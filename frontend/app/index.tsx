@@ -1,30 +1,102 @@
-import { Text, View, StyleSheet, Image } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, ImageBackground, Image } from 'react-native';
+import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { Colors } from '../src/theme';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
-
-export default function Index() {
-  console.log(EXPO_PUBLIC_BACKEND_URL, "EXPO_PUBLIC_BACKEND_URL");
+export default function Welcome() {
+  const router = useRouter();
 
   return (
-    <View style={styles.container}>
-      <Image
-        source={require("../assets/images/app-image.png")}
-        style={styles.image}
-      />
+    <ImageBackground
+      source={{ uri: 'https://images.unsplash.com/photo-1770520214803-9af048351642?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxNzV8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGdyZWVuJTIwYW5kJTIwd2hpdGUlMjBmbHVpZCUyMGJhY2tncm91bmR8ZW58MHx8fHwxNzc4NTQxNjg1fDA&ixlib=rb-4.1.0&q=85' }}
+      style={styles.bg}
+      imageStyle={{ opacity: 0.5 }}
+    >
+      <View style={styles.overlay} />
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+        <View style={styles.top}>
+          <View style={styles.logoCircle}>
+            <Ionicons name="shield-checkmark" size={48} color={Colors.surface} />
+          </View>
+          <Text style={styles.brand}>KinnectCare</Text>
+          <Text style={styles.tagline}>Family safety & senior wellness, all in one place.</Text>
+        </View>
+
+        <View style={styles.featureRow}>
+          <FeatureItem icon="people" label="Family" />
+          <FeatureItem icon="heart" label="Wellness" />
+          <FeatureItem icon="alert-circle" label="Alerts" />
+        </View>
+
+        <View style={styles.bottom}>
+          <TouchableOpacity
+            testID="get-started-btn"
+            style={styles.cta}
+            activeOpacity={0.85}
+            onPress={() => router.push('/(auth)/signup')}
+          >
+            <Text style={styles.ctaText}>Get Started</Text>
+            <Ionicons name="arrow-forward" size={20} color={Colors.surface} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            testID="welcome-login-link"
+            onPress={() => router.push('/(auth)/login')}
+            style={styles.loginLink}
+          >
+            <Text style={styles.loginLinkText}>
+              I already have an account · <Text style={{ fontWeight: '700' }}>Sign in</Text>
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    </ImageBackground>
+  );
+}
+
+function FeatureItem({ icon, label }: { icon: any; label: string }) {
+  return (
+    <View style={styles.featureItem}>
+      <View style={styles.featureIconBubble}>
+        <Ionicons name={icon} size={22} color={Colors.primary} />
+      </View>
+      <Text style={styles.featureLabel}>{label}</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#0c0c0c",
-    alignItems: "center",
-    justifyContent: "center",
+  bg: { flex: 1, backgroundColor: Colors.background },
+  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(249,245,240,0.82)' },
+  container: { flex: 1, paddingHorizontal: 28, justifyContent: 'space-between' },
+  top: { alignItems: 'center', marginTop: 40 },
+  logoCircle: {
+    width: 96, height: 96, borderRadius: 48,
+    backgroundColor: Colors.primary,
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: Colors.primary, shadowOpacity: 0.25, shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 }, elevation: 6,
   },
-  image: {
-    width: "100%",
-    height: "100%",
-    resizeMode: "contain",
+  brand: { fontSize: 36, fontWeight: '800', color: Colors.textPrimary, marginTop: 24, letterSpacing: -0.5 },
+  tagline: {
+    fontSize: 17, color: Colors.textSecondary, textAlign: 'center',
+    marginTop: 12, paddingHorizontal: 12, lineHeight: 26,
   },
+  featureRow: { flexDirection: 'row', justifyContent: 'space-around', marginVertical: 32 },
+  featureItem: { alignItems: 'center' },
+  featureIconBubble: {
+    width: 60, height: 60, borderRadius: 30, backgroundColor: Colors.tertiary,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  featureLabel: { marginTop: 8, fontSize: 14, fontWeight: '600', color: Colors.textSecondary },
+  bottom: { marginBottom: 24 },
+  cta: {
+    height: 60, backgroundColor: Colors.primary, borderRadius: 18,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
+    shadowColor: Colors.primary, shadowOpacity: 0.25, shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 }, elevation: 6,
+  },
+  ctaText: { color: Colors.surface, fontSize: 18, fontWeight: '700' },
+  loginLink: { marginTop: 18, alignItems: 'center' },
+  loginLinkText: { fontSize: 15, color: Colors.textSecondary },
 });
