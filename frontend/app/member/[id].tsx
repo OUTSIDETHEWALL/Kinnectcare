@@ -228,16 +228,7 @@ const styles = StyleSheet.create({
   phoneText: { fontSize: 14, color: Colors.textTertiary },
   section: { marginHorizontal: 24, marginTop: 16 },
   sectionTitle: { fontSize: 18, fontWeight: '700', color: Colors.textPrimary, marginBottom: 12 },
-  mapCard: { borderRadius: 18, overflow: 'hidden', backgroundColor: Colors.surface, height: 180, position: 'relative' },
-  mapImg: { width: '100%', height: '100%' },
-  mapOverlay: {
-    position: 'absolute', bottom: 12, left: 12,
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: Colors.primary, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999,
-  },
-  mapText: { color: Colors.surface, fontWeight: '700', fontSize: 13 },
-  lastSeen: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 10 },
-  lastSeenText: { fontSize: 14, color: Colors.textTertiary },
+  mapNote: { fontSize: 12, color: Colors.textTertiary, textAlign: 'center', marginTop: 10, fontStyle: 'italic' },
   locationCard: {
     backgroundColor: Colors.surface, borderRadius: 20, padding: 18,
     borderWidth: 1, borderColor: Colors.border,
