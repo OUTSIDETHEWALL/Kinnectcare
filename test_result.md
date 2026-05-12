@@ -101,3 +101,155 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: |
+  KinnectCare is a family safety and senior wellness mobile app (Expo + FastAPI + MongoDB).
+  Validate the latest feature: flexible time picker for medications. The Reminder schema now
+  uses `times: List[TimeSlot]` where each TimeSlot is `{time: "HH:MM", label?: str}`. A new
+  endpoint `PUT /api/reminders/{id}` was added to support editing an existing medication's
+  title/dosage/times. Also validate there are no regressions in auth, members, summary, SOS,
+  alerts, check-ins, and existing reminder endpoints.
+
+backend:
+  - task: "TimeSlot schema + POST /api/reminders accepts custom HH:MM with optional label"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Updated Reminder/ReminderCreate to use List[TimeSlot]. Coercion supports legacy list-of-strings too. POST should accept e.g. {member_id, title, dosage, category:'medication', times:[{time:'07:30', label:'Morning'},{time:'21:00'}]}."
+      - working: true
+        agent: "testing"
+        comment: "PASS. POST /api/reminders with times=[{time:'07:30',label:'Morning'},{time:'21:00'}] returns 200 with times as list of TimeSlot dicts (label preserved/null). Backward-compat list-of-strings ['08:00','20:00'] is coerced to [{time:'08:00',label:null},{time:'20:00',label:null}]. Invalid time '25:99' correctly returns 400 with detail 'Invalid time format: 25:99'."
+
+  - task: "PUT /api/reminders/{id} endpoint"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "New endpoint allows updating title/dosage/times for an existing reminder owned by the current user. Should reject invalid HH:MM and unknown ids."
+      - working: true
+        agent: "testing"
+        comment: "PASS. PUT updates title, dosage and times to [{time:'06:00',label:'Dawn'}] and is reflected in subsequent GET /api/reminders/member/{id}. Negative cases: invalid time '9999' -> 400, unknown id -> 404, missing Authorization header -> 403. All expected status codes returned correctly."
+
+  - task: "GET /api/reminders/member/{member_id} returns new TimeSlot list shape"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Should return reminders with times as list of {time,label}."
+      - working: true
+        agent: "testing"
+        comment: "PASS. Endpoint returns list of reminders; each item's times field is a list of objects each containing time (HH:MM) and optional label. Validated structure across 2+ reminders created during the test run."
+
+  - task: "Regression: auth (signup/login), /api/me, members CRUD, summary, SOS, alerts, check-ins, reminders mark/toggle/delete, history"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Run regression after TimeSlot refactor to ensure no other endpoint broke."
+      - working: false
+        agent: "testing"
+        comment: |
+          REGRESSION ISSUE: GET /api/summary returns 500 Internal Server Error for the demo user (demo@kinnectcare.app).
+          Root cause (from backend logs at server.py:862):
+              KeyError: 'category'
+              m_meds = [r for r in rems if r["member_id"] == mid and r["category"] == "medication"]
+          The demo user has 5 reminders in Mongo; 3 of them are legacy documents missing the `category` field
+          (keys: id, owner_id, member_id, member_name, title, time, taken, created_at — no category). The
+          dashboard_summary endpoint indexes r["category"] directly, raising KeyError on those legacy docs.
+          Note: /api/summary works correctly for freshly created users (their seed reminders all include category=medication),
+          but breaks for any account that has legacy reminder documents predating the schema change.
+          Suggested fix: use r.get("category") in dashboard_summary's list comprehensions (and any similar field access),
+          and/or run a one-time migration to backfill `category="medication"` on legacy reminder docs.
+          All other regression endpoints PASS:
+            - POST /api/auth/login (demo) -> 200, returns access_token + user
+            - POST /api/auth/signup (new random email) -> 200 (requires real TLD; pydantic EmailStr rejects .test/.example)
+            - GET /api/auth/me -> 200
+            - PUT /api/auth/timezone -> 200 (set America/Los_Angeles, restored UTC)
+            - POST /api/auth/push-token: invalid token -> 200 {ok:false}; valid ExponentPushToken[...] -> 200 {ok:true}
+            - GET /api/members, POST /api/members, GET /api/members/{id} -> 200
+            - POST /api/sos with coords -> 200 (alert_id returned)
+            - GET /api/alerts -> 200, includes the new SOS alert
+            - POST /api/checkins, GET /api/checkins/member/{id}, GET /api/checkins/recent -> 200
+            - POST /api/reminders/{id}/mark (taken & missed) -> 200, both statuses accepted
+            - POST /api/reminders/{id}/toggle -> 200
+            - DELETE /api/reminders/{id} -> 200
+            - GET /api/history/member/{id}?days=7 -> 200, series length 7, totals + compliance_percent present
+
+metadata:
+  created_by: "main_agent"
+  version: "1.6"
+  test_sequence: 6
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Regression: auth (signup/login), /api/me, members CRUD, summary, SOS, alerts, check-ins, reminders mark/toggle/delete, history"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Please test the new flexible medication time slot system end-to-end on backend only.
+      Use credentials from /app/memory/test_credentials.md (demo@kinnectcare.app / password123).
+      Backend base URL: read EXPO_BACKEND_URL from /app/frontend/.env (append /api).
+      Focus tests:
+        1) POST /api/reminders with new shape: times=[{time:"07:30", label:"Morning"}, {time:"21:00"}]
+        2) PUT /api/reminders/{id} updating title, dosage, and times. Verify HH:MM validation rejects "25:99".
+        3) GET /api/reminders/member/{member_id} returns times as list of objects with time+label.
+        4) Backward compatibility: POST with legacy times=["08:00","20:00"] should still work.
+        5) Regression on auth, /api/me, /api/summary, members CRUD, SOS, alerts, check-ins,
+           reminders mark/toggle/delete, history endpoints.
+      Do NOT test frontend.
+  - agent: "testing"
+    message: |
+      Backend testing complete. 27/28 checks passing.
+
+      All new TimeSlot feature work is GREEN:
+        - POST /api/reminders with new [{time,label}] shape ✓
+        - POST /api/reminders backward-compat with ["HH:MM",...] coerced to TimeSlot objects ✓
+        - POST validation rejects "25:99" with 400 ✓
+        - PUT /api/reminders/{id} updates title/dosage/times, reflected in GET ✓
+        - PUT validation rejects "9999" with 400, unknown id returns 404, missing token returns 403 ✓
+        - GET /api/reminders/member/{id} returns times as list of {time,label} objects ✓
+
+      Regression suite mostly PASSING (login, signup, /auth/me, /auth/timezone, /auth/push-token,
+      members CRUD, SOS, /alerts, /checkins (POST/member/recent), /reminders mark/toggle/delete,
+      /history/member/{id}?days=7).
+
+      ONE CRITICAL REGRESSION BUG:
+        GET /api/summary -> 500 for the demo user.
+        Backend log shows: KeyError: 'category' at server.py:862
+          m_meds = [r for r in rems if r["member_id"] == mid and r["category"] == "medication"]
+        I queried Mongo: demo user has 5 reminders, 3 of which lack the `category` field
+        (legacy docs predating the schema change). Endpoint works fine for users with only
+        new-format reminders (verified with a freshly created account).
+
+        Fix (main agent): in dashboard_summary, use r.get("category") (and r.get("status"))
+        defensively, OR run a one-time migration to backfill category="medication" on legacy
+        reminder docs in the demo account / production. Recommend BOTH — defensive read in code
+        plus a migration so legacy users don't keep tripping it.
+
+        I have NOT modified production code. Please apply the fix, then re-test only /api/summary.
