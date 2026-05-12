@@ -217,11 +217,81 @@ backend:
           Backend logs confirm: "GET /api/summary HTTP/1.1" 200 OK (both demo and fresh).
           Regression bug RESOLVED. No further action needed.
 
+frontend:
+  - task: "Login -> Dashboard -> Member detail navigation (iPhone 390x844)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(auth)/login.tsx, /app/frontend/app/(tabs)/dashboard.tsx, /app/frontend/app/member/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "PASS. demo@kinnectcare.app / password123 logs in; lands at /dashboard. 4 member cards rendered, SOS button visible. Tapping first card navigates to /member/{id}. Member screen renders header, Location card (text-based with Coordinates row — NOT a map), Daily Check-in section, Medications section, Routine section, and Check-in CTA. Avatar, status dot, age/gender/role, phone all rendered."
+  - task: "Reminder rows display {label} {time} chips and edit (pencil) icon"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/member/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "PASS. After adding a new medication with two slots, member screen shows both 'Morning 07:30' and '21:00' (unlabeled slot renders bare time). Legacy single-time reminders fall back to plain HH:MM. Each reminder card exposes edit-reminder-{id} pencil testID alongside mark-taken/mark-missed/delete actions."
+  - task: "Add Medication flow / TimeSlotsEditor (/add-medication/[memberId])"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/add-medication/[memberId].tsx, /app/frontend/src/TimeSlotsEditor.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. Screen renders Medication Name input, Dosage input, Reminder Times section with TimeSlotsEditor showing one default slot (Morning 08:00). Preset chips Morning/Afternoon/Evening/Bedtime are present (no explicit 'Custom' chip — leaving no preset selected = custom/unlabeled, which is the correct design). HH and MM TextInputs accept manual typing. '➕ Add Time' button (testID add-med-add-time) appends a new slot. ✕ remove buttons appear when slots>1. Submitted 2 slots (07:30 Morning + 21:00 unlabeled) -> router.back() to member screen and both chips appear ('Morning 07:30', '21:00') confirming POST /reminders with TimeSlot shape integrated correctly.
+  - task: "Edit Medication flow (/edit-medication/[reminderId]) — NEW"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/edit-medication/[reminderId].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. Tapping the pencil icon navigates to /edit-medication/{reminderId}. Loads existing reminder via GET /reminders, pre-fills edit-med-name ('Tylenol QA'), edit-med-dosage ('500mg'), and TimeSlotsEditor with slot 0 hour='07' minute='30' (label Morning) and slot 1 21:00 (no label). Modified title to 'Tylenol QA (edited)', changed slot 0 to 06:45, added new slot 14:00 with Afternoon label, removed slot 1. Save (PUT /reminders/{id}) succeeds, router.back() to member screen; chips now show 'Tylenol QA (edited)', '06:45' and 'Afternoon 14:00'. Old 21:00 chip is gone for this med.
+  - task: "Time input validation — UI clamps invalid HH:MM"
+    implemented: true
+    working: true
+    file: "/app/frontend/src/TimeSlotsEditor.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "PASS. Entering hour=25 and minute=99 is auto-clamped on blur to 23:59 by clampHour/clampMin (UI prevents invalid HH:MM before submission). isValidHHMM gate plus Alert.alert fallback exists for any uncaught case. Backend 400 path is therefore unreachable from this UI but safety net is in place."
+  - task: "Regression: tabs, SOS confirmation, no Ionicons / shadow warnings"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/_layout.tsx, /app/frontend/app/(tabs)/dashboard.tsx, /app/frontend/src/Icon.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "PASS. Bottom tab bar shows Family + Alerts (icons rendered as emojis via Icon.tsx, no Ionicons references). SOS button on dashboard triggers a confirmation Alert (body text shows 'SOS Emergency' / 'Emergency Alert' content). Console captured during full run: 0 errors, 0 'shadow' deprecation warnings, 0 'Ionicons' warnings. Safe-area insets respected at 390x844."
+
 metadata:
   created_by: "main_agent"
-  version: "1.6"
-  test_sequence: 6
-  run_ui: false
+  version: "1.7"
+  test_sequence: 7
+  run_ui: true
 
 test_plan:
   current_focus: []
