@@ -16,10 +16,12 @@ export default function Welcome() {
       <View style={styles.overlay} />
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <View style={styles.top}>
-          <View style={styles.logoCircle}>
-            <Icon name="shield-checkmark" size={48} color={Colors.surface} />
-          </View>
-          <Text style={styles.brand}>KinnectCare</Text>
+          <Image
+            source={require('../assets/images/kinnectcare-logo.png')}
+            style={styles.logoImage}
+            resizeMode="contain"
+            accessibilityLabel="KinnectCare"
+          />
           <Text style={styles.tagline}>Family safety & senior wellness, all in one place.</Text>
         </View>
 
@@ -69,15 +71,10 @@ const styles = StyleSheet.create({
   bg: { flex: 1, backgroundColor: Colors.background },
   overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(249,245,240,0.82)' },
   container: { flex: 1, paddingHorizontal: 28, justifyContent: 'space-between' },
-  top: { alignItems: 'center', marginTop: 40 },
-  logoCircle: {
-    width: 96, height: 96, borderRadius: 48,
-    backgroundColor: Colors.primary,
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: Colors.primary, shadowOpacity: 0.25, shadowRadius: 16,
-    shadowOffset: { width: 0, height: 8 }, elevation: 6,
+  top: { alignItems: 'center', marginTop: 24 },
+  logoImage: {
+    width: 220, height: 220,
   },
-  brand: { fontSize: 36, fontWeight: '800', color: Colors.textPrimary, marginTop: 24, letterSpacing: -0.5 },
   tagline: {
     fontSize: 17, color: Colors.textSecondary, textAlign: 'center',
     marginTop: 12, paddingHorizontal: 12, lineHeight: 26,

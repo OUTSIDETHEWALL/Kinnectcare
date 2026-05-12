@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity, KeyboardAvoidingView,
-  Platform, ScrollView, ActivityIndicator, Alert,
+  Platform, ScrollView, ActivityIndicator, Alert, Image,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Icon } from '../../src/Icon';
@@ -44,9 +44,12 @@ export default function Login() {
           </TouchableOpacity>
 
           <View style={styles.logoWrap}>
-            <View style={styles.logoCircle}>
-              <Icon name="shield-checkmark" size={36} color={Colors.surface} />
-            </View>
+            <Image
+              source={require('../../assets/images/kinnectcare-logo.png')}
+              style={styles.logoImage}
+              resizeMode="contain"
+              accessibilityLabel="KinnectCare"
+            />
           </View>
           <Text style={styles.title}>Welcome back</Text>
           <Text style={styles.subtitle}>Sign in to keep your family safe.</Text>
@@ -95,11 +98,8 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
   scroll: { padding: 24, paddingBottom: 48 },
   back: { width: 44, height: 44, justifyContent: 'center' },
-  logoWrap: { alignItems: 'center', marginTop: 16, marginBottom: 8 },
-  logoCircle: {
-    width: 76, height: 76, borderRadius: 38, backgroundColor: Colors.primary,
-    alignItems: 'center', justifyContent: 'center',
-  },
+  logoWrap: { alignItems: 'center', marginTop: 8, marginBottom: 4 },
+  logoImage: { width: 140, height: 140 },
   title: { fontSize: 28, fontWeight: '800', color: Colors.textPrimary, marginTop: 16, textAlign: 'center' },
   subtitle: { fontSize: 16, color: Colors.textSecondary, textAlign: 'center', marginTop: 6 },
   label: { fontSize: 13, fontWeight: '700', color: Colors.textSecondary, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 },
