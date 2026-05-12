@@ -64,6 +64,8 @@ export type Alert = {
   created_at: string;
 };
 
+export type TimeSlot = { time: string; label?: string | null };
+
 export type Reminder = {
   id: string;
   member_id: string;
@@ -71,7 +73,7 @@ export type Reminder = {
   category: 'medication' | 'routine';
   title: string;
   dosage?: string | null;
-  times: string[];
+  times: TimeSlot[];
   time: string;
   status: 'pending' | 'taken' | 'missed';
   taken: boolean;

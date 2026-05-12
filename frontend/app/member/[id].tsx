@@ -251,7 +251,7 @@ export default function MemberDetail() {
           {meds.length === 0 ? (
             <Text style={styles.emptyText}>No medications yet. Tap Add to create one.</Text>
           ) : meds.map(r => (
-            <ReminderRow key={r.id} reminder={r} onMark={markReminder} onDelete={deleteReminder} />
+            <ReminderRow key={r.id} reminder={r} onMark={markReminder} onDelete={deleteReminder} onEdit={(rid) => router.push(`/edit-medication/${rid}`)} />
           ))}
 
           {history && history.totals && history.totals.logged > 0 && (
@@ -274,7 +274,7 @@ export default function MemberDetail() {
           {routines.length === 0 ? (
             <Text style={styles.emptyText}>No routine items yet.</Text>
           ) : routines.map(r => (
-            <ReminderRow key={r.id} reminder={r} onMark={markReminder} onDelete={deleteReminder} />
+            <ReminderRow key={r.id} reminder={r} onMark={markReminder} onDelete={deleteReminder} onEdit={(rid) => router.push(`/edit-medication/${rid}`)} />
           ))}
         </View>
 
@@ -292,13 +292,17 @@ export default function MemberDetail() {
   );
 }
 
-function ReminderRow({ reminder, onMark, onDelete }: {
+function ReminderRow({ reminder, onMark, onDelete, onEdit }: {
   reminder: Reminder;
   onMark: (id: string, s: 'taken' | 'missed') => void;
   onDelete: (id: string, title: string) => void;
+  onEdit: (id: string) => void;
 }) {
   const isTaken = reminder.status === 'taken';
   const isMissed = reminder.status === 'missed';
+  const timeStr = (reminder.times && reminder.times.length > 0
+    ? reminder.times.map(t => t.label ? `${t.label} ${t.time}` : t.time)
+    : [reminder.time]).filter(Boolean).join(' · ');
   return (
     <View testID={`reminder-${reminder.id}`} style={styles.reminderCard}>
       <View style={{ flex: 1 }}>
@@ -307,9 +311,7 @@ function ReminderRow({ reminder, onMark, onDelete }: {
           <Text style={styles.reminderTitle}>{reminder.title}</Text>
         </View>
         {reminder.dosage ? <Text style={styles.reminderSub}>{reminder.dosage}</Text> : null}
-        <Text style={styles.reminderTime}>
-          🕐 {(reminder.times && reminder.times.length > 0 ? reminder.times : [reminder.time]).filter(Boolean).join(' · ')}
-        </Text>
+        <Text style={styles.reminderTime}>🕐 {timeStr}</Text>
         {isMissed && <Text style={styles.missedTag}>⚠ Missed — family alerted</Text>}
       </View>
       <View style={styles.reminderActions}>
@@ -326,6 +328,13 @@ function ReminderRow({ reminder, onMark, onDelete }: {
           style={[styles.markBtn, isMissed && styles.markBtnMissedActive]}
         >
           <Text style={[styles.markBtnText, isMissed && { color: Colors.surface }]}>✕</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          testID={`edit-reminder-${reminder.id}`}
+          onPress={() => onEdit(reminder.id)}
+          style={styles.editBtnSmall}
+        >
+          <Text style={{ fontSize: 14, color: Colors.primary }}>✏️</Text>
         </TouchableOpacity>
         <TouchableOpacity
           testID={`delete-reminder-${reminder.id}`}
@@ -390,11 +399,12 @@ const styles = StyleSheet.create({
   reminderSub: { fontSize: 13, color: Colors.textSecondary, marginTop: 2, marginLeft: 24 },
   reminderTime: { fontSize: 12, color: Colors.textTertiary, marginTop: 2, marginLeft: 24 },
   missedTag: { fontSize: 12, color: Colors.warning, fontWeight: '700', marginTop: 4, marginLeft: 24 },
-  reminderActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  reminderActions: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   markBtn: { width: 36, height: 36, borderRadius: 12, backgroundColor: Colors.background, borderWidth: 1, borderColor: Colors.border, alignItems: 'center', justifyContent: 'center' },
   markBtnTakenActive: { backgroundColor: Colors.success, borderColor: Colors.success },
   markBtnMissedActive: { backgroundColor: Colors.error, borderColor: Colors.error },
   markBtnText: { fontSize: 14, color: Colors.textSecondary, fontWeight: '700' },
+  editBtnSmall: { width: 28, height: 36, alignItems: 'center', justifyContent: 'center' },
   deleteBtnSmall: { width: 28, height: 36, alignItems: 'center', justifyContent: 'center' },
   emptyText: { color: Colors.textTertiary, fontSize: 13, fontStyle: 'italic', paddingVertical: 8 },
   deleteBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 28, paddingVertical: 12 },

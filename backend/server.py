@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import jwt
 from passlib.context import CryptContext
+from pydantic import field_validator
 
 from expo_push import send_expo_push
 
@@ -100,6 +101,11 @@ class CheckinSettings(BaseModel):
     daily_checkin_time: Optional[str] = None
 
 
+class TimeSlot(BaseModel):
+    time: str  # "HH:MM"
+    label: Optional[str] = None  # e.g. "Morning", "Afternoon", or user-defined
+
+
 class Reminder(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     owner_id: str
@@ -108,7 +114,7 @@ class Reminder(BaseModel):
     category: str = "medication"
     title: str
     dosage: Optional[str] = None
-    times: List[str] = Field(default_factory=list)
+    times: List[TimeSlot] = Field(default_factory=list)
     time: str = ""
     status: str = "pending"
     taken: bool = False
@@ -116,13 +122,40 @@ class Reminder(BaseModel):
     last_marked_date: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    @field_validator("times", mode="before")
+    @classmethod
+    def _coerce_times(cls, v):
+        return _coerce_time_list(v)
+
+    @classmethod
+    def _coerce_times_static(cls, v):
+        return _coerce_time_list(v)
+
 
 class ReminderCreate(BaseModel):
     member_id: str
     title: str
     category: str = "medication"
     dosage: Optional[str] = None
-    times: List[str] = Field(default_factory=list)
+    times: List[TimeSlot] = Field(default_factory=list)
+
+    @field_validator("times", mode="before")
+    @classmethod
+    def _coerce_times(cls, v):
+        return _coerce_time_list(v)
+
+
+class ReminderUpdate(BaseModel):
+    title: Optional[str] = None
+    dosage: Optional[str] = None
+    times: Optional[List[TimeSlot]] = None
+
+    @field_validator("times", mode="before")
+    @classmethod
+    def _coerce_times(cls, v):
+        if v is None:
+            return None
+        return _coerce_time_list(v)
 
 
 class ReminderMark(BaseModel):
@@ -218,9 +251,30 @@ def local_today_str(user: dict) -> str:
 def parse_hhmm(s: str) -> Optional[int]:
     try:
         h, m = s.split(":")
-        return int(h) * 60 + int(m)
+        h_i, m_i = int(h), int(m)
+        if not (0 <= h_i <= 23 and 0 <= m_i <= 59):
+            return None
+        if len(h) != 2 or len(m) != 2:
+            return None
+        return h_i * 60 + m_i
     except Exception:
         return None
+
+
+def _coerce_time_list(v):
+    if not v:
+        return []
+    out = []
+    for t in v:
+        if isinstance(t, str):
+            out.append({"time": t, "label": None})
+        elif isinstance(t, dict):
+            out.append({"time": t.get("time", ""), "label": t.get("label")})
+        elif hasattr(t, "model_dump"):
+            out.append(t.model_dump())
+        else:
+            out.append(t)
+    return out
 
 
 async def push_to_user(user_id: str, title: str, body: str, data: dict):
@@ -315,23 +369,27 @@ async def seed_demo_data(owner_id: str):
     meds = [
         Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
                  category="medication", title="Metformin", dosage="500mg, 1 pill",
-                 times=["08:00", "20:00"], time="08:00"),
+                 times=[TimeSlot(time="08:00", label="Morning"), TimeSlot(time="20:00", label="Bedtime")], time="08:00"),
         Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
                  category="medication", title="Lisinopril", dosage="10mg",
-                 times=["13:00"], time="13:00"),
+                 times=[TimeSlot(time="13:00", label="Afternoon")], time="13:00"),
         Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
                  category="medication", title="Aspirin", dosage="81mg",
-                 times=["09:00"], time="09:00"),
+                 times=[TimeSlot(time="09:00", label="Morning")], time="09:00"),
     ]
     routines = [
         Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
-                 category="routine", title="Drink water", times=["10:00", "14:00", "18:00"], time="10:00"),
+                 category="routine", title="Drink water",
+                 times=[TimeSlot(time="10:00"), TimeSlot(time="14:00"), TimeSlot(time="18:00")], time="10:00"),
         Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
-                 category="routine", title="Morning walk", times=["07:30"], time="07:30"),
+                 category="routine", title="Morning walk",
+                 times=[TimeSlot(time="07:30", label="Morning")], time="07:30"),
         Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
-                 category="routine", title="Breakfast", times=["08:30"], time="08:30"),
+                 category="routine", title="Breakfast",
+                 times=[TimeSlot(time="08:30", label="Morning")], time="08:30"),
         Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
-                 category="routine", title="Dinner", times=["19:00"], time="19:00"),
+                 category="routine", title="Dinner",
+                 times=[TimeSlot(time="19:00", label="Evening")], time="19:00"),
     ]
     await db.reminders.insert_many([r.model_dump() for r in meds + routines])
 
@@ -505,7 +563,7 @@ async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
 async def list_reminders(current=Depends(get_current_user)):
     await reset_daily_reminder_statuses(current["id"])
     docs = await db.reminders.find({"owner_id": current["id"]}, {"_id": 0}).to_list(2000)
-    return [Reminder(**d) for d in docs]
+    return [Reminder.model_validate(d) for d in docs]
 
 
 @api_router.get("/reminders/member/{member_id}", response_model=List[Reminder])
@@ -514,7 +572,7 @@ async def list_member_reminders(member_id: str, current=Depends(get_current_user
     docs = await db.reminders.find(
         {"owner_id": current["id"], "member_id": member_id}, {"_id": 0}
     ).to_list(2000)
-    return [Reminder(**d) for d in docs]
+    return [Reminder.model_validate(d) for d in docs]
 
 
 @api_router.post("/reminders", response_model=Reminder)
@@ -524,14 +582,40 @@ async def create_reminder(data: ReminderCreate, current=Depends(get_current_user
         raise HTTPException(status_code=404, detail="Member not found")
     if data.category not in ("medication", "routine"):
         raise HTTPException(status_code=400, detail="category must be medication or routine")
+    # Validate each time format HH:MM
+    for slot in data.times:
+        if parse_hhmm(slot.time) is None:
+            raise HTTPException(status_code=400, detail=f"Invalid time format: {slot.time}")
     times = data.times or []
     rem = Reminder(
         owner_id=current["id"], member_id=data.member_id, member_name=member["name"],
         category=data.category, title=data.title, dosage=data.dosage,
-        times=times, time=times[0] if times else "",
+        times=times, time=times[0].time if times else "",
     )
     await db.reminders.insert_one(rem.model_dump())
     return rem
+
+
+@api_router.put("/reminders/{reminder_id}", response_model=Reminder)
+async def update_reminder(reminder_id: str, data: ReminderUpdate, current=Depends(get_current_user)):
+    rem = await db.reminders.find_one({"id": reminder_id, "owner_id": current["id"]}, {"_id": 0})
+    if not rem:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+    update: dict = {}
+    if data.title is not None:
+        update["title"] = data.title
+    if data.dosage is not None:
+        update["dosage"] = data.dosage
+    if data.times is not None:
+        for slot in data.times:
+            if parse_hhmm(slot.time) is None:
+                raise HTTPException(status_code=400, detail=f"Invalid time format: {slot.time}")
+        update["times"] = [s.model_dump() for s in data.times]
+        update["time"] = data.times[0].time if data.times else ""
+    if update:
+        await db.reminders.update_one({"id": reminder_id}, {"$set": update})
+    doc = await db.reminders.find_one({"id": reminder_id}, {"_id": 0})
+    return Reminder.model_validate(doc)
 
 
 @api_router.post("/reminders/{reminder_id}/mark")

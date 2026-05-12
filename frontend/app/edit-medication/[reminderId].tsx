@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView,
   KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
@@ -7,87 +7,119 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
-import { api, TimeSlot } from '../../src/api';
+import { api, TimeSlot, Reminder } from '../../src/api';
 import { TimeSlotsEditor, isValidHHMM } from '../../src/TimeSlotsEditor';
 
-export default function AddMedication() {
+export default function EditMedication() {
   const router = useRouter();
-  const { memberId } = useLocalSearchParams<{ memberId: string }>();
+  const { reminderId } = useLocalSearchParams<{ reminderId: string }>();
   const [name, setName] = useState('');
   const [dosage, setDosage] = useState('');
-  const [slots, setSlots] = useState<TimeSlot[]>([{ time: '08:00', label: 'Morning' }]);
-  const [loading, setLoading] = useState(false);
+  const [slots, setSlots] = useState<TimeSlot[]>([]);
+  const [category, setCategory] = useState<'medication' | 'routine'>('medication');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        // We don't have GET /reminders/{id} so fetch all and find
+        const r = await api.get('/reminders');
+        const found: Reminder | undefined = (r.data as Reminder[]).find(x => x.id === reminderId);
+        if (found) {
+          setName(found.title);
+          setDosage(found.dosage || '');
+          setSlots(found.times.length > 0 ? found.times : [{ time: '08:00', label: null }]);
+          setCategory(found.category);
+        }
+      } catch (_e) {}
+      setLoading(false);
+    })();
+  }, [reminderId]);
 
   const onSubmit = async () => {
-    if (!name.trim()) { Alert.alert('Missing', 'Enter medication name.'); return; }
-    if (slots.length === 0) { Alert.alert('Missing', 'Add at least one reminder time.'); return; }
+    if (!name.trim()) { Alert.alert('Missing', 'Enter a name.'); return; }
+    if (slots.length === 0) { Alert.alert('Missing', 'Add at least one time.'); return; }
     for (const s of slots) {
       if (!isValidHHMM(s.time)) {
         Alert.alert('Invalid time', `"${s.time}" is not a valid HH:MM time.`);
         return;
       }
     }
-    setLoading(true);
+    setSaving(true);
     try {
-      await api.post('/reminders', {
-        member_id: memberId,
+      await api.put(`/reminders/${reminderId}`, {
         title: name.trim(),
         dosage: dosage.trim() || null,
-        category: 'medication',
         times: slots.map(s => ({ time: s.time, label: s.label || null })),
       });
       router.back();
     } catch (e: any) {
       Alert.alert('Failed', e?.response?.data?.detail || 'Try again.');
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   };
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <ActivityIndicator color={Colors.primary} size="large" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const isRoutine = category === 'routine';
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <View style={styles.header}>
-          <TouchableOpacity testID="add-med-close" onPress={() => router.back()} style={styles.iconBtn}>
+          <TouchableOpacity testID="edit-med-close" onPress={() => router.back()} style={styles.iconBtn}>
             <Icon name="close" size={22} color={Colors.textPrimary} />
           </TouchableOpacity>
-          <Text style={styles.title}>💊 Add Medication</Text>
+          <Text style={styles.title}>{isRoutine ? '🌿 Edit Routine' : '💊 Edit Medication'}</Text>
           <View style={{ width: 44 }} />
         </View>
 
         <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 48 }} keyboardShouldPersistTaps="handled">
-          <Text style={styles.label}>Medication name</Text>
+          <Text style={styles.label}>{isRoutine ? 'Routine name' : 'Medication name'}</Text>
           <TextInput
-            testID="med-name"
+            testID="edit-med-name"
             style={styles.input}
             value={name}
             onChangeText={setName}
-            placeholder="e.g. Metformin"
             placeholderTextColor={Colors.textTertiary}
           />
 
-          <Text style={styles.label}>Dosage (optional)</Text>
-          <TextInput
-            testID="med-dosage"
-            style={styles.input}
-            value={dosage}
-            onChangeText={setDosage}
-            placeholder="e.g. 500mg, 1 pill"
-            placeholderTextColor={Colors.textTertiary}
-          />
+          {!isRoutine && (
+            <>
+              <Text style={styles.label}>Dosage (optional)</Text>
+              <TextInput
+                testID="edit-med-dosage"
+                style={styles.input}
+                value={dosage}
+                onChangeText={setDosage}
+                placeholder="e.g. 500mg, 1 pill"
+                placeholderTextColor={Colors.textTertiary}
+              />
+            </>
+          )}
 
           <Text style={styles.label}>Reminder times</Text>
-          <Text style={styles.subhelp}>Add as many custom times as you need. Each time has an optional label.</Text>
-          <TimeSlotsEditor slots={slots} onChange={setSlots} testIDPrefix="add-med" />
+          <Text style={styles.subhelp}>Edit, add, or remove times — each can have an optional label.</Text>
+          <TimeSlotsEditor slots={slots} onChange={setSlots} testIDPrefix="edit-med" />
 
           <TouchableOpacity
-            testID="add-med-submit"
+            testID="edit-med-submit"
             onPress={onSubmit}
             activeOpacity={0.85}
             style={styles.cta}
-            disabled={loading}
+            disabled={saving}
           >
-            {loading ? <ActivityIndicator color={Colors.surface} /> : <Text style={styles.ctaText}>Add Medication</Text>}
+            {saving ? <ActivityIndicator color={Colors.surface} /> : <Text style={styles.ctaText}>Save Changes</Text>}
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
