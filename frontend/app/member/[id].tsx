@@ -1,10 +1,10 @@
 import { useCallback, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
-  ActivityIndicator, Alert, Linking,
+  ActivityIndicator, Alert, Linking, Platform,
 } from 'react-native';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import { Colors, StatusColor } from '../../src/theme';
@@ -77,18 +77,38 @@ export default function MemberDetail() {
   }
 
   const initials = member.name.split(' ').map(s => s[0]).slice(0, 2).join('').toUpperCase();
-  const mapLat = member.latitude ?? 37.7749;
-  const mapLon = member.longitude ?? -122.4194;
+  const hasCoords = member.latitude != null && member.longitude != null;
+  const coordsLabel = hasCoords
+    ? `${member.latitude!.toFixed(4)}°, ${member.longitude!.toFixed(4)}°`
+    : 'Coordinates not available yet';
+
+  const openDirections = () => {
+    const label = encodeURIComponent(member.location_name || member.name);
+    let url: string;
+    if (hasCoords) {
+      const latlon = `${member.latitude},${member.longitude}`;
+      url = Platform.select({
+        ios: `maps:0,0?q=${label}@${latlon}`,
+        android: `geo:0,0?q=${latlon}(${label})`,
+        default: `https://www.google.com/maps/search/?api=1&query=${latlon}`,
+      })!;
+    } else {
+      url = `https://www.google.com/maps/search/?api=1&query=${label}`;
+    }
+    Linking.openURL(url).catch(() => {
+      Alert.alert('Unable to open maps', 'No map application found on this device.');
+    });
+  };
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
         <TouchableOpacity testID="member-back" onPress={() => router.back()} style={styles.iconBtn}>
-          <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />
+          <Icon name="arrow-back" size={22} color={Colors.textPrimary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Member</Text>
         <TouchableOpacity testID="member-call" onPress={() => Linking.openURL(`tel:${member.phone}`)} style={styles.iconBtn}>
-          <Ionicons name="call" size={20} color={Colors.primary} />
+          <Icon name="call" size={20} color={Colors.primary} />
         </TouchableOpacity>
       </View>
 
@@ -107,26 +127,49 @@ export default function MemberDetail() {
           <Text style={styles.name}>{member.name}</Text>
           <Text style={styles.meta}>{member.age} years · {member.gender} · {member.role === 'senior' ? 'Senior' : 'Family'}</Text>
           <View style={styles.phoneRow}>
-            <Ionicons name="call-outline" size={14} color={Colors.textTertiary} />
+            <Icon name="call-outline" size={14} color={Colors.textTertiary} />
             <Text style={styles.phoneText}>{member.phone}</Text>
           </View>
         </View>
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Location</Text>
-          <View style={styles.mapCard}>
-            <Image
-              source={{ uri: `https://staticmap.openstreetmap.de/staticmap.php?center=${mapLat},${mapLon}&zoom=14&size=600x300&markers=${mapLat},${mapLon},lightblue` }}
-              style={styles.mapImg}
-            />
-            <View style={styles.mapOverlay}>
-              <Ionicons name="location" size={18} color={Colors.surface} />
-              <Text style={styles.mapText}>{member.location_name || 'Unknown'}</Text>
+          <View style={styles.locationCard}>
+            <View style={styles.locRow}>
+              <View style={styles.locPinBubble}>
+                <Text style={styles.locPinEmoji}>📍</Text>
+              </View>
+              <View style={{ flex: 1, marginLeft: 14 }}>
+                <View style={styles.locNameRow}>
+                  <Text style={styles.locName}>{member.name}</Text>
+                  <View style={[styles.locStatusDot, { backgroundColor: StatusColor(member.status) }]} />
+                </View>
+                <Text style={styles.locPlace}>{member.location_name || 'Unknown location'}</Text>
+              </View>
             </View>
-          </View>
-          <View style={styles.lastSeen}>
-            <Ionicons name="time-outline" size={16} color={Colors.textTertiary} />
-            <Text style={styles.lastSeenText}>Last seen recently</Text>
+
+            <View style={styles.locDivider} />
+
+            <View style={styles.locMetaRow}>
+              <Text style={styles.locMetaLabel}>Coordinates</Text>
+              <Text style={styles.locMetaValue}>{coordsLabel}</Text>
+            </View>
+            <View style={styles.locMetaRow}>
+              <Text style={styles.locMetaLabel}>Last seen</Text>
+              <Text style={styles.locMetaValue}>🕐 Recently</Text>
+            </View>
+
+            <TouchableOpacity
+              testID="member-get-directions"
+              onPress={openDirections}
+              activeOpacity={0.85}
+              style={styles.directionsBtn}
+            >
+              <Text style={styles.directionsEmoji}>🗺</Text>
+              <Text style={styles.directionsText}>Get Directions</Text>
+            </TouchableOpacity>
+
+            <Text style={styles.mapNote}>Live map view coming soon</Text>
           </View>
         </View>
 
@@ -138,7 +181,7 @@ export default function MemberDetail() {
             reminders.map(r => (
               <View key={r.id} testID={`member-reminder-${r.id}`} style={styles.reminderCard}>
                 <View style={styles.reminderIcon}>
-                  <Ionicons name="medical" size={18} color={Colors.primary} />
+                  <Icon name="medical" size={18} color={Colors.primary} />
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.reminderTitle}>{r.title}</Text>
@@ -155,13 +198,13 @@ export default function MemberDetail() {
         </View>
 
         <TouchableOpacity testID="member-delete" onPress={onDelete} style={styles.deleteBtn}>
-          <Ionicons name="trash-outline" size={18} color={Colors.error} />
+          <Icon name="trash-outline" size={18} color={Colors.error} />
           <Text style={styles.deleteText}>Remove member</Text>
         </TouchableOpacity>
       </ScrollView>
 
       <TouchableOpacity testID="member-checkin" onPress={checkIn} activeOpacity={0.85} style={styles.checkinBtn}>
-        <Ionicons name="checkmark-circle" size={24} color={Colors.surface} />
+        <Icon name="checkmark-circle" size={24} color={Colors.surface} />
         <Text style={styles.checkinText}>Check in {member.name}</Text>
       </TouchableOpacity>
     </SafeAreaView>
@@ -195,6 +238,32 @@ const styles = StyleSheet.create({
   mapText: { color: Colors.surface, fontWeight: '700', fontSize: 13 },
   lastSeen: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 10 },
   lastSeenText: { fontSize: 14, color: Colors.textTertiary },
+  locationCard: {
+    backgroundColor: Colors.surface, borderRadius: 20, padding: 18,
+    borderWidth: 1, borderColor: Colors.border,
+    shadowColor: Colors.primary, shadowOpacity: 0.06, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 2,
+  },
+  locRow: { flexDirection: 'row', alignItems: 'center' },
+  locPinBubble: {
+    width: 52, height: 52, borderRadius: 26, backgroundColor: Colors.tertiary,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  locPinEmoji: { fontSize: 26 },
+  locNameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  locName: { fontSize: 17, fontWeight: '700', color: Colors.textPrimary },
+  locStatusDot: { width: 10, height: 10, borderRadius: 5 },
+  locPlace: { fontSize: 15, color: Colors.secondary, fontWeight: '600', marginTop: 2 },
+  locDivider: { height: 1, backgroundColor: Colors.border, marginVertical: 14 },
+  locMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 6 },
+  locMetaLabel: { fontSize: 13, fontWeight: '600', color: Colors.textTertiary, textTransform: 'uppercase', letterSpacing: 0.5 },
+  locMetaValue: { fontSize: 14, color: Colors.textPrimary, fontWeight: '600' },
+  directionsBtn: {
+    marginTop: 14, height: 52, borderRadius: 14, backgroundColor: Colors.primary,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
+  },
+  directionsEmoji: { fontSize: 18 },
+  directionsText: { color: Colors.surface, fontSize: 16, fontWeight: '700' },
+  mapNote: { fontSize: 12, color: Colors.textTertiary, textAlign: 'center', marginTop: 10, fontStyle: 'italic' },
   reminderCard: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: Colors.surface,
     padding: 14, borderRadius: 14, marginTop: 8, borderWidth: 1, borderColor: Colors.border,

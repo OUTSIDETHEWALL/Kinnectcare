@@ -1,5 +1,5 @@
 import { Tabs } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import { Icon } from '../../src/Icon';
 import { Colors } from '../../src/theme';
 import { Platform } from 'react-native';
 
@@ -24,14 +24,14 @@ export default function TabsLayout() {
         name="dashboard"
         options={{
           title: 'Family',
-          tabBarIcon: ({ color, size }) => <Ionicons name="people" size={size} color={color} />,
+          tabBarIcon: ({ color, size }) => <Icon name="people" size={size} color={color} />,
         }}
       />
       <Tabs.Screen
         name="alerts"
         options={{
           title: 'Alerts',
-          tabBarIcon: ({ color, size }) => <Ionicons name="notifications" size={size} color={color} />,
+          tabBarIcon: ({ color, size }) => <Icon name="notifications" size={size} color={color} />,
         }}
       />
     </Tabs>

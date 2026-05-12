@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator } from 'react-native';
 import { useFocusEffect } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
 import { api, Alert } from '../../src/api';
@@ -73,7 +73,7 @@ export default function Alerts() {
       >
         {active.length === 0 && (
           <View style={styles.empty}>
-            <Ionicons name="checkmark-circle" size={48} color={Colors.success} />
+            <Icon name="checkmark-circle" size={48} color={Colors.success} />
             <Text style={styles.emptyTitle}>All clear!</Text>
             <Text style={styles.emptyMsg}>No active alerts right now.</Text>
           </View>
@@ -85,7 +85,7 @@ export default function Alerts() {
           return (
             <View key={a.id} testID={`alert-${a.id}`} style={[styles.alertCard, { backgroundColor: t.bg }]}>
               <View style={[styles.iconBubble, { backgroundColor: Colors.surface }]}>
-                <Ionicons name={alertIcon(a.type) as any} size={22} color={t.fg} />
+                <Icon name={alertIcon(a.type) as any} size={22} color={t.fg} />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={[styles.alertTitle, { color: t.fg }]}>{a.title}</Text>
@@ -106,7 +106,7 @@ export default function Alerts() {
         {cleared.length > 0 && <Text style={styles.section}>Cleared</Text>}
         {cleared.slice(0, 10).map(a => (
           <View key={a.id} style={styles.clearedCard}>
-            <Ionicons name="checkmark-circle" size={18} color={Colors.success} />
+            <Icon name="checkmark-circle" size={18} color={Colors.success} />
             <View style={{ flex: 1, marginLeft: 10 }}>
               <Text style={styles.clearedTitle}>{a.title}</Text>
               <Text style={styles.clearedMsg}>{a.member_name}</Text>

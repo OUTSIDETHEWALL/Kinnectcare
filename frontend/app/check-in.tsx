@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Animated, Easing } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import { Icon } from '../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../src/theme';
 
@@ -23,14 +23,14 @@ export default function CheckInConfirm() {
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <View style={styles.content}>
         <Animated.View style={[styles.checkCircle, { transform: [{ scale }] }]}>
-          <Ionicons name="checkmark" size={80} color={Colors.surface} />
+          <Icon name="checkmark" size={80} color={Colors.surface} />
         </Animated.View>
         <Text testID="checkin-title" style={styles.title}>You're checked in!</Text>
         <Text style={styles.subtitle}>
           {name ? `${name} is safely checked in.` : 'Your family has been notified.'}
         </Text>
         <View style={styles.timeRow}>
-          <Ionicons name="time-outline" size={16} color={Colors.textTertiary} />
+          <Icon name="time-outline" size={16} color={Colors.textTertiary} />
           <Text style={styles.timeText}>Just now</Text>
         </View>
       </View>

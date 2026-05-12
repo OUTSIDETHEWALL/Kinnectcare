@@ -1,6 +1,6 @@
 import { View, Text, StyleSheet, TouchableOpacity, ImageBackground, Image } from 'react-native';
 import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -17,7 +17,7 @@ export default function Welcome() {
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <View style={styles.top}>
           <View style={styles.logoCircle}>
-            <Ionicons name="shield-checkmark" size={48} color={Colors.surface} />
+            <Icon name="shield-checkmark" size={48} color={Colors.surface} />
           </View>
           <Text style={styles.brand}>KinnectCare</Text>
           <Text style={styles.tagline}>Family safety & senior wellness, all in one place.</Text>
@@ -37,7 +37,7 @@ export default function Welcome() {
             onPress={() => router.push('/(auth)/signup')}
           >
             <Text style={styles.ctaText}>Get Started</Text>
-            <Ionicons name="arrow-forward" size={20} color={Colors.surface} />
+            <Icon name="arrow-forward" size={20} color={Colors.surface} />
           </TouchableOpacity>
           <TouchableOpacity
             testID="welcome-login-link"
@@ -54,11 +54,11 @@ export default function Welcome() {
   );
 }
 
-function FeatureItem({ icon, label }: { icon: any; label: string }) {
+function FeatureItem({ icon, label }: { icon: string; label: string }) {
   return (
     <View style={styles.featureItem}>
       <View style={styles.featureIconBubble}>
-        <Ionicons name={icon} size={22} color={Colors.primary} />
+        <Icon name={icon} size={22} color={Colors.primary} />
       </View>
       <Text style={styles.featureLabel}>{label}</Text>
     </View>

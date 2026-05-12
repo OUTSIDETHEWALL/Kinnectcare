@@ -4,7 +4,7 @@ import {
   RefreshControl, Alert as RNAlert, Linking, ActivityIndicator,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import { Colors, StatusColor } from '../../src/theme';
@@ -108,7 +108,7 @@ export default function Dashboard() {
             <Text style={styles.name}>{user?.full_name?.split(' ')[0] || 'there'} 👋</Text>
           </View>
           <TouchableOpacity testID="dashboard-logout" onPress={logout} style={styles.iconBtn}>
-            <Ionicons name="log-out-outline" size={22} color={Colors.textSecondary} />
+            <Icon name="log-out-outline" size={22} color={Colors.textSecondary} />
           </TouchableOpacity>
         </View>
 
@@ -132,7 +132,7 @@ export default function Dashboard() {
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Your Family</Text>
           <TouchableOpacity testID="add-member-btn" onPress={() => router.push('/add-member')} style={styles.addBtn}>
-            <Ionicons name="add" size={18} color={Colors.primary} />
+            <Icon name="add" size={18} color={Colors.primary} />
             <Text style={styles.addBtnText}>Add</Text>
           </TouchableOpacity>
         </View>
@@ -153,7 +153,7 @@ export default function Dashboard() {
 
         {members.length === 0 && (
           <View style={styles.empty}>
-            <Ionicons name="people-outline" size={40} color={Colors.textTertiary} />
+            <Icon name="people-outline" size={40} color={Colors.textTertiary} />
             <Text style={styles.emptyText}>No family members yet. Tap "Add" to get started.</Text>
           </View>
         )}
@@ -161,7 +161,7 @@ export default function Dashboard() {
         <Text style={[styles.sectionTitle, { marginHorizontal: 24, marginTop: 28, marginBottom: 12 }]}>Medication Reminders</Text>
         {pendingReminders.length === 0 ? (
           <View style={styles.reminderEmpty}>
-            <Ionicons name="checkmark-circle" size={28} color={Colors.success} />
+            <Icon name="checkmark-circle" size={28} color={Colors.success} />
             <Text style={styles.reminderEmptyText}>All caught up!</Text>
           </View>
         ) : (
@@ -175,7 +175,7 @@ export default function Dashboard() {
       </ScrollView>
 
       <TouchableOpacity testID="sos-button" onPress={triggerSOS} activeOpacity={0.85} style={styles.sosBtn}>
-        <Ionicons name="warning" size={26} color={Colors.surface} />
+        <Icon name="warning" size={26} color={Colors.surface} />
         <Text style={styles.sosText}>SOS Emergency</Text>
       </TouchableOpacity>
     </SafeAreaView>
@@ -199,11 +199,11 @@ function MemberCard({ member, onPress }: { member: Member; onPress: () => void }
       <View style={{ flex: 1, marginLeft: 14 }}>
         <Text style={styles.memberName}>{member.name}, {member.age}</Text>
         <Text style={styles.memberMeta}>
-          <Ionicons name="location-outline" size={12} color={Colors.textTertiary} /> {member.location_name || 'Unknown'}
+          <Icon name="location-outline" size={12} color={Colors.textTertiary} /> {member.location_name || 'Unknown'}
         </Text>
         <Text style={styles.memberMeta}>Last seen recently</Text>
       </View>
-      <Ionicons name="chevron-forward" size={20} color={Colors.textTertiary} />
+      <Icon name="chevron-forward" size={20} color={Colors.textTertiary} />
     </TouchableOpacity>
   );
 }
@@ -212,14 +212,14 @@ function ReminderRow({ reminder, onToggle }: { reminder: Reminder; onToggle: () 
   return (
     <TouchableOpacity testID={`reminder-${reminder.id}`} onPress={onToggle} activeOpacity={0.85} style={styles.reminderCard}>
       <View style={styles.reminderIcon}>
-        <Ionicons name="medical" size={20} color={Colors.primary} />
+        <Icon name="medical" size={20} color={Colors.primary} />
       </View>
       <View style={{ flex: 1 }}>
         <Text style={styles.reminderTitle}>{reminder.title}</Text>
         <Text style={styles.reminderSub}>For {reminder.member_name} · {reminder.time}</Text>
       </View>
       <View style={styles.checkBox}>
-        {reminder.taken && <Ionicons name="checkmark" size={18} color={Colors.surface} />}
+        {reminder.taken && <Icon name="checkmark" size={18} color={Colors.surface} />}
       </View>
     </TouchableOpacity>
   );

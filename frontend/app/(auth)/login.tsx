@@ -4,7 +4,7 @@ import {
   Platform, ScrollView, ActivityIndicator, Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
 import { useAuth } from '../../src/AuthContext';
@@ -40,12 +40,12 @@ export default function Login() {
       >
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           <TouchableOpacity testID="login-back" onPress={() => router.back()} style={styles.back}>
-            <Ionicons name="arrow-back" size={24} color={Colors.textPrimary} />
+            <Icon name="arrow-back" size={24} color={Colors.textPrimary} />
           </TouchableOpacity>
 
           <View style={styles.logoWrap}>
             <View style={styles.logoCircle}>
-              <Ionicons name="shield-checkmark" size={36} color={Colors.surface} />
+              <Icon name="shield-checkmark" size={36} color={Colors.surface} />
             </View>
           </View>
           <Text style={styles.title}>Welcome back</Text>

@@ -4,7 +4,7 @@ import {
   KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import { Icon } from '../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../src/theme';
 import { api } from '../src/api';
@@ -42,7 +42,7 @@ export default function AddMember() {
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <View style={styles.header}>
           <TouchableOpacity testID="add-member-back" onPress={() => router.back()} style={styles.iconBtn}>
-            <Ionicons name="close" size={22} color={Colors.textPrimary} />
+            <Icon name="close" size={22} color={Colors.textPrimary} />
           </TouchableOpacity>
           <Text style={styles.title}>Add Family Member</Text>
           <View style={{ width: 44 }} />
