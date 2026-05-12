@@ -232,6 +232,19 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
                   </Text>
                 </View>
               )}
+              {sum.weekly_compliance_percent != null && (
+                <View testID={`compliance-chip-${member.id}`} style={[
+                  styles.medChip,
+                  { backgroundColor: sum.weekly_compliance_percent >= 80 ? Colors.successBg : Colors.warningBg }
+                ]}>
+                  <Text style={styles.medChipEmoji}>📊</Text>
+                  <Text style={[styles.medChipText, {
+                    color: sum.weekly_compliance_percent >= 80 ? Colors.success : Colors.warning,
+                  }]}>
+                    {sum.weekly_compliance_percent}% this week
+                  </Text>
+                </View>
+              )}
               {sum.checked_in_today && (
                 <View style={[styles.medChip, { backgroundColor: Colors.successBg }]}>
                   <Text style={[styles.medChipText, { color: Colors.success }]}>✅ Checked in</Text>

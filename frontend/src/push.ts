@@ -41,11 +41,14 @@ export async function registerForPushNotifications(): Promise<string | null> {
     if (finalStatus !== 'granted') return null;
 
     const projectId =
-      Constants?.expoConfig?.extra?.eas?.projectId ??
+      process.env.EXPO_PUBLIC_EAS_PROJECT_ID ||
+      Constants?.expoConfig?.extra?.eas?.projectId ||
       (Constants as any)?.easConfig?.projectId;
 
-    const token = projectId
-      ? (await Notifications.getExpoPushTokenAsync({ projectId })).data
+    const validProjectId = projectId && projectId !== 'REPLACE_WITH_EAS_PROJECT_ID' ? projectId : undefined;
+
+    const token = validProjectId
+      ? (await Notifications.getExpoPushTokenAsync({ projectId: validProjectId })).data
       : (await Notifications.getExpoPushTokenAsync()).data;
 
     if (token) {

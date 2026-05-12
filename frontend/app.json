@@ -1,40 +1,63 @@
 {
   "expo": {
-    "name": "frontend",
-    "slug": "frontend",
+    "name": "KinnectCare",
+    "slug": "kinnectcare",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
-    "scheme": "frontend",
+    "icon": "./assets/images/kinnectcare-logo.png",
+    "scheme": "kinnectcare",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "app.kinnectcare.client",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Share your location with family during check-ins and SOS.",
+        "NSCameraUsageDescription": "Add profile photos for family members."
+      }
     },
     "android": {
+      "package": "app.kinnectcare.client",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#000"
+        "foregroundImage": "./assets/images/kinnectcare-logo.png",
+        "backgroundColor": "#F9F5F0"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "POST_NOTIFICATIONS"
+      ]
     },
     "web": {
       "bundler": "metro",
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/kinnectcare-logo.png"
     },
     "plugins": [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
+          "image": "./assets/images/kinnectcare-logo.png",
+          "imageWidth": 220,
           "resizeMode": "contain",
-          "backgroundColor": "#000"
+          "backgroundColor": "#F9F5F0"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/kinnectcare-logo.png",
+          "color": "#1B5E35"
         }
       ]
     ],
+    "extra": {
+      "eas": {
+        "projectId": "REPLACE_WITH_EAS_PROJECT_ID"
+      }
+    },
     "experiments": {
       "typedRoutes": true
     }

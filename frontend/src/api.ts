@@ -92,4 +92,6 @@ export type MemberSummary = {
   checked_in_today: boolean;
   last_checkin_time?: string | null;
   daily_checkin_time?: string | null;
+  weekly_compliance_percent?: number | null;
+  weekly_logged?: number;
 };

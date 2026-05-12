@@ -758,12 +758,19 @@ async def dashboard_summary(current=Depends(get_current_user)):
     tz = user_tz(current)
     now_local = datetime.now(tz)
     day_start_utc = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz).astimezone(timezone.utc)
+    # 7-day window start for compliance
+    week_start_local = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz) - timedelta(days=6)
+    week_start_utc = week_start_local.astimezone(timezone.utc)
 
     members = await db.members.find({"owner_id": current["id"]}, {"_id": 0}).to_list(500)
     rems = await db.reminders.find({"owner_id": current["id"]}, {"_id": 0}).to_list(2000)
     cis = await db.checkins.find(
         {"owner_id": current["id"], "created_at": {"$gte": day_start_utc}}, {"_id": 0}
     ).to_list(500)
+    week_logs = await db.medication_logs.find(
+        {"owner_id": current["id"], "category": "medication", "marked_at": {"$gte": week_start_utc}},
+        {"_id": 0},
+    ).to_list(5000)
 
     summary = []
     for m in members:
@@ -774,6 +781,12 @@ async def dashboard_summary(current=Depends(get_current_user)):
         med_missed = sum(1 for r in m_meds if r["status"] == "missed")
         routine_done = sum(1 for r in m_routines if r["status"] == "taken")
         last_ci = next((c for c in cis if c["member_id"] == mid), None)
+        # weekly compliance for this member
+        m_logs = [log for log in week_logs if log["member_id"] == mid]
+        wk_taken = sum(1 for log in m_logs if log["status"] == "taken")
+        wk_missed = sum(1 for log in m_logs if log["status"] == "missed")
+        wk_total = wk_taken + wk_missed
+        wk_compliance = round((wk_taken / wk_total) * 100) if wk_total > 0 else None
         summary.append({
             "member_id": mid, "name": m["name"], "role": m["role"], "status": m["status"],
             "medication_total": len(m_meds), "medication_taken": med_taken, "medication_missed": med_missed,
@@ -781,6 +794,8 @@ async def dashboard_summary(current=Depends(get_current_user)):
             "checked_in_today": last_ci is not None,
             "last_checkin_time": last_ci["created_at"].isoformat() if last_ci else None,
             "daily_checkin_time": m.get("daily_checkin_time"),
+            "weekly_compliance_percent": wk_compliance,
+            "weekly_logged": wk_total,
         })
     return {"members": summary, "timezone": current.get("timezone") or "UTC"}
 
