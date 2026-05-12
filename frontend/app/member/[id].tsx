@@ -403,7 +403,7 @@ const styles = StyleSheet.create({
     position: 'absolute', bottom: 24, left: 24, right: 24,
     height: 60, backgroundColor: Colors.primary, borderRadius: 18,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
-    shadowColor: Colors.primary, shadowOpacity: 0.3, shadowRadius: 14, shadowOffset: { width: 0, height: 8 }, elevation: 8,
+    boxShadow: '0px 8px 14px rgba(27,94,53,0.3)', elevation: 8,
   },
   checkinEmoji: { fontSize: 22 },
   checkinText: { color: Colors.surface, fontSize: 17, fontWeight: '700' },

@@ -54,7 +54,7 @@ const styles = StyleSheet.create({
   checkCircle: {
     width: 160, height: 160, borderRadius: 80, backgroundColor: Colors.primary,
     alignItems: 'center', justifyContent: 'center',
-    shadowColor: Colors.primary, shadowOpacity: 0.3, shadowRadius: 20, shadowOffset: { width: 0, height: 12 }, elevation: 10,
+    boxShadow: '0px 12px 20px rgba(27,94,53,0.3)', elevation: 10,
   },
   title: { fontSize: 32, fontWeight: '800', color: Colors.textPrimary, marginTop: 36, textAlign: 'center' },
   subtitle: { fontSize: 17, color: Colors.textSecondary, marginTop: 12, textAlign: 'center', lineHeight: 26 },

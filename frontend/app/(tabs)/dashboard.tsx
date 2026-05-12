@@ -275,7 +275,7 @@ const styles = StyleSheet.create({
   summaryCard: {
     marginHorizontal: 24, padding: 18, backgroundColor: Colors.surface, borderRadius: 20,
     flexDirection: 'row', alignItems: 'center',
-    shadowColor: Colors.primary, shadowOpacity: 0.06, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 2,
+    boxShadow: '0px 4px 12px rgba(27,94,53,0.06)', elevation: 2,
   },
   summaryItem: { flex: 1, alignItems: 'center' },
   summaryNum: { fontSize: 24, fontWeight: '800', color: Colors.primary },
@@ -288,7 +288,7 @@ const styles = StyleSheet.create({
   subSection: { fontSize: 13, fontWeight: '700', color: Colors.textTertiary, marginHorizontal: 24, marginTop: 14, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.6 },
   memberCard: {
     marginHorizontal: 24, marginTop: 10, padding: 14, backgroundColor: Colors.surface, borderRadius: 18,
-    shadowColor: Colors.primary, shadowOpacity: 0.06, shadowRadius: 10, shadowOffset: { width: 0, height: 3 }, elevation: 2,
+    boxShadow: '0px 3px 10px rgba(27,94,53,0.06)', elevation: 2,
   },
   memberMain: { flexDirection: 'row', alignItems: 'center' },
   avatarWrap: { position: 'relative' },
@@ -315,7 +315,7 @@ const styles = StyleSheet.create({
     position: 'absolute', bottom: 24, left: 24, right: 24,
     height: 64, backgroundColor: Colors.sos, borderRadius: 20,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12,
-    shadowColor: Colors.sos, shadowOpacity: 0.4, shadowRadius: 16, shadowOffset: { width: 0, height: 8 }, elevation: 8,
+    boxShadow: '0px 8px 16px rgba(220,38,38,0.4)', elevation: 8,
   },
   sosEmoji: { fontSize: 24 },
   sosText: { color: Colors.surface, fontSize: 18, fontWeight: '800', letterSpacing: 0.3 },

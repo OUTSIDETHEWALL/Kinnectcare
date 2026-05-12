@@ -90,8 +90,7 @@ const styles = StyleSheet.create({
   cta: {
     height: 60, backgroundColor: Colors.primary, borderRadius: 18,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
-    shadowColor: Colors.primary, shadowOpacity: 0.25, shadowRadius: 14,
-    shadowOffset: { width: 0, height: 8 }, elevation: 6,
+    boxShadow: '0px 8px 14px rgba(27,94,53,0.25)', elevation: 6,
   },
   ctaText: { color: Colors.surface, fontSize: 18, fontWeight: '700' },
   loginLink: { marginTop: 18, alignItems: 'center' },
