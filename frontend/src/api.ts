@@ -32,7 +32,7 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
-export type User = { id: string; email: string; full_name: string };
+export type User = { id: string; email: string; full_name: string; timezone?: string };
 
 export type Member = {
   id: string;

@@ -17,18 +17,21 @@ export default function MemberDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const [member, setMember] = useState<Member | null>(null);
   const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [history, setHistory] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showCheckinSettings, setShowCheckinSettings] = useState(false);
 
   const load = async () => {
     try {
-      const [m, r] = await Promise.all([
+      const [m, r, h] = await Promise.all([
         api.get(`/members/${id}`),
         api.get(`/reminders/member/${id}`),
+        api.get(`/history/member/${id}?days=7`).catch(() => ({ data: null })),
       ]);
       setMember(m.data);
       setReminders(r.data);
+      setHistory(h.data);
     } catch (_e) {}
   };
 
@@ -248,6 +251,10 @@ export default function MemberDetail() {
           ) : meds.map(r => (
             <ReminderRow key={r.id} reminder={r} onMark={markReminder} onDelete={deleteReminder} />
           ))}
+
+          {history && history.totals && history.totals.logged > 0 && (
+            <ComplianceChart history={history} />
+          )}
         </View>
 
         {/* Daily Routine */}
@@ -398,4 +405,81 @@ const styles = StyleSheet.create({
   },
   checkinEmoji: { fontSize: 22 },
   checkinText: { color: Colors.surface, fontSize: 17, fontWeight: '700' },
+
+  // Compliance chart
+  chartCard: { backgroundColor: Colors.surface, borderRadius: 16, padding: 14, marginTop: 14, borderWidth: 1, borderColor: Colors.border },
+  chartHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 12 },
+  chartTitle: { fontSize: 14, fontWeight: '700', color: Colors.textPrimary },
+  chartSub: { fontSize: 12, color: Colors.textTertiary, marginTop: 2 },
+  complianceBig: { fontSize: 28, fontWeight: '800', color: Colors.primary },
+  complianceLabel: { fontSize: 10, color: Colors.textTertiary, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'right' },
+  barsRow: { flexDirection: 'row', alignItems: 'flex-end', height: 110, gap: 6, marginBottom: 6 },
+  barCol: { flex: 1, alignItems: 'center', justifyContent: 'flex-end' },
+  bar: { width: '100%', borderRadius: 6, minHeight: 4 },
+  barLabel: { fontSize: 10, color: Colors.textTertiary, marginTop: 4 },
+  barCount: { fontSize: 10, color: Colors.textSecondary, fontWeight: '700' },
+  legendRow: { flexDirection: 'row', gap: 14, justifyContent: 'center', marginTop: 6 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  legendDot: { width: 10, height: 10, borderRadius: 5 },
+  legendText: { fontSize: 11, color: Colors.textSecondary, fontWeight: '600' },
 });
+
+function ComplianceChart({ history }: { history: any }) {
+  const series: { date: string; taken: number; missed: number; total: number }[] = history.series || [];
+  const maxTotal = Math.max(1, ...series.map(d => d.total || 0));
+  const compliance = history.compliance_percent ?? 0;
+  const tz = history.timezone || 'UTC';
+  const dayLabel = (iso: string) => {
+    try {
+      const d = new Date(iso + 'T00:00:00');
+      return d.toLocaleDateString(undefined, { weekday: 'short' }).slice(0, 3);
+    } catch { return iso.slice(5); }
+  };
+  return (
+    <View testID="compliance-chart" style={styles.chartCard}>
+      <View style={styles.chartHeader}>
+        <View>
+          <Text style={styles.chartTitle}>📊 Weekly compliance</Text>
+          <Text style={styles.chartSub}>
+            {history.totals.taken}/{history.totals.logged} taken · {tz}
+          </Text>
+        </View>
+        <View>
+          <Text style={styles.complianceBig}>{compliance}%</Text>
+          <Text style={styles.complianceLabel}>last 7 days</Text>
+        </View>
+      </View>
+      <View style={styles.barsRow}>
+        {series.map(d => {
+          const takenH = (d.taken / maxTotal) * 80;
+          const missedH = (d.missed / maxTotal) * 80;
+          return (
+            <View key={d.date} style={styles.barCol}>
+              {d.missed > 0 && (
+                <View style={[styles.bar, { height: Math.max(4, missedH), backgroundColor: Colors.warning, marginBottom: d.taken > 0 ? 2 : 0 }]} />
+              )}
+              {d.taken > 0 && (
+                <View style={[styles.bar, { height: Math.max(4, takenH), backgroundColor: Colors.primary }]} />
+              )}
+              {d.total === 0 && (
+                <View style={[styles.bar, { height: 4, backgroundColor: Colors.border }]} />
+              )}
+              <Text style={styles.barCount}>{d.total > 0 ? `${d.taken}/${d.total}` : '–'}</Text>
+              <Text style={styles.barLabel}>{dayLabel(d.date)}</Text>
+            </View>
+          );
+        })}
+      </View>
+      <View style={styles.legendRow}>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendDot, { backgroundColor: Colors.primary }]} />
+          <Text style={styles.legendText}>Taken</Text>
+        </View>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendDot, { backgroundColor: Colors.warning }]} />
+          <Text style={styles.legendText}>Missed</Text>
+        </View>
+      </View>
+    </View>
+  );
+}

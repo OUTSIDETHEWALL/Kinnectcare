@@ -5,11 +5,24 @@ import { AuthProvider, useAuth } from '../src/AuthContext';
 import { useEffect } from 'react';
 import { View, ActivityIndicator } from 'react-native';
 import { Colors } from '../src/theme';
+import { registerForPushNotifications, useNotificationListeners } from '../src/push';
 
 function RootNav() {
   const { user, loading } = useAuth();
   const segments = useSegments();
   const router = useRouter();
+
+  useNotificationListeners((data) => {
+    if (data?.type === 'sos' || data?.type === 'missed_checkin' || data?.type === 'medication' || data?.type === 'routine') {
+      router.push('/(tabs)/alerts');
+    }
+  });
+
+  useEffect(() => {
+    if (user) {
+      registerForPushNotifications().catch(() => {});
+    }
+  }, [user?.id]);
 
   useEffect(() => {
     if (loading) return;

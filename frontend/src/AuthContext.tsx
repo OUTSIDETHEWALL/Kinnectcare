@@ -41,7 +41,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signup = async (email: string, password: string, full_name: string) => {
-    const res = await api.post('/auth/signup', { email, password, full_name });
+    const tz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
+    const res = await api.post('/auth/signup', { email, password, full_name, timezone: tz });
     await saveToken(res.data.access_token);
     setUser(res.data.user);
   };
@@ -50,6 +51,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const res = await api.post('/auth/login', { email, password });
     await saveToken(res.data.access_token);
     setUser(res.data.user);
+    // Sync timezone if it doesn't match device tz
+    try {
+      const tz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
+      if (tz && tz !== res.data.user.timezone) {
+        api.put('/auth/timezone', { timezone: tz }).catch(() => {});
+      }
+    } catch (_e) {}
   };
 
   const logout = async () => {
