@@ -859,11 +859,11 @@ async def dashboard_summary(current=Depends(get_current_user)):
     summary = []
     for m in members:
         mid = m["id"]
-        m_meds = [r for r in rems if r["member_id"] == mid and r["category"] == "medication"]
-        m_routines = [r for r in rems if r["member_id"] == mid and r["category"] == "routine"]
-        med_taken = sum(1 for r in m_meds if r["status"] == "taken")
-        med_missed = sum(1 for r in m_meds if r["status"] == "missed")
-        routine_done = sum(1 for r in m_routines if r["status"] == "taken")
+        m_meds = [r for r in rems if r["member_id"] == mid and r.get("category", "medication") == "medication"]
+        m_routines = [r for r in rems if r["member_id"] == mid and r.get("category") == "routine"]
+        med_taken = sum(1 for r in m_meds if r.get("status") == "taken")
+        med_missed = sum(1 for r in m_meds if r.get("status") == "missed")
+        routine_done = sum(1 for r in m_routines if r.get("status") == "taken")
         last_ci = next((c for c in cis if c["member_id"] == mid), None)
         # weekly compliance for this member
         m_logs = [log for log in week_logs if log["member_id"] == mid]
@@ -898,6 +898,23 @@ app.add_middleware(
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+@app.on_event("startup")
+async def _migrate_legacy_reminders():
+    """One-time backfill for legacy reminder docs missing category/status fields."""
+    try:
+        await db.reminders.update_many(
+            {"category": {"$exists": False}}, {"$set": {"category": "medication"}}
+        )
+        await db.reminders.update_many(
+            {"status": {"$exists": False}}, {"$set": {"status": "pending"}}
+        )
+        await db.reminders.update_many(
+            {"times": {"$exists": False}}, {"$set": {"times": []}}
+        )
+    except Exception as e:
+        logger.warning(f"Legacy reminder migration skipped: {e}")
 
 
 @app.on_event("shutdown")

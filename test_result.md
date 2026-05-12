@@ -158,11 +158,11 @@ backend:
 
   - task: "Regression: auth (signup/login), /api/me, members CRUD, summary, SOS, alerts, check-ins, reminders mark/toggle/delete, history"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/server.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
       - working: "NA"
         agent: "main"
@@ -195,6 +195,27 @@ backend:
             - POST /api/reminders/{id}/toggle -> 200
             - DELETE /api/reminders/{id} -> 200
             - GET /api/history/member/{id}?days=7 -> 200, series length 7, totals + compliance_percent present
+      - working: true
+        agent: "testing"
+        comment: |
+          RE-TEST AFTER FIX — ALL GREEN. Verified the GET /api/summary fix (defensive r.get(...) +
+          startup migration backfilling legacy reminders with category/status/times). Test results
+          via /app/backend_retest_summary.py (9/9 checks passed):
+            - POST /api/auth/login (demo@kinnectcare.app) -> 200, token returned
+            - GET /api/summary (demo user) -> 200 with members=4. Each member object contains all
+              required fields: medication_total, medication_taken, medication_missed, routine_total,
+              weekly_compliance_percent. No more KeyError: 'category'.
+            - GET /api/reminders (demo user) -> 200; all 5 reminder documents now have category field
+              populated (values=['medication']) confirming startup migration backfilled legacy docs.
+              Statuses present: ['missed','pending']. No nulls/missing.
+            - POST /api/reminders (demo) with TimeSlot shape [{time:'07:30',label:'Morning'},{time:'21:00'}]
+              -> 200; times preserved with label None for unlabeled slot.
+            - PUT /api/reminders/{id} (demo) updates title/dosage/times -> 200 and returns updated values.
+            - POST /api/auth/signup (fresh user qa_<uuid>@kinnectcare.app) -> 200
+            - GET /api/summary (fresh user) -> 200 with all required fields present.
+            - POST /api/reminders + PUT /api/reminders/{id} (fresh user) -> both 200.
+          Backend logs confirm: "GET /api/summary HTTP/1.1" 200 OK (both demo and fresh).
+          Regression bug RESOLVED. No further action needed.
 
 metadata:
   created_by: "main_agent"
@@ -203,8 +224,7 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Regression: auth (signup/login), /api/me, members CRUD, summary, SOS, alerts, check-ins, reminders mark/toggle/delete, history"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -253,3 +273,15 @@ agent_communication:
         plus a migration so legacy users don't keep tripping it.
 
         I have NOT modified production code. Please apply the fix, then re-test only /api/summary.
+  - agent: "testing"
+    message: |
+      RE-TEST after summary fix — ALL GREEN (9/9 checks via /app/backend_retest_summary.py).
+        - GET /api/summary (demo@kinnectcare.app) -> 200 with members array; each member exposes
+          medication_total / medication_taken / medication_missed / routine_total /
+          weekly_compliance_percent. No more KeyError.
+        - GET /api/reminders (demo) confirms startup migration: all 5 legacy reminder docs now
+          have category='medication' and status populated.
+        - POST /api/reminders with TimeSlot shape and PUT /api/reminders/{id} both still return 200
+          for demo and fresh users.
+        - GET /api/summary for a freshly signed-up user -> 200 with all required fields.
+      Regression task is now working. No further backend issues observed.
