@@ -9,12 +9,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, Reminder } from '../../src/api';
+import { useAuth } from '../../src/AuthContext';
 
 const TIME_PRESETS = ['08:00', '09:00', '10:00', '12:00', '18:00', '20:00', '21:00'];
 
 export default function MemberDetail() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
+  const { user } = useAuth();
   const [member, setMember] = useState<Member | null>(null);
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [history, setHistory] = useState<any | null>(null);
@@ -206,7 +208,7 @@ export default function MemberDetail() {
             </TouchableOpacity>
           </View>
           <View style={styles.settingCard}>
-            <Text style={styles.settingLabel}>Expected check-in time (UTC)</Text>
+            <Text style={styles.settingLabel}>Expected check-in time ({user?.timezone || 'local'})</Text>
             <Text style={styles.settingValue}>
               {member.daily_checkin_time ? `🕐 ${member.daily_checkin_time}` : '— Not set'}
             </Text>
