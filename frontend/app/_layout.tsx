@@ -36,6 +36,8 @@ function RootNav() {
       <Stack.Screen name="(auth)" />
       <Stack.Screen name="(tabs)" />
       <Stack.Screen name="add-member" options={{ presentation: 'modal' }} />
+      <Stack.Screen name="add-medication/[memberId]" options={{ presentation: 'modal' }} />
+      <Stack.Screen name="add-routine/[memberId]" options={{ presentation: 'modal' }} />
       <Stack.Screen name="check-in" />
       <Stack.Screen name="member/[id]" />
     </Stack>

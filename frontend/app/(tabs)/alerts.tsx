@@ -90,7 +90,10 @@ export default function Alerts() {
               <View style={{ flex: 1 }}>
                 <Text style={[styles.alertTitle, { color: t.fg }]}>{a.title}</Text>
                 <Text style={styles.alertMsg}>{a.message}</Text>
-                <Text style={styles.alertMeta}>{a.member_name}</Text>
+                {a.type === 'sos' && a.latitude != null && a.longitude != null && (
+                  <Text style={styles.coordsLine}>📍 {a.latitude.toFixed(4)}°, {a.longitude.toFixed(4)}°</Text>
+                )}
+                <Text style={styles.alertMeta}>{a.member_name} · {new Date(a.created_at).toLocaleString()}</Text>
                 <TouchableOpacity
                   testID={`alert-ack-${a.id}`}
                   onPress={() => ack(a.id)}
@@ -131,6 +134,7 @@ const styles = StyleSheet.create({
   iconBubble: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
   alertTitle: { fontSize: 16, fontWeight: '700' },
   alertMsg: { fontSize: 14, color: Colors.textSecondary, marginTop: 4, lineHeight: 20 },
+  coordsLine: { fontSize: 13, color: Colors.error, fontWeight: '700', marginTop: 6 },
   alertMeta: { fontSize: 12, color: Colors.textTertiary, marginTop: 6 },
   ackBtn: { marginTop: 10, alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, borderWidth: 1, backgroundColor: Colors.surface },
   ackText: { fontWeight: '700', fontSize: 13 },
