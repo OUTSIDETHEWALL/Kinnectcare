@@ -42,9 +42,19 @@ function RootNav() {
     const isOnboarding = segments[0] === 'onboarding';
     const isPublic =
       segments[0] === 'privacy-policy' || segments[0] === 'terms-of-service';
+
     // First-time users (not logged in, no onboarding flag) go to onboarding first.
+    // Re-verify the storage flag whenever we'd redirect — handles the case where the
+    // user just pressed "Get Started" / Skip and the in-memory flag is stale.
     if (!user && needsOnboarding && !isOnboarding && !isPublic) {
-      router.replace('/onboarding');
+      (async () => {
+        const stillNeeds = !(await isOnboardingDone());
+        if (stillNeeds) {
+          router.replace('/onboarding');
+        } else {
+          setNeedsOnboarding(false);
+        }
+      })();
       return;
     }
     if (!user && !inAuthGroup && !isWelcome && !isOnboarding && !isPublic) {

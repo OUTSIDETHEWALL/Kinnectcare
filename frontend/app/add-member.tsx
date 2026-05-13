@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView,
-  KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
+  KeyboardAvoidingView, Platform, Alert, ActivityIndicator, Modal,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Icon } from '../src/Icon';
@@ -18,6 +18,7 @@ export default function AddMember() {
   const [phone, setPhone] = useState('');
   const [gender, setGender] = useState('Male');
   const [loading, setLoading] = useState(false);
+  const [paywallMsg, setPaywallMsg] = useState<string | null>(null);
 
   const onSubmit = async () => {
     const n = parseInt(age, 10);
@@ -33,14 +34,7 @@ export default function AddMember() {
     } catch (e: any) {
       const pw = isPaywall(e);
       if (pw) {
-        Alert.alert(
-          'Upgrade to add more members',
-          pw.message,
-          [
-            { text: 'Maybe later', style: 'cancel' },
-            { text: 'See Plans', onPress: () => router.push('/upgrade') },
-          ],
-        );
+        setPaywallMsg(pw.message);
       } else {
         Alert.alert('Failed to add', e?.response?.data?.detail || 'Please try again.');
       }
@@ -118,6 +112,39 @@ export default function AddMember() {
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <Modal
+        visible={!!paywallMsg}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPaywallMsg(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard} testID="paywall-modal">
+            <Text style={styles.modalEmoji}>⭐</Text>
+            <Text style={styles.modalTitle}>Upgrade to add more members</Text>
+            <Text style={styles.modalBody}>
+              {paywallMsg || 'You\'ve reached the free plan limit. Upgrade to add unlimited family members.'}
+            </Text>
+            <TouchableOpacity
+              testID="paywall-see-plans"
+              style={styles.modalPrimary}
+              onPress={() => { setPaywallMsg(null); router.push('/upgrade'); }}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.modalPrimaryText}>See Plans</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="paywall-dismiss"
+              style={styles.modalSecondary}
+              onPress={() => setPaywallMsg(null)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.modalSecondaryText}>Maybe later</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -155,4 +182,26 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   ctaText: { color: Colors.surface, fontSize: 17, fontWeight: '700' },
+  modalBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center', justifyContent: 'center', padding: 24,
+  },
+  modalCard: {
+    width: '100%', maxWidth: 360, backgroundColor: Colors.surface,
+    borderRadius: 18, padding: 22, alignItems: 'center',
+    boxShadow: '0px 12px 28px rgba(0,0,0,0.22)' as any,
+  },
+  modalEmoji: { fontSize: 36, marginBottom: 4 },
+  modalTitle: { fontSize: 18, fontWeight: '800', color: Colors.textPrimary, textAlign: 'center' },
+  modalBody: {
+    fontSize: 14, color: Colors.textSecondary, textAlign: 'center',
+    marginTop: 8, marginBottom: 20, lineHeight: 20,
+  },
+  modalPrimary: {
+    height: 50, alignSelf: 'stretch', backgroundColor: Colors.primary,
+    borderRadius: 14, alignItems: 'center', justifyContent: 'center',
+  },
+  modalPrimaryText: { color: Colors.surface, fontSize: 16, fontWeight: '800' },
+  modalSecondary: { marginTop: 10, alignSelf: 'stretch', alignItems: 'center', paddingVertical: 12 },
+  modalSecondaryText: { color: Colors.textSecondary, fontSize: 15, fontWeight: '600' },
 });

@@ -800,11 +800,11 @@ agent_communication:
 frontend:
   - task: "Onboarding flow (/onboarding) — first-launch redirect + 4 slides + persistence"
     implemented: true
-    working: false
+    working: true
     file: "/app/frontend/app/onboarding.tsx, /app/frontend/app/_layout.tsx, /app/frontend/src/onboardingStore.ts"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
       - working: false
         agent: "testing"
@@ -881,11 +881,11 @@ frontend:
 
   - task: "Add Member paywall (Alert with 'See Plans' → /upgrade)"
     implemented: true
-    working: false
+    working: true
     file: "/app/frontend/app/add-member.tsx, /app/frontend/src/api.ts"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
       - working: false
         agent: "testing"
@@ -957,3 +957,50 @@ agent_communication:
            call-sites (upgrade success/cancel, settings sign-out) for the same issue.
 
       No code was modified by the testing agent.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      RE-TEST after fixes — BOTH PREVIOUSLY FAILING ITEMS NOW PASS.
+
+      A) Onboarding completion + persistence @ 390x844 — PASS
+        - localStorage.clear() + goto / → redirects to /onboarding ✓
+        - 3 taps on onboarding-next → slide 4, CTA label = "Get Started" ✓
+        - Tap Get Started → URL becomes "/", welcome screen renders (get-started-btn + welcome-login-link present) ✓
+        - localStorage.getItem('kc.onboarding.done') === '1' ✓
+        - Reload → still on "/", onboarding-next count = 0 (NO redirect bounce) ✓
+        - Skip flow: clear + /onboarding → tap onboarding-skip → lands on "/", flag persists as '1' ✓
+        Fix in _layout.tsx (re-read isOnboardingDone() inside the redirect effect) is working.
+
+      B) Paywall modal (web) @ 390x844 — PASS
+        - Verified GET /api/billing/status for demo: plan='free', member_limit=2, member_count=5,
+          members_remaining=0 (i.e. demo currently on free plan; previous backend test toggle
+          back to free is in effect).
+        - /add-member → fill (Test Paywall Z / 40 / +1-555-9999 / Male) → submit → backend 402.
+        - Inline RN <Modal testID="paywall-modal"> renders with:
+            • title "Upgrade to add more members"
+            • body "Free plan allows up to 2 family members. Upgrade to the Family Plan for unlimited members."
+            • primary CTA "See Plans" (testID paywall-see-plans)
+            • secondary "Maybe later" (testID paywall-dismiss)
+          Screenshot: .screenshots/paywall_390.png ✓
+        - Tap "See Plans" → URL becomes /upgrade and upgrade-cta renders ✓
+        - Back to /add-member, submit again, tap "Maybe later" → modal closes
+          (paywall-modal count = 0), stay on /add-member ✓
+
+      C) 360x800 regression — PASS
+        - Onboarding finish flow at 360x800: scrollWidth-clientWidth = 0 (no horizontal
+          overflow), Get Started navigates to "/" ✓
+        - Paywall modal at 360x800: overflow = 0, modal still fits with title + both CTAs.
+          Screenshot: .screenshots/paywall_360.png ✓
+
+      D) Console — CLEAN
+        - 0 console errors related to JS exceptions.
+        - 0 Ionicons warnings.
+        - 0 shadow deprecation warnings.
+        - The only console errors are the expected HTTP 402 responses from the paywall test
+          (visible in network panel as "Failed to load resource: 402") — these are the
+          backend's correct paywall signal, NOT a JS bug.
+
+      Both previously stuck issues are now resolved. No source code modified by testing
+      agent. Main agent can summarize and finish.
+
