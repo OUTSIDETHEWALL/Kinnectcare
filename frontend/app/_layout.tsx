@@ -28,7 +28,9 @@ function RootNav() {
     if (loading) return;
     const inAuthGroup = segments[0] === '(auth)';
     const isWelcome = !segments[0] || segments[0] === ('index' as any);
-    if (!user && !inAuthGroup && !isWelcome) {
+    const isPublic =
+      segments[0] === 'privacy-policy' || segments[0] === 'terms-of-service';
+    if (!user && !inAuthGroup && !isWelcome && !isPublic) {
       router.replace('/');
     } else if (user && (inAuthGroup || isWelcome)) {
       router.replace('/(tabs)/dashboard');
@@ -54,6 +56,9 @@ function RootNav() {
       <Stack.Screen name="edit-medication/[reminderId]" options={{ presentation: 'modal' }} />
       <Stack.Screen name="check-in" />
       <Stack.Screen name="member/[id]" />
+      <Stack.Screen name="settings" />
+      <Stack.Screen name="privacy-policy" />
+      <Stack.Screen name="terms-of-service" />
     </Stack>
   );
 }

@@ -130,9 +130,14 @@ export default function Dashboard() {
             <Text style={styles.hello}>Hello,</Text>
             <Text style={styles.name}>{user?.full_name?.split(' ')[0] || 'there'} 👋</Text>
           </View>
-          <TouchableOpacity testID="dashboard-logout" onPress={logout} style={styles.iconBtn}>
-            <Icon name="log-out-outline" size={20} color={Colors.textSecondary} />
-          </TouchableOpacity>
+          <View style={styles.headerActions}>
+            <TouchableOpacity testID="dashboard-settings" onPress={() => router.push('/settings')} style={styles.iconBtn}>
+              <Icon name="settings" size={20} color={Colors.textSecondary} />
+            </TouchableOpacity>
+            <TouchableOpacity testID="dashboard-logout" onPress={logout} style={styles.iconBtn}>
+              <Icon name="log-out-outline" size={20} color={Colors.textSecondary} />
+            </TouchableOpacity>
+          </View>
         </View>
 
         <View style={styles.summaryCard}>
@@ -272,6 +277,7 @@ const styles = StyleSheet.create({
   hello: { fontSize: 16, color: Colors.textTertiary },
   name: { fontSize: 28, fontWeight: '800', color: Colors.textPrimary, marginTop: 2 },
   iconBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: Colors.surface, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: Colors.border },
+  headerActions: { flexDirection: 'row', gap: 10 },
   summaryCard: {
     marginHorizontal: 24, padding: 18, backgroundColor: Colors.surface, borderRadius: 20,
     flexDirection: 'row', alignItems: 'center',

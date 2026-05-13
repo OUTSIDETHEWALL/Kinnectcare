@@ -277,14 +277,21 @@ def _coerce_time_list(v):
     return out
 
 
-async def push_to_user(user_id: str, title: str, body: str, data: dict):
-    """Send push to all registered push tokens for a user. Best-effort."""
+async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
+    """Send push to all registered push tokens for a user. Best-effort.
+    Returns the number of devices the push was attempted on (0 if user has none).
+    """
     user = await db.users.find_one({"id": user_id}, {"_id": 0, "push_tokens": 1})
     if not user:
-        return
+        return 0
     tokens = user.get("push_tokens") or []
-    if tokens:
+    if not tokens:
+        return 0
+    try:
         await send_expo_push(tokens, title, body, data)
+    except Exception as e:
+        logger.warning(f"push_to_user failed for {user_id}: {e}")
+    return len(tokens)
 
 
 # ========== Daily reset ==========
@@ -812,26 +819,54 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         if m:
             member_name = m["name"]
     tz = user_tz(current)
-    now_local = datetime.now(tz)
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(tz)
+    timestamp_iso = now_utc.isoformat()
+    local_time_str = now_local.strftime('%H:%M %Z, %b %d')
+
+    has_coords = data.latitude is not None and data.longitude is not None
     coord_str = ""
-    if data.latitude is not None and data.longitude is not None:
+    coord_line = ""
+    if has_coords:
         coord_str = f" Location: {data.latitude:.4f}, {data.longitude:.4f}."
+        coord_line = f"📍 {data.latitude:.5f}, {data.longitude:.5f}"
+    else:
+        coord_line = "📍 Location unavailable"
+
     alert = Alert(
         owner_id=current["id"], member_id=member_id, member_name=member_name,
         type="sos", severity="critical",
         title=f"SOS Emergency — {member_name}",
-        message=f"{member_name} triggered SOS at {now_local.strftime('%H:%M %Z, %b %d')}.{coord_str} Emergency services notified.",
+        message=f"{member_name} triggered SOS at {local_time_str}.{coord_str} Emergency services notified.",
         latitude=data.latitude, longitude=data.longitude,
     )
     await db.alerts.insert_one(alert.model_dump())
-    # Push to family caregivers (owner = same account)
-    await push_to_user(
-        current["id"],
-        f"🆘 SOS — {member_name}",
-        alert.message,
-        {"type": "sos", "member_id": member_id, "latitude": data.latitude, "longitude": data.longitude},
-    )
-    return {"ok": True, "alert_id": alert.id, "emergency_number": "911"}
+
+    # Enhanced push: notify ALL devices on the family account with member name + GPS + timestamp.
+    push_title = f"🆘 SOS — {member_name}"
+    push_body = f"{coord_line}\n🕒 {local_time_str}\nTap to view & respond."
+    push_data = {
+        "type": "sos",
+        "alert_id": alert.id,
+        "member_id": member_id,
+        "member_name": member_name,
+        "latitude": data.latitude,
+        "longitude": data.longitude,
+        "timestamp": timestamp_iso,
+    }
+    devices_notified = await push_to_user(current["id"], push_title, push_body, push_data)
+
+    return {
+        "ok": True,
+        "alert_id": alert.id,
+        "emergency_number": "911",
+        "timestamp": timestamp_iso,
+        "member_name": member_name,
+        "coordinates": (
+            {"latitude": data.latitude, "longitude": data.longitude} if has_coords else None
+        ),
+        "devices_notified": devices_notified,
+    }
 
 
 # ========== Dashboard summary ==========

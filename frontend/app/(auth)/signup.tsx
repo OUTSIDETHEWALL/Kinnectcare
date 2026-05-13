@@ -54,6 +54,18 @@ export default function Signup() {
             {loading ? <ActivityIndicator color={Colors.surface} /> : <Text style={styles.ctaText}>Create Account</Text>}
           </TouchableOpacity>
 
+          <Text style={styles.agreement}>
+            By creating an account, you agree to our{' '}
+            <Text testID="signup-to-terms" style={styles.agreementLink} onPress={() => router.push('/terms-of-service')}>
+              Terms of Service
+            </Text>{' '}
+            and{' '}
+            <Text testID="signup-to-privacy" style={styles.agreementLink} onPress={() => router.push('/privacy-policy')}>
+              Privacy Policy
+            </Text>
+            .
+          </Text>
+
           <TouchableOpacity testID="signup-to-login" onPress={() => router.replace('/(auth)/login')} style={{ marginTop: 18, alignItems: 'center' }}>
             <Text style={styles.link}>Already have an account? <Text style={{ fontWeight: '700', color: Colors.primary }}>Sign in</Text></Text>
           </TouchableOpacity>
@@ -93,4 +105,9 @@ const styles = StyleSheet.create({
   },
   ctaText: { color: Colors.surface, fontSize: 17, fontWeight: '700' },
   link: { color: Colors.textSecondary, fontSize: 15 },
+  agreement: {
+    fontSize: 12, color: Colors.textTertiary, textAlign: 'center',
+    marginTop: 14, paddingHorizontal: 6, lineHeight: 18,
+  },
+  agreementLink: { color: Colors.primary, fontWeight: '700', textDecorationLine: 'underline' },
 });

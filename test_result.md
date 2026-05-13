@@ -419,6 +419,45 @@ frontend:
           s21 label, the page redirected to /dashboard because the demo auth session from
           the iphone pass persisted in storage — this is expected app behavior, not a bug.
 
+backend:
+  - task: "Enhanced SOS push notification (member name + GPS + ISO timestamp)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          POST /api/sos response now includes timestamp (ISO8601 UTC), member_name, coordinates
+          {lat,lng} (or null), and devices_notified count. push_to_user returns int count of
+          devices it attempted. Push body now contains coords + local time, data payload contains
+          alert_id, member_id, member_name, latitude, longitude, timestamp.
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 33/33 backend checks GREEN via /app/backend_test.py against
+          https://family-guard-37.preview.emergentagent.com/api with demo@kinnectcare.app.
+          SOS enhancements verified:
+            (a) POST /api/sos {member_id:<senior James>, latitude:37.7749, longitude:-122.4194}
+                -> 200, member_name='James', coordinates=={"latitude":37.7749,"longitude":-122.4194},
+                timestamp ISO-parseable (e.g. 2026-05-13T20:06:13.868457+00:00),
+                devices_notified=1 (demo account already had a push token from a prior run),
+                alert_id present, emergency_number='911', ok=True.
+            (b) POST /api/sos {} -> 200, member_name=='Demo User' (current user.full_name),
+                coordinates is None, alert still inserted.
+            (c) GET /api/alerts contains both new SOS alerts with type='sos' severity='critical'.
+            (d) After POST /api/auth/push-token {token:'ExponentPushToken[FAKE_TEST_TOKEN_KINNECT]',
+                platform:'ios'} -> {ok:true}, subsequent POST /api/sos returned devices_notified=2
+                (>=1 as required). Backend logs show no errors; Expo upstream rejection of the
+                fake token is silently caught — our endpoint correctly counted & attempted.
+          Regression suite all green: auth login/signup/me, /summary (no KeyError, members
+          carry medication_total/medication_taken/medication_missed/routine_total/
+          weekly_compliance_percent), members CRUD, reminders POST (TimeSlot) + PUT + mark +
+          toggle + delete, checkins POST + recent, history days=7.
+
 test_plan:
   current_focus: []
   stuck_tasks: []
@@ -428,18 +467,34 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      Branding refresh: replaced placeholder logo throughout the app.
-        - NEW asset: /app/frontend/assets/images/kinnectcare-logo-dark.png (dark green bg)
-        - NEW asset: /app/frontend/assets/images/kinnectcare-logo-white.png (white bg)
-        - Welcome screen (/app/frontend/app/index.tsx): uses dark variant @ 220x220 with
-          borderRadius 32 + soft shadow.
-        - Login screen (/app/frontend/app/(auth)/login.tsx): uses white variant @ 140x140.
-        - app.json: icon, adaptiveIcon (bg #1B5E35), splash (image=dark, bg #1B5E35),
-          favicon all use dark variant; expo-notifications icon uses white variant.
-        - Removed obsolete 'shield-checkmark' 🛡️ mapping from /app/frontend/src/Icon.tsx.
-      No backend code changed. Requesting only a quick regression suite to confirm nothing
-      broke (per the user's "Run full tests after" instruction).
-      DO NOT test frontend.
+      Two new things to validate:
+      1. (Frontend only — no backend changes for legal screens.) New /privacy-policy and
+         /terms-of-service routes plus a /settings screen. Auth redirect in _layout.tsx was
+         relaxed so unauthenticated users can view the two legal screens.
+      2. Backend: POST /api/sos has been enhanced.
+         - response now includes: timestamp (ISO 8601 UTC), member_name, coordinates {lat,lng}
+           (or null when not supplied), devices_notified (count of push tokens reached).
+         - push notification body now contains coordinates + local time string; data payload
+           includes alert_id, member_id, member_name, latitude, longitude, timestamp (ISO).
+         - push_to_user() now returns the number of devices it attempted to notify.
+      Please test ON BACKEND ONLY:
+        - POST /api/sos WITH coords (lat=37.7749, lng=-122.4194, member_id=<a senior id>) →
+          200, response has timestamp parseable as ISO, member_name == that senior's name,
+          coordinates == {latitude:37.7749, longitude:-122.4194}, devices_notified is int ≥ 0.
+        - POST /api/sos WITHOUT coords → 200, coordinates == null, alert still inserted.
+        - POST /api/sos WITHOUT member_id → 200, member_name == user.full_name.
+        - GET /api/alerts shows the new SOS with type='sos' severity='critical'.
+        - Register a fake push token via POST /api/auth/push-token
+          { token:'ExponentPushToken[FAKE_TEST_TOKEN_KINNECT]', platform:'ios' } → 200,
+          then POST /api/sos → devices_notified ≥ 1.
+        - Quick regression on auth, /api/me, summary, members, reminders (TimeSlot + PUT),
+          mark/toggle/delete, checkins, history, alerts.
+
+metadata:
+  created_by: "main_agent"
+  version: "1.9"
+  test_sequence: 9
+  run_ui: true
 
 agent_communication:
   - agent: "main"
@@ -507,3 +562,37 @@ agent_communication:
           for demo and fresh users.
         - GET /api/summary for a freshly signed-up user -> 200 with all required fields.
       Regression task is now working. No further backend issues observed.
+  - agent: "testing"
+    message: |
+      Enhanced SOS push notification — backend testing complete. 33/33 checks PASS via
+      /app/backend_test.py against https://family-guard-37.preview.emergentagent.com/api
+      with demo@kinnectcare.app / password123.
+
+      New SOS contract verified:
+        - POST /api/sos {member_id:<senior James>, latitude:37.7749, longitude:-122.4194}
+          -> 200, member_name='James', coordinates=={"latitude":37.7749,"longitude":-122.4194},
+          timestamp ISO-parseable (datetime.fromisoformat), devices_notified is int >=0,
+          alert_id + emergency_number='911' + ok=True returned.
+        - POST /api/sos {} -> 200, member_name=='Demo User' (user.full_name fallback),
+          coordinates is None, alert still inserted.
+        - GET /api/alerts returns both new SOS alerts (type='sos', severity='critical').
+        - POST /api/auth/push-token {token:'ExponentPushToken[FAKE_TEST_TOKEN_KINNECT]',
+          platform:'ios'} -> {ok:true}; subsequent POST /api/sos returned devices_notified=2
+          (>=1 required). Expo's upstream 400 for the fake token is silently swallowed by
+          push_to_user — endpoint correctly counted & attempted. Backend logs show 200s
+          throughout and INFO:httpx POST to exp.host returning 200 (Expo accepted batch).
+
+      Regression — all green:
+        - POST /api/auth/login (demo) + POST /api/auth/signup (random qa_<uuid>@kinnectcare.app)
+          + GET /api/auth/me
+        - GET /api/summary -> 200 with members array, each carrying medication_total,
+          medication_taken, medication_missed, routine_total, weekly_compliance_percent
+          (no KeyError)
+        - GET /api/members + POST /api/members (Eleanor senior) + GET /api/members/{id}
+        - POST /api/reminders (TimeSlot shape) + PUT /api/reminders/{id} + mark/toggle/delete
+        - POST /api/checkins + GET /api/checkins/recent
+        - GET /api/history/member/{id}?days=7
+
+      No backend issues observed. Main agent: please summarize and finish. Push notification
+      integration is REAL (Expo HTTP API hit — not mocked); only the test token itself is fake
+      so Expo rejects it upstream, which is the expected & intentional test scenario.

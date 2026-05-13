@@ -88,6 +88,16 @@ export default function Login() {
           <TouchableOpacity testID="login-to-signup" onPress={() => router.replace('/(auth)/signup')} style={{ marginTop: 18, alignItems: 'center' }}>
             <Text style={styles.link}>New here? <Text style={{ fontWeight: '700', color: Colors.primary }}>Create an account</Text></Text>
           </TouchableOpacity>
+
+          <View style={styles.legalRow}>
+            <TouchableOpacity testID="login-to-privacy" onPress={() => router.push('/privacy-policy')}>
+              <Text style={styles.legalLink}>Privacy Policy</Text>
+            </TouchableOpacity>
+            <Text style={styles.legalDot}>·</Text>
+            <TouchableOpacity testID="login-to-terms" onPress={() => router.push('/terms-of-service')}>
+              <Text style={styles.legalLink}>Terms of Service</Text>
+            </TouchableOpacity>
+          </View>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -113,4 +123,10 @@ const styles = StyleSheet.create({
   },
   ctaText: { color: Colors.surface, fontSize: 17, fontWeight: '700' },
   link: { color: Colors.textSecondary, fontSize: 15 },
+  legalRow: {
+    flexDirection: 'row', justifyContent: 'center', alignItems: 'center',
+    marginTop: 28, gap: 8,
+  },
+  legalLink: { fontSize: 13, color: Colors.textSecondary, fontWeight: '600', textDecorationLine: 'underline' },
+  legalDot: { fontSize: 13, color: Colors.textTertiary },
 });
