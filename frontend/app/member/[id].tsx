@@ -38,7 +38,8 @@ export default function MemberDetail() {
   };
 
   useFocusEffect(useCallback(() => {
-    setLoading(true);
+    // Silent re-fetch on subsequent focuses so the UI (including the Check In button)
+    // doesn't unmount/flash. Only the very first load shows the full-screen spinner.
     load().finally(() => setLoading(false));
   }, [id]));
 

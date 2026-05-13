@@ -74,9 +74,6 @@ const styles = StyleSheet.create({
   top: { alignItems: 'center', marginTop: 24 },
   logoImage: {
     width: 220, height: 220,
-    borderRadius: 32,
-    overflow: 'hidden',
-    boxShadow: '0px 12px 28px rgba(27,94,53,0.28)',
   },
   tagline: {
     fontSize: 17, color: Colors.textSecondary, textAlign: 'center',
