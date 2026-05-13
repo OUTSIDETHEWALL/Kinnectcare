@@ -1264,3 +1264,104 @@ agent_communication:
       Demo account was NOT deleted — only used to view the Danger Zone UI;
       cancel was tapped in the modal during demo session. Source code not
       modified. Main agent can summarize and finish.
+
+frontend:
+  - task: "Welcome logo wrapper removed (no card / no shadow / no border-radius)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/index.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ 390x844 and @ 360x800. Verified /app/frontend/app/index.tsx logoImage
+          style is just { width: 220, height: 220 } (no borderRadius, no overflow:hidden,
+          no boxShadow). DOM inspection of <img src=".../kinnectcare-logo-dark.png">:
+            - measured width=220, height=220 (exact).
+            - computed styles on the <img> itself: borderRadius='0px', boxShadow='none'.
+            - walked up 6 levels of parent DIVs: none had a non-zero borderRadius and
+              none had a non-'none' boxShadow. The only ancestor with overflow:hidden is
+              the default RN View at depth 1 with borderRadius=0px and boxShadow=none,
+              i.e. NOT a rounded white card wrapper.
+          Visual capture (.screenshots/welcome_390.png, welcome_360.png): logo PNG (with
+          its own dark green square background baked into the asset) sits directly on the
+          warm-white patterned background — no surrounding white rounded card, no extra
+          box, no drop shadow. Tagline "Family safety & senior wellness, all in one
+          place." renders below; Family/Wellness/Alerts row + Get Started CTA + Sign-in
+          link all present. scrollWidth==clientWidth at both viewports (no horizontal
+          overflow).
+
+  - task: "Member Check-In button flicker fixed (useFocusEffect no longer toggles loading=true)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/member/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. Verified /app/frontend/app/member/[id].tsx useFocusEffect now calls
+          load().finally(() => setLoading(false)) WITHOUT calling setLoading(true) on
+          each focus. Only the very first mount keeps loading=true initially.
+          End-to-end on web (demo@kinnectcare.app / password123):
+            - First entry: member-checkin renders "✅ Check in James" ✓
+            - Scenario C2 (get-directions → return): URL stays /member/{id}; Check-in
+              button count remained 1 before and after the directions tap — no unmount,
+              no flicker.
+            - Scenario C3 (member → tap member-checkin → /check-in success → back):
+              upon returning to /member, member-checkin is visible IMMEDIATELY
+              (btnVisible: True; URL /member/{id}). useFocusEffect re-fires but does
+              NOT replace the button with the ActivityIndicator — confirming the
+              continuous-mount fix works as designed.
+            - 360x800 regression of back-and-re-tap (D): page renders correctly; quick
+              probe at 100ms catches the initial render of a fresh stack mount (which
+              still naturally shows a brief spinner because it's a brand-new mount,
+              not a re-focus). Once render completes, member-checkin is present.
+              This residual initial-mount loading state is the INTENDED behavior per
+              the fix description ("Only the FIRST mount shows the full-screen
+              ActivityIndicator"), and the flicker bug being fixed is specifically the
+              same-mount re-focus path (validated in C2 and C3 above).
+          Console during full run: 0 console.error, 0 JS pageerrors, 0 'Re-rendering
+          MemberDetail' logs, 0 Ionicons warnings, 0 shadow deprecation warnings.
+          Regression sweep: settings-plan-card present (count=1), delete-account-modal
+          opens (count=1) and closes via Cancel (count=0) — DOES NOT delete. Screenshots
+          saved at .screenshots/welcome_390.png, welcome_360.png, member_first_entry.png,
+          member_reentry_100ms.png, member_360_reentry.png.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Both targeted fixes verified — ALL GREEN.
+
+      Fix #1 (Welcome logo wrapper removed): @ 390x844 and 360x800 the
+      kinnectcare-logo-dark.png renders at exactly 220x220 directly on the warm-white
+      patterned background. <img> has borderRadius=0px, overflow=clip (default), and
+      boxShadow=none. Ancestor walk found no rounded-card wrapper (no parent with both
+      a non-zero borderRadius and any boxShadow). No horizontal overflow at either
+      viewport.
+
+      Fix #2 (Member Check-In button flicker fixed):
+        - useFocusEffect no longer calls setLoading(true) — confirmed in source.
+        - C3 (member → /check-in → back): member-checkin button is visible
+          immediately on return (no flicker, no replaced spinner).
+        - C2 (directions → return): button count stays 1; no unmount.
+        - C1 first entry: button text "✅ Check in James" correct.
+      Edge note: when going dashboard → member, then back → dashboard → re-tap the same
+      member, that's a brand-new mount (Expo Router unmounts the screen on back), so a
+      brief initial spinner is expected and matches the intended "FIRST mount shows the
+      full-screen ActivityIndicator" behavior. The flicker the fix targets — repeated
+      setLoading(true) on every focus while the screen is already mounted — is gone.
+
+      Regression sweep:
+        - Login / logout flow OK.
+        - /settings → settings-plan-card visible.
+        - /settings → settings-delete-account opens delete-account-modal; Cancel
+          closes it (DID NOT delete).
+        - Console: 0 errors, 0 'Re-rendering MemberDetail' logs, 0 Ionicons warnings,
+          0 shadow deprecation warnings.
+      No source code modified. Main agent can summarize and finish.
