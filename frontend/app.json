@@ -4,7 +4,7 @@
     "slug": "kinnectcare",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/kinnectcare-logo.png",
+    "icon": "./assets/images/kinnectcare-logo-dark.png",
     "scheme": "kinnectcare",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -19,8 +19,8 @@
     "android": {
       "package": "app.kinnectcare.client",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/kinnectcare-logo.png",
-        "backgroundColor": "#F9F5F0"
+        "foregroundImage": "./assets/images/kinnectcare-logo-dark.png",
+        "backgroundColor": "#1B5E35"
       },
       "edgeToEdgeEnabled": true,
       "permissions": [
@@ -32,23 +32,23 @@
     "web": {
       "bundler": "metro",
       "output": "static",
-      "favicon": "./assets/images/kinnectcare-logo.png"
+      "favicon": "./assets/images/kinnectcare-logo-dark.png"
     },
     "plugins": [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/kinnectcare-logo.png",
+          "image": "./assets/images/kinnectcare-logo-dark.png",
           "imageWidth": 220,
           "resizeMode": "contain",
-          "backgroundColor": "#F9F5F0"
+          "backgroundColor": "#1B5E35"
         }
       ],
       [
         "expo-notifications",
         {
-          "icon": "./assets/images/kinnectcare-logo.png",
+          "icon": "./assets/images/kinnectcare-logo-white.png",
           "color": "#1B5E35"
         }
       ]

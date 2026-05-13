@@ -45,7 +45,7 @@ export default function Login() {
 
           <View style={styles.logoWrap}>
             <Image
-              source={require('../../assets/images/kinnectcare-logo.png')}
+              source={require('../../assets/images/kinnectcare-logo-white.png')}
               style={styles.logoImage}
               resizeMode="contain"
               accessibilityLabel="KinnectCare"

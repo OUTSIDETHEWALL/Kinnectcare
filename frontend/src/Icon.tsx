@@ -3,8 +3,7 @@ import { Text, TextStyle } from 'react-native';
 // Drop-in replacement for Ionicons using emoji so they render in Expo Go.
 // Maps the icon names used across the app to the requested emoji set.
 const MAP: Record<string, string> = {
-  // Logo / wellness — 🛡️ is a temporary placeholder; the real KinnectCare logo image will replace it.
-  'shield-checkmark': '🛡️',
+  // Wellness
   'heart': '💚',
 
   // Nav

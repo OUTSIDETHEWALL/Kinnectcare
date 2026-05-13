@@ -17,7 +17,7 @@ export default function Welcome() {
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <View style={styles.top}>
           <Image
-            source={require('../assets/images/kinnectcare-logo.png')}
+            source={require('../assets/images/kinnectcare-logo-dark.png')}
             style={styles.logoImage}
             resizeMode="contain"
             accessibilityLabel="KinnectCare"
@@ -74,6 +74,9 @@ const styles = StyleSheet.create({
   top: { alignItems: 'center', marginTop: 24 },
   logoImage: {
     width: 220, height: 220,
+    borderRadius: 32,
+    overflow: 'hidden',
+    boxShadow: '0px 12px 28px rgba(27,94,53,0.28)',
   },
   tagline: {
     fontSize: 17, color: Colors.textSecondary, textAlign: 'center',

@@ -289,15 +289,63 @@ frontend:
 
 metadata:
   created_by: "main_agent"
-  version: "1.7"
-  test_sequence: 7
+  version: "1.8"
+  test_sequence: 8
   run_ui: true
+
+backend:
+  - task: "Regression after frontend branding refresh (no backend code changes)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 15/15 regression checks green via /app/backend_regression_branding.py against
+          https://family-guard-37.preview.emergentagent.com/api using demo@kinnectcare.app.
+            - POST /api/auth/login -> 200, token returned, user.email matches.
+            - GET /api/auth/me -> 200, returns demo user.
+            - GET /api/summary -> 200, members=4 each with medication_total/medication_taken/
+              medication_missed/routine_total/weekly_compliance_percent fields intact.
+            - GET /api/members -> 200 (count=4).
+            - POST /api/members (Eleanor QA) -> 200; GET /api/members/{id} -> 200.
+            - POST /api/reminders with times=[{time:"07:30",label:"Morning"},{time:"21:00"}] -> 200,
+              second slot returned with label=None as expected.
+            - GET /api/reminders/member/{id} -> 200, includes new reminder; times stored as TimeSlot list.
+            - PUT /api/reminders/{id} -> 200, title/dosage/times updated and reflected.
+            - POST /api/reminders/{id}/mark {status:"taken"} -> 200.
+            - POST /api/sos with coords -> 200, alert_id returned.
+            - GET /api/alerts -> 200 (count=9), new SOS alert present.
+            - POST /api/checkins -> 200; GET /api/checkins/recent -> 200.
+            - GET /api/history/member/{id}?days=7 -> 200, series length=7, compliance_percent=100.
+          Backend logs show no errors during the run. Frontend-only branding change introduced
+          no backend regressions.
 
 test_plan:
   current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Branding refresh: replaced placeholder logo throughout the app.
+        - NEW asset: /app/frontend/assets/images/kinnectcare-logo-dark.png (dark green bg)
+        - NEW asset: /app/frontend/assets/images/kinnectcare-logo-white.png (white bg)
+        - Welcome screen (/app/frontend/app/index.tsx): uses dark variant @ 220x220 with
+          borderRadius 32 + soft shadow.
+        - Login screen (/app/frontend/app/(auth)/login.tsx): uses white variant @ 140x140.
+        - app.json: icon, adaptiveIcon (bg #1B5E35), splash (image=dark, bg #1B5E35),
+          favicon all use dark variant; expo-notifications icon uses white variant.
+        - Removed obsolete 'shield-checkmark' 🛡️ mapping from /app/frontend/src/Icon.tsx.
+      No backend code changed. Requesting only a quick regression suite to confirm nothing
+      broke (per the user's "Run full tests after" instruction).
+      DO NOT test frontend.
 
 agent_communication:
   - agent: "main"
@@ -335,6 +383,16 @@ agent_communication:
           m_meds = [r for r in rems if r["member_id"] == mid and r["category"] == "medication"]
         I queried Mongo: demo user has 5 reminders, 3 of which lack the `category` field
         (legacy docs predating the schema change). Endpoint works fine for users with only
+  - agent: "testing"
+    message: |
+      Branding-refresh regression run: 15/15 backend checks PASS via
+      /app/backend_regression_branding.py against the public base URL with demo creds.
+      Covered: auth/login, auth/me, summary (fields intact), members list/create/get,
+      reminders POST (TimeSlot shape) + GET by member, PUT /reminders/{id}, mark taken,
+      SOS + alerts (SOS alert visible), checkins POST + recent, history days=7
+      (series_len=7, compliance=100). Backend logs show all 200s, no errors. No
+      regressions detected from the frontend-only logo/asset/app.json update.
+
         new-format reminders (verified with a freshly created account).
 
         Fix (main agent): in dashboard_summary, use r.get("category") (and r.get("status"))
