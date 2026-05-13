@@ -60,47 +60,65 @@ export default function Dashboard() {
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Yes, Send SOS', style: 'destructive',
-          onPress: async () => {
-            try {
-              let lat: number | undefined, lon: number | undefined;
+          onPress: () => {
+            // INSTANT user-facing actions — do not await anything before doing these:
+            // 1) Dial 911 immediately
+            // 2) Navigate to the SOS confirmation screen
+            Linking.openURL('tel:911').catch(() => {});
+            router.push('/sos-confirmation');
+
+            // Backend work (location + alert + push) runs in the background.
+            (async () => {
               try {
-                const { status } = await Location.requestForegroundPermissionsAsync();
-                if (status === 'granted') {
-                  const pos = await Location.getCurrentPositionAsync({});
-                  lat = pos.coords.latitude;
-                  lon = pos.coords.longitude;
-                }
-              } catch (_e) {}
-              await api.post('/sos', { latitude: lat, longitude: lon });
-              Linking.openURL('tel:911').catch(() => {});
-              RNAlert.alert('SOS Sent', 'Your family has been notified with your location.');
-              load();
-            } catch (_e) {
-              RNAlert.alert('SOS Failed', 'Please try again.');
-            }
+                let lat: number | undefined, lon: number | undefined;
+                try {
+                  const { status } = await Location.requestForegroundPermissionsAsync();
+                  if (status === 'granted') {
+                    const pos = await Location.getCurrentPositionAsync({
+                      accuracy: Location.Accuracy.Balanced,
+                    });
+                    lat = pos.coords.latitude;
+                    lon = pos.coords.longitude;
+                  }
+                } catch (_e) {}
+                await api.post('/sos', { latitude: lat, longitude: lon });
+                // Refresh dashboard data silently for the next time the user lands here.
+                load().catch(() => {});
+              } catch (_e) {
+                // Best-effort: do not interrupt the confirmation flow with an error toast
+                // because the user has already been told help is on the way.
+              }
+            })();
           },
         },
       ]
     );
   };
 
-  const quickCheckIn = async (m: Member) => {
-    try {
-      let lat: number | undefined, lon: number | undefined, name: string | undefined;
+  const quickCheckIn = (m: Member) => {
+    // INSTANT: navigate immediately so the confirmation screen renders <1s.
+    router.push({ pathname: '/check-in', params: { name: m.name } });
+    // Backend work runs in the background.
+    (async () => {
       try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status === 'granted') {
-          const pos = await Location.getCurrentPositionAsync({});
-          lat = pos.coords.latitude;
-          lon = pos.coords.longitude;
-          name = 'Current Location';
-        }
-      } catch (_e) {}
-      await api.post('/checkins', { member_id: m.id, latitude: lat, longitude: lon, location_name: name });
-      router.push({ pathname: '/check-in', params: { name: m.name } });
-    } catch (_e) {
-      RNAlert.alert('Check-in failed', 'Please try again.');
-    }
+        let lat: number | undefined, lon: number | undefined, name: string | undefined;
+        try {
+          const { status } = await Location.requestForegroundPermissionsAsync();
+          if (status === 'granted') {
+            const pos = await Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.Balanced,
+            });
+            lat = pos.coords.latitude;
+            lon = pos.coords.longitude;
+            name = 'Current Location';
+          }
+        } catch (_e) {}
+        await api.post('/checkins', { member_id: m.id, latitude: lat, longitude: lon, location_name: name });
+        load().catch(() => {});
+      } catch (_e) {
+        // Silent failure on the network side; the user already saw the confirmation.
+      }
+    })();
   };
 
   if (loading) {

@@ -88,6 +88,7 @@ function RootNav() {
       <Stack.Screen name="terms-of-service" />
       <Stack.Screen name="onboarding" />
       <Stack.Screen name="upgrade" />
+      <Stack.Screen name="sos-confirmation" />
     </Stack>
   );
 }

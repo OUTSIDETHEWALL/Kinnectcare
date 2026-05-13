@@ -629,6 +629,78 @@ test_plan:
   test_priority: "high_first"
 
 backend:
+  - task: "Regression after instant-UX refactor (frontend fire-and-forget SOS + check-ins)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 46/46 backend checks GREEN via /app/backend_test_instant_ux.py against
+          https://family-guard-37.preview.emergentagent.com/api with demo@kinnectcare.app /
+          password123. No backend code changed; verified contracts are intact after the
+          frontend-only instant-UX refactor (router.push / tel:911 before any await + POST
+          /api/sos and POST /api/checkins called fire-and-forget).
+
+          Smoke (all 200):
+            - POST /api/auth/login -> 200, access_token + user returned.
+            - GET  /api/auth/me -> 200, email matches demo.
+            - GET  /api/members -> 200 (members list non-empty; James 78 senior located).
+            - GET  /api/summary -> 200; each member exposes medication_total,
+              medication_taken, medication_missed, routine_total, weekly_compliance_percent.
+            - GET  /api/billing/status -> 200, plan field present.
+
+          Test 1 — POST /api/sos with coords {member_id:<James>, latitude:37.7749,
+          longitude:-122.4194}:
+            - status 200, ok=True, timestamp ISO8601-parseable,
+              member_name == 'James', coordinates == {latitude:37.7749, longitude:-122.4194},
+              devices_notified is int (>=0).
+
+          Test 2 — POST /api/sos with {} (no coords):
+            - status 200, ok=True, coordinates is null, member_name falls back to
+              user.full_name ('Demo User'), alert_id present.
+
+          Test 3 — POST /api/sos with senior member_id (no coords):
+            - status 200, member_name == 'James', coordinates null.
+
+          GET /api/alerts: returns all 3 newly inserted SOS alerts; each has type='sos'
+          and severity='critical'.
+
+          Test 4 — POST /api/checkins {member_id, latitude:12.97, longitude:77.59,
+          location_name:'Test'}:
+            - status 200, record returned with id, latitude=12.97, longitude=77.59,
+              location_name='Test', member_id matches.
+            - GET /api/checkins/recent -> 200; top entry matches lat/lng/location_name
+              and member_id (most recent first per backend sort).
+
+          Test 5 — POST /api/checkins without lat/lng (location_name='Coord-less Test'):
+            - status 200, record returned with id; latitude=None, longitude=None,
+              location_name preserved.
+
+          Backend logs show 200s throughout; no errors. The frontend's fire-and-forget
+          pattern does not affect server behavior — endpoints are idempotent w.r.t. the
+          response shape and DB writes. No regressions detected.
+
+agent_communication:
+  - agent: "main"
+    message: |
+      No backend code changed in this pass. The frontend now triggers SOS / check-in instantly
+      (router.push + tel:911 before any await), and the backend POST /api/sos and
+      POST /api/checkins calls happen fire-and-forget in the background. Please run a fast
+      regression to confirm those endpoints still behave:
+        - POST /api/sos with lat/lng -> 200, includes timestamp + member_name + coordinates +
+          devices_notified (as before).
+        - POST /api/sos without lat/lng -> 200, coordinates == null.
+        - POST /api/checkins with member_id + lat/lng -> 200; creates a checkin record;
+          GET /api/checkins/recent shows it.
+        - Quick smoke: /auth/login, /auth/me, /summary, /members, /billing/status.
+      DO NOT test frontend.
+
+backend:
   - task: "DELETE /api/auth/account: cascade-delete + Stripe cancel"
     implemented: true
     working: true
@@ -1365,3 +1437,28 @@ agent_communication:
         - Console: 0 errors, 0 'Re-rendering MemberDetail' logs, 0 Ionicons warnings,
           0 shadow deprecation warnings.
       No source code modified. Main agent can summarize and finish.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Instant-UX backend regression complete — 46/46 checks GREEN via
+      /app/backend_test_instant_ux.py against https://family-guard-37.preview.emergentagent.com/api
+      with demo@kinnectcare.app / password123. No backend code changed; the frontend's new
+      fire-and-forget pattern for SOS/check-ins does not alter server behavior.
+
+      Verified per request:
+        1) POST /api/sos {member_id:<James senior>, latitude:37.7749, longitude:-122.4194}
+           -> 200, ok=True, timestamp ISO-parseable, member_name='James',
+           coordinates=={'latitude':37.7749,'longitude':-122.4194}, devices_notified is int.
+        2) POST /api/sos {} -> 200, coordinates is null, member_name=='Demo User'
+           (user.full_name fallback), alert still inserted (alert_id present).
+        3) POST /api/sos with senior member_id only -> 200, member_name=='James'.
+        4) POST /api/checkins {member_id, latitude:12.97, longitude:77.59, location_name:'Test'}
+           -> 200; GET /api/checkins/recent's most recent record has those exact coords +
+           location_name + member_id.
+        5) POST /api/checkins WITHOUT lat/lng -> 200 (still recorded, lat/lng=null).
+        6) Smoke /auth/login, /auth/me, /summary, /members, /billing/status, /alerts all 200.
+           /alerts contains the 3 new SOS alerts (type='sos', severity='critical').
+
+      Backend logs show 200s throughout, no errors. No source code modified.
+

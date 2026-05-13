@@ -68,23 +68,29 @@ export default function MemberDetail() {
     ]);
   };
 
-  const checkIn = async () => {
-    try {
-      let lat: number | undefined, lon: number | undefined, loc_name: string | undefined;
+  const checkIn = () => {
+    // INSTANT: navigate to confirmation screen first so it feels instant (<1s).
+    router.push({ pathname: '/check-in', params: { name: member?.name } });
+    // Backend work runs in the background.
+    (async () => {
       try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status === 'granted') {
-          const pos = await Location.getCurrentPositionAsync({});
-          lat = pos.coords.latitude;
-          lon = pos.coords.longitude;
-          loc_name = 'Current Location';
-        }
-      } catch (_e) {}
-      await api.post('/checkins', { member_id: id, latitude: lat, longitude: lon, location_name: loc_name });
-      router.push({ pathname: '/check-in', params: { name: member?.name } });
-    } catch (_e) {
-      Alert.alert('Failed', 'Could not check in.');
-    }
+        let lat: number | undefined, lon: number | undefined, loc_name: string | undefined;
+        try {
+          const { status } = await Location.requestForegroundPermissionsAsync();
+          if (status === 'granted') {
+            const pos = await Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.Balanced,
+            });
+            lat = pos.coords.latitude;
+            lon = pos.coords.longitude;
+            loc_name = 'Current Location';
+          }
+        } catch (_e) {}
+        await api.post('/checkins', { member_id: id, latitude: lat, longitude: lon, location_name: loc_name });
+      } catch (_e) {
+        // Silent failure on the network side; the user has already seen the confirmation.
+      }
+    })();
   };
 
   const setCheckinTime = async (t: string | null) => {
