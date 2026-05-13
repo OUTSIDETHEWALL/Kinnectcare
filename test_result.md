@@ -458,11 +458,133 @@ backend:
           weekly_compliance_percent), members CRUD, reminders POST (TimeSlot) + PUT + mark +
           toggle + delete, checkins POST + recent, history days=7.
 
+frontend:
+  - task: "Privacy Policy screen (/privacy-policy) — LegalScreen shell + 10 sections"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/privacy-policy.tsx, /app/frontend/src/LegalScreen.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ 390x844. Tapping testID login-to-privacy from /login navigates to
+          /privacy-policy. Header shows "Privacy Policy". Body shows app name "KinnectCare",
+          subtitle "by KinnectCare LLC", and "Effective May 13, 2026". First section
+          "1. Who We Are" rendered. Scrolling reveals "10. Contact Us" at bottom. Back
+          button (testID privacy-back) returns to /login. Screenshot captured at
+          .screenshots/privacy_390.png.
+  - task: "Terms of Service screen (/terms-of-service) — LegalScreen shell + 15 sections"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/terms-of-service.tsx, /app/frontend/src/LegalScreen.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ 390x844. Tapping testID login-to-terms navigates to /terms-of-service.
+          Header "Terms of Service" + KinnectCare app name + "by KinnectCare LLC" +
+          "Effective May 13, 2026". Section "1. Acceptance of Terms" visible at top;
+          scrolling to bottom shows "15. Contact" present. Back (terms-back) returns to
+          /login. Screenshot at .screenshots/terms_390.png.
+  - task: "Login footer legal links (login-to-privacy / login-to-terms)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(auth)/login.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "PASS. Both testIDs login-to-privacy and login-to-terms present on /login and route to /privacy-policy and /terms-of-service respectively. Back returns to /login each time."
+  - task: "Signup agreement inline links (signup-to-terms / signup-to-privacy)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(auth)/signup.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ 390x844. /signup contains the agreement line "By creating an account,
+          you agree to our Terms of Service and Privacy Policy." Tapping
+          testID signup-to-terms -> /terms-of-service; back returns to /signup. Tapping
+          signup-to-privacy -> /privacy-policy; back returns to /signup.
+  - task: "Settings screen (/settings) — Account / Legal / Session sections + dashboard gear"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/settings.tsx, /app/frontend/app/(tabs)/dashboard.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ 390x844. After login as demo@kinnectcare.app/password123, dashboard
+          header exposes both testID dashboard-settings (gear) and a logout icon. Tapping
+          gear navigates to /settings. Settings page shows:
+            - ACCOUNT section: Name=Demo User, Email=demo@kinnectcare.app, Time zone=UTC
+            - LEGAL section: Privacy Policy (settings-privacy) + Terms of Service (settings-terms)
+            - SESSION section: Sign out (settings-logout) styled red
+            - Footer: "KinnectCare · © 2026 KinnectCare LLC"
+          (Note: section labels render uppercase via textTransform; visually verified.)
+          settings-privacy -> /privacy-policy; back returns to /settings.
+          settings-terms -> /terms-of-service; back returns to /settings.
+          Screenshot at .screenshots/settings_390.png.
+  - task: "Legal/Settings cross-viewport at 360x800 + console cleanliness"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/privacy-policy.tsx, /app/frontend/app/terms-of-service.tsx, /app/frontend/app/settings.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. At 360x800, /privacy-policy renders with 0 horizontal overflow
+          (scrollWidth - clientWidth == 0); back button returns to /login. Bottom tabs
+          (Family / Alerts) remain functional on dashboard. Console captured across the
+          full run: 0 errors, 0 'shadow' deprecation warnings, 0 'Ionicons' references.
+          SOS button + modal not exercised per instructions (verified visually present).
+
 test_plan:
   current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Legal & Settings UI testing complete — ALL GREEN.
+      Coverage (single browser_automation run, 390x844 + 360x800):
+        A) login-to-privacy ✓ headline / app name / "by KinnectCare LLC" / "Effective May 13,
+           2026" / "1. Who We Are" / "10. Contact Us" / back -> /login ✓
+        A2) login-to-terms ✓ headline / 15 sections (last "15. Contact") / back -> /login ✓
+        B)  /signup agreement text "By creating an account, you agree to our Terms of
+            Service and Privacy Policy." ✓
+            signup-to-terms -> /terms-of-service -> back -> /signup ✓
+            signup-to-privacy -> /privacy-policy -> back -> /signup ✓
+        C)  Login as demo@kinnectcare.app/password123 -> /dashboard. dashboard-settings
+            gear + logout icon both present. Tap gear -> /settings. Account (Name/Email/
+            Time zone), Legal (Privacy Policy, Terms of Service), Session (Sign out red),
+            footer "KinnectCare · © 2026 KinnectCare LLC" all render. settings-privacy
+            and settings-terms each navigate and back returns to /settings ✓
+        D)  Tabs (Family / Alerts) intact on dashboard. Console: 0 errors, 0 shadow
+            warnings, 0 Ionicons warnings ✓
+        E)  /privacy-policy at 360x800: 0 horizontal overflow; back works ✓
+      Screenshots saved: privacy_390.png, terms_390.png, settings_390.png. No source
+      code modified. No issues found — main agent can summarize and finish.
 
 agent_communication:
   - agent: "main"
