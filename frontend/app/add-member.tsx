@@ -7,7 +7,7 @@ import { useRouter } from 'expo-router';
 import { Icon } from '../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../src/theme';
-import { api } from '../src/api';
+import { api, isPaywall } from '../src/api';
 
 const GENDERS = ['Male', 'Female', 'Other'];
 
@@ -31,7 +31,19 @@ export default function AddMember() {
       await api.post('/members', { name: name.trim(), age: n, phone: phone.trim(), gender, role });
       router.back();
     } catch (e: any) {
-      Alert.alert('Failed to add', e?.response?.data?.detail || 'Please try again.');
+      const pw = isPaywall(e);
+      if (pw) {
+        Alert.alert(
+          'Upgrade to add more members',
+          pw.message,
+          [
+            { text: 'Maybe later', style: 'cancel' },
+            { text: 'See Plans', onPress: () => router.push('/upgrade') },
+          ],
+        );
+      } else {
+        Alert.alert('Failed to add', e?.response?.data?.detail || 'Please try again.');
+      }
     } finally {
       setLoading(false);
     }

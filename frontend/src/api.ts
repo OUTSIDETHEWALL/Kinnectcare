@@ -97,3 +97,56 @@ export type MemberSummary = {
   weekly_compliance_percent?: number | null;
   weekly_logged?: number;
 };
+
+export type BillingStatus = {
+  plan: 'free' | 'family_plan';
+  status?: string | null;
+  member_limit: number | null; // null when unlimited (paid)
+  member_count: number;
+  members_remaining: number | null;
+  current_period_end?: string | null;
+  cancel_at_period_end?: boolean;
+  stripe_customer_id?: string | null;
+  manage_url?: string | null;
+  paid_plan: {
+    amount_cents: number;
+    currency: string;
+    interval: string;
+    product_name: string;
+  };
+};
+
+export async function getBillingStatus(): Promise<BillingStatus> {
+  const r = await api.get('/billing/status');
+  return r.data;
+}
+
+export async function createCheckoutSession(returnUrl?: string): Promise<{
+  checkout_url: string;
+  session_id: string;
+  publishable_key: string | null;
+}> {
+  const successUrl = returnUrl ? `${returnUrl}?status=success` : undefined;
+  const cancelUrl = returnUrl ? `${returnUrl}?status=cancel` : undefined;
+  const r = await api.post('/billing/checkout-session', {
+    success_url: successUrl,
+    cancel_url: cancelUrl,
+  });
+  return r.data;
+}
+
+export type PaywallError = {
+  paywall: true;
+  code: string;
+  message: string;
+  current?: number;
+  limit?: number;
+};
+
+export function isPaywall(err: any): PaywallError | null {
+  const data = err?.response?.data?.detail;
+  if (data && typeof data === 'object' && data.paywall === true) {
+    return data as PaywallError;
+  }
+  return null;
+}

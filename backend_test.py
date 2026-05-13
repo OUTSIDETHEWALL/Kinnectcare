@@ -1,198 +1,294 @@
-"""Backend tests for enhanced KinnectCare SOS push notification system + regression."""
+"""KinnectCare backend tests: Stripe billing + free-tier member limit + regressions."""
+from __future__ import annotations
+
+import os
 import sys
+import time
 import uuid
-from datetime import datetime
+from typing import Dict, Optional, Tuple
+
 import requests
 
-BASE = "https://family-guard-37.preview.emergentagent.com/api"
+
+def _read_env(path: str) -> Dict[str, str]:
+    env: Dict[str, str] = {}
+    if not os.path.isfile(path):
+        return env
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+FRONT_ENV = _read_env("/app/frontend/.env")
+BASE = (
+    FRONT_ENV.get("EXPO_PUBLIC_BACKEND_URL")
+    or FRONT_ENV.get("EXPO_BACKEND_URL")
+    or "https://family-guard-37.preview.emergentagent.com"
+).rstrip("/")
+API = f"{BASE}/api"
+
 DEMO_EMAIL = "demo@kinnectcare.app"
-DEMO_PASS = "password123"
-
-results = []
-def record(name, passed, info=""):
-    status = "PASS" if passed else "FAIL"
-    results.append((name, passed, info))
-    print(f"[{status}] {name}  {info}")
-
-def post(path, **kwargs): return requests.post(f"{BASE}{path}", timeout=30, **kwargs)
-def get(path, **kwargs):  return requests.get(f"{BASE}{path}", timeout=30, **kwargs)
-def put(path, **kwargs):  return requests.put(f"{BASE}{path}", timeout=30, **kwargs)
-def delete(path, **kwargs): return requests.delete(f"{BASE}{path}", timeout=30, **kwargs)
-
-def _iso_ok(s):
-    try: datetime.fromisoformat(s); return True
-    except Exception: return False
+DEMO_PASSWORD = "password123"
 
 
-def main():
-    r = post("/auth/login", json={"email": DEMO_EMAIL, "password": DEMO_PASS})
-    record("POST /auth/login (demo)", r.status_code == 200 and "access_token" in r.json(),
-           f"status={r.status_code}")
+class R:
+    results: list = []
+
+    @classmethod
+    def add(cls, name: str, ok: bool, info: str = "") -> bool:
+        cls.results.append((name, bool(ok), info))
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}  {info}")
+        return bool(ok)
+
+    @classmethod
+    def summary(cls) -> int:
+        passed = sum(1 for _, ok, _ in cls.results if ok)
+        total = len(cls.results)
+        print(f"\n==== SUMMARY: {passed}/{total} passed ====")
+        for n, ok, info in cls.results:
+            if not ok:
+                print(f"  - FAIL {n}: {info}")
+        return 0 if passed == total else 1
+
+
+def login(email: str, password: str) -> Tuple[Optional[str], Optional[dict]]:
+    r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=30)
     if r.status_code != 200:
-        print(r.text); return False
-    token = r.json()["access_token"]
-    user = r.json()["user"]
-    H = {"Authorization": f"Bearer {token}"}
+        return None, None
+    j = r.json()
+    return j.get("access_token"), j.get("user")
 
-    r = get("/auth/me", headers=H)
-    record("GET /auth/me", r.status_code == 200 and r.json()["email"] == DEMO_EMAIL,
-           f"status={r.status_code}")
 
-    r = get("/members", headers=H)
-    record("GET /members", r.status_code == 200 and isinstance(r.json(), list),
-           f"count={len(r.json()) if r.status_code==200 else '?'}")
-    members = r.json() if r.status_code == 200 else []
-    seniors = [m for m in members if m.get("role") == "senior"]
-    record("Has at least one senior member", len(seniors) >= 1, f"seniors={len(seniors)}")
-    if not seniors: return False
-    senior = seniors[0]
+def signup(email: str, password: str, full_name: str = "Billing Tester") -> Tuple[Optional[str], Optional[dict]]:
+    r = requests.post(
+        f"{API}/auth/signup",
+        json={"email": email, "password": password, "full_name": full_name},
+        timeout=30,
+    )
+    if r.status_code != 200:
+        print(f"signup failed: {r.status_code} {r.text}")
+        return None, None
+    j = r.json()
+    return j.get("access_token"), j.get("user")
 
-    # ---- 2a. SOS with senior + coords ----
-    body = {"member_id": senior["id"], "latitude": 37.7749, "longitude": -122.4194}
-    r = post("/sos", headers=H, json=body)
-    ok = r.status_code == 200
-    j = r.json() if ok else {}
-    record("POST /sos with member_id + coords -> 200", ok, f"status={r.status_code}")
-    alert_id_with_coords = None
-    if ok:
-        ts = j.get("timestamp")
-        record("SOS.timestamp ISO parseable", _iso_ok(ts), f"ts={ts}")
-        record("SOS.member_name == senior.name",
-               j.get("member_name") == senior["name"],
-               f"got={j.get('member_name')} expected={senior['name']}")
-        coords = j.get("coordinates")
-        record("SOS.coordinates == {latitude:37.7749, longitude:-122.4194}",
-               coords == {"latitude": 37.7749, "longitude": -122.4194}, f"coords={coords}")
-        record("SOS.devices_notified is int >=0",
-               isinstance(j.get("devices_notified"), int) and j["devices_notified"] >= 0,
-               f"devices_notified={j.get('devices_notified')}")
-        record("SOS.alert_id present", bool(j.get("alert_id")), f"alert_id={j.get('alert_id')}")
-        record("SOS.emergency_number == '911'", j.get("emergency_number") == "911",
-               f"emergency_number={j.get('emergency_number')}")
-        record("SOS.ok == True", j.get("ok") is True, "")
-        alert_id_with_coords = j.get("alert_id")
 
-    # ---- 2b. SOS empty body ----
-    r = post("/sos", headers=H, json={})
-    ok = r.status_code == 200
-    j = r.json() if ok else {}
-    record("POST /sos empty body -> 200", ok, f"status={r.status_code}")
-    alert_id_no_coords = None
-    if ok:
-        record("SOS empty: member_name == user.full_name",
-               j.get("member_name") == user["full_name"],
-               f"got={j.get('member_name')} expected={user['full_name']}")
-        record("SOS empty: coordinates == null", j.get("coordinates") is None,
-               f"coordinates={j.get('coordinates')}")
-        record("SOS empty: timestamp parseable", _iso_ok(j.get("timestamp")), f"ts={j.get('timestamp')}")
-        alert_id_no_coords = j.get("alert_id")
+def H(token: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    # ---- 2c. /alerts shows both ----
-    r = get("/alerts", headers=H)
+
+print(f"== Using API: {API}")
+
+# ====================================================================
+# T1 demo /billing/status
+# ====================================================================
+print("\n== TEST 1: demo /billing/status ==")
+token, user = login(DEMO_EMAIL, DEMO_PASSWORD)
+R.add("T1 demo login", token is not None, f"user={user and user.get('email')}")
+
+if token:
+    r = requests.get(f"{API}/billing/status", headers=H(token), timeout=30)
+    R.add("T1 GET /billing/status 200", r.status_code == 200, f"st={r.status_code}")
     if r.status_code == 200:
-        alerts = r.json()
-        sos_ids = {a["id"] for a in alerts if a.get("type") == "sos" and a.get("severity") == "critical"}
-        found = (alert_id_with_coords in sos_ids) and (alert_id_no_coords in sos_ids)
-        record("GET /alerts includes both new SOS (type=sos severity=critical)", found,
-               f"with={alert_id_with_coords in sos_ids} no={alert_id_no_coords in sos_ids}")
-    else:
-        record("GET /alerts", False, f"status={r.status_code}")
+        s = r.json()
+        R.add("T1 plan==free", s.get("plan") == "free", f"plan={s.get('plan')}")
+        R.add("T1 member_limit==2", s.get("member_limit") == 2, f"limit={s.get('member_limit')}")
+        pp = s.get("paid_plan") or {}
+        R.add("T1 paid_plan.amount_cents==999", pp.get("amount_cents") == 999, f"amt={pp.get('amount_cents')}")
+        R.add("T1 paid_plan.currency==usd", pp.get("currency") == "usd", f"cur={pp.get('currency')}")
+        R.add("T1 paid_plan.interval==month", pp.get("interval") == "month", f"int={pp.get('interval')}")
+        pname = pp.get("product_name") or ""
+        R.add("T1 paid_plan.product_name has 'KinnectCare Family Plan'",
+              "KinnectCare Family Plan" in pname, f"pname={pname}")
+        mc = s.get("member_count")
+        R.add("T1 member_count>=2", isinstance(mc, int) and mc >= 2, f"mc={mc}")
+        mr = s.get("members_remaining")
+        exp = max(0, 2 - int(mc or 0))
+        R.add("T1 members_remaining==max(0,2-count)", mr == exp, f"mr={mr} expected={exp}")
 
-    # ---- 2d. push token + SOS device count ----
-    fake_tok = "ExponentPushToken[FAKE_TEST_TOKEN_KINNECT]"
-    r = post("/auth/push-token", headers=H, json={"token": fake_tok, "platform": "ios"})
-    record("POST /auth/push-token (fake expo) -> 200",
-           r.status_code == 200 and r.json().get("ok") is True, f"status={r.status_code}")
-    r = post("/sos", headers=H, json={"latitude": 12.97, "longitude": 77.59})
+# ====================================================================
+# T2 fresh user 402 paywall
+# ====================================================================
+print("\n== TEST 2: fresh user member-limit 402 ==")
+rand = uuid.uuid4().hex[:10]
+new_email = f"billing_test_{rand}@example.com"
+fr_token, fr_user = signup(new_email, "password123")
+R.add("T2 signup fresh user", fr_token is not None, f"email={new_email}")
+fr_user_id = (fr_user or {}).get("id") if fr_user else None
+
+if fr_token:
+    r = requests.get(f"{API}/billing/status", headers=H(fr_token), timeout=30)
+    R.add("T2 /billing/status 200", r.status_code == 200, f"st={r.status_code}")
     if r.status_code == 200:
-        dn = r.json().get("devices_notified")
-        record("POST /sos after push-token: devices_notified >= 1",
-               isinstance(dn, int) and dn >= 1, f"devices_notified={dn}")
-    else:
-        record("POST /sos after push-token", False, f"status={r.status_code}")
+        s = r.json()
+        R.add("T2 plan==free", s.get("plan") == "free", f"plan={s.get('plan')}")
+        R.add("T2 member_count==2", s.get("member_count") == 2, f"mc={s.get('member_count')}")
+        R.add("T2 members_remaining==0", s.get("members_remaining") == 0, f"mr={s.get('members_remaining')}")
 
-    # ===== REGRESSION =====
-    rand_email = f"qa_{uuid.uuid4().hex[:10]}@kinnectcare.app"
-    r = post("/auth/signup", json={"email": rand_email, "password": "Password123!",
-                                   "full_name": "QA Tester", "timezone": "America/New_York"})
-    record("POST /auth/signup (random email)",
-           r.status_code == 200 and "access_token" in r.json(),
-           f"status={r.status_code} email={rand_email}")
-    new_token = r.json().get("access_token") if r.status_code == 200 else None
-    NH = {"Authorization": f"Bearer {new_token}"} if new_token else {}
-    if new_token:
-        r = get("/auth/me", headers=NH)
-        record("GET /auth/me (new user)",
-               r.status_code == 200 and r.json().get("email") == rand_email, f"status={r.status_code}")
+    payload = {"name": "Test 3rd", "age": 40, "phone": "+1-555-0000", "gender": "Male"}
+    r = requests.post(f"{API}/members", json=payload, headers=H(fr_token), timeout=30)
+    R.add("T2 POST /members (3rd) -> 402", r.status_code == 402, f"st={r.status_code} body={r.text[:300]}")
+    if r.status_code == 402:
+        detail = r.json().get("detail")
+        R.add("T2 detail is dict", isinstance(detail, dict), f"detail={detail}")
+        if isinstance(detail, dict):
+            R.add("T2 paywall==true", detail.get("paywall") is True, str(detail.get("paywall")))
+            R.add("T2 code==member_limit_reached",
+                  detail.get("code") == "member_limit_reached", str(detail.get("code")))
+            R.add("T2 limit==2", detail.get("limit") == 2, str(detail.get("limit")))
+            R.add("T2 current==2", detail.get("current") == 2, str(detail.get("current")))
 
-    r = get("/summary", headers=H)
-    summary_ok = r.status_code == 200 and "members" in r.json()
-    record("GET /summary (demo) -> 200 with members (no KeyError)", summary_ok,
-           f"status={r.status_code}")
-    if summary_ok:
-        req = ["medication_total","medication_taken","medication_missed","routine_total","weekly_compliance_percent"]
-        all_have = all(all(k in m for k in req) for m in r.json()["members"])
-        record("/summary members have all required fields", all_have, "")
+# ====================================================================
+# T3 checkout-session
+# ====================================================================
+print("\n== TEST 3: checkout-session ==")
+fresh_customer_id = None
+if fr_token:
+    r = requests.post(
+        f"{API}/billing/checkout-session",
+        json={"success_url": "https://example.com/ok", "cancel_url": "https://example.com/cancel"},
+        headers=H(fr_token),
+        timeout=60,
+    )
+    R.add("T3 checkout-session 200", r.status_code == 200, f"st={r.status_code} body={r.text[:300]}")
+    if r.status_code == 200:
+        j = r.json()
+        co_url = j.get("checkout_url") or ""
+        R.add("T3 checkout_url startswith https://checkout.stripe.com/",
+              co_url.startswith("https://checkout.stripe.com/"), f"url={co_url[:80]}")
+        R.add("T3 session_id non-empty", bool(j.get("session_id")), f"sid={j.get('session_id')}")
+        pk = j.get("publishable_key") or ""
+        R.add("T3 publishable_key startswith pk_test_", pk.startswith("pk_test_"), f"pk={pk[:12]}")
 
-    # members CRUD
-    r = post("/members", headers=H, json={"name": "Eleanor Vance", "age": 74,
-                                          "phone": "+1-555-0188", "gender": "Female", "role": "senior"})
-    new_member_id = r.json().get("id") if r.status_code == 200 else None
-    record("POST /members (Eleanor)", r.status_code == 200 and bool(new_member_id),
-           f"status={r.status_code}")
-    if new_member_id:
-        r = get(f"/members/{new_member_id}", headers=H)
-        record("GET /members/{id}", r.status_code == 200 and r.json().get("id") == new_member_id,
-               f"status={r.status_code}")
+    r = requests.get(f"{API}/billing/status", headers=H(fr_token), timeout=30)
+    R.add("T3 /billing/status 200 post-checkout", r.status_code == 200, f"st={r.status_code}")
+    if r.status_code == 200:
+        fresh_customer_id = (r.json().get("stripe_customer_id") or "")
+        R.add("T3 stripe_customer_id startswith cus_",
+              isinstance(fresh_customer_id, str) and fresh_customer_id.startswith("cus_"),
+              f"cust={fresh_customer_id}")
 
-    # reminders flow
-    if new_member_id:
-        body = {"member_id": new_member_id, "title": "Atorvastatin", "category": "medication",
-                "dosage": "20mg", "times": [{"time": "08:00", "label": "Morning"}, {"time": "20:00"}]}
-        r = post("/reminders", headers=H, json=body)
-        rid = r.json().get("id") if r.status_code == 200 else None
-        record("POST /reminders (TimeSlot shape)", r.status_code == 200 and bool(rid),
-               f"status={r.status_code}")
-        if rid:
-            r = put(f"/reminders/{rid}", headers=H,
-                    json={"title": "Atorvastatin (edited)", "dosage": "40mg",
-                          "times": [{"time": "07:30", "label": "Dawn"}]})
-            record("PUT /reminders/{id}",
-                   r.status_code == 200 and r.json().get("title") == "Atorvastatin (edited)",
-                   f"status={r.status_code}")
-            r = post(f"/reminders/{rid}/mark", headers=H, json={"status": "taken"})
-            record("POST /reminders/{id}/mark taken", r.status_code == 200, f"status={r.status_code}")
-            r = post(f"/reminders/{rid}/toggle", headers=H)
-            record("POST /reminders/{id}/toggle", r.status_code == 200, f"status={r.status_code}")
-            r = delete(f"/reminders/{rid}", headers=H)
-            record("DELETE /reminders/{id}", r.status_code == 200, f"status={r.status_code}")
+# ====================================================================
+# T4 webhook activation
+# ====================================================================
+print("\n== TEST 4: webhook activate subscription ==")
+if fr_token and fresh_customer_id and fr_user_id:
+    future_unix = int(time.time()) + 30 * 86400
+    body = {
+        "type": "customer.subscription.updated",
+        "data": {"object": {
+            "id": "sub_test_unit_001",
+            "customer": fresh_customer_id,
+            "status": "active",
+            "current_period_end": future_unix,
+            "current_period_start": future_unix - 30 * 86400,
+            "metadata": {"kinnect_user_id": fr_user_id},
+        }},
+    }
+    r = requests.post(f"{API}/billing/webhook", json=body, timeout=30)
+    R.add("T4 webhook 200", r.status_code == 200, f"st={r.status_code} body={r.text[:300]}")
+    if r.status_code == 200:
+        R.add("T4 webhook status==ok", r.json().get("status") == "ok", r.text)
 
-    # check-ins
-    if new_member_id:
-        r = post("/checkins", headers=H,
-                 json={"member_id": new_member_id, "location_name": "Home",
-                       "latitude": 40.7128, "longitude": -74.0060})
-        record("POST /checkins", r.status_code == 200, f"status={r.status_code}")
-    r = get("/checkins/recent", headers=H)
-    record("GET /checkins/recent",
-           r.status_code == 200 and isinstance(r.json(), list),
-           f"status={r.status_code}")
+    r = requests.get(f"{API}/billing/status", headers=H(fr_token), timeout=30)
+    R.add("T4 /billing/status 200 post-activation", r.status_code == 200, f"st={r.status_code}")
+    if r.status_code == 200:
+        s = r.json()
+        R.add("T4 plan==family_plan", s.get("plan") == "family_plan", f"plan={s.get('plan')}")
+        R.add("T4 status==active", s.get("status") == "active", f"status={s.get('status')}")
+        R.add("T4 member_limit is null", s.get("member_limit") is None, f"limit={s.get('member_limit')}")
+        R.add("T4 members_remaining is null", s.get("members_remaining") is None, f"mr={s.get('members_remaining')}")
+        cpe = s.get("current_period_end")
+        try:
+            from datetime import datetime
+            ok_iso = isinstance(cpe, str) and bool(datetime.fromisoformat(cpe.replace("Z", "+00:00")))
+        except Exception:
+            ok_iso = False
+        R.add("T4 current_period_end is ISO string", ok_iso, f"cpe={cpe}")
 
-    if new_member_id:
-        r = get(f"/history/member/{new_member_id}?days=7", headers=H)
-        ok = r.status_code == 200 and len(r.json().get("series", [])) == 7
-        record("GET /history/member/{id}?days=7", ok, f"status={r.status_code}")
+    payload = {"name": "Paid Member 3", "age": 33, "phone": "+1-555-0303", "gender": "Female"}
+    r = requests.post(f"{API}/members", json=payload, headers=H(fr_token), timeout=30)
+    R.add("T4 POST /members (3rd after paid) -> 200",
+          r.status_code == 200, f"st={r.status_code} body={r.text[:200]}")
 
-    print("\n" + "="*60)
-    total = len(results); passed = sum(1 for _,p,_ in results if p)
-    print(f"PASSED: {passed}/{total}")
-    failures = [(n,i) for n,p,i in results if not p]
-    if failures:
-        print("\nFAILURES:")
-        for n,i in failures:
-            print(f"  - {n}  {i}")
-    return passed == total
+# ====================================================================
+# T5 webhook cancellation
+# ====================================================================
+print("\n== TEST 5: webhook cancellation ==")
+if fr_token and fresh_customer_id:
+    body = {
+        "type": "customer.subscription.deleted",
+        "data": {"object": {"id": "sub_test_unit_001", "customer": fresh_customer_id}},
+    }
+    r = requests.post(f"{API}/billing/webhook", json=body, timeout=30)
+    R.add("T5 webhook 200", r.status_code == 200, f"body={r.text[:200]}")
+    if r.status_code == 200:
+        R.add("T5 status==ok", r.json().get("status") == "ok", r.text)
 
-if __name__ == "__main__":
-    ok = main()
-    sys.exit(0 if ok else 1)
+    r = requests.get(f"{API}/billing/status", headers=H(fr_token), timeout=30)
+    R.add("T5 /billing/status 200", r.status_code == 200, f"st={r.status_code}")
+    if r.status_code == 200:
+        s = r.json()
+        R.add("T5 plan==free", s.get("plan") == "free", f"plan={s.get('plan')}")
+        R.add("T5 status==canceled", s.get("status") == "canceled", f"status={s.get('status')}")
+        R.add("T5 member_limit==2", s.get("member_limit") == 2, f"limit={s.get('member_limit')}")
+
+    payload = {"name": "Cancelled Member 4", "age": 44, "phone": "+1-555-0404", "gender": "Male"}
+    r = requests.post(f"{API}/members", json=payload, headers=H(fr_token), timeout=30)
+    R.add("T5 POST /members (4th) -> 402 after cancel",
+          r.status_code == 402, f"st={r.status_code} body={r.text[:200]}")
+
+# ====================================================================
+# T6 billing_config doc exists
+# ====================================================================
+print("\n== TEST 6: billing_config in Mongo ==")
+try:
+    from pymongo import MongoClient
+
+    bk = _read_env("/app/backend/.env")
+    mc = MongoClient(bk.get("MONGO_URL", "mongodb://localhost:27017"), serverSelectionTimeoutMS=5000)
+    cfg = mc[bk.get("DB_NAME", "test_database")]["billing_config"].find_one({"key": "price"})
+    R.add("T6 billing_config price doc exists", cfg is not None, f"found={bool(cfg)}")
+    if cfg:
+        pid = str(cfg.get("product_id") or "")
+        prid = str(cfg.get("price_id") or "")
+        R.add("T6 product_id starts with prod_", pid.startswith("prod_"), f"pid={pid}")
+        R.add("T6 price_id starts with price_", prid.startswith("price_"), f"price_id={prid}")
+        R.add("T6 amount_cents==999", cfg.get("amount_cents") == 999, f"amt={cfg.get('amount_cents')}")
+except Exception as e:
+    R.add("T6 mongo lookup", False, f"err={e}")
+
+# ====================================================================
+# T7 negative auth
+# ====================================================================
+print("\n== TEST 7: negative auth ==")
+r = requests.get(f"{API}/billing/status", timeout=30)
+R.add("T7 /billing/status no auth -> 401/403", r.status_code in (401, 403), f"st={r.status_code}")
+r = requests.post(
+    f"{API}/billing/checkout-session",
+    json={"success_url": "https://example.com/ok", "cancel_url": "https://example.com/cancel"},
+    timeout=30,
+)
+R.add("T7 /billing/checkout-session no auth -> 401/403", r.status_code in (401, 403), f"st={r.status_code}")
+
+# ====================================================================
+# T8 regression
+# ====================================================================
+print("\n== TEST 8: regression ==")
+token2, _ = login(DEMO_EMAIL, DEMO_PASSWORD)
+R.add("T8 /auth/login still works", token2 is not None)
+if token2:
+    r = requests.get(f"{API}/auth/me", headers=H(token2), timeout=30)
+    R.add("T8 /auth/me 200", r.status_code == 200, f"st={r.status_code}")
+    r = requests.get(f"{API}/summary", headers=H(token2), timeout=30)
+    R.add("T8 /summary 200", r.status_code == 200, f"st={r.status_code}")
+    if r.status_code == 200:
+        R.add("T8 /summary has members list", isinstance(r.json().get("members"), list))
+    r = requests.get(f"{API}/members", headers=H(token2), timeout=30)
+    R.add("T8 /members 200", r.status_code == 200, f"st={r.status_code}")
+
+sys.exit(R.summary())

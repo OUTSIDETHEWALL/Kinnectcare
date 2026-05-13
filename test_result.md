@@ -557,11 +557,90 @@ frontend:
           full run: 0 errors, 0 'shadow' deprecation warnings, 0 'Ionicons' references.
           SOS button + modal not exercised per instructions (verified visually present).
 
+backend:
+  - task: "Stripe billing endpoints + free member limit enforcement"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py, /app/backend/billing.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 54/54 checks GREEN via /app/backend_test.py against
+          https://family-guard-37.preview.emergentagent.com/api.
+
+          T1 demo /api/billing/status:
+            - plan='free', member_limit=2, member_count=5, members_remaining=0.
+            - paid_plan = {amount_cents=999, currency='usd', interval='month',
+              product_name='KinnectCare Family Plan'}.
+
+          T2 Fresh signup billing_test_<rand>@example.com / password123:
+            - /billing/status returns plan='free', member_count=2 (seed),
+              members_remaining=0.
+            - POST /api/members (3rd) -> HTTP 402. detail is object with
+              paywall=true, code='member_limit_reached', limit=2, current=2,
+              and a human-readable message.
+
+          T3 POST /api/billing/checkout-session:
+            - 200 with checkout_url starting 'https://checkout.stripe.com/'
+              and a non-empty cs_test_... session_id.
+            - publishable_key returned starts with 'pk_test_'.
+            - GET /billing/status afterwards exposes stripe_customer_id
+              starting with 'cus_' (verified: cus_UVlGPc1Xjg6rHR).
+
+          T4 Webhook activation (customer.subscription.updated, status=active,
+          future current_period_end, metadata.kinnect_user_id set):
+            - POST /api/billing/webhook -> 200 {"status":"ok"}.
+            - GET /billing/status now plan='family_plan', status='active',
+              member_limit=null, members_remaining=null, current_period_end is
+              ISO string (e.g. 2026-06-12T20:51:19).
+            - POST /api/members for 3rd member succeeds (200).
+
+          T5 Webhook cancellation (customer.subscription.deleted):
+            - POST /api/billing/webhook -> 200 {"status":"ok"}.
+            - GET /billing/status returns plan='free', status='canceled',
+              member_limit=2.
+            - POST /api/members for 4th member returns 402 again with
+              detail.paywall=true.
+
+          T6 Mongo billing_config:
+            - db.billing_config has {"key":"price"} with product_id starting
+              'prod_', price_id starting 'price_', amount_cents=999.
+
+          T7 Negative auth:
+            - GET /api/billing/status with no Authorization -> 403.
+            - POST /api/billing/checkout-session with no Authorization -> 403.
+
+          T8 Regression: /api/auth/login, /api/auth/me, /api/summary
+          (members list present), /api/members all return 200.
+
+          Stripe integration is REAL (live test-mode keys; Checkout Session,
+          Customer, Product, Price all created through Stripe API). Webhook
+          signature check is correctly skipped because STRIPE_WEBHOOK_SECRET
+          is empty, matching the test-mode contract. No regressions detected.
+
 test_plan:
   current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Stripe billing + paywall testing complete — 54/54 checks PASS
+      (/app/backend_test.py against the public preview URL).
+      Verified GET /api/billing/status, POST /api/billing/checkout-session
+      (real cs_test_... URL on checkout.stripe.com), POST /api/billing/webhook
+      for customer.subscription.updated (activate) and .deleted (cancel),
+      member-limit 402 with paywall payload, plan transition free -> family_plan
+      -> free, billing_config persisted in Mongo (product_id, price_id,
+      amount_cents=999), and negative auth (403). Regression smoke
+      (login, /auth/me, /summary, /members) all green. No issues found —
+      main agent can summarise and finish.
 
 agent_communication:
   - agent: "testing"

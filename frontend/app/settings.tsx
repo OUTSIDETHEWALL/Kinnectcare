@@ -1,14 +1,30 @@
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { useAuth } from '../src/AuthContext';
 import { APP_NAME, COMPANY_NAME } from '../src/legal';
+import { getBillingStatus, BillingStatus } from '../src/api';
 
 export default function SettingsScreen() {
   const router = useRouter();
   const { user, logout } = useAuth();
+  const [billing, setBilling] = useState<BillingStatus | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try { setBilling(await getBillingStatus()); } catch {}
+    })();
+  }, []);
+
+  const planLabel = billing?.plan === 'family_plan' ? 'Family Plan' : 'Free Plan';
+  const limitLine = billing
+    ? billing.member_limit === null
+      ? `${billing.member_count} members · unlimited`
+      : `${billing.member_count} of ${billing.member_limit} members used`
+    : '—';
 
   const confirmLogout = () => {
     Alert.alert('Sign out', 'Are you sure you want to sign out?', [
@@ -33,6 +49,35 @@ export default function SettingsScreen() {
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll}>
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Plan</Text>
+          <TouchableOpacity
+            testID="settings-plan-card"
+            style={styles.planCard}
+            onPress={() => router.push('/upgrade')}
+            activeOpacity={0.8}
+          >
+            <View style={styles.planTop}>
+              <View>
+                <Text style={styles.planName}>{planLabel}</Text>
+                <Text style={styles.planLimit}>{limitLine}</Text>
+              </View>
+              <View style={[styles.planBadge, billing?.plan === 'family_plan' && styles.planBadgePaid]}>
+                <Text style={[styles.planBadgeText, billing?.plan === 'family_plan' && { color: Colors.surface }]}>
+                  {billing?.plan === 'family_plan' ? '⭐ Active' : 'Upgrade'}
+                </Text>
+              </View>
+            </View>
+            {billing?.plan !== 'family_plan' ? (
+              <Text style={styles.planCta}>Get unlimited members & premium features ›</Text>
+            ) : (
+              billing?.current_period_end ? (
+                <Text style={styles.planCta}>Renews {new Date(billing.current_period_end).toLocaleDateString()}</Text>
+              ) : null
+            )}
+          </TouchableOpacity>
+        </View>
+
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Account</Text>
           <View style={styles.card}>
@@ -134,4 +179,16 @@ const styles = StyleSheet.create({
   navLabel: { flex: 1, fontSize: 15, fontWeight: '700', color: Colors.textPrimary },
   chevron: { fontSize: 22, color: Colors.textTertiary },
   footer: { fontSize: 12, color: Colors.textTertiary, textAlign: 'center', marginTop: 18 },
+  planCard: {
+    backgroundColor: Colors.surface, borderRadius: 14, padding: 16,
+    borderWidth: 1, borderColor: Colors.border,
+    boxShadow: '0px 4px 12px rgba(27,94,53,0.08)' as any,
+  },
+  planTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  planName: { fontSize: 16, fontWeight: '800', color: Colors.textPrimary },
+  planLimit: { fontSize: 13, color: Colors.textSecondary, marginTop: 2 },
+  planBadge: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 10, backgroundColor: Colors.tertiary },
+  planBadgePaid: { backgroundColor: Colors.primary },
+  planBadgeText: { fontSize: 12, fontWeight: '800', color: Colors.primary },
+  planCta: { marginTop: 10, fontSize: 13, fontWeight: '700', color: Colors.primary },
 });

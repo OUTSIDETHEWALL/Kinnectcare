@@ -1,9 +1,10 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import json
 import logging
 import uuid
 from pathlib import Path
@@ -12,10 +13,12 @@ from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import jwt
+import stripe
 from passlib.context import CryptContext
 from pydantic import field_validator
 
 from expo_push import send_expo_push
+import billing
 
 
 ROOT_DIR = Path(__file__).parent
@@ -491,6 +494,24 @@ async def list_members(current=Depends(get_current_user)):
 
 @api_router.post("/members", response_model=FamilyMember)
 async def create_member(data: FamilyMemberCreate, current=Depends(get_current_user)):
+    # Enforce free tier member limit.
+    limit = billing.get_member_limit(current)
+    if limit != float("inf"):
+        existing = await db.members.count_documents({"owner_id": current["id"]})
+        if existing >= int(limit):
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "paywall": True,
+                    "code": "member_limit_reached",
+                    "message": (
+                        f"Free plan allows up to {int(limit)} family members. "
+                        "Upgrade to the Family Plan for unlimited members."
+                    ),
+                    "current": existing,
+                    "limit": int(limit),
+                },
+            )
     role = data.role if data.role in ("family", "senior") else ("senior" if data.age >= 60 else "family")
     member = FamilyMember(
         owner_id=current["id"], name=data.name, age=data.age, phone=data.phone,
@@ -809,6 +830,103 @@ async def list_recent_checkins(current=Depends(get_current_user)):
     return [CheckIn(**d) for d in docs]
 
 
+# ========== Billing (Stripe) ==========
+class CheckoutRequest(BaseModel):
+    success_url: Optional[str] = None
+    cancel_url: Optional[str] = None
+
+
+def _billing_required():
+    if not billing.is_configured():
+        raise HTTPException(status_code=503, detail="Billing is not configured")
+
+
+@api_router.get("/billing/status")
+async def billing_status(current=Depends(get_current_user)):
+    return await billing.build_status_payload(current, db)
+
+
+@api_router.post("/billing/checkout-session")
+async def billing_checkout_session(payload: CheckoutRequest, current=Depends(get_current_user)):
+    _billing_required()
+    if billing.is_paid(current):
+        raise HTTPException(status_code=400, detail="Already on the Family Plan")
+    base = (os.environ.get("EXPO_BACKEND_URL") or "").rstrip("/")
+    # Fallback: caller-provided URLs (Expo frontend usually sets these to the public preview URL).
+    default_success = payload.success_url or f"{base}/billing-success?session_id={{CHECKOUT_SESSION_ID}}"
+    default_cancel = payload.cancel_url or f"{base}/billing-cancel"
+    try:
+        url, session_id = await billing.create_checkout_session(
+            db, current, default_success, default_cancel
+        )
+    except stripe.error.StripeError as e:
+        logger.error(f"checkout-session stripe error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "checkout_url": url,
+        "session_id": session_id,
+        "publishable_key": os.environ.get("STRIPE_PUBLISHABLE_KEY") or None,
+    }
+
+
+@api_router.post("/billing/webhook")
+async def billing_webhook(request: Request):
+    """Stripe webhook handler. Verifies signature when STRIPE_WEBHOOK_SECRET is set."""
+    if not billing.is_configured():
+        return {"status": "ignored", "reason": "not configured"}
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature")
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+    try:
+        if secret:
+            event = stripe.Webhook.construct_event(payload, sig, secret)
+        else:
+            event = json.loads(payload)
+    except ValueError as e:
+        logger.error(f"webhook invalid payload: {e}")
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError as e:
+        logger.error(f"webhook signature failed: {e}")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    etype = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
+    obj = (event.get("data") or {}).get("object") if isinstance(event, dict) else event["data"]["object"]
+    logger.info(f"stripe webhook: {etype}")
+    try:
+        if etype == "checkout.session.completed":
+            customer_id = obj.get("customer")
+            subscription_id = obj.get("subscription")
+            user_id = (obj.get("metadata") or {}).get("kinnect_user_id")
+            if subscription_id and customer_id:
+                sub = stripe.Subscription.retrieve(subscription_id)
+                # Resolve user_id from customer if metadata missing
+                if not user_id:
+                    u = await db.users.find_one(
+                        {"subscription.stripe_customer_id": customer_id}, {"_id": 0, "id": 1}
+                    )
+                    user_id = u and u.get("id")
+                if user_id:
+                    await billing.apply_subscription_to_user(db, user_id, customer_id, sub)
+        elif etype in ("customer.subscription.updated", "customer.subscription.created"):
+            customer_id = obj.get("customer")
+            user_id = (obj.get("metadata") or {}).get("kinnect_user_id")
+            if not user_id and customer_id:
+                u = await db.users.find_one(
+                    {"subscription.stripe_customer_id": customer_id}, {"_id": 0, "id": 1}
+                )
+                user_id = u and u.get("id")
+            if user_id and customer_id:
+                await billing.apply_subscription_to_user(db, user_id, customer_id, obj)
+        elif etype == "customer.subscription.deleted":
+            customer_id = obj.get("customer")
+            if customer_id:
+                await billing.revert_user_to_free_by_customer(db, customer_id)
+    except Exception as e:
+        logger.exception(f"webhook handler failed: {e}")
+        return {"status": "error", "message": str(e)}
+    return {"status": "ok"}
+
+
 # ========== SOS ==========
 @api_router.post("/sos")
 async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
@@ -933,6 +1051,14 @@ app.add_middleware(
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+@app.on_event("startup")
+async def _init_billing():
+    if billing.init_stripe():
+        logger.info("Stripe initialized.")
+    else:
+        logger.info("Stripe NOT initialized (no secret key).")
 
 
 @app.on_event("startup")

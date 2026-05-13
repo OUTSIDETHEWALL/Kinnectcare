@@ -77,6 +77,7 @@ function RootNav() {
       <Stack.Screen name="privacy-policy" />
       <Stack.Screen name="terms-of-service" />
       <Stack.Screen name="onboarding" />
+      <Stack.Screen name="upgrade" />
     </Stack>
   );
 }
