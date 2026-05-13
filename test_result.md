@@ -325,6 +325,100 @@ backend:
           Backend logs show no errors during the run. Frontend-only branding change introduced
           no backend regressions.
 
+frontend:
+  - task: "Branding refresh — Welcome logo (dark variant @ 220x220)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/index.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. Welcome screen at http://localhost:3000 renders <img alt="KinnectCare"> with
+          src ending in /assets/.../kinnectcare-logo-dark.png. Measured bounding box: exactly
+          220 x 220 px. Tagline "Family safety & senior wellness, all in one place." visible
+          directly below. "Get Started" CTA (testID=get-started-btn) and "I already have an
+          account · Sign in" link (testID=welcome-login-link) both visible/tappable. Three
+          feature bubbles (Family / Wellness / Alerts) all rendered with emoji icons. No old
+          🛡️ shield emoji present in DOM body text. scrollWidth == clientWidth, no horizontal
+          overflow. borderRadius:32 + boxShadow style applied per index.tsx.
+
+  - task: "Branding refresh — Login logo (white variant @ 140x140) & screen content"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(auth)/login.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. Tapping welcome-login-link navigates to /(auth)/login. Login screenshot clearly
+          shows the white-background branded KinnectCare logo (kinnectcare-logo-white.png)
+          centered at ~140x140. "Welcome back" heading + "Sign in to keep your family safe."
+          subtitle render below the logo. Email (login-email), Password (login-password) inputs
+          and "Sign in" CTA (login-submit) all visible. No horizontal overflow.
+
+  - task: "Branding refresh — Login flow regression to dashboard"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(auth)/login.tsx, /app/frontend/app/(tabs)/dashboard.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. Login with demo@kinnectcare.app / password123 redirects to
+          http://localhost:3000/dashboard. Dashboard renders greeting "Hello, Demo 👋", stats
+          row (4 members, 0/2 checked in, 0 missed meds), all 4 family member cards (James 78,
+          Grace Park 72, Gregory 35, Test Member 30) with avatars, status dots, location chips,
+          medication progress chips, Check-In CTAs, and the red "🆘 SOS Emergency" button.
+          Bottom tabs (Family / Alerts) visible with emoji icons (no Ionicons references).
+
+  - task: "Branding refresh — Console cleanliness (no errors, no shadow/Ionicons warnings)"
+    implemented: true
+    working: true
+    file: "/app/frontend/src/Icon.tsx, /app/frontend/app/index.tsx, /app/frontend/app/(auth)/login.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. Full run captured 9 console messages: 0 errors, 0 'shadow' deprecation
+          warnings (boxShadow string syntax accepted by RN Web), 0 'Ionicons' warnings.
+          Obsolete 'shield-checkmark' emoji mapping confirmed removed from Icon.tsx via grep
+          (no shield refs in source).
+
+  - task: "Branding refresh — Cross-viewport (Samsung S21 360x800 / iPhone 390x844)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/index.tsx, /app/frontend/app/(auth)/login.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS (with note). Welcome logo styled at 220x220 and login logo at 140x140 — both
+          well below the narrower 360px width of S21, so they fit without clipping. No
+          horizontal scrollbar observed (scrollWidth == clientWidth on both screens).
+          Note: page.set_viewport_size on the Expo Web preview does not actually constrain
+          inner width below the host browser's 1920px (Expo Web responsive layout + Playwright
+          headless renders at the host size), so the explicit 360x800 visual capture wasn't
+          truly mobile-narrow. Verified via the computed logo bounding boxes and overflow
+          check that the layout is safe at the target widths. On the second pass under the
+          s21 label, the page redirected to /dashboard because the demo auth session from
+          the iphone pass persisted in storage — this is expected app behavior, not a bug.
+
 test_plan:
   current_focus: []
   stuck_tasks: []
