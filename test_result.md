@@ -1462,3 +1462,150 @@ agent_communication:
 
       Backend logs show 200s throughout, no errors. No source code modified.
 
+
+frontend:
+  - task: "/sos-confirmation screen"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/sos-confirmation.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ 390x844 and 360x800.
+          Direct navigation to /sos-confirmation renders correctly:
+            - Pulsing red 🆘 icon visible (animated spring + pulse loop)
+            - testID sos-title "SOS Sent" present
+            - Three status rows render: "Calling 911" / "Sharing GPS location" /
+              "Family notified" — each with a ✓ checkmark (3 checkmarks counted in DOM)
+            - testID sos-call-again red-bordered "Call 911 again" button present
+            - testID sos-done green "Done" CTA present
+            - "Just now" timeRow with clock icon visible
+          Interactions:
+            - Tapping sos-done navigates to /(tabs)/dashboard ✓ (URL changed correctly)
+            - Tapping sos-call-again invokes Linking.openURL('tel:911') — no JS exception
+              raised; on RN Web the tel: anchor is created but blocked from auto-dial as
+              expected. No errors in console.
+          Cross-viewport @ 360x800:
+            - scrollWidth == clientWidth == 360 (0 horizontal overflow)
+            - All three testIDs (sos-title, sos-call-again, sos-done) still render
+            - Layout fits without clipping. Screenshot saved at .screenshots/sos_360.png.
+
+  - task: "SOS fire-and-forget (instant navigation from dashboard)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/dashboard.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS (with web caveat).
+          Code inspection of triggerSOS (dashboard.tsx lines 55-96) confirms:
+            - Inside the RNAlert "Yes, Send SOS" onPress handler, the FIRST two
+              statements are SYNCHRONOUS and pre-await:
+                  Linking.openURL('tel:911').catch(()=>{})
+                  router.push('/sos-confirmation')
+            - Geolocation request + POST /api/sos run inside a background IIFE
+              (async () => {...})() — no await blocks the user-facing nav.
+          Web automation caveat for Test B timing:
+            - React Native Web's Alert.alert polyfill does NOT render the multi-
+              button confirmation dialog as DOM, and it does NOT route through
+              window.confirm/window.alert/native page.on('dialog'). After clicking
+              sos-button on /(tabs)/dashboard, no "Yes, Send SOS" / "Emergency SOS"
+              text appears in DOM and no playwright Dialog event fires; the
+              onPress callback is therefore unreachable through automated UI on web,
+              and Test B's <1000ms timing could not be measured end-to-end via the
+              browser. THIS IS A PRE-EXISTING RN-WEB ALERT LIMITATION already
+              documented in /app/test_result.md (paywall test had the same finding),
+              NOT a regression of the instant-UX refactor.
+          Indirect confirmation that the instant pattern works:
+            - Test C (member-checkin) and Test D (dashboard quick-check-in) which
+              use the SAME router.push-first / async IIFE pattern measured 52 ms
+              and 62 ms respectively (both well under 1000 ms) with geolocation
+              stubbed to a 5000 ms delay, proving the fire-and-forget approach
+              navigates instantly without awaiting the location lookup.
+            - Test G: GET /(tabs)/alerts subsequently shows SOS alerts present
+              with severity='critical', and the backend-test suite separately
+              verified POST /api/sos contract is intact (46/46 backend checks).
+          Net: on native (iOS/Android) where Alert.alert renders properly, the
+          instant SOS navigation will trigger immediately because no await runs
+          before the router.push + tel: dial. Implementation is correct.
+
+  - task: "Check-in fire-and-forget (member screen + dashboard quick check-in)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/dashboard.tsx, /app/frontend/app/member/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ 390x844 with geolocation stubbed to 5000 ms delay.
+          Test C — Member screen Check-In:
+            - Navigated to /member/<senior-id>, waited for testID member-checkin.
+            - Started perf.now() timer, tapped member-checkin, waited for
+              [data-testid="checkin-title"] to appear.
+            - Measured elapsed = 52 ms. PASS (< 1000 ms).
+          Test D — Dashboard quick check-in (testID member-checkin-{id}):
+            - Found 5 quick check-in buttons on /(tabs)/dashboard.
+            - Tapped first one, waited for [data-testid="checkin-title"].
+            - Measured elapsed = 62 ms. PASS (< 1000 ms).
+          Both flows confirm router.push fires before any await; POST /api/checkins
+          + Location.getCurrentPositionAsync run in a background IIFE, so the
+          5-second geolocation delay does NOT block the user-visible transition.
+
+  - task: "Console hygiene during SOS + check-in flows"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/dashboard.tsx, /app/frontend/app/member/[id].tsx, /app/frontend/app/sos-confirmation.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. Across the full automated run (login → /sos-confirmation render →
+          /(tabs)/alerts → member check-in → dashboard quick check-in → 360x800
+          regression): 0 JS errors, 0 'shadow' deprecation warnings, 0 'Ionicons'
+          references logged to console.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Instant-UX frontend testing complete.
+
+      RESULTS:
+        A) /sos-confirmation render @ 390x844                          ✅ PASS
+        B) SOS instant navigation timing                                ⚠ UNTESTABLE
+           on web due to RN Web Alert.alert polyfill not rendering the
+           multi-button "Yes, Send SOS" confirm dialog (no DOM modal, no
+           page.on('dialog'), no window.confirm). Code review confirms
+           Linking.openURL('tel:911') + router.push('/sos-confirmation')
+           run SYNCHRONOUSLY before any await — implementation is correct
+           and will work on native iOS/Android where Alert renders properly.
+           This is a pre-existing RN-Web limitation, NOT a regression.
+        C) Member-screen check-in instant nav: 52 ms                   ✅ PASS (<1000 ms)
+        D) Dashboard quick check-in instant nav: 62 ms                 ✅ PASS (<1000 ms)
+        E) /sos-confirmation @ 360x800 (no horizontal overflow)        ✅ PASS
+        F) Console hygiene (0 errors, 0 shadow, 0 Ionicons warnings)   ✅ PASS
+        G) GET /(tabs)/alerts shows SOS alerts present                 ✅ PASS
+
+      Verified by code inspection that triggerSOS, quickCheckIn (dashboard.tsx)
+      and checkIn (member/[id].tsx) all call router.push (and tel:911 for SOS)
+      BEFORE any await — the geolocation lookup + POST /api/sos and POST
+      /api/checkins run inside background async IIFEs. Tests C/D directly
+      measured this pattern (with geolocation artificially delayed to 5 s) and
+      both confirmed sub-100ms navigation, so the same pattern in triggerSOS
+      will also navigate instantly on native.
+
+      No source code modified. Main agent: please summarize and finish. The
+      RN-Web Alert.alert limitation is already known and tracked.
