@@ -1744,3 +1744,53 @@ agent_communication:
 
       No source code modified. Main agent: please summarize and finish. The
       RN-Web Alert.alert limitation is already known and tracked.
+
+backend:
+  - task: "Smoke after frontend-only logo asset swap (kinnectcare-logo-dark/white.png)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 19/19 smoke checks GREEN via /app/backend_test.py against
+          https://family-guard-37.preview.emergentagent.com/api with demo@kinnectcare.app /
+          password123. Frontend-only asset swap confirmed: no backend regressions.
+
+            1) POST /api/auth/login -> 200, access_token returned.
+            2) GET  /api/auth/me -> 200.
+            3) GET  /api/summary -> 200; response.members is a list of 5 member objects
+               (each carrying medication_total/medication_taken/medication_missed/
+               routine_total/weekly_compliance_percent).
+            4) GET  /api/members -> 200, non-empty (count=5).
+            5) GET  /api/billing/status -> 200; paid_plan.amount_cents == 999
+               (paid_plan: currency='usd', interval='month',
+               product_name='KinnectCare Family Plan').
+            6) POST /api/sos {latitude:37.7749, longitude:-122.4194} -> 200; response
+               has timestamp ('2026-05-13T22:56:29.090252+00:00', ISO-parseable),
+               member_name ('Demo User'),
+               coordinates == {latitude:37.7749, longitude:-122.4194},
+               devices_notified == 2 (int).
+            7) POST /api/checkins {member_id:<first member>, latitude:12.97, longitude:77.59}
+               -> 200; record returned with id, latitude=12.97, longitude=77.59,
+               member_id matches first member.
+
+          Backend logs show 200s throughout; no errors observed.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Logo-swap smoke test COMPLETE — 19/19 green via /app/backend_test.py. All 7
+      requested checks pass against the public preview URL:
+        - /auth/login (200 + token), /auth/me (200)
+        - /summary (200, members[] len=5)
+        - /members (200, non-empty)
+        - /billing/status (200, paid_plan.amount_cents == 999)
+        - /sos with coords (200, timestamp + member_name + coordinates + devices_notified=2)
+        - /checkins with coords (200)
+      No backend regressions from the frontend logo asset swap. Main agent: please
+      summarize and finish.

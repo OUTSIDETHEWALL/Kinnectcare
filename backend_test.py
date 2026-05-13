@@ -1,247 +1,106 @@
-"""Backend tests for DELETE /api/auth/account endpoint (App Store compliance).
-
-Run: python3 /app/backend_test.py
-"""
-import os
+"""Smoke test for KinnectCare backend after frontend-only logo asset swap."""
 import sys
-import time
-import uuid
-import json
-from typing import Optional, Dict, Any
-
+from datetime import datetime
 import requests
-from dotenv import dotenv_values
 
+FRONTEND_ENV = "/app/frontend/.env"
+BASE = None
+with open(FRONTEND_ENV) as f:
+    for line in f:
+        line = line.strip()
+        if line.startswith("EXPO_PUBLIC_BACKEND_URL=") or line.startswith("EXPO_BACKEND_URL="):
+            v = line.split("=", 1)[1].strip().strip('"')
+            BASE = v.rstrip("/") + "/api"
+            break
 
-def load_base_url() -> str:
-    env = dotenv_values("/app/frontend/.env")
-    base = env.get("EXPO_PUBLIC_BACKEND_URL") or env.get("EXPO_BACKEND_URL")
-    if not base:
-        print("ERROR: EXPO_PUBLIC_BACKEND_URL not found in /app/frontend/.env")
-        sys.exit(1)
-    return base.rstrip("/") + "/api"
-
-
-BASE = load_base_url()
+assert BASE, "Could not resolve backend URL from /app/frontend/.env"
 print(f"BASE = {BASE}")
 
-results = []  # list of (name, ok, detail)
+EMAIL = "demo@kinnectcare.app"
+PASSWORD = "password123"
 
+failures = []
+def check(name, cond, info=""):
+    status = "PASS" if cond else "FAIL"
+    print(f"[{status}] {name}{(' - ' + info) if info else ''}")
+    if not cond:
+        failures.append(f"{name}: {info}")
 
-def record(name: str, ok: bool, detail: str = ""):
-    flag = "PASS" if ok else "FAIL"
-    print(f"  [{flag}] {name}: {detail}")
-    results.append((name, ok, detail))
+# 1. login
+r = requests.post(f"{BASE}/auth/login", json={"email": EMAIL, "password": PASSWORD}, timeout=30)
+check("POST /auth/login -> 200", r.status_code == 200, f"status={r.status_code} body={r.text[:200]}")
+data = r.json() if r.status_code == 200 else {}
+token = data.get("access_token")
+check("login returns access_token", bool(token), f"token_present={bool(token)}")
+H = {"Authorization": f"Bearer {token}"} if token else {}
 
+# 2. /auth/me
+r = requests.get(f"{BASE}/auth/me", headers=H, timeout=30)
+check("GET /auth/me -> 200", r.status_code == 200, f"status={r.status_code}")
 
-def req(method: str, path: str, token: Optional[str] = None, json_body=None, raw_body: Optional[str] = None) -> requests.Response:
-    url = BASE + path
-    headers = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    if raw_body is not None:
-        headers["Content-Type"] = "application/json"
-        return requests.request(method, url, headers=headers, data=raw_body, timeout=30)
-    return requests.request(method, url, headers=headers, json=json_body, timeout=30)
+# 3. /summary
+r = requests.get(f"{BASE}/summary", headers=H, timeout=30)
+check("GET /summary -> 200", r.status_code == 200, f"status={r.status_code} body={r.text[:200]}")
+summary = r.json() if r.status_code == 200 else {}
+members_arr = summary.get("members")
+check("summary has members array", isinstance(members_arr, list),
+      f"type={type(members_arr).__name__} len={len(members_arr) if isinstance(members_arr, list) else 'n/a'}")
 
+# 4. /members
+r = requests.get(f"{BASE}/members", headers=H, timeout=30)
+check("GET /members -> 200", r.status_code == 200, f"status={r.status_code}")
+members = r.json() if r.status_code == 200 else []
+check("/members non-empty", isinstance(members, list) and len(members) > 0,
+      f"count={len(members) if isinstance(members, list) else 'n/a'}")
 
-def signup_user() -> Dict[str, Any]:
-    email = f"delete_test_{uuid.uuid4().hex[:8]}@example.com"
-    pw = "password123"
-    r = req("POST", "/auth/signup", json_body={
-        "email": email, "password": pw, "full_name": "Delete Tester"
-    })
-    if r.status_code != 200:
-        raise RuntimeError(f"signup failed: {r.status_code} {r.text}")
-    body = r.json()
-    return {
-        "email": email,
-        "password": pw,
-        "token": body["access_token"],
-        "user": body["user"],
-    }
+# 5. /billing/status
+r = requests.get(f"{BASE}/billing/status", headers=H, timeout=30)
+check("GET /billing/status -> 200", r.status_code == 200, f"status={r.status_code}")
+billing = r.json() if r.status_code == 200 else {}
+paid_plan = billing.get("paid_plan") or {}
+check("billing.paid_plan.amount_cents == 999", paid_plan.get("amount_cents") == 999,
+      f"got={paid_plan.get('amount_cents')}")
 
-
-# ============================================================
-# SECTION 1 — Negative tests for DELETE /api/auth/account
-# ============================================================
-print("\n=== 1) Negative — missing/invalid confirm ===")
+# 6. /sos with coords
+r = requests.post(f"{BASE}/sos", headers=H, json={"latitude": 37.7749, "longitude": -122.4194}, timeout=30)
+check("POST /sos -> 200", r.status_code == 200, f"status={r.status_code} body={r.text[:200]}")
+sos = r.json() if r.status_code == 200 else {}
+ts = sos.get("timestamp")
 try:
-    u = signup_user()
-    print(f"  signed up: {u['email']}")
-    token = u["token"]
-    user_id = u["user"]["id"]
+    if ts:
+        datetime.fromisoformat(ts)
+    ts_ok = ts is not None
+except Exception:
+    ts_ok = False
+check("sos.timestamp ISO parseable", ts_ok, f"timestamp={ts}")
+check("sos.member_name present", bool(sos.get("member_name")), f"member_name={sos.get('member_name')}")
+coords = sos.get("coordinates") or {}
+check("sos.coordinates.latitude == 37.7749", coords.get("latitude") == 37.7749, f"lat={coords.get('latitude')}")
+check("sos.coordinates.longitude == -122.4194", coords.get("longitude") == -122.4194,
+      f"lng={coords.get('longitude')}")
+check("sos.devices_notified is int", isinstance(sos.get("devices_notified"), int),
+      f"devices_notified={sos.get('devices_notified')}")
 
-    # Verify seed counts via GET /members and reminders.
-    rm = req("GET", "/members", token=token)
-    members = rm.json() if rm.status_code == 200 else []
-    record("seed members count >= 2", len(members) >= 2, f"got {len(members)}")
+# 7. /checkins
+first_id = members[0]["id"] if members else None
+check("first member id present", bool(first_id), f"id={first_id}")
+if first_id:
+    r = requests.post(
+        f"{BASE}/checkins", headers=H,
+        json={"member_id": first_id, "latitude": 12.97, "longitude": 77.59}, timeout=30,
+    )
+    check("POST /checkins -> 200", r.status_code == 200, f"status={r.status_code} body={r.text[:200]}")
+    ci = r.json() if r.status_code == 200 else {}
+    check("checkin returned with id", bool(ci.get("id")), f"id={ci.get('id')}")
+    check("checkin.latitude == 12.97", ci.get("latitude") == 12.97, f"lat={ci.get('latitude')}")
+    check("checkin.longitude == 77.59", ci.get("longitude") == 77.59, f"lng={ci.get('longitude')}")
 
-    reminder_total = 0
-    for m in members:
-        r2 = req("GET", f"/reminders/member/{m['id']}", token=token)
-        if r2.status_code == 200:
-            reminder_total += len(r2.json())
-    record("seed reminders total >= 7", reminder_total >= 7, f"got {reminder_total}")
-
-    # 1a. No body
-    r = req("DELETE", "/auth/account", token=token, raw_body="")
-    record("DELETE no body -> 400/422", r.status_code in (400, 422), f"got {r.status_code}")
-
-    # 1b. Empty confirm
-    r = req("DELETE", "/auth/account", token=token, json_body={"confirm": ""})
-    record("DELETE confirm='' -> 400", r.status_code == 400, f"got {r.status_code} body={r.text[:120]}")
-
-    # 1c. Wrong confirm
-    r = req("DELETE", "/auth/account", token=token, json_body={"confirm": "nope"})
-    record("DELETE confirm='nope' -> 400", r.status_code == 400, f"got {r.status_code}")
-
-    # 1d. Verify user still exists
-    rme = req("GET", "/auth/me", token=token)
-    record("GET /auth/me still 200 after failed deletes", rme.status_code == 200, f"got {rme.status_code}")
-
-    # ============================================================
-    # SECTION 2 — Happy path on the SAME free user
-    # ============================================================
-    print("\n=== 2) Happy path — free user ===")
-    r = req("DELETE", "/auth/account", token=token, json_body={"confirm": "DELETE"})
-    record("DELETE confirm='DELETE' -> 200", r.status_code == 200, f"got {r.status_code} body={r.text[:200]}")
-    body = r.json() if r.status_code == 200 else {}
-    record("response.ok == True", body.get("ok") is True, f"ok={body.get('ok')}")
-    deleted = body.get("deleted") or {}
-    record("deleted.members >= 2", (deleted.get("members") or 0) >= 2, f"members={deleted.get('members')}")
-    record("deleted.reminders >= 7", (deleted.get("reminders") or 0) >= 7, f"reminders={deleted.get('reminders')}")
-    record("deleted.alerts >= 2", (deleted.get("alerts") or 0) >= 2, f"alerts={deleted.get('alerts')}")
-    record("deleted has checkins key", "checkins" in deleted, f"checkins={deleted.get('checkins')}")
-    record("deleted has medication_logs key", "medication_logs" in deleted, f"medication_logs={deleted.get('medication_logs')}")
-    record("stripe_subscription_canceled == False", body.get("stripe_subscription_canceled") is False,
-           f"got {body.get('stripe_subscription_canceled')}")
-    record("stripe_customer_deleted == False", body.get("stripe_customer_deleted") is False,
-           f"got {body.get('stripe_customer_deleted')}")
-
-    # User truly gone — old token returns 401/403, login fails
-    rme = req("GET", "/auth/me", token=token)
-    record("GET /auth/me after delete -> 401/403", rme.status_code in (401, 403), f"got {rme.status_code}")
-
-    rlogin = req("POST", "/auth/login", json_body={"email": u["email"], "password": u["password"]})
-    record("login deleted user -> 401", rlogin.status_code == 401, f"got {rlogin.status_code}")
-
-except Exception as e:
-    record("Section 1+2 exception", False, repr(e))
-
-
-# ============================================================
-# SECTION 3 — Paid user with real Stripe customer
-# ============================================================
-print("\n=== 3) Happy path — paid user with Stripe customer ===")
-try:
-    u2 = signup_user()
-    print(f"  signed up: {u2['email']}")
-    token2 = u2["token"]
-    user_id2 = u2["user"]["id"]
-
-    # Create checkout session (creates real Stripe customer)
-    r = req("POST", "/billing/checkout-session", token=token2, json_body={
-        "success_url": "https://example.com/ok",
-        "cancel_url": "https://example.com/cancel",
-    })
-    record("POST /billing/checkout-session -> 200", r.status_code == 200, f"got {r.status_code} body={r.text[:200]}")
-
-    # Fetch billing/status to get customer_id
-    rs = req("GET", "/billing/status", token=token2)
-    record("GET /billing/status -> 200", rs.status_code == 200, f"got {rs.status_code}")
-    status_body = rs.json() if rs.status_code == 200 else {}
-    customer_id = status_body.get("stripe_customer_id")
-    record("stripe_customer_id starts with cus_", bool(customer_id and customer_id.startswith("cus_")),
-           f"customer_id={customer_id}")
-
-    # Simulate active subscription with FAKE sub_id but REAL customer
-    now = int(time.time())
-    webhook_body = {
-        "type": "customer.subscription.updated",
-        "data": {
-            "object": {
-                "id": "sub_test_delete_001",
-                "customer": customer_id,
-                "status": "active",
-                "current_period_end": now + 30 * 86400,
-                "current_period_start": now,
-                "metadata": {"kinnect_user_id": user_id2},
-            }
-        }
-    }
-    rw = req("POST", "/billing/webhook", json_body=webhook_body)
-    record("POST /billing/webhook updated -> 200", rw.status_code == 200, f"got {rw.status_code} body={rw.text[:200]}")
-
-    rs2 = req("GET", "/billing/status", token=token2)
-    sb2 = rs2.json() if rs2.status_code == 200 else {}
-    record("plan == family_plan", sb2.get("plan") == "family_plan", f"got plan={sb2.get('plan')}")
-    record("status == active", sb2.get("status") == "active", f"got status={sb2.get('status')}")
-
-    # Now DELETE
-    r = req("DELETE", "/auth/account", token=token2, json_body={"confirm": "DELETE"})
-    record("DELETE paid user -> 200", r.status_code == 200, f"got {r.status_code} body={r.text[:300]}")
-    body = r.json() if r.status_code == 200 else {}
-    record("ok == True (paid)", body.get("ok") is True, f"ok={body.get('ok')}")
-    sc = body.get("stripe_subscription_canceled")
-    cd = body.get("stripe_customer_deleted")
-    record("stripe_subscription_canceled is bool", isinstance(sc, bool),
-           f"got {sc} (False acceptable because fake sub_id)")
-    record("stripe_customer_deleted == True (real customer)", cd is True,
-           f"got {cd}")
-    deleted2 = body.get("deleted") or {}
-    record("deleted has members key (paid)", "members" in deleted2, f"members={deleted2.get('members')}")
-
-    # post-deletion auth
-    rme = req("GET", "/auth/me", token=token2)
-    record("paid user /auth/me after delete -> 401/403", rme.status_code in (401, 403), f"got {rme.status_code}")
-
-    rlogin = req("POST", "/auth/login", json_body={"email": u2["email"], "password": u2["password"]})
-    record("login deleted paid user -> 401", rlogin.status_code == 401, f"got {rlogin.status_code}")
-
-except Exception as e:
-    record("Section 3 exception", False, repr(e))
-
-
-# ============================================================
-# SECTION 4 — Demo user regression (MUST NOT BE DELETED)
-# ============================================================
-print("\n=== 4) Demo user regression ===")
-try:
-    r = req("POST", "/auth/login", json_body={
-        "email": "demo@kinnectcare.app", "password": "password123"
-    })
-    record("demo login -> 200", r.status_code == 200, f"got {r.status_code}")
-    demo_token = r.json()["access_token"] if r.status_code == 200 else None
-
-    rme = req("GET", "/auth/me", token=demo_token)
-    record("demo /auth/me -> 200", rme.status_code == 200, f"got {rme.status_code}")
-
-    rs = req("GET", "/summary", token=demo_token)
-    record("demo /summary -> 200", rs.status_code == 200, f"got {rs.status_code}")
-    if rs.status_code == 200:
-        members = rs.json().get("members") or []
-        record("demo /summary has members", len(members) >= 1, f"got {len(members)} members")
-
-    rm = req("GET", "/members", token=demo_token)
-    record("demo /members -> 200", rm.status_code == 200, f"got {rm.status_code}")
-    if rm.status_code == 200:
-        record("demo has members not deleted", len(rm.json()) >= 1, f"got {len(rm.json())}")
-
-except Exception as e:
-    record("Section 4 exception", False, repr(e))
-
-
-# ============================================================
-# Summary
-# ============================================================
-print("\n" + "=" * 60)
-total = len(results)
-passed = sum(1 for _, ok, _ in results if ok)
-print(f"RESULT: {passed}/{total} passed")
-failed = [(n, d) for n, ok, d in results if not ok]
-if failed:
-    print("\nFAILURES:")
-    for n, d in failed:
-        print(f"  - {n}: {d}")
-sys.exit(0 if passed == total else 1)
+print("\n========== SUMMARY ==========")
+if failures:
+    print(f"FAILED: {len(failures)} check(s)")
+    for f in failures:
+        print(f"  - {f}")
+    sys.exit(1)
+else:
+    print("ALL GREEN")
+    sys.exit(0)
