@@ -628,10 +628,108 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+backend:
+  - task: "DELETE /api/auth/account: cascade-delete + Stripe cancel"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          New endpoint for App Store compliance. Requires body {"confirm":"DELETE"} (case-insensitive).
+          Best-effort cancels Stripe Subscription + deletes Stripe Customer; deletes user-owned docs
+          from members/reminders/checkins/alerts/medication_logs; deletes the user document.
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 36/36 checks GREEN via /app/backend_test.py against
+          https://family-guard-37.preview.emergentagent.com/api.
+
+          T1 Negative — confirm guards (fresh user delete_test_<rand>@example.com):
+            - Seed verified: 2 members + 7 reminders + 2 alerts present immediately after signup.
+            - DELETE /api/auth/account with NO body -> 400 (FastAPI returns 400 for missing body).
+            - DELETE with {"confirm":""} -> 400 detail='Confirmation required. Send {"confirm":"DELETE"} to proceed.'
+            - DELETE with {"confirm":"nope"} -> 400.
+            - GET /api/auth/me still 200 after all three failed deletes (user not deleted).
+
+          T2 Happy path — free user (same user from T1):
+            - DELETE /api/auth/account {"confirm":"DELETE"} -> 200.
+            - Body: ok=true, deleted={members:2, reminders:7, checkins:0, alerts:2, medication_logs:0},
+              stripe_subscription_canceled=false, stripe_customer_deleted=false. All keys present.
+            - GET /api/auth/me with deleted user's token -> 401 (user gone).
+            - POST /api/auth/login same email/password -> 401.
+
+          T3 Happy path — paid user (second fresh user, real Stripe customer):
+            - POST /api/billing/checkout-session -> 200 with real cs_test_... URL on checkout.stripe.com.
+            - GET /api/billing/status -> stripe_customer_id starts with 'cus_' (e.g. cus_UVli6bz8xFn8cC).
+            - POST /api/billing/webhook with customer.subscription.updated (status=active, fake
+              sub_id 'sub_test_delete_001', metadata.kinnect_user_id) -> 200 {status:ok}.
+            - GET /api/billing/status -> plan=family_plan, status=active.
+            - DELETE /api/auth/account {"confirm":"DELETE"} -> 200. Body: ok=true,
+              stripe_subscription_canceled=false (expected — fake sub_id raises resource_missing
+              in Stripe, caught and logged; user docs still deleted),
+              stripe_customer_deleted=true (real customer accepted deletion),
+              deleted={members:2, reminders:7, checkins:0, alerts:2, medication_logs:0}.
+            - GET /api/auth/me with deleted token -> 401; login same creds -> 401.
+
+          T4 Demo user regression — demo@kinnectcare.app NOT deleted:
+            - POST /api/auth/login (demo) -> 200.
+            - GET /api/auth/me -> 200; GET /api/summary -> 200 with 5 members carrying all required
+              fields; GET /api/members -> 200 with 5 members.
+
+          Stripe integration is REAL (live test-mode keys; the Stripe Customer for the paid-user
+          flow was actually deleted via stripe.Customer.delete). Backend logs show 200s/expected
+          401s throughout; the warning logged for the fake sub_id is benign.
+
 agent_communication:
-  - agent: "testing"
+  - agent: "main"
     message: |
-      Stripe billing + paywall testing complete — 54/54 checks PASS
+      NEW: DELETE /api/auth/account endpoint for App Store compliance.
+        - Requires body {"confirm":"DELETE"} (case-insensitive). Without it -> 400.
+        - Best-effort cancels the user's Stripe Subscription (stripe.Subscription.delete)
+          AND deletes the Stripe Customer (stripe.Customer.delete) — failures are logged
+          but do not block account deletion.
+        - Deletes the user's docs from collections: members, reminders, checkins, alerts,
+          medication_logs. Finally deletes from db.users.
+        - Returns 200 with {ok:true, deleted:{...counts...}, stripe_subscription_canceled,
+          stripe_customer_deleted}.
+
+      Please test ON BACKEND ONLY:
+        1) Signup a fresh user (e.g. delete_test_<rand>@example.com / password123).
+           After signup, seed creates 2 members + 7 reminders + 2 alerts.
+        2) Negative — DELETE /api/auth/account with NO body OR {} -> 400 with detail mentioning confirm.
+        3) Negative — DELETE /api/auth/account with body {"confirm":"nope"} -> 400.
+        4) DELETE /api/auth/account with {"confirm":"DELETE"} -> 200. Response should include:
+             - ok: true
+             - deleted.members >= 2, deleted.reminders >= 7, deleted.alerts >= 2
+             - stripe_subscription_canceled: false  (no sub yet)
+             - stripe_customer_deleted: false
+        5) After deletion, GET /api/auth/me with the same token -> 401 (user gone).
+        6) Re-login with same email/password -> 401.
+        7) Signup a SECOND fresh user. Hit POST /api/billing/checkout-session, then simulate
+           customer.subscription.updated webhook with status=active so plan=family_plan.
+           Verify GET /api/billing/status returns plan=family_plan.
+           THEN DELETE /api/auth/account with {"confirm":"DELETE"} -> 200. Verify:
+             - stripe_subscription_canceled: true
+             - stripe_customer_deleted: true
+             - deleted.* counts correct
+           After deletion: /api/auth/me -> 401.
+        8) Quick regression: demo login + summary + members + 1 sample reminder still work.
+
+      DO NOT test frontend.
+
+metadata:
+  created_by: "main_agent"
+  version: "2.1"
+  test_sequence: 11
+  run_ui: true
+
+agent_communication:
+  - agent: "previous"
       (/app/backend_test.py against the public preview URL).
       Verified GET /api/billing/status, POST /api/billing/checkout-session
       (real cs_test_... URL on checkout.stripe.com), POST /api/billing/webhook
@@ -1004,3 +1102,34 @@ agent_communication:
       Both previously stuck issues are now resolved. No source code modified by testing
       agent. Main agent can summarize and finish.
 
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      DELETE /api/auth/account endpoint — 36/36 backend checks PASS via
+      /app/backend_test.py against https://family-guard-37.preview.emergentagent.com/api.
+
+      Coverage:
+        1) Negative confirm guards (fresh user, seeded 2 members + 7 reminders + 2 alerts):
+           - no body / {"confirm":""} / {"confirm":"nope"} all return 400.
+           - GET /api/auth/me still 200 (user not deleted).
+        2) Free user happy path: DELETE {"confirm":"DELETE"} -> 200 with
+           deleted={members:2, reminders:7, checkins:0, alerts:2, medication_logs:0},
+           stripe_subscription_canceled=false, stripe_customer_deleted=false.
+           Token + login both return 401 after deletion.
+        3) Paid user happy path: created real Stripe customer via /billing/checkout-session
+           (cus_UVli6bz8xFn8cC), simulated active sub via webhook with fake sub_id
+           (so plan=family_plan, status=active). DELETE -> 200 with
+           stripe_subscription_canceled=false (Stripe returned 404 resource_missing for the
+           fake sub_id; endpoint logged WARNING and continued, as per spec) and
+           stripe_customer_deleted=true (Stripe accepted the customer.delete call — verified
+           in backend logs: DELETE /v1/customers/cus_... response_code=200). All user docs
+           deleted (same counts as free flow). Token + login -> 401 after deletion.
+        4) Demo regression: demo@kinnectcare.app login -> 200, /auth/me -> 200, /summary -> 200
+           (5 members intact), /members -> 200. Demo account is NOT touched by any other user's
+           account deletion (owner_id isolation works correctly).
+
+      Stripe integration is REAL (live test-mode keys; real Stripe Customer was created and
+      deleted via the live Stripe API). No mocks. Backend logs (tail of backend.err.log) show
+      the expected stripe.Subscription.delete 404 warning and stripe.Customer.delete 200 success.
+      No regressions observed. Main agent: please summarize and finish.

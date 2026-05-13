@@ -485,6 +485,81 @@ async def register_push_token(data: PushTokenRegister, current=Depends(get_curre
     return {"ok": True}
 
 
+class DeleteAccountRequest(BaseModel):
+    confirm: Optional[str] = None  # Expect "DELETE" for extra safety
+
+
+@api_router.delete("/auth/account")
+async def delete_account(
+    data: DeleteAccountRequest = None,
+    current=Depends(get_current_user),
+):
+    """Permanently delete the authenticated user and ALL of their data.
+
+    Steps:
+      1. Cancel active Stripe subscription (best-effort).
+      2. Delete all user-owned collections.
+      3. Delete the user document.
+    """
+    user_id = current["id"]
+    payload = data or DeleteAccountRequest()
+    if (payload.confirm or "").strip().upper() != "DELETE":
+        raise HTTPException(
+            status_code=400,
+            detail='Confirmation required. Send {"confirm":"DELETE"} to proceed.',
+        )
+
+    sub = (current.get("subscription") or {})
+    sub_id = sub.get("stripe_subscription_id")
+    customer_id = sub.get("stripe_customer_id")
+    stripe_canceled = False
+    customer_deleted = False
+    if billing.is_configured():
+        # Best-effort cancellation. Do not block account deletion if Stripe fails.
+        try:
+            if sub_id:
+                stripe.Subscription.delete(sub_id)
+                stripe_canceled = True
+        except Exception as e:
+            logger.warning(f"Stripe subscription cancel failed for {user_id}: {e}")
+        try:
+            if customer_id:
+                stripe.Customer.delete(customer_id)
+                customer_deleted = True
+        except Exception as e:
+            logger.warning(f"Stripe customer delete failed for {user_id}: {e}")
+
+    # Delete all user-owned data.
+    deleted_counts = {}
+    for coll in [
+        "members",
+        "reminders",
+        "checkins",
+        "alerts",
+        "medication_logs",
+    ]:
+        try:
+            r = await db[coll].delete_many({"owner_id": user_id})
+            deleted_counts[coll] = r.deleted_count
+        except Exception as e:
+            logger.warning(f"Failed to delete from {coll} for {user_id}: {e}")
+            deleted_counts[coll] = 0
+
+    # Finally delete the user.
+    await db.users.delete_one({"id": user_id})
+
+    logger.info(
+        f"Account deleted: user={user_id} stripe_sub_canceled={stripe_canceled} "
+        f"stripe_customer_deleted={customer_deleted} counts={deleted_counts}"
+    )
+    return {
+        "ok": True,
+        "deleted": deleted_counts,
+        "stripe_subscription_canceled": stripe_canceled,
+        "stripe_customer_deleted": customer_deleted,
+    }
+
+
 # ========== Members ==========
 @api_router.get("/members", response_model=List[FamilyMember])
 async def list_members(current=Depends(get_current_user)):

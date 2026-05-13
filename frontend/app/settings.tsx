@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Modal, TextInput, ActivityIndicator } from 'react-native';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -6,12 +6,16 @@ import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { useAuth } from '../src/AuthContext';
 import { APP_NAME, COMPANY_NAME } from '../src/legal';
-import { getBillingStatus, BillingStatus } from '../src/api';
+import { getBillingStatus, BillingStatus, api } from '../src/api';
 
 export default function SettingsScreen() {
   const router = useRouter();
   const { user, logout } = useAuth();
   const [billing, setBilling] = useState<BillingStatus | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -31,6 +35,33 @@ export default function SettingsScreen() {
       { text: 'Cancel', style: 'cancel' },
       { text: 'Sign out', style: 'destructive', onPress: logout },
     ]);
+  };
+
+  const openDelete = () => {
+    setDeleteConfirmText('');
+    setDeleteError(null);
+    setDeleteOpen(true);
+  };
+
+  const performDelete = async () => {
+    if (deleting) return;
+    if (deleteConfirmText.trim().toUpperCase() !== 'DELETE') {
+      setDeleteError('Please type DELETE exactly to confirm.');
+      return;
+    }
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await api.delete('/auth/account', { data: { confirm: 'DELETE' } });
+      setDeleteOpen(false);
+      // Clear the local session and redirect to welcome.
+      await logout();
+      router.replace('/');
+    } catch (e: any) {
+      setDeleteError(e?.response?.data?.detail || e?.message || 'Failed to delete account. Please try again.');
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -121,10 +152,89 @@ export default function SettingsScreen() {
           </View>
         </View>
 
+        <View style={styles.section}>
+          <Text style={[styles.sectionLabel, { color: Colors.error }]}>Danger Zone</Text>
+          <View style={[styles.card, { borderColor: '#F2C3C0' }]}>
+            <NavRow
+              testID="settings-delete-account"
+              icon="🗑"
+              label="Delete Account"
+              onPress={openDelete}
+              danger
+            />
+          </View>
+          <Text style={styles.dangerHint}>
+            Permanently delete your account and all associated data. This cannot be undone.
+          </Text>
+        </View>
+
         <Text style={styles.footer}>
           {APP_NAME} · © {new Date().getFullYear()} {COMPANY_NAME}
         </Text>
       </ScrollView>
+
+      <Modal
+        visible={deleteOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => !deleting && setDeleteOpen(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard} testID="delete-account-modal">
+            <Text style={styles.modalEmoji}>⚠️</Text>
+            <Text style={styles.modalTitle}>Delete your account?</Text>
+            <Text style={styles.modalBody}>
+              This will permanently delete your KinnectCare account and all related data:
+              {'\n'}• family member profiles
+              {'\n'}• medications, routines, and check-ins
+              {'\n'}• alerts and SOS history
+              {'\n'}• any active subscription (will be canceled)
+              {'\n\n'}
+              This action cannot be undone.
+            </Text>
+            <Text style={styles.modalConfirmLabel}>Type DELETE to confirm</Text>
+            <TextInput
+              testID="delete-confirm-input"
+              value={deleteConfirmText}
+              onChangeText={(t) => { setDeleteConfirmText(t); setDeleteError(null); }}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              placeholder="DELETE"
+              placeholderTextColor={Colors.textTertiary}
+              editable={!deleting}
+              style={styles.modalInput}
+            />
+            {deleteError ? (
+              <Text style={styles.modalError}>{deleteError}</Text>
+            ) : null}
+            <TouchableOpacity
+              testID="delete-account-confirm"
+              style={[
+                styles.modalDanger,
+                (deleteConfirmText.trim().toUpperCase() !== 'DELETE' || deleting) && { opacity: 0.5 },
+              ]}
+              onPress={performDelete}
+              disabled={deleting || deleteConfirmText.trim().toUpperCase() !== 'DELETE'}
+              activeOpacity={0.85}
+            >
+              {deleting ? (
+                <ActivityIndicator color={Colors.surface} />
+              ) : (
+                <Text style={styles.modalDangerText}>Permanently delete account</Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="delete-account-cancel"
+              style={styles.modalSecondary}
+              onPress={() => !deleting && setDeleteOpen(false)}
+              disabled={deleting}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.modalSecondaryText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -191,4 +301,44 @@ const styles = StyleSheet.create({
   planBadgePaid: { backgroundColor: Colors.primary },
   planBadgeText: { fontSize: 12, fontWeight: '800', color: Colors.primary },
   planCta: { marginTop: 10, fontSize: 13, fontWeight: '700', color: Colors.primary },
+  dangerHint: {
+    marginTop: 8, paddingHorizontal: 4,
+    fontSize: 12, color: Colors.textTertiary, lineHeight: 18,
+  },
+  modalBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center', justifyContent: 'center', padding: 22,
+  },
+  modalCard: {
+    width: '100%', maxWidth: 380, backgroundColor: Colors.surface,
+    borderRadius: 18, padding: 22,
+    boxShadow: '0px 12px 28px rgba(0,0,0,0.25)' as any,
+  },
+  modalEmoji: { fontSize: 36, textAlign: 'center', marginBottom: 4 },
+  modalTitle: {
+    fontSize: 19, fontWeight: '800', color: Colors.textPrimary, textAlign: 'center',
+  },
+  modalBody: {
+    fontSize: 14, color: Colors.textSecondary, marginTop: 10,
+    marginBottom: 14, lineHeight: 20,
+  },
+  modalConfirmLabel: {
+    fontSize: 12, fontWeight: '800', color: Colors.textSecondary,
+    letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 6,
+  },
+  modalInput: {
+    backgroundColor: Colors.background, borderRadius: 12, padding: 14,
+    fontSize: 16, fontWeight: '700', color: Colors.textPrimary,
+    borderWidth: 1, borderColor: Colors.border, letterSpacing: 1,
+  },
+  modalError: { color: Colors.error, fontSize: 13, marginTop: 8, fontWeight: '600' },
+  modalDanger: {
+    marginTop: 14, height: 52, backgroundColor: Colors.error,
+    borderRadius: 14, alignItems: 'center', justifyContent: 'center',
+  },
+  modalDangerText: { color: Colors.surface, fontSize: 16, fontWeight: '800' },
+  modalSecondary: {
+    marginTop: 10, alignItems: 'center', paddingVertical: 12,
+  },
+  modalSecondaryText: { color: Colors.textSecondary, fontSize: 15, fontWeight: '600' },
 });
