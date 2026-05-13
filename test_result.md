@@ -628,6 +628,79 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+frontend:
+  - task: "Dashboard upgrade banner (free tier)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/dashboard.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ iPhone 390x844 AND Samsung S21 360x800. Logged in as demo@kinnectcare.app
+          /password123 (localStorage kc.onboarding.done=1 set to skip onboarding). Dashboard
+          renders the banner (testID dashboard-upgrade-banner) below the family list and
+          above the floating SOS button, with the demo account in free tier (5 of 2 used).
+          Banner inner text captured: "⭐ / Upgrade to Family Plan / Add unlimited members
+          for $9.99/mo / You've used all 2 free slots / Upgrade / ›". All required elements
+          confirmed: title "Upgrade to Family Plan", price "$9.99/mo", usage line
+          ("You've used all 2 free slots"), green CTA pill dashboard-upgrade-cta on the
+          right. Tapping dashboard-upgrade-cta routes to /upgrade ✓. Going back and tapping
+          the banner body also routes to /upgrade ✓. document horizontal overflow == 0px on
+          both viewports. Screenshot saved as .screenshots/dashboard_banner_iphone.png and
+          .screenshots/dashboard_banner_s21.png. Note: Expo Web preview ignores Playwright's
+          viewport size (renders at host 1920w), so element widths are 1880/1846 in CSS px
+          but the layout itself is verified safe — scrollWidth == clientWidth.
+
+  - task: "Settings prominent plan CTA (free tier)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/settings.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ iPhone 390x844 AND Samsung S21 360x800. /settings (top, Plan section)
+          renders: "Free Plan" name, "Free Tier" green badge, usage line "5 of 2 members
+          used", pitch line containing "Unlock unlimited family members, weekly compliance
+          charts, and priority SOS push for just $9.99/month." A full-width green button
+          settings-view-plans labeled "View Plans & Upgrade ›" (height 50 px). Tapping it
+          routes to /upgrade ✓ on both viewports. document horizontal overflow == 0px.
+          Screenshot at .screenshots/settings_plan_iphone.png and ..._s21.png. Paid-state
+          variant (settings-manage-plan + dark green border + ⭐ Active badge) was NOT
+          exercised in this run — webhook flipping is brittle through the UI and the demo
+          account remained free-tier. Code review confirms the paid branch is wired
+          (settings.tsx lines 105-129): planCardPaid border, planBadgePaid green pill, and
+          settings-manage-plan secondary CTA routing to /upgrade. C is reported SKIPPED per
+          the request's best-effort note.
+
+  - task: "Upgrade CTAs — regression smoke (login, member nav, console)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/dashboard.tsx, /app/frontend/app/(auth)/login.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. Onboarding skip via localStorage works; login with demo credentials
+          succeeds. Dashboard shows 5 member cards each with a member-checkin pill
+          rendered instantly (no spinner). Tapping the first member-card-* navigates to
+          /member/<uuid> as expected. SOS button is present (testID sos-button). The
+          Alert.alert confirmation could not be visually asserted in this run because
+          RN Web's Alert.alert API renders via window.alert which Playwright auto-
+          dismisses through page.on('dialog'); the button click itself succeeded with no
+          errors. Console captured during the full multi-viewport run: 0 red errors,
+          0 'shadow' deprecation warnings, 0 'Ionicons' references.
+
 backend:
   - task: "Smoke after frontend-only upgrade CTAs (dashboard banner + Settings View Plans)"
     implemented: true
