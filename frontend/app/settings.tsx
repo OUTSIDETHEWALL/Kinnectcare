@@ -82,31 +82,52 @@ export default function SettingsScreen() {
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Plan</Text>
-          <TouchableOpacity
-            testID="settings-plan-card"
-            style={styles.planCard}
-            onPress={() => router.push('/upgrade')}
-            activeOpacity={0.8}
-          >
+          <View style={[styles.planCard, billing?.plan === 'family_plan' && styles.planCardPaid]}>
             <View style={styles.planTop}>
-              <View>
-                <Text style={styles.planName}>{planLabel}</Text>
+              <View style={{ flex: 1 }}>
+                <View style={styles.planNameRow}>
+                  <Text style={styles.planName}>{planLabel}</Text>
+                  <View style={[styles.planBadge, billing?.plan === 'family_plan' && styles.planBadgePaid]}>
+                    <Text style={[styles.planBadgeText, billing?.plan === 'family_plan' && { color: Colors.surface }]}>
+                      {billing?.plan === 'family_plan' ? '⭐ Active' : 'Free Tier'}
+                    </Text>
+                  </View>
+                </View>
                 <Text style={styles.planLimit}>{limitLine}</Text>
-              </View>
-              <View style={[styles.planBadge, billing?.plan === 'family_plan' && styles.planBadgePaid]}>
-                <Text style={[styles.planBadgeText, billing?.plan === 'family_plan' && { color: Colors.surface }]}>
-                  {billing?.plan === 'family_plan' ? '⭐ Active' : 'Upgrade'}
-                </Text>
+                {billing?.plan === 'family_plan' && billing?.current_period_end ? (
+                  <Text style={styles.planRenewal}>
+                    Renews {new Date(billing.current_period_end).toLocaleDateString()}
+                  </Text>
+                ) : null}
               </View>
             </View>
+
             {billing?.plan !== 'family_plan' ? (
-              <Text style={styles.planCta}>Get unlimited members & premium features ›</Text>
+              <>
+                <Text style={styles.planPitch}>
+                  Unlock unlimited family members, weekly compliance charts, and priority SOS push for just $9.99/month.
+                </Text>
+                <TouchableOpacity
+                  testID="settings-view-plans"
+                  style={styles.planCtaPrimary}
+                  onPress={() => router.push('/upgrade')}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.planCtaPrimaryText}>View Plans & Upgrade</Text>
+                  <Text style={styles.planCtaPrimaryArrow}>›</Text>
+                </TouchableOpacity>
+              </>
             ) : (
-              billing?.current_period_end ? (
-                <Text style={styles.planCta}>Renews {new Date(billing.current_period_end).toLocaleDateString()}</Text>
-              ) : null
+              <TouchableOpacity
+                testID="settings-manage-plan"
+                style={styles.planCtaSecondary}
+                onPress={() => router.push('/upgrade')}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.planCtaSecondaryText}>Manage Subscription ›</Text>
+              </TouchableOpacity>
             )}
-          </TouchableOpacity>
+          </View>
         </View>
 
         <View style={styles.section}>
@@ -301,6 +322,25 @@ const styles = StyleSheet.create({
   planBadgePaid: { backgroundColor: Colors.primary },
   planBadgeText: { fontSize: 12, fontWeight: '800', color: Colors.primary },
   planCta: { marginTop: 10, fontSize: 13, fontWeight: '700', color: Colors.primary },
+  planCardPaid: { borderColor: Colors.primary, borderWidth: 2 },
+  planNameRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 4 },
+  planRenewal: { fontSize: 12, color: Colors.textTertiary, marginTop: 4, fontWeight: '600' },
+  planPitch: {
+    marginTop: 14, fontSize: 13, color: Colors.textSecondary,
+    lineHeight: 19, paddingRight: 4,
+  },
+  planCtaPrimary: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    marginTop: 14, height: 50, borderRadius: 14, backgroundColor: Colors.primary,
+    boxShadow: '0px 6px 12px rgba(27,94,53,0.2)' as any,
+  },
+  planCtaPrimaryText: { color: Colors.surface, fontSize: 15, fontWeight: '800' },
+  planCtaPrimaryArrow: { color: Colors.surface, fontSize: 20, fontWeight: '700' },
+  planCtaSecondary: {
+    marginTop: 14, height: 46, borderRadius: 12, borderWidth: 2, borderColor: Colors.primary,
+    alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent',
+  },
+  planCtaSecondaryText: { color: Colors.primary, fontSize: 14, fontWeight: '800' },
   dangerHint: {
     marginTop: 8, paddingHorizontal: 4,
     fontSize: 12, color: Colors.textTertiary, lineHeight: 18,

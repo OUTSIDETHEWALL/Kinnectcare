@@ -629,6 +629,68 @@ test_plan:
   test_priority: "high_first"
 
 backend:
+  - task: "Smoke after frontend-only upgrade CTAs (dashboard banner + Settings View Plans)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 33/33 checks GREEN via /app/backend_smoke_upgrade_ctas.py against
+          https://family-guard-37.preview.emergentagent.com/api with demo@kinnectcare.app /
+          password123. Frontend-only change confirmed: no backend regressions.
+
+          Coverage:
+            - POST /api/auth/login -> 200 with access_token.
+            - GET  /api/auth/me -> 200.
+            - GET  /api/billing/status -> 200; plan='free', member_limit=int (free),
+              member_count=int, members_remaining=int (free). paid_plan: amount_cents=999,
+              currency='usd', interval='month', product_name non-empty
+              ('KinnectCare Family Plan').
+            - GET  /api/summary -> 200; response includes a non-empty members array.
+            - GET  /api/members -> 200; non-empty list.
+            - POST /api/sos {latitude:37.7749, longitude:-122.4194} -> 200; response
+              includes ISO-parseable timestamp, member_name (non-empty),
+              coordinates={latitude:37.7749, longitude:-122.4194}, devices_notified=int.
+            - POST /api/checkins {member_id:<first>, latitude:12.97, longitude:77.59,
+              location_name:'Smoke'} -> 200. Subsequent GET /api/checkins/recent first
+              record matches member_id/lat/lng/location_name.
+            - POST /api/checkins {member_id:<first>} (no lat/lng) -> 200; record returned
+              with latitude=None and longitude=None.
+          Backend logs show all 200s, no errors observed during the run.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Fast backend smoke after the frontend-only upgrade CTAs change is COMPLETE — 33/33
+      green via /app/backend_smoke_upgrade_ctas.py. /billing/status shape is intact for the
+      demo (free) account: plan='free', member_limit=int, members_remaining=int,
+      paid_plan={amount_cents:999, currency:'usd', interval:'month', product_name non-empty}.
+      /auth/login, /auth/me, /summary (members[]), /members, /sos (with coords -> timestamp +
+      member_name + coordinates + devices_notified), /checkins (with and without coords) +
+      /checkins/recent all pass. No regressions. Main agent: please summarize and finish.
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Frontend-only change: added two visible upgrade CTAs.
+        1) Dashboard upgrade banner (only renders for plan='free'): below member list, above SOS.
+           testID `dashboard-upgrade-banner`, taps routes to /upgrade.
+        2) Settings Plan card is now more prominent: usage row + value pitch + full-width
+           "View Plans & Upgrade" button (testID `settings-view-plans`). Paid users see a
+           "Manage Subscription" variant (testID `settings-manage-plan`). Both route to /upgrade.
+      No backend changes. Please run a fast regression to confirm nothing broke:
+        - /auth/login demo + /auth/me + /summary + /members + /billing/status (plan, member_limit,
+          paid_plan.amount_cents == 999).
+        - POST /api/sos with coords (still returns timestamp/member_name/coordinates/devices_notified).
+        - POST /api/checkins with and without coords.
+      DO NOT test frontend.
+
+backend:
   - task: "Regression after instant-UX refactor (frontend fire-and-forget SOS + check-ins)"
     implemented: true
     working: true

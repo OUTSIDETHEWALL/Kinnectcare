@@ -8,7 +8,7 @@ import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import { Colors, StatusColor } from '../../src/theme';
-import { api, Member, MemberSummary } from '../../src/api';
+import { api, Member, MemberSummary, getBillingStatus, BillingStatus } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
 
 export default function Dashboard() {
@@ -16,14 +16,20 @@ export default function Dashboard() {
   const { user, logout } = useAuth();
   const [members, setMembers] = useState<Member[]>([]);
   const [summary, setSummary] = useState<MemberSummary[]>([]);
+  const [billing, setBilling] = useState<BillingStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = async () => {
     try {
-      const [m, s] = await Promise.all([api.get('/members'), api.get('/summary')]);
+      const [m, s, b] = await Promise.all([
+        api.get('/members'),
+        api.get('/summary'),
+        getBillingStatus().catch(() => null),
+      ]);
       setMembers(m.data);
       setSummary(s.data.members || []);
+      if (b) setBilling(b);
     } catch (_e) {}
   };
 
@@ -205,6 +211,36 @@ export default function Dashboard() {
             <Text style={styles.emptyText}>No family members yet. Tap "Add" to get started.</Text>
           </View>
         )}
+
+        {billing && billing.plan === 'free' && members.length > 0 && (
+          <TouchableOpacity
+            testID="dashboard-upgrade-banner"
+            activeOpacity={0.85}
+            onPress={() => router.push('/upgrade')}
+            style={styles.upgradeBanner}
+          >
+            <View style={styles.upgradeIconWrap}>
+              <Text style={styles.upgradeIcon}>⭐</Text>
+            </View>
+            <View style={{ flex: 1, marginLeft: 14 }}>
+              <Text style={styles.upgradeTitle}>Upgrade to Family Plan</Text>
+              <Text style={styles.upgradeSub}>
+                Add unlimited members for <Text style={styles.upgradePrice}>$9.99/mo</Text>
+              </Text>
+              {typeof billing.members_remaining === 'number' && billing.member_limit !== null ? (
+                <Text style={styles.upgradeUsage}>
+                  {billing.members_remaining > 0
+                    ? `${billing.members_remaining} of ${billing.member_limit} member slots left`
+                    : `You've used all ${billing.member_limit} free slots`}
+                </Text>
+              ) : null}
+            </View>
+            <View testID="dashboard-upgrade-cta" style={styles.upgradeCta}>
+              <Text style={styles.upgradeCtaText}>Upgrade</Text>
+              <Text style={styles.upgradeCtaArrow}>›</Text>
+            </View>
+          </TouchableOpacity>
+        )}
       </ScrollView>
 
       <TouchableOpacity testID="sos-button" onPress={triggerSOS} activeOpacity={0.85} style={styles.sosBtn}>
@@ -343,4 +379,29 @@ const styles = StyleSheet.create({
   },
   sosEmoji: { fontSize: 24 },
   sosText: { color: Colors.surface, fontSize: 18, fontWeight: '800', letterSpacing: 0.3 },
+  upgradeBanner: {
+    flexDirection: 'row', alignItems: 'center',
+    marginHorizontal: 20, marginTop: 24, padding: 16,
+    backgroundColor: Colors.surface, borderRadius: 16,
+    borderWidth: 1, borderColor: Colors.tertiary,
+    boxShadow: '0px 6px 16px rgba(27,94,53,0.10)' as any,
+  },
+  upgradeIconWrap: {
+    width: 48, height: 48, borderRadius: 24,
+    backgroundColor: Colors.tertiary,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  upgradeIcon: { fontSize: 24 },
+  upgradeTitle: { fontSize: 15, fontWeight: '800', color: Colors.textPrimary },
+  upgradeSub: { fontSize: 13, color: Colors.textSecondary, marginTop: 2 },
+  upgradePrice: { fontWeight: '800', color: Colors.primary },
+  upgradeUsage: { fontSize: 11, color: Colors.textTertiary, marginTop: 4, fontWeight: '600' },
+  upgradeCta: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 14, paddingVertical: 10,
+    backgroundColor: Colors.primary, borderRadius: 12,
+    marginLeft: 8,
+  },
+  upgradeCtaText: { color: Colors.surface, fontSize: 13, fontWeight: '800' },
+  upgradeCtaArrow: { color: Colors.surface, fontSize: 16, fontWeight: '700' },
 });
