@@ -2,15 +2,26 @@ import { Stack, useRouter, useSegments } from 'expo-router';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from '../src/AuthContext';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { View, ActivityIndicator } from 'react-native';
 import { Colors } from '../src/theme';
 import { registerForPushNotifications, useNotificationListeners } from '../src/push';
+import { isOnboardingDone } from '../src/onboardingStore';
 
 function RootNav() {
   const { user, loading } = useAuth();
   const segments = useSegments();
   const router = useRouter();
+  const [onboardingChecked, setOnboardingChecked] = useState(false);
+  const [needsOnboarding, setNeedsOnboarding] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const done = await isOnboardingDone();
+      setNeedsOnboarding(!done);
+      setOnboardingChecked(true);
+    })();
+  }, []);
 
   useNotificationListeners((data) => {
     if (data?.type === 'sos' || data?.type === 'missed_checkin' || data?.type === 'medication' || data?.type === 'routine') {
@@ -25,19 +36,25 @@ function RootNav() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (loading) return;
+    if (loading || !onboardingChecked) return;
     const inAuthGroup = segments[0] === '(auth)';
     const isWelcome = !segments[0] || segments[0] === ('index' as any);
+    const isOnboarding = segments[0] === 'onboarding';
     const isPublic =
       segments[0] === 'privacy-policy' || segments[0] === 'terms-of-service';
-    if (!user && !inAuthGroup && !isWelcome && !isPublic) {
+    // First-time users (not logged in, no onboarding flag) go to onboarding first.
+    if (!user && needsOnboarding && !isOnboarding && !isPublic) {
+      router.replace('/onboarding');
+      return;
+    }
+    if (!user && !inAuthGroup && !isWelcome && !isOnboarding && !isPublic) {
       router.replace('/');
-    } else if (user && (inAuthGroup || isWelcome)) {
+    } else if (user && (inAuthGroup || isWelcome || isOnboarding)) {
       router.replace('/(tabs)/dashboard');
     }
-  }, [user, loading, segments]);
+  }, [user, loading, segments, onboardingChecked, needsOnboarding]);
 
-  if (loading) {
+  if (loading || !onboardingChecked) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: Colors.background }}>
         <ActivityIndicator size="large" color={Colors.primary} />
@@ -59,6 +76,7 @@ function RootNav() {
       <Stack.Screen name="settings" />
       <Stack.Screen name="privacy-policy" />
       <Stack.Screen name="terms-of-service" />
+      <Stack.Screen name="onboarding" />
     </Stack>
   );
 }
