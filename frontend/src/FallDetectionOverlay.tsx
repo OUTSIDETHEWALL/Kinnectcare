@@ -96,6 +96,18 @@ export function FallDetectionOverlay() {
     onFallDetected: handleFall,
   });
 
+  // Web/test hook — lets us trigger the modal from Playwright (`window.__kc_triggerFall()`).
+  // No-op outside web. Safe to leave in production; nothing calls it from the app code.
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    try {
+      (globalThis as any).__kc_triggerFall = () => handleFall();
+    } catch (_e) {}
+    return () => {
+      try { delete (globalThis as any).__kc_triggerFall; } catch (_e) {}
+    };
+  }, []);
+
   useEffect(() => () => stopTimer(), []);
 
   // If user logs out while modal is open, dismiss.

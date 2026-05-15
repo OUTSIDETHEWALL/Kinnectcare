@@ -628,6 +628,85 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+frontend:
+  - task: "Settings Safety toggle (Fall Detection)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/settings.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ 390x844. /settings SAFETY section shows settings-fall-row with title
+          "Fall Detection" and explanation text. settings-fall-switch visible and default
+          ON. Toggling OFF persists localStorage.kc.fall.enabled='0' across reload;
+          toggling ON persists '1' across reload. Screenshot: settings_safety.png.
+
+  - task: "Member detail Fall Detection badge"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/member/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. With kc.fall.enabled='1' the first member screen renders member-fall-badge
+          inside the Active Safety card below Location with title "Fall Detection", body
+          "Active — accelerometer is watching for sudden falls. 30 s grace period before
+          automatic SOS." and an "ACTIVE" green pill. With kc.fall.enabled='0' + reload,
+          badge body becomes "Off — turn on in Settings to detect falls automatically."
+          and the pill reads "OFF" (grey). Screenshots: member_badge_active.png,
+          member_badge_off.png.
+
+  - task: "Fall Detection modal: cancel + call-now + timeout"
+    implemented: true
+    working: true
+    file: "/app/frontend/src/FallDetectionOverlay.tsx, /app/frontend/app/_layout.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. window.__kc_triggerFall test hook is exposed on web. Triggering it shows
+          fall-modal with title "Fall detected — are you okay?", animated countdown bar,
+          and fall-countdown text starting at 29s. fall-cancel closes the modal without
+          navigation (stays on /dashboard). fall-call-now closes modal AND navigates to
+          /sos-confirmation?reason=fall where testID sos-title renders. Timeout path:
+          after triggering and waiting ~32s without input, modal auto-closes, URL
+          navigates to /sos-confirmation?reason=fall and sos-title renders; countdown
+          observed ticking (24s at ~5s elapsed). Cross-viewport: at 360x800 modal
+          fits with 0 horizontal overflow and fall-cancel works. Console: 0 errors,
+          0 shadow warnings, 0 Ionicons warnings across the full run. Screenshot:
+          fall_modal_countdown.png.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Fall Detection UI testing COMPLETE — all cases PASS (A,B,C,D,E,F,G).
+      A) Settings toggle persists across reload (ON->OFF->ON verified via
+         localStorage.kc.fall.enabled).
+      B) Member detail Active Safety card reflects ACTIVE (green) / OFF (grey) state
+         correctly with the exact body strings specified.
+      C) Modal cancel path: hook -> modal visible -> 29s countdown -> fall-cancel ->
+         modal closes, no navigation away from /dashboard.
+      D) Manual call-now: navigates to /sos-confirmation?reason=fall and sos-title
+         renders within ~1s. tel:911 dialog auto-dismissed by Playwright (expected).
+      E) 32s timeout: modal auto-closes, navigates to /sos-confirmation, sos-title
+         renders; countdown observed ticking (24s @ ~5s).
+      F) 360x800 (S21): modal fits, scrollWidth==clientWidth (0 overflow), cancel
+         works.
+      G) Regression: 0 console errors, 0 shadow/Ionicons warnings. Demo login +
+         onboarding skip + dashboard + member nav + settings + sos-confirmation all
+         reachable. No source code modified. Main agent: please summarize and finish.
+
 backend:
   - task: "POST /api/sos accepts optional fall_detected flag"
     implemented: true
