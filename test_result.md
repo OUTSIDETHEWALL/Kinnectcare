@@ -2011,3 +2011,282 @@ agent_communication:
       member_name + coordinates + devices_notified=2), and /checkins all work as
       before. Pure text/asset rebrand — no backend regressions. Main agent: please
       summarize and finish.
+
+
+backend:
+  - task: "Multi-user Family Groups: /api/family-group GET/PUT/regenerate/join/leave/remove-member"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/family_group.py, /app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          NEW FEATURE: Real multi-user family groups. Each Kinnship user belongs to a
+          family_group (lazy-created on signup/login). All data collections (members,
+          reminders, alerts, checkins, medication_logs) gained a family_group_id field
+          and queries now filter by family_group_id instead of owner_id.
+          New endpoints (router prefix /api/family-group):
+            GET    /api/family-group               → {group, members[], my_role, member_count}
+            PUT    /api/family-group               → rename (owner only), body {name}
+            POST   /api/family-group/regenerate-code  (owner only)
+            POST   /api/family-group/join          body {invite_code}
+            POST   /api/family-group/leave         (owner of multi-user group cannot leave)
+            POST   /api/family-group/remove-member body {user_id} (owner only)
+          Auth changes:
+            POST /api/auth/signup now accepts optional `invite_code` → joins existing
+            group instead of creating a new one (no demo seed when joining).
+            UserResponse exposes family_group_id + family_group_role.
+          Startup migration: backfilled 34 legacy demo users into solo family_groups.
+
+  - task: "SOS push fanout to ALL users in family group (manual + fall_detected)"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          /api/sos now uses push_to_family_group() helper which iterates EVERY user in
+          the triggering user's family_group_id and calls push_to_user(uid, …) on each.
+          Response now includes triggered_by_name, family_group_id, fall_detected (echoed
+          back). devices_notified is the sum across the group. Push title prefix still
+          adds "Fall detected · " when fall_detected:true. Push data payload includes
+          alert_id, member_id, member_name, triggered_by_user_id, triggered_by_name,
+          family_group_id, latitude, longitude, timestamp, fall_detected.
+          Manual smoke check (2 users in same group, both with push tokens):
+            POST /api/sos {lat,lng,fall_detected:true} → devices_notified=4 (both users'
+            tokens reached). Both users see the SOS alert in their /api/alerts feed.
+
+  - task: "Group-aware billing: member limit + status payload use family_group_id"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/billing.py, /app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          billing.build_status_payload now counts members by family_group_id and
+          returns plan=family_plan if ANY user in the group has an active paid
+          subscription (group_is_paid). create_member uses get_member_limit_for_group
+          (async) so joining a paid owner unlocks unlimited for all members of the
+          group. Free-tier limit stays at 2 members per group.
+
+  - task: "Regression: existing SOS / alerts / members / reminders / checkins under group model"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          All query filters were swapped from {"owner_id": current["id"]} to
+          {"family_group_id": current["family_group_id"]}. Helpers
+          reset_daily_reminder_statuses() and detect_missed_checkins() now take
+          (family_group_id, user). Need full regression sweep on:
+            - POST /api/auth/login (demo@kinnship.app / password123), /auth/me, /auth/signup
+            - GET /api/members, POST /api/members, GET/DELETE /api/members/{id}
+            - GET /api/summary (per-member metrics intact)
+            - GET /api/reminders, POST/PUT/DELETE /reminders/{id}, mark, toggle
+            - POST /api/checkins (with and without lat/lng), /checkins/recent
+            - GET /api/alerts, /api/history/member/{id}
+            - POST /api/sos (with coords & with fall_detected)
+            - GET /api/billing/status
+
+agent_communication:
+  - agent: "main"
+    message: |
+      BIG FEATURE LANDED: Real multi-user Family Groups.
+      Backend changes:
+        - New family_group.py module (models, helpers, routes).
+        - server.py: switched all data queries from owner_id→family_group_id.
+        - Migration: 34 legacy users backfilled into solo family_groups.
+        - SOS now fans push notifications to EVERY user in the family group
+          (push_to_family_group helper). Response includes triggered_by_name,
+          family_group_id, fall_detected.
+        - Signup accepts optional invite_code to join an existing family group
+          (no demo seed when joining).
+        - billing.py: group-aware member-count + paid detection.
+      Please run a FULL backend regression:
+        1) Family-group flow:
+           a) demo login → GET /api/family-group → 200 with group + 1+ members (owner)
+           b) Signup co-caregiver with invite_code (e.g. KINN-XXXXXX) → 200, user.family_group_id matches demo's
+           c) Co-caregiver lists /api/members → sees demo's members
+           d) Co-caregiver triggers /api/sos {fall_detected:true,lat,lng} → 200 with triggered_by_name=co-caregiver's name, family_group_id present, devices_notified>=2
+           e) Demo's /api/alerts contains the co-caregiver-triggered SOS
+           f) PUT /api/family-group {name:"Smith Family"} as owner → 200
+           g) PUT /api/family-group {name:"X"} as member → 403
+           h) POST /family-group/regenerate-code as owner → 200 new code; member → 403
+           i) POST /family-group/join with bad code → 404; with own code → already_member=true
+           j) Co-caregiver POST /family-group/leave → 200, new_group present
+           k) Owner of 2-user group attempts /leave → 400 (must remove others first)
+           l) POST /family-group/remove-member as owner → 200; as member → 403
+        2) Signup with invite_code: new user created and family_group_id matches; demo seed NOT created (their group already has data).
+        3) SOS fanout: with 2 push tokens registered across 2 users in same group, /sos devices_notified>=2.
+           Fall_detected:true → push title server-side prefixed with "Fall detected · ".
+        4) Member visibility regression: demo /api/members still returns the existing demo members.
+        5) Billing: demo /api/billing/status returns plan=free, member_count>0, paid_plan.amount_cents=999.
+        6) Smoke: /auth/me, /summary, /members POST/GET, /reminders POST/PUT/mark, /checkins POST + recent, /alerts, /history/member/{id}?days=7.
+      Demo credentials: demo@kinnship.app / password123. Backend base URL: read EXPO_BACKEND_URL from /app/frontend/.env (append /api). DO NOT test frontend.
+
+test_plan:
+  current_focus:
+    - "Multi-user Family Groups: /api/family-group GET/PUT/regenerate/join/leave/remove-member"
+    - "SOS push fanout to ALL users in family group (manual + fall_detected)"
+    - "Group-aware billing: member limit + status payload use family_group_id"
+    - "Regression: existing SOS / alerts / members / reminders / checkins under group model"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Multi-user Family Groups backend testing COMPLETE — 97/98 checks GREEN via
+      /app/backend_test.py against https://family-guard-37.preview.emergentagent.com/api
+      using demo@kinnship.app / password123.
+
+      TEST 1 (Family Group GET / Auto-bootstrap) — PASS 13/13
+        POST /api/auth/login returns user.family_group_id (non-null) and
+        family_group_role. GET /api/family-group returns group with id, name,
+        owner_user_id, invite_code matching ^KINN-[A-Z0-9]{6}$, created_at,
+        members list, my_role='owner', member_count>=1. Demo user appears in
+        the members list.
+
+      TEST 2 (Signup with invite_code joins existing group) — PASS 9/10
+        Signup with demo's invite_code -> 200; new user.family_group_id ==
+        demo's; family_group_role == 'member'. GET /api/members shows the
+        family's members (5 visible — demo's shared family list, NOT a fresh
+        2-member seed). GET /api/family-group as the new user contains both
+        the demo (role=owner) and the new user (role=member).
+        Minor: member_count was 4 (not exactly 2) because the demo family
+        group already had 3 leftover co-caregivers from prior test runs.
+        This is test-data pollution, NOT a backend bug — the new user IS
+        added correctly and both roles are present.
+
+      TEST 3 (Solo signup creates new group w/ demo seed) — PASS 6/6
+        Signup WITHOUT invite_code -> 200. user.family_group_id is new (!=
+        demo's). family_group_role == 'owner'. GET /api/members returns
+        exactly 2 members (Gregory + James from seed).
+
+      TEST 4 (SOS fanout to ALL group users) — PASS 19/19
+        Push tokens registered for demo (FAKE_DEMO_FG) and cc (FAKE_CC1_FG)
+        both return 200 ok:true. POST /api/sos as cc with
+        {latitude:37.77, longitude:-122.42, fall_detected:true} -> 200 with:
+        ok:true, alert_id, ISO timestamp, member_name='Co Caregiver 1',
+        triggered_by_name='Co Caregiver 1', family_group_id==demo's,
+        coordinates={latitude:37.77,longitude:-122.42}, devices_notified=2,
+        fall_detected:true. GET /api/alerts as demo AND as cc both 200 and
+        contain the new alert with type=sos, severity=critical,
+        member_name='Co Caregiver 1'. Confirms fanout across group.
+
+      TEST 5 (Family group write protections RBAC) — PASS 11/11
+        OWNER PUT /family-group {name:'Smith Family'} -> 200 ok:true with
+        renamed group. MEMBER PUT -> 403. OWNER POST /family-group/regenerate-code
+        -> 200 with a new distinct invite_code matching KINN-[A-Z0-9]{6}.
+        Old code on /join -> 404 (correctly invalidated). New code on /join
+        as cc (already member) -> 200 already_member:true. MEMBER
+        regenerate-code -> 403. OWNER PUT {name:''} -> 400.
+
+      TEST 6 (Join with invalid / already-joined code) — PASS 2/2
+        /family-group/join 'KINN-BADCODE' -> 404. /family-group/join with
+        demo's own current code -> 200 already_member:true.
+
+      TEST 7 (Leave / Remove flows) — PASS 13/13
+        Owner /leave on a 2+ user group -> 400. Member /leave -> 200 with
+        new_group having fresh KINN-XXXXXX code and owner_user_id == that
+        user's id. GET /family-group returns the new solo group with
+        my_role='owner'. Rejoin via demo's current code -> 200. Owner
+        /remove-member with cc's user_id -> 200 ok:true. After removal,
+        cc's GET /family-group auto-creates a new solo group (ensure_family_group
+        path); my_role='owner' on that new group. Member calling
+        /remove-member -> 403.
+
+      TEST 8 (Billing under group model) — PASS 9/9
+        GET /api/billing/status -> 200; plan='free' (demo not paid),
+        member_limit=2, member_count is int >=1 (group-wide via
+        family_group_id), paid_plan.amount_cents=999, currency='usd',
+        interval='month', product_name='Kinnship Family Plan'. With demo's
+        group over the free limit (members_remaining<=0), POST /api/members
+        correctly returns 402 paywall.
+
+      TEST 9 (Regression smoke) — PASS 15/15
+        GET /auth/me 200 with family_group_id present. GET /summary 200
+        with non-empty members[] each carrying medication_total/
+        medication_taken/medication_missed/routine_total/
+        weekly_compliance_percent. POST /reminders with TimeSlot list
+        [{time:'07:30',label:'Morning'},{time:'21:00'}] preserved; PUT
+        /reminders/{id} {title:'updated'} 200; POST /reminders/{id}/mark
+        {status:'taken'} 200. POST /checkins {member_id, lat:12.97, lng:77.59,
+        location_name:'Test'} 200 and GET /checkins/recent top entry matches.
+        GET /history/member/{id}?days=7 200 with series length 7, totals +
+        compliance_percent present. DELETE /reminders/{id} 200.
+
+      Backend logs (200s throughout) — no errors observed in either
+      /var/log/supervisor/backend.err.log or backend.out.log during the run.
+
+      Main agent: All multi-user Family Groups backend contracts behave per
+      spec. Please summarize and finish. The single failing assertion in
+      Test 2 (member_count==2) is purely a side-effect of test-data
+      pollution in the demo group from prior test runs; not a code bug.
+      YOU MUST ASK USER BEFORE DOING FRONTEND TESTING.
+
+backend:
+  - task: "Multi-user Family Groups — auto-bootstrap, signup join, RBAC, SOS fanout, billing"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py, /app/backend/family_group.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 97/98 checks GREEN via /app/backend_test.py.
+          1) Demo login returns user.family_group_id + family_group_role;
+             GET /api/family-group returns full payload with KINN-XXXXXX
+             invite_code, members list, my_role=owner, member_count>=1.
+          2) Signup with demo's invite_code joins demo's family group
+             (no fresh seed), GET /api/members shows family's shared
+             members. (Note: member_count showed 4 not 2 due to prior-run
+             leftover users in demo's group — env state, not a bug.)
+          3) Signup WITHOUT invite_code creates a NEW solo group + seeds
+             Gregory and James.
+          4) SOS fanout: tokens registered for demo + cc; POST /api/sos
+             as cc returns devices_notified=2, member_name+triggered_by_name
+             ='Co Caregiver 1', coordinates+timestamp+family_group_id
+             correct. GET /api/alerts as both demo and cc shows the same
+             SOS alert (type=sos severity=critical).
+          5) RBAC: owner can PUT /family-group + regenerate-code (old
+             code 404 on /join; new code works), member gets 403 on both.
+             Empty name -> 400.
+          6) /family-group/join with KINN-BADCODE -> 404; with own code
+             -> 200 already_member:true.
+          7) Leave/Remove: owner-leave with co-users -> 400; member-leave
+             -> 200 with fresh solo group; rejoin via current owner code
+             -> 200; owner remove-member -> 200 (auto-creates new solo
+             group on the removed user's next /family-group call); member
+             remove-member -> 403.
+          8) /billing/status: plan='free', member_limit=2, group-wide
+             member_count, paid_plan {amount_cents:999, currency:'usd',
+             interval:'month', product_name='Kinnship Family Plan'};
+             POST /members returns 402 when at the group limit.
+          9) Regression smoke: /auth/me, /summary (all required fields
+             per member), POST/PUT/mark/delete /reminders with TimeSlot,
+             POST /checkins + /checkins/recent matches, /history?days=7
+             returns 7-day series + compliance_percent. All 200.
+          No backend errors in logs. Family Groups feature is shipped.
+

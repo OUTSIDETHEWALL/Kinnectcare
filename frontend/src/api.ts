@@ -32,7 +32,14 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
-export type User = { id: string; email: string; full_name: string; timezone?: string };
+export type User = {
+  id: string;
+  email: string;
+  full_name: string;
+  timezone?: string;
+  family_group_id?: string | null;
+  family_group_role?: 'owner' | 'member' | null;
+};
 
 export type Member = {
   id: string;
@@ -149,4 +156,58 @@ export function isPaywall(err: any): PaywallError | null {
     return data as PaywallError;
   }
   return null;
+}
+
+// ========== Family Group ==========
+export type FamilyGroup = {
+  id: string;
+  name: string;
+  owner_user_id: string;
+  invite_code: string;
+  created_at?: string;
+};
+
+export type FamilyGroupMember = {
+  user_id: string;
+  full_name: string;
+  email: string;
+  role: 'owner' | 'member';
+  joined_at?: string;
+};
+
+export type FamilyGroupResponse = {
+  group: FamilyGroup;
+  members: FamilyGroupMember[];
+  my_role: 'owner' | 'member';
+  member_count: number;
+};
+
+export async function getFamilyGroup(): Promise<FamilyGroupResponse> {
+  const r = await api.get('/family-group');
+  return r.data;
+}
+
+export async function renameFamilyGroup(name: string): Promise<{ ok: boolean; group: FamilyGroup }> {
+  const r = await api.put('/family-group', { name });
+  return r.data;
+}
+
+export async function regenerateInviteCode(): Promise<{ ok: boolean; invite_code: string; group: FamilyGroup }> {
+  const r = await api.post('/family-group/regenerate-code');
+  return r.data;
+}
+
+export async function joinFamilyGroup(invite_code: string): Promise<{ ok: boolean; group: FamilyGroup; already_member?: boolean }> {
+  const r = await api.post('/family-group/join', { invite_code });
+  return r.data;
+}
+
+export async function leaveFamilyGroup(): Promise<{ ok: boolean; new_group: FamilyGroup }> {
+  const r = await api.post('/family-group/leave');
+  return r.data;
+}
+
+export async function removeFamilyMember(user_id: string): Promise<{ ok: boolean; removed_user_id: string }> {
+  const r = await api.post('/family-group/remove-member', { user_id });
+  return r.data;
 }

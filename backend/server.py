@@ -19,6 +19,7 @@ from pydantic import field_validator
 
 from expo_push import send_expo_push
 import billing
+import family_group as fg
 
 
 ROOT_DIR = Path(__file__).parent
@@ -45,6 +46,7 @@ class UserSignup(BaseModel):
     password: str
     full_name: str
     timezone: Optional[str] = None
+    invite_code: Optional[str] = None  # Optional: join an existing family group
 
 
 class UserLogin(BaseModel):
@@ -57,6 +59,8 @@ class UserResponse(BaseModel):
     email: str
     full_name: str
     timezone: Optional[str] = "UTC"
+    family_group_id: Optional[str] = None
+    family_group_role: Optional[str] = None
 
 
 class TokenResponse(BaseModel):
@@ -85,6 +89,7 @@ class FamilyMemberCreate(BaseModel):
 class FamilyMember(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     owner_id: str
+    family_group_id: Optional[str] = None
     name: str
     age: int
     phone: str
@@ -112,6 +117,7 @@ class TimeSlot(BaseModel):
 class Reminder(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     owner_id: str
+    family_group_id: Optional[str] = None
     member_id: str
     member_name: str
     category: str = "medication"
@@ -168,6 +174,7 @@ class ReminderMark(BaseModel):
 class Alert(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     owner_id: str
+    family_group_id: Optional[str] = None
     member_id: str
     member_name: str
     type: str
@@ -183,6 +190,7 @@ class Alert(BaseModel):
 class CheckIn(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     owner_id: str
+    family_group_id: Optional[str] = None
     member_id: str
     member_name: str
     location_name: Optional[str] = None
@@ -236,6 +244,8 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(securit
     user = await db.users.find_one({"id": user_id}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    # Ensure user has a family_group_id (lazy-creates for legacy users)
+    await fg.ensure_family_group(db, user)
     return user
 
 
@@ -299,12 +309,9 @@ async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
 
 
 # ========== Daily reset ==========
-async def reset_daily_reminder_statuses(owner_id: str):
-    user = await db.users.find_one({"id": owner_id}, {"_id": 0})
-    if not user:
-        return
+async def reset_daily_reminder_statuses(family_group_id: str, user: dict):
     today = local_today_str(user)
-    docs = await db.reminders.find({"owner_id": owner_id, "status": {"$ne": "pending"}}, {"_id": 0}).to_list(2000)
+    docs = await db.reminders.find({"family_group_id": family_group_id, "status": {"$ne": "pending"}}, {"_id": 0}).to_list(2000)
     for d in docs:
         if d.get("last_marked_date") and d["last_marked_date"] != today:
             await db.reminders.update_one(
@@ -312,20 +319,16 @@ async def reset_daily_reminder_statuses(owner_id: str):
             )
 
 
-async def detect_missed_checkins(owner_id: str):
-    user = await db.users.find_one({"id": owner_id}, {"_id": 0})
-    if not user:
-        return
+async def detect_missed_checkins(family_group_id: str, user: dict):
     tz = user_tz(user)
     now_local = datetime.now(tz)
-    today = now_local.date().isoformat()
     now_minutes = now_local.hour * 60 + now_local.minute
     # Today start in UTC for the user's local day
     day_start_local = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz)
     day_start_utc = day_start_local.astimezone(timezone.utc)
 
     members = await db.members.find(
-        {"owner_id": owner_id, "daily_checkin_time": {"$ne": None}}, {"_id": 0}
+        {"family_group_id": family_group_id, "daily_checkin_time": {"$ne": None}}, {"_id": 0}
     ).to_list(500)
     for m in members:
         t = m.get("daily_checkin_time")
@@ -335,42 +338,64 @@ async def detect_missed_checkins(owner_id: str):
         if expected is None or now_minutes < expected:
             continue
         has_ci = await db.checkins.find_one(
-            {"owner_id": owner_id, "member_id": m["id"], "created_at": {"$gte": day_start_utc}}
+            {"family_group_id": family_group_id, "member_id": m["id"], "created_at": {"$gte": day_start_utc}}
         )
         if has_ci:
             continue
         existing = await db.alerts.find_one({
-            "owner_id": owner_id, "member_id": m["id"], "type": "missed_checkin",
+            "family_group_id": family_group_id, "member_id": m["id"], "type": "missed_checkin",
             "created_at": {"$gte": day_start_utc},
         })
         if existing:
             continue
         a = Alert(
-            owner_id=owner_id, member_id=m["id"], member_name=m["name"],
+            owner_id=user["id"], family_group_id=family_group_id,
+            member_id=m["id"], member_name=m["name"],
             type="missed_checkin", severity="critical",
             title=f"{m['name']} missed daily check-in",
             message=f"Expected by {t} ({user.get('timezone') or 'UTC'}) today. They haven't checked in yet.",
         )
         await db.alerts.insert_one(a.model_dump())
         await db.members.update_one({"id": m["id"]}, {"$set": {"status": "warning"}})
-        # Push notify
-        await push_to_user(
-            owner_id,
+        # Push notify ALL members of the family group (so any caregiver gets the alert).
+        await push_to_family_group(
+            family_group_id,
             f"⚠️ {m['name']} missed check-in",
             f"Expected by {t}. Tap to call or check on them.",
             {"type": "missed_checkin", "member_id": m["id"]},
         )
 
 
+async def push_to_family_group(family_group_id: str, title: str, body: str, data: dict, exclude_user_id: Optional[str] = None) -> int:
+    """Fan out a push notification to every user in the given family group.
+
+    Returns the total number of devices (push tokens) the notification was
+    attempted on across all users in the group.
+    """
+    if not family_group_id:
+        return 0
+    user_ids = await fg.list_group_user_ids(db, family_group_id)
+    total = 0
+    for uid in user_ids:
+        if exclude_user_id and uid == exclude_user_id:
+            continue
+        try:
+            total += await push_to_user(uid, title, body, data)
+        except Exception as e:
+            logger.warning(f"push_to_family_group fanout failed for {uid}: {e}")
+    return total
+
+
 # ========== Seed ==========
-async def seed_demo_data(owner_id: str):
+async def seed_demo_data(owner_id: str, family_group_id: Optional[str] = None):
+    fgid = family_group_id
     gregory = FamilyMember(
-        owner_id=owner_id, name="Gregory", age=35, phone="+1-555-0142", gender="Male",
+        owner_id=owner_id, family_group_id=fgid, name="Gregory", age=35, phone="+1-555-0142", gender="Male",
         role="family", status="healthy", location_name="Downtown Office",
         avatar_url="https://images.unsplash.com/photo-1592234789031-94bf65f630ed?crop=entropy&cs=srgb&fm=jpg&w=400",
     )
     james = FamilyMember(
-        owner_id=owner_id, name="James", age=78, phone="+1-555-0178", gender="Male",
+        owner_id=owner_id, family_group_id=fgid, name="James", age=78, phone="+1-555-0178", gender="Male",
         role="senior", status="warning", location_name="Home",
         daily_checkin_time="09:00",
         avatar_url="https://images.unsplash.com/photo-1667312147803-4b2437b5485e?crop=entropy&cs=srgb&fm=jpg&w=400",
@@ -378,38 +403,38 @@ async def seed_demo_data(owner_id: str):
     await db.members.insert_many([gregory.model_dump(), james.model_dump()])
 
     meds = [
-        Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
+        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
                  category="medication", title="Metformin", dosage="500mg, 1 pill",
                  times=[TimeSlot(time="08:00", label="Morning"), TimeSlot(time="20:00", label="Bedtime")], time="08:00"),
-        Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
+        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
                  category="medication", title="Lisinopril", dosage="10mg",
                  times=[TimeSlot(time="13:00", label="Afternoon")], time="13:00"),
-        Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
+        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
                  category="medication", title="Aspirin", dosage="81mg",
                  times=[TimeSlot(time="09:00", label="Morning")], time="09:00"),
     ]
     routines = [
-        Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
+        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
                  category="routine", title="Drink water",
                  times=[TimeSlot(time="10:00"), TimeSlot(time="14:00"), TimeSlot(time="18:00")], time="10:00"),
-        Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
+        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
                  category="routine", title="Morning walk",
                  times=[TimeSlot(time="07:30", label="Morning")], time="07:30"),
-        Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
+        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
                  category="routine", title="Breakfast",
                  times=[TimeSlot(time="08:30", label="Morning")], time="08:30"),
-        Reminder(owner_id=owner_id, member_id=james.id, member_name=james.name,
+        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
                  category="routine", title="Dinner",
                  times=[TimeSlot(time="19:00", label="Evening")], time="19:00"),
     ]
     await db.reminders.insert_many([r.model_dump() for r in meds + routines])
 
     alerts = [
-        Alert(owner_id=owner_id, member_id=james.id, member_name=james.name,
+        Alert(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
               type="low_battery", severity="warning",
               title="Low battery on James's device",
               message="Battery level is 15%. Please remind him to charge."),
-        Alert(owner_id=owner_id, member_id=james.id, member_name=james.name,
+        Alert(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
               type="medication", severity="warning",
               title="Medication missed",
               message="James missed his 8:00 AM Metformin."),
@@ -422,6 +447,8 @@ def _user_response(u: dict) -> UserResponse:
     return UserResponse(
         id=u["id"], email=u["email"], full_name=u["full_name"],
         timezone=u.get("timezone") or "UTC",
+        family_group_id=u.get("family_group_id"),
+        family_group_role=u.get("family_group_role"),
     )
 
 
@@ -434,6 +461,14 @@ async def signup(data: UserSignup):
         ZoneInfo(tz)
     except ZoneInfoNotFoundError:
         tz = "UTC"
+
+    # Resolve invite code (if any) BEFORE creating the user.
+    target_group = None
+    if data.invite_code:
+        target_group = await fg.get_group_by_code(db, data.invite_code)
+        if not target_group:
+            raise HTTPException(status_code=404, detail="Invite code not found")
+
     user_id = str(uuid.uuid4())
     doc = {
         "id": user_id, "email": data.email.lower(), "full_name": data.full_name,
@@ -442,7 +477,25 @@ async def signup(data: UserSignup):
         "created_at": datetime.now(timezone.utc),
     }
     await db.users.insert_one(doc)
-    await seed_demo_data(user_id)
+
+    if target_group:
+        # Join existing family group; do NOT seed demo data — they already have a family.
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {
+                "family_group_id": target_group["id"],
+                "family_group_role": "member",
+            }},
+        )
+        doc["family_group_id"] = target_group["id"]
+        doc["family_group_role"] = "member"
+    else:
+        # Create a new solo family group + seed demo data
+        group = await fg.create_group_for_user(db, doc)
+        doc["family_group_id"] = group["id"]
+        doc["family_group_role"] = "owner"
+        await seed_demo_data(user_id, group["id"])
+
     return TokenResponse(
         access_token=create_access_token(user_id),
         user=_user_response(doc),
@@ -454,6 +507,8 @@ async def login(data: UserLogin):
     user = await db.users.find_one({"email": data.email.lower()})
     if not user or not verify_password(data.password, user["hashed_password"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    # Ensure user has a family_group_id (lazy-creates for legacy users)
+    await fg.ensure_family_group(db, user)
     return TokenResponse(
         access_token=create_access_token(user["id"]),
         user=_user_response(user),
@@ -564,16 +619,16 @@ async def delete_account(
 # ========== Members ==========
 @api_router.get("/members", response_model=List[FamilyMember])
 async def list_members(current=Depends(get_current_user)):
-    docs = await db.members.find({"owner_id": current["id"]}, {"_id": 0}).to_list(1000)
+    docs = await db.members.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).to_list(1000)
     return [FamilyMember(**d) for d in docs]
 
 
 @api_router.post("/members", response_model=FamilyMember)
 async def create_member(data: FamilyMemberCreate, current=Depends(get_current_user)):
-    # Enforce free tier member limit.
-    limit = billing.get_member_limit(current)
+    # Enforce family-group-aware member limit (group is paid if ANY user is paid).
+    limit = await billing.get_member_limit_for_group(db, current)
     if limit != float("inf"):
-        existing = await db.members.count_documents({"owner_id": current["id"]})
+        existing = await db.members.count_documents({"family_group_id": current["family_group_id"]})
         if existing >= int(limit):
             raise HTTPException(
                 status_code=402,
@@ -590,7 +645,7 @@ async def create_member(data: FamilyMemberCreate, current=Depends(get_current_us
             )
     role = data.role if data.role in ("family", "senior") else ("senior" if data.age >= 60 else "family")
     member = FamilyMember(
-        owner_id=current["id"], name=data.name, age=data.age, phone=data.phone,
+        owner_id=current["id"], family_group_id=current["family_group_id"], name=data.name, age=data.age, phone=data.phone,
         gender=data.gender, role=role, status="healthy", location_name="Unknown",
         daily_checkin_time="09:00" if role == "senior" else None,
     )
@@ -600,7 +655,7 @@ async def create_member(data: FamilyMemberCreate, current=Depends(get_current_us
 
 @api_router.get("/members/{member_id}", response_model=FamilyMember)
 async def get_member(member_id: str, current=Depends(get_current_user)):
-    doc = await db.members.find_one({"id": member_id, "owner_id": current["id"]}, {"_id": 0})
+    doc = await db.members.find_one({"id": member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Member not found")
     return FamilyMember(**doc)
@@ -608,12 +663,12 @@ async def get_member(member_id: str, current=Depends(get_current_user)):
 
 @api_router.delete("/members/{member_id}")
 async def delete_member(member_id: str, current=Depends(get_current_user)):
-    r = await db.members.delete_one({"id": member_id, "owner_id": current["id"]})
+    r = await db.members.delete_one({"id": member_id, "family_group_id": current["family_group_id"]})
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
-    await db.reminders.delete_many({"owner_id": current["id"], "member_id": member_id})
-    await db.checkins.delete_many({"owner_id": current["id"], "member_id": member_id})
-    await db.medication_logs.delete_many({"owner_id": current["id"], "member_id": member_id})
+    await db.reminders.delete_many({"family_group_id": current["family_group_id"], "member_id": member_id})
+    await db.checkins.delete_many({"family_group_id": current["family_group_id"], "member_id": member_id})
+    await db.medication_logs.delete_many({"family_group_id": current["family_group_id"], "member_id": member_id})
     return {"ok": True}
 
 
@@ -622,7 +677,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     update = {"latitude": data.latitude, "longitude": data.longitude, "last_seen": datetime.now(timezone.utc)}
     if data.location_name:
         update["location_name"] = data.location_name
-    r = await db.members.update_one({"id": member_id, "owner_id": current["id"]}, {"$set": update})
+    r = await db.members.update_one({"id": member_id, "family_group_id": current["family_group_id"]}, {"$set": update})
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
     doc = await db.members.find_one({"id": member_id}, {"_id": 0})
@@ -635,7 +690,7 @@ async def update_checkin_settings(member_id: str, data: CheckinSettings, current
     if val and parse_hhmm(val) is None:
         raise HTTPException(status_code=400, detail="daily_checkin_time must be HH:MM format")
     r = await db.members.update_one(
-        {"id": member_id, "owner_id": current["id"]},
+        {"id": member_id, "family_group_id": current["family_group_id"]},
         {"$set": {"daily_checkin_time": val}}
     )
     if r.matched_count == 0:
@@ -647,15 +702,15 @@ async def update_checkin_settings(member_id: str, data: CheckinSettings, current
 # ========== Alerts ==========
 @api_router.get("/alerts", response_model=List[Alert])
 async def list_alerts(current=Depends(get_current_user)):
-    await detect_missed_checkins(current["id"])
-    docs = await db.alerts.find({"owner_id": current["id"]}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    await detect_missed_checkins(current["family_group_id"], current)
+    docs = await db.alerts.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).sort("created_at", -1).to_list(2000)
     return [Alert(**d) for d in docs]
 
 
 @api_router.post("/alerts/{alert_id}/ack")
 async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
     r = await db.alerts.update_one(
-        {"id": alert_id, "owner_id": current["id"]}, {"$set": {"acknowledged": True}}
+        {"id": alert_id, "family_group_id": current["family_group_id"]}, {"$set": {"acknowledged": True}}
     )
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Alert not found")
@@ -665,23 +720,23 @@ async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
 # ========== Reminders ==========
 @api_router.get("/reminders", response_model=List[Reminder])
 async def list_reminders(current=Depends(get_current_user)):
-    await reset_daily_reminder_statuses(current["id"])
-    docs = await db.reminders.find({"owner_id": current["id"]}, {"_id": 0}).to_list(2000)
+    await reset_daily_reminder_statuses(current["family_group_id"], current)
+    docs = await db.reminders.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).to_list(2000)
     return [Reminder.model_validate(d) for d in docs]
 
 
 @api_router.get("/reminders/member/{member_id}", response_model=List[Reminder])
 async def list_member_reminders(member_id: str, current=Depends(get_current_user)):
-    await reset_daily_reminder_statuses(current["id"])
+    await reset_daily_reminder_statuses(current["family_group_id"], current)
     docs = await db.reminders.find(
-        {"owner_id": current["id"], "member_id": member_id}, {"_id": 0}
+        {"family_group_id": current["family_group_id"], "member_id": member_id}, {"_id": 0}
     ).to_list(2000)
     return [Reminder.model_validate(d) for d in docs]
 
 
 @api_router.post("/reminders", response_model=Reminder)
 async def create_reminder(data: ReminderCreate, current=Depends(get_current_user)):
-    member = await db.members.find_one({"id": data.member_id, "owner_id": current["id"]}, {"_id": 0})
+    member = await db.members.find_one({"id": data.member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
     if data.category not in ("medication", "routine"):
@@ -692,7 +747,7 @@ async def create_reminder(data: ReminderCreate, current=Depends(get_current_user
             raise HTTPException(status_code=400, detail=f"Invalid time format: {slot.time}")
     times = data.times or []
     rem = Reminder(
-        owner_id=current["id"], member_id=data.member_id, member_name=member["name"],
+        owner_id=current["id"], family_group_id=current["family_group_id"], member_id=data.member_id, member_name=member["name"],
         category=data.category, title=data.title, dosage=data.dosage,
         times=times, time=times[0].time if times else "",
     )
@@ -702,7 +757,7 @@ async def create_reminder(data: ReminderCreate, current=Depends(get_current_user
 
 @api_router.put("/reminders/{reminder_id}", response_model=Reminder)
 async def update_reminder(reminder_id: str, data: ReminderUpdate, current=Depends(get_current_user)):
-    rem = await db.reminders.find_one({"id": reminder_id, "owner_id": current["id"]}, {"_id": 0})
+    rem = await db.reminders.find_one({"id": reminder_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not rem:
         raise HTTPException(status_code=404, detail="Reminder not found")
     update: dict = {}
@@ -726,7 +781,7 @@ async def update_reminder(reminder_id: str, data: ReminderUpdate, current=Depend
 async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(get_current_user)):
     if body.status not in ("taken", "missed", "pending"):
         raise HTTPException(status_code=400, detail="invalid status")
-    rem = await db.reminders.find_one({"id": reminder_id, "owner_id": current["id"]}, {"_id": 0})
+    rem = await db.reminders.find_one({"id": reminder_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not rem:
         raise HTTPException(status_code=404, detail="Reminder not found")
     now = datetime.now(timezone.utc)
@@ -743,7 +798,7 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
     # Log every mark for medication history
     await db.medication_logs.insert_one({
         "id": str(uuid.uuid4()),
-        "owner_id": current["id"],
+        "family_group_id": current["family_group_id"],
         "reminder_id": reminder_id,
         "member_id": rem["member_id"],
         "category": rem.get("category", "medication"),
@@ -755,7 +810,7 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
 
     if body.status == "missed":
         recent = await db.alerts.find_one({
-            "owner_id": current["id"], "member_id": rem["member_id"],
+            "family_group_id": current["family_group_id"], "member_id": rem["member_id"],
             "type": rem.get("category", "medication"),
             "created_at": {"$gte": now - timedelta(hours=1)},
             "title": {"$regex": rem["title"]},
@@ -764,14 +819,14 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
             atype = "medication" if rem.get("category") == "medication" else "routine"
             label = "Medication" if atype == "medication" else "Routine"
             a = Alert(
-                owner_id=current["id"], member_id=rem["member_id"], member_name=rem["member_name"],
+                owner_id=current["id"], family_group_id=current["family_group_id"], member_id=rem["member_id"], member_name=rem["member_name"],
                 type=atype, severity="warning",
                 title=f"{label} missed: {rem['title']}",
                 message=f"{rem['member_name']} missed {rem['title']}" + (f" ({rem.get('dosage')})" if rem.get('dosage') else "") + ".",
             )
             await db.alerts.insert_one(a.model_dump())
-            await push_to_user(
-                current["id"],
+            await push_to_family_group(
+                current["family_group_id"],
                 f"💊 {rem['member_name']} missed {rem['title']}",
                 a.message,
                 {"type": atype, "member_id": rem["member_id"], "reminder_id": reminder_id},
@@ -781,7 +836,7 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
 
 @api_router.post("/reminders/{reminder_id}/toggle")
 async def toggle_reminder(reminder_id: str, current=Depends(get_current_user)):
-    rem = await db.reminders.find_one({"id": reminder_id, "owner_id": current["id"]}, {"_id": 0})
+    rem = await db.reminders.find_one({"id": reminder_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not rem:
         raise HTTPException(status_code=404, detail="Reminder not found")
     new_taken = not rem.get("taken", False)
@@ -796,7 +851,7 @@ async def toggle_reminder(reminder_id: str, current=Depends(get_current_user)):
 
 @api_router.delete("/reminders/{reminder_id}")
 async def delete_reminder(reminder_id: str, current=Depends(get_current_user)):
-    r = await db.reminders.delete_one({"id": reminder_id, "owner_id": current["id"]})
+    r = await db.reminders.delete_one({"id": reminder_id, "family_group_id": current["family_group_id"]})
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Reminder not found")
     return {"ok": True}
@@ -806,7 +861,7 @@ async def delete_reminder(reminder_id: str, current=Depends(get_current_user)):
 @api_router.get("/history/member/{member_id}")
 async def member_history(member_id: str, days: int = 7, current=Depends(get_current_user)):
     days = max(1, min(days, 30))
-    member = await db.members.find_one({"id": member_id, "owner_id": current["id"]}, {"_id": 0})
+    member = await db.members.find_one({"id": member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
     tz = user_tz(current)
@@ -816,7 +871,7 @@ async def member_history(member_id: str, days: int = 7, current=Depends(get_curr
     start_dt_utc = start_dt_local.astimezone(timezone.utc)
 
     logs = await db.medication_logs.find({
-        "owner_id": current["id"], "member_id": member_id, "category": "medication",
+        "family_group_id": current["family_group_id"], "member_id": member_id, "category": "medication",
         "marked_at": {"$gte": start_dt_utc},
     }, {"_id": 0}).to_list(5000)
 
@@ -860,11 +915,11 @@ async def member_history(member_id: str, days: int = 7, current=Depends(get_curr
 # ========== Check-ins ==========
 @api_router.post("/checkins", response_model=CheckIn)
 async def create_checkin(data: CheckInCreate, current=Depends(get_current_user)):
-    member = await db.members.find_one({"id": data.member_id, "owner_id": current["id"]}, {"_id": 0})
+    member = await db.members.find_one({"id": data.member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
     ci = CheckIn(
-        owner_id=current["id"], member_id=data.member_id, member_name=member["name"],
+        owner_id=current["id"], family_group_id=current["family_group_id"], member_id=data.member_id, member_name=member["name"],
         location_name=data.location_name, latitude=data.latitude, longitude=data.longitude,
     )
     await db.checkins.insert_one(ci.model_dump())
@@ -880,7 +935,7 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
     now_local = datetime.now(tz)
     day_start_utc = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz).astimezone(timezone.utc)
     await db.alerts.update_many(
-        {"owner_id": current["id"], "member_id": data.member_id,
+        {"family_group_id": current["family_group_id"], "member_id": data.member_id,
          "type": "missed_checkin", "created_at": {"$gte": day_start_utc}},
         {"$set": {"acknowledged": True}}
     )
@@ -890,7 +945,7 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
 @api_router.get("/checkins/member/{member_id}", response_model=List[CheckIn])
 async def list_member_checkins(member_id: str, current=Depends(get_current_user)):
     docs = await db.checkins.find(
-        {"owner_id": current["id"], "member_id": member_id}, {"_id": 0}
+        {"family_group_id": current["family_group_id"], "member_id": member_id}, {"_id": 0}
     ).sort("created_at", -1).to_list(100)
     return [CheckIn(**d) for d in docs]
 
@@ -901,7 +956,7 @@ async def list_recent_checkins(current=Depends(get_current_user)):
     now_local = datetime.now(tz)
     day_start_utc = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz).astimezone(timezone.utc)
     docs = await db.checkins.find(
-        {"owner_id": current["id"], "created_at": {"$gte": day_start_utc}}, {"_id": 0}
+        {"family_group_id": current["family_group_id"], "created_at": {"$gte": day_start_utc}}, {"_id": 0}
     ).sort("created_at", -1).to_list(200)
     return [CheckIn(**d) for d in docs]
 
@@ -1006,10 +1061,16 @@ async def billing_webhook(request: Request):
 # ========== SOS ==========
 @api_router.post("/sos")
 async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
-    member_name = current["full_name"]
+    # Get triggering user's name (the person who pressed SOS) for the push notification.
+    triggered_by_name = current.get("full_name") or "A family member"
+
+    # SOS member_id resolution:
+    #  - If frontend passed member_id, use that member's name.
+    #  - Otherwise the triggering user IS the person in distress; use their name.
+    member_name = triggered_by_name
     member_id = data.member_id or current["id"]
     if data.member_id:
-        m = await db.members.find_one({"id": data.member_id, "owner_id": current["id"]}, {"_id": 0})
+        m = await db.members.find_one({"id": data.member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
         if m:
             member_name = m["name"]
     tz = user_tz(current)
@@ -1028,7 +1089,7 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         coord_line = "📍 Location unavailable"
 
     alert = Alert(
-        owner_id=current["id"], member_id=member_id, member_name=member_name,
+        owner_id=current["id"], family_group_id=current["family_group_id"], member_id=member_id, member_name=member_name,
         type="sos", severity="critical",
         title=f"SOS Emergency — {member_name}",
         message=f"{member_name} triggered SOS at {local_time_str}.{coord_str} Emergency services notified.",
@@ -1036,21 +1097,30 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
     )
     await db.alerts.insert_one(alert.model_dump())
 
-    # Enhanced push: notify ALL devices on the family account with member name + GPS + timestamp.
+    # Enhanced push: fan out to ALL users in the family group (every linked
+    # family member receives the alert on their own devices).
     fall_prefix = "Fall detected · " if data.fall_detected else ""
     push_title = f"🆘 {fall_prefix}SOS — {member_name}"
-    push_body = f"{coord_line}\n🕒 {local_time_str}\nTap to view & respond."
+    triggered_by_line = (
+        f"Triggered by {triggered_by_name}\n" if triggered_by_name and triggered_by_name != member_name else ""
+    )
+    push_body = f"{triggered_by_line}{coord_line}\n🕒 {local_time_str}\nTap to view & respond."
     push_data = {
         "type": "sos",
         "alert_id": alert.id,
         "member_id": member_id,
         "member_name": member_name,
+        "triggered_by_user_id": current["id"],
+        "triggered_by_name": triggered_by_name,
+        "family_group_id": current["family_group_id"],
         "latitude": data.latitude,
         "longitude": data.longitude,
         "timestamp": timestamp_iso,
         "fall_detected": bool(data.fall_detected),
     }
-    devices_notified = await push_to_user(current["id"], push_title, push_body, push_data)
+    devices_notified = await push_to_family_group(
+        current["family_group_id"], push_title, push_body, push_data
+    )
 
     return {
         "ok": True,
@@ -1058,18 +1128,21 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         "emergency_number": "911",
         "timestamp": timestamp_iso,
         "member_name": member_name,
+        "triggered_by_name": triggered_by_name,
+        "family_group_id": current["family_group_id"],
         "coordinates": (
             {"latitude": data.latitude, "longitude": data.longitude} if has_coords else None
         ),
         "devices_notified": devices_notified,
+        "fall_detected": bool(data.fall_detected),
     }
 
 
 # ========== Dashboard summary ==========
 @api_router.get("/summary")
 async def dashboard_summary(current=Depends(get_current_user)):
-    await reset_daily_reminder_statuses(current["id"])
-    await detect_missed_checkins(current["id"])
+    await reset_daily_reminder_statuses(current["family_group_id"], current)
+    await detect_missed_checkins(current["family_group_id"], current)
     tz = user_tz(current)
     now_local = datetime.now(tz)
     day_start_utc = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz).astimezone(timezone.utc)
@@ -1077,13 +1150,13 @@ async def dashboard_summary(current=Depends(get_current_user)):
     week_start_local = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz) - timedelta(days=6)
     week_start_utc = week_start_local.astimezone(timezone.utc)
 
-    members = await db.members.find({"owner_id": current["id"]}, {"_id": 0}).to_list(500)
-    rems = await db.reminders.find({"owner_id": current["id"]}, {"_id": 0}).to_list(2000)
+    members = await db.members.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).to_list(500)
+    rems = await db.reminders.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).to_list(2000)
     cis = await db.checkins.find(
-        {"owner_id": current["id"], "created_at": {"$gte": day_start_utc}}, {"_id": 0}
+        {"family_group_id": current["family_group_id"], "created_at": {"$gte": day_start_utc}}, {"_id": 0}
     ).to_list(500)
     week_logs = await db.medication_logs.find(
-        {"owner_id": current["id"], "category": "medication", "marked_at": {"$gte": week_start_utc}},
+        {"family_group_id": current["family_group_id"], "category": "medication", "marked_at": {"$gte": week_start_utc}},
         {"_id": 0},
     ).to_list(5000)
 
@@ -1120,6 +1193,10 @@ async def root():
     return {"message": "Kinnship API", "status": "ok"}
 
 
+# Register family group routes (multi-user family invite & membership)
+api_router.include_router(fg.build_router(db, get_current_user, push_to_user=push_to_user))
+
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -1154,6 +1231,41 @@ async def _migrate_legacy_reminders():
         )
     except Exception as e:
         logger.warning(f"Legacy reminder migration skipped: {e}")
+
+
+@app.on_event("startup")
+async def _migrate_family_groups():
+    """Backfill family_group_id on every legacy user + their owned data.
+
+    For each user without a family_group_id we create a brand-new solo family
+    group (named after the user), then tag all of their owned data in
+    members/reminders/alerts/checkins/medication_logs with that group id.
+    Idempotent: running this on an already-migrated DB is a no-op.
+    """
+    try:
+        cursor = db.users.find(
+            {"family_group_id": {"$exists": False}},
+            {"_id": 0, "id": 1, "full_name": 1, "email": 1},
+        )
+        legacy = await cursor.to_list(10000)
+        if not legacy:
+            return
+        logger.info(f"Backfilling family_group_id for {len(legacy)} legacy users…")
+        for user in legacy:
+            try:
+                group = await fg.create_group_for_user(db, user)
+                gid = group["id"]
+                # Backfill data
+                for coll in fg.DATA_COLLECTIONS:
+                    await db[coll].update_many(
+                        {"owner_id": user["id"], "family_group_id": {"$exists": False}},
+                        {"$set": {"family_group_id": gid}},
+                    )
+            except Exception as e:
+                logger.warning(f"Migration failed for user {user.get('id')}: {e}")
+        logger.info("Family group migration complete.")
+    except Exception as e:
+        logger.warning(f"Family group migration skipped: {e}")
 
 
 @app.on_event("shutdown")

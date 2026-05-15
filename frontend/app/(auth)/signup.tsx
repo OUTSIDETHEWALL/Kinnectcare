@@ -15,6 +15,7 @@ export default function Signup() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
   const [loading, setLoading] = useState(false);
 
   const onSubmit = async () => {
@@ -24,7 +25,7 @@ export default function Signup() {
     }
     setLoading(true);
     try {
-      await signup(email.trim(), password, name.trim());
+      await signup(email.trim(), password, name.trim(), inviteCode.trim() || undefined);
       router.replace('/(tabs)/dashboard');
     } catch (e: any) {
       Alert.alert('Sign up failed', e?.response?.data?.detail || 'Please try again.');
@@ -49,6 +50,19 @@ export default function Signup() {
           <Field label="Full name" value={name} onChangeText={setName} placeholder="Jane Smith" testID="signup-name" />
           <Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address" autoCapitalize="none" testID="signup-email" />
           <Field label="Password" value={password} onChangeText={setPassword} placeholder="••••••••" secureTextEntry testID="signup-password" />
+          <Field
+            label="Family invite code (optional)"
+            value={inviteCode}
+            onChangeText={(v) => setInviteCode(v.toUpperCase())}
+            placeholder="KINN-XXXXXX"
+            autoCapitalize="characters"
+            testID="signup-invite-code"
+          />
+          {inviteCode.trim() ? (
+            <Text style={styles.inviteHint}>
+              👨‍👩‍👧 You'll join an existing family and see their members & alerts immediately.
+            </Text>
+          ) : null}
 
           <TouchableOpacity testID="signup-submit" style={styles.cta} onPress={onSubmit} disabled={loading} activeOpacity={0.85}>
             {loading ? <ActivityIndicator color={Colors.surface} /> : <Text style={styles.ctaText}>Create Account</Text>}
@@ -110,4 +124,5 @@ const styles = StyleSheet.create({
     marginTop: 14, paddingHorizontal: 6, lineHeight: 18,
   },
   agreementLink: { color: Colors.primary, fontWeight: '700', textDecorationLine: 'underline' },
+  inviteHint: { fontSize: 12, color: Colors.success, marginTop: 8, lineHeight: 18 },
 });

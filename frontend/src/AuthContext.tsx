@@ -9,9 +9,10 @@ const TOKEN_KEY = 'kc_token';
 type AuthCtx = {
   user: User | null;
   loading: boolean;
-  signup: (email: string, password: string, fullName: string) => Promise<void>;
+  signup: (email: string, password: string, fullName: string, inviteCode?: string) => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  refreshUser: () => Promise<void>;
 };
 
 const Ctx = createContext<AuthCtx | undefined>(undefined);
@@ -40,9 +41,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })();
   }, []);
 
-  const signup = async (email: string, password: string, full_name: string) => {
+  const signup = async (email: string, password: string, full_name: string, inviteCode?: string) => {
     const tz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
-    const res = await api.post('/auth/signup', { email, password, full_name, timezone: tz });
+    const body: any = { email, password, full_name, timezone: tz };
+    if (inviteCode && inviteCode.trim()) {
+      body.invite_code = inviteCode.trim().toUpperCase();
+    }
+    const res = await api.post('/auth/signup', body);
     await saveToken(res.data.access_token);
     setUser(res.data.user);
   };
@@ -65,8 +70,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   };
 
+  const refreshUser = async () => {
+    try {
+      const res = await api.get('/auth/me');
+      setUser(res.data);
+    } catch (_e) {}
+  };
+
   return (
-    <Ctx.Provider value={{ user, loading, signup, login, logout }}>
+    <Ctx.Provider value={{ user, loading, signup, login, logout, refreshUser }}>
       {children}
     </Ctx.Provider>
   );

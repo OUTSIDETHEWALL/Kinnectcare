@@ -141,6 +141,18 @@ export default function SettingsScreen() {
         </View>
 
         <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Family</Text>
+          <View style={styles.card}>
+            <NavRow
+              testID="settings-family-group"
+              icon="👨‍👩‍👧"
+              label="Family Group & Invite Code"
+              onPress={() => router.push('/family-group')}
+            />
+          </View>
+        </View>
+
+        <View style={styles.section}>
           <Text style={styles.sectionLabel}>Safety</Text>
           <View style={styles.card}>
             <View style={styles.fallRow} testID="settings-fall-row">

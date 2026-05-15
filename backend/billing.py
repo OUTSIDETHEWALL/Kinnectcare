@@ -100,12 +100,41 @@ def plan_for_user(user_doc: dict) -> str:
     return "free"
 
 
+async def group_is_paid(db, family_group_id: Optional[str]) -> bool:
+    """A family group is on Family Plan if ANY user in it has an active paid sub."""
+    if not family_group_id:
+        return False
+    cursor = db.users.find(
+        {"family_group_id": family_group_id, "subscription.plan": "family_plan"},
+        {"_id": 0, "subscription": 1},
+    )
+    docs = await cursor.to_list(50)
+    for d in docs:
+        if plan_for_user(d) == "family_plan":
+            return True
+    return False
+
+
+async def get_member_limit_for_group(
+    db, user_doc: dict, free_limit: int = FREE_LIMIT_DEFAULT
+):
+    """Returns int member limit for the user's family group (math.inf for paid)."""
+    if is_paid(user_doc):
+        return math.inf
+    fgid = user_doc.get("family_group_id")
+    if fgid and await group_is_paid(db, fgid):
+        return math.inf
+    return free_limit
+
+
 def is_paid(user_doc: dict) -> bool:
     return plan_for_user(user_doc) == "family_plan"
 
 
 def get_member_limit(user_doc: dict, free_limit: int = FREE_LIMIT_DEFAULT):
-    """Returns int member limit (math.inf for paid)."""
+    """Returns int member limit (math.inf for paid). Synchronous; only checks
+    this user's own subscription. For full group-level check, use
+    get_member_limit_for_group."""
     return math.inf if is_paid(user_doc) else free_limit
 
 
@@ -193,8 +222,17 @@ async def revert_user_to_free_by_customer(db, customer_id: str) -> None:
 async def build_status_payload(user_doc: dict, db, free_limit: int = FREE_LIMIT_DEFAULT) -> dict:
     sub = user_doc.get("subscription") or {}
     plan = plan_for_user(user_doc)
-    member_count = await db.members.count_documents({"owner_id": user_doc["id"]})
-    limit = get_member_limit(user_doc, free_limit)
+    fgid = user_doc.get("family_group_id")
+    # Count members for the user's family group (the user's own data is also
+    # tagged with this group id).
+    if fgid:
+        member_count = await db.members.count_documents({"family_group_id": fgid})
+    else:
+        member_count = await db.members.count_documents({"owner_id": user_doc["id"]})
+    limit = await get_member_limit_for_group(db, user_doc, free_limit)
+    # If the group is paid (someone else paid), reflect that.
+    if plan == "free" and fgid and await group_is_paid(db, fgid):
+        plan = "family_plan"
     members_remaining: Optional[int]
     if limit == math.inf:
         members_remaining = None
