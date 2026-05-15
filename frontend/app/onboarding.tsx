@@ -150,7 +150,7 @@ const styles = StyleSheet.create({
     }),
   },
   illustrationEmoji: { fontSize: 100 },
-  logo: { width: 160, height: 160, borderRadius: 28 },
+  logo: { width: 128, height: 128, borderRadius: 24 },
   title: {
     fontSize: 26, fontWeight: '800', color: Colors.textPrimary,
     textAlign: 'center', marginBottom: 14, lineHeight: 32,

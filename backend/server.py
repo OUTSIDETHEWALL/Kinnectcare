@@ -40,6 +40,14 @@ app = FastAPI(title="Kinnship API")
 api_router = APIRouter(prefix="/api")
 
 
+# ========== Static: App Store screenshots ==========
+# Serves /api/screenshots/<file> for App Store / pitch-deck delivery.
+SCREENSHOTS_DIR = "/app/frontend/screenshots"
+if os.path.isdir(SCREENSHOTS_DIR):
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/api/screenshots", StaticFiles(directory=SCREENSHOTS_DIR), name="screenshots")
+
+
 # ========== Models ==========
 class UserSignup(BaseModel):
     email: EmailStr
