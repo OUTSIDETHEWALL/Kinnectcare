@@ -222,22 +222,21 @@ export default function Dashboard() {
             <View style={styles.upgradeIconWrap}>
               <Text style={styles.upgradeIcon}>⭐</Text>
             </View>
-            <View style={{ flex: 1, marginLeft: 14 }}>
-              <Text style={styles.upgradeTitle}>Upgrade to Family Plan</Text>
-              <Text style={styles.upgradeSub}>
+            <View style={styles.upgradeTextBlock}>
+              <Text style={styles.upgradeTitle} numberOfLines={2}>Upgrade to Family Plan</Text>
+              <Text style={styles.upgradeSub} numberOfLines={2}>
                 Add unlimited members for <Text style={styles.upgradePrice}>$9.99/mo</Text>
               </Text>
               {typeof billing.members_remaining === 'number' && billing.member_limit !== null ? (
-                <Text style={styles.upgradeUsage}>
+                <Text style={styles.upgradeUsage} numberOfLines={1}>
                   {billing.members_remaining > 0
-                    ? `${billing.members_remaining} of ${billing.member_limit} member slots left`
-                    : `You've used all ${billing.member_limit} free slots`}
+                    ? `${billing.members_remaining} of ${billing.member_limit} slots left`
+                    : `All ${billing.member_limit} free slots used`}
                 </Text>
               ) : null}
             </View>
             <View testID="dashboard-upgrade-cta" style={styles.upgradeCta}>
               <Text style={styles.upgradeCtaText}>Upgrade</Text>
-              <Text style={styles.upgradeCtaArrow}>›</Text>
             </View>
           </TouchableOpacity>
         )}
@@ -381,26 +380,26 @@ const styles = StyleSheet.create({
   sosText: { color: Colors.surface, fontSize: 18, fontWeight: '800', letterSpacing: 0.3 },
   upgradeBanner: {
     flexDirection: 'row', alignItems: 'center',
-    marginHorizontal: 20, marginTop: 24, padding: 16,
+    marginHorizontal: 20, marginTop: 24, padding: 14,
     backgroundColor: Colors.surface, borderRadius: 16,
     borderWidth: 1, borderColor: Colors.tertiary,
     boxShadow: '0px 6px 16px rgba(27,94,53,0.10)' as any,
   },
   upgradeIconWrap: {
-    width: 48, height: 48, borderRadius: 24,
+    width: 40, height: 40, borderRadius: 20,
     backgroundColor: Colors.tertiary,
     alignItems: 'center', justifyContent: 'center',
   },
-  upgradeIcon: { fontSize: 24 },
-  upgradeTitle: { fontSize: 15, fontWeight: '800', color: Colors.textPrimary },
-  upgradeSub: { fontSize: 13, color: Colors.textSecondary, marginTop: 2 },
+  upgradeIcon: { fontSize: 20 },
+  upgradeTextBlock: { flex: 1, marginLeft: 12, marginRight: 8, minWidth: 0 },
+  upgradeTitle: { fontSize: 14, fontWeight: '800', color: Colors.textPrimary, lineHeight: 18 },
+  upgradeSub: { fontSize: 12, color: Colors.textSecondary, marginTop: 2 },
   upgradePrice: { fontWeight: '800', color: Colors.primary },
-  upgradeUsage: { fontSize: 11, color: Colors.textTertiary, marginTop: 4, fontWeight: '600' },
+  upgradeUsage: { fontSize: 10.5, color: Colors.textTertiary, marginTop: 3, fontWeight: '600' },
   upgradeCta: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 14, paddingVertical: 10,
-    backgroundColor: Colors.primary, borderRadius: 12,
-    marginLeft: 8,
+    paddingHorizontal: 14, paddingVertical: 9,
+    backgroundColor: Colors.primary, borderRadius: 10,
+    alignItems: 'center', justifyContent: 'center',
   },
   upgradeCtaText: { color: Colors.surface, fontSize: 13, fontWeight: '800' },
   upgradeCtaArrow: { color: Colors.surface, fontSize: 16, fontWeight: '700' },
