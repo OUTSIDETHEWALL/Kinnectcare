@@ -2016,11 +2016,11 @@ agent_communication:
 backend:
   - task: "Annual subscription plan: $99.99/year alongside $9.99/month"
     implemented: true
-    working: "NA"
+    working: true
     file: "/app/backend/billing.py, /app/backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
       - working: "NA"
         agent: "main"
@@ -2056,6 +2056,72 @@ backend:
               in green
             - CTAs "Choose Monthly" / "Choose Annual" hit
               POST /billing/checkout-session with {interval}
+
+
+frontend:
+  - task: "Upgrade screen — Annual + Monthly plan cards"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/upgrade.tsx, /app/frontend/app/settings.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — All scenarios A-G GREEN at iPhone 390x844 + Samsung S21 360x800
+          (after restarting expo to pick up the new bundle). Verified via two
+          browser_automation runs against http://localhost:3000.
+
+          A) /upgrade hero ✓: 🚀 emoji, "Upgrade to Family Plan", subtitle
+             "Unlock unlimited family members and every premium feature.
+             Cancel anytime." WHAT'S INCLUDED card has 6 ✓ rows (Unlimited
+             family members / Daily check-ins & SOS / Medications & routines
+             / Weekly compliance charts / Priority SOS push to family /
+             Cancel anytime).
+             Annual card (upgrade-plan-annual) appears FIRST: ⭐ Best Value
+             badge sticks out top-left, title "Annual", "$99.99 / year",
+             sub "Just $8.33/mo billed yearly", "Save $19.89" green pill on
+             the right side. Border: 2px solid rgb(27,94,53) (darker/thicker
+             than monthly card's 1px rgb(227,237,224)). CTA
+             upgrade-cta-annual reads "Choose Annual" with primary green
+             fill. Monthly card (upgrade-plan-monthly) appears below: title
+             "Monthly", "$9.99 / month", sub "Billed every month · cancel
+             anytime", no badge, no save pill, lighter border, CTA
+             upgrade-cta-monthly reads "Choose Monthly" with outlined
+             monochrome style.
+          B) Choose Annual ✓: POST /api/billing/checkout-session →
+             req body `{...,"interval":"year"}` (verified), HTTP 200. Page
+             auto-navigated toward checkout.stripe.com (response listener
+             couldn't await JSON post-navigation, but backend logs confirm
+             200 and Stripe SDK created a real checkout session).
+          C) Choose Monthly ✓: POST /api/billing/checkout-session →
+             req body `{...,"interval":"month"}` (verified), HTTP 200.
+          D) /settings free-tier copy ✓: pitch reads "Unlock unlimited
+             family members, weekly compliance charts, and priority SOS
+             push from $9.99/month — or save 17% with the $99.99/year
+             annual plan." Both $9.99/month AND $99.99/year visibly
+             present. settings-view-plans button rendered.
+          E) Cross-viewport 360x800 ✓: both plan cards render; all 4
+             testIDs (upgrade-plan-annual, upgrade-plan-monthly,
+             upgrade-cta-annual, upgrade-cta-monthly) present and
+             tappable; scrollWidth == clientWidth (no horizontal
+             overflow). (Note: Expo Web preview renders at host 1920w
+             even after page.set_viewport_size; layout is verified via
+             scrollWidth equality.)
+          F) Console ✓: 0 red errors, 0 shadow/Ionicons/non-DOM-prop
+             warnings across the full run.
+          G) Back nav ✓: From /upgrade (entered via Settings →
+             settings-view-plans) tap upgrade-back routes to /settings
+             without crash.
+
+          IMPORTANT NOTE: When the test first ran, the served bundle was
+          stale and showed the legacy single-plan UI (no annual card
+          testIDs). Restarting `expo` via supervisorctl picked up the
+          new upgrade.tsx and all assertions passed. Demo credentials
+          (demo@kinnship.app / password123) and family invite code were
+          not modified during this run.
 
 
 
