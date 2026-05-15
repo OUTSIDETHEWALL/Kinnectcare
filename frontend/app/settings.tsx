@@ -33,7 +33,10 @@ export default function SettingsScreen() {
     await setFallEnabled(v);
   };
 
-  const planLabel = billing?.plan === 'family_plan' ? 'Family Plan' : 'Free Plan';
+  const planLabel =
+    billing?.plan === 'family_plan'
+      ? (billing?.plan_label || (billing?.interval === 'year' ? 'Annual Plan' : 'Monthly Plan'))
+      : 'Free Plan';
   const limitLine = billing
     ? billing.member_limit === null
       ? `${billing.member_count} members · unlimited`
@@ -115,7 +118,7 @@ export default function SettingsScreen() {
             {billing?.plan !== 'family_plan' ? (
               <>
                 <Text style={styles.planPitch}>
-                  Unlock unlimited family members, weekly compliance charts, and priority SOS push for just $9.99/month.
+                  Unlock unlimited family members, weekly compliance charts, and priority SOS push from $9.99/month — or save 17% with the $99.99/year annual plan.
                 </Text>
                 <TouchableOpacity
                   testID="settings-view-plans"

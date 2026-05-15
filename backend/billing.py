@@ -36,6 +36,36 @@ PAID_AMOUNT_CENTS = int(os.getenv("PAID_PLAN_AMOUNT_CENTS", "999"))
 PAID_INTERVAL = os.getenv("PAID_PLAN_INTERVAL", "month")
 PAID_PRODUCT_NAME = os.getenv("PAID_PLAN_PRODUCT_NAME", "Kinnship Family Plan")
 PAID_CURRENCY = os.getenv("PAID_PLAN_CURRENCY", "usd")
+PAID_ANNUAL_AMOUNT_CENTS = int(os.getenv("PAID_PLAN_ANNUAL_AMOUNT_CENTS", "9999"))
+
+# Per-interval config used by /billing/status and /billing/checkout-session
+PLAN_INTERVALS = {
+    "month": {
+        "amount_cents": PAID_AMOUNT_CENTS,
+        "label": "Monthly",
+        "currency": PAID_CURRENCY,
+    },
+    "year": {
+        "amount_cents": PAID_ANNUAL_AMOUNT_CENTS,
+        "label": "Annual",
+        "currency": PAID_CURRENCY,
+    },
+}
+
+
+def normalize_interval(value: Optional[str]) -> str:
+    """Sanitize an interval string. Defaults to monthly when unknown/empty."""
+    if not value:
+        return "month"
+    v = str(value).strip().lower()
+    if v in ("year", "yearly", "annual", "annually"):
+        return "year"
+    return "month"
+
+
+def annual_savings_cents() -> int:
+    """Cents saved by paying annually vs 12 months. Never negative."""
+    return max(0, PAID_AMOUNT_CENTS * 12 - PAID_ANNUAL_AMOUNT_CENTS)
 
 
 def init_stripe() -> bool:
@@ -53,40 +83,72 @@ def is_configured() -> bool:
     return bool(os.getenv("STRIPE_SECRET_KEY", "").strip())
 
 
-async def get_or_create_price(db) -> str:
-    """Return a Stripe Price ID for the family plan. Creates Product+Price on first call."""
-    env_price = (os.getenv("STRIPE_PRICE_ID") or "").strip()
+async def get_or_create_price(db, interval: str = "month") -> str:
+    """Return a Stripe Price ID for the family plan at the requested interval.
+
+    On first use for an interval the function creates the underlying Stripe
+    Product (shared across intervals) and a Price for that interval, then caches
+    the price id under the doc key f"price_{interval}" in db.billing_config.
+
+    interval: 'month' or 'year'.
+    """
+    interval = normalize_interval(interval)
+
+    # Env override (one key per interval).
+    env_key = "STRIPE_PRICE_ID_ANNUAL" if interval == "year" else "STRIPE_PRICE_ID"
+    env_price = (os.getenv(env_key) or "").strip()
     if env_price:
         return env_price
 
-    cached = await db.billing_config.find_one({"key": "price"}, {"_id": 0})
+    cache_key = f"price_{interval}"
+    cached = await db.billing_config.find_one({"key": cache_key}, {"_id": 0})
     if cached and cached.get("price_id"):
         return cached["price_id"]
 
-    product = stripe.Product.create(
-        name=PAID_PRODUCT_NAME,
-        description="Unlimited family members and premium Kinnship features.",
+    # Re-use existing product across intervals.
+    existing_product_id: Optional[str] = None
+    any_cached = await db.billing_config.find_one(
+        {"product_id": {"$exists": True}}, {"_id": 0}
     )
+    if any_cached and any_cached.get("product_id"):
+        existing_product_id = any_cached["product_id"]
+    else:
+        # Legacy doc (key="price") used to store product_id at top level.
+        legacy = await db.billing_config.find_one({"key": "price"}, {"_id": 0})
+        if legacy and legacy.get("product_id"):
+            existing_product_id = legacy["product_id"]
+
+    if existing_product_id:
+        product_id = existing_product_id
+    else:
+        product = stripe.Product.create(
+            name=PAID_PRODUCT_NAME,
+            description="Unlimited family members and premium Kinnship features.",
+        )
+        product_id = product.id
+
+    amount = PLAN_INTERVALS[interval]["amount_cents"]
     price = stripe.Price.create(
-        product=product.id,
-        unit_amount=PAID_AMOUNT_CENTS,
+        product=product_id,
+        unit_amount=amount,
         currency=PAID_CURRENCY,
-        recurring={"interval": PAID_INTERVAL, "interval_count": 1},
+        recurring={"interval": interval, "interval_count": 1},
+        nickname=f"Kinnship Family Plan – {PLAN_INTERVALS[interval]['label']}",
     )
     await db.billing_config.update_one(
-        {"key": "price"},
+        {"key": cache_key},
         {"$set": {
-            "key": "price",
-            "product_id": product.id,
+            "key": cache_key,
+            "product_id": product_id,
             "price_id": price.id,
-            "amount_cents": PAID_AMOUNT_CENTS,
+            "amount_cents": amount,
             "currency": PAID_CURRENCY,
-            "interval": PAID_INTERVAL,
+            "interval": interval,
             "created_at": datetime.now(timezone.utc),
         }},
         upsert=True,
     )
-    logger.info(f"Auto-created Stripe product={product.id} price={price.id}")
+    logger.info(f"Auto-created Stripe price ({interval})={price.id} on product={product_id}")
     return price.id
 
 
@@ -156,9 +218,16 @@ async def _ensure_stripe_customer(db, user_doc: dict) -> str:
     return customer.id
 
 
-async def create_checkout_session(db, user_doc: dict, success_url: str, cancel_url: str):
+async def create_checkout_session(
+    db,
+    user_doc: dict,
+    success_url: str,
+    cancel_url: str,
+    interval: str = "month",
+):
     """Create a Stripe Checkout subscription session and return its URL + id."""
-    price_id = await get_or_create_price(db)
+    interval = normalize_interval(interval)
+    price_id = await get_or_create_price(db, interval)
     customer_id = await _ensure_stripe_customer(db, user_doc)
     session = stripe.checkout.Session.create(
         customer=customer_id,
@@ -168,9 +237,9 @@ async def create_checkout_session(db, user_doc: dict, success_url: str, cancel_u
         success_url=success_url,
         cancel_url=cancel_url,
         allow_promotion_codes=True,
-        metadata={"kinnect_user_id": user_doc["id"]},
+        metadata={"kinnect_user_id": user_doc["id"], "interval": interval},
         subscription_data={
-            "metadata": {"kinnect_user_id": user_doc["id"]},
+            "metadata": {"kinnect_user_id": user_doc["id"], "interval": interval},
         },
     )
     return session.url, session.id
@@ -185,9 +254,29 @@ def _ts_to_dt(ts: Optional[int]) -> Optional[datetime]:
         return None
 
 
+def _extract_interval_from_subscription(sub_obj: dict) -> Optional[str]:
+    """Extract recurring interval from a Stripe Subscription dict, or None."""
+    try:
+        items = (sub_obj.get("items") or {}).get("data") or []
+        if items:
+            price = items[0].get("price") or {}
+            rec = price.get("recurring") or {}
+            iv = rec.get("interval")
+            if iv:
+                return normalize_interval(iv)
+    except Exception:
+        pass
+    # Fallback: stripe metadata we set on the subscription/checkout
+    meta = sub_obj.get("metadata") or {}
+    if isinstance(meta, dict) and meta.get("interval"):
+        return normalize_interval(meta.get("interval"))
+    return None
+
+
 async def apply_subscription_to_user(db, user_id: str, customer_id: str, subscription) -> None:
     """Persist subscription state on the user document."""
     sub_obj = subscription if isinstance(subscription, dict) else subscription.to_dict_recursive()
+    interval = _extract_interval_from_subscription(sub_obj)
     update = {
         "subscription.plan": "family_plan" if sub_obj.get("status") in (
             "active", "trialing", "past_due"
@@ -198,6 +287,8 @@ async def apply_subscription_to_user(db, user_id: str, customer_id: str, subscri
         "subscription.cancel_at_period_end": bool(sub_obj.get("cancel_at_period_end")),
         "subscription.updated_at": datetime.now(timezone.utc),
     }
+    if interval:
+        update["subscription.interval"] = interval
     cps = _ts_to_dt(sub_obj.get("current_period_start"))
     cpe = _ts_to_dt(sub_obj.get("current_period_end"))
     if cps:
@@ -238,9 +329,43 @@ async def build_status_payload(user_doc: dict, db, free_limit: int = FREE_LIMIT_
         members_remaining = None
     else:
         members_remaining = max(0, int(limit) - int(member_count))
+
+    # Pricing for BOTH plans (offered on the upgrade screen).
+    paid_plans = [
+        {
+            "interval": "month",
+            "label": "Monthly",
+            "amount_cents": PAID_AMOUNT_CENTS,
+            "currency": PAID_CURRENCY,
+            "product_name": PAID_PRODUCT_NAME,
+            "is_recommended": False,
+            "savings_cents": 0,
+        },
+        {
+            "interval": "year",
+            "label": "Annual",
+            "amount_cents": PAID_ANNUAL_AMOUNT_CENTS,
+            "currency": PAID_CURRENCY,
+            "product_name": PAID_PRODUCT_NAME,
+            "is_recommended": True,
+            "savings_cents": annual_savings_cents(),
+        },
+    ]
+
+    # Resolve the user's current subscription interval (if paid).
+    sub_interval = normalize_interval(sub.get("interval")) if sub.get("interval") else None
+    if plan == "family_plan" and not sub_interval:
+        # Fallback: legacy users without recorded interval are assumed monthly.
+        sub_interval = "month"
+    plan_label: Optional[str] = None
+    if plan == "family_plan":
+        plan_label = "Annual Plan" if sub_interval == "year" else "Monthly Plan"
+
     payload = {
         "plan": plan,
+        "plan_label": plan_label,
         "status": sub.get("status"),
+        "interval": sub_interval,
         "member_limit": None if limit == math.inf else int(limit),
         "member_count": member_count,
         "members_remaining": members_remaining,
@@ -250,12 +375,19 @@ async def build_status_payload(user_doc: dict, db, free_limit: int = FREE_LIMIT_
         ),
         "cancel_at_period_end": bool(sub.get("cancel_at_period_end")),
         "stripe_customer_id": sub.get("stripe_customer_id"),
+        # Legacy single-plan field (kept for backward compatibility with any
+        # callers that read paid_plan.amount_cents/.interval directly).
         "paid_plan": {
-            "amount_cents": PAID_AMOUNT_CENTS,
+            "amount_cents": (
+                PAID_ANNUAL_AMOUNT_CENTS if sub_interval == "year" else PAID_AMOUNT_CENTS
+            ),
             "currency": PAID_CURRENCY,
-            "interval": PAID_INTERVAL,
+            "interval": sub_interval or "month",
             "product_name": PAID_PRODUCT_NAME,
         },
+        # NEW: full pricing menu rendered by the upgrade screen.
+        "paid_plans": paid_plans,
+        "annual_savings_cents": annual_savings_cents(),
     }
     # Best-effort billing portal link (paid users only)
     if is_paid(user_doc) and sub.get("stripe_customer_id") and is_configured():

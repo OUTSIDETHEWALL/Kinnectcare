@@ -973,6 +973,7 @@ async def list_recent_checkins(current=Depends(get_current_user)):
 class CheckoutRequest(BaseModel):
     success_url: Optional[str] = None
     cancel_url: Optional[str] = None
+    interval: Optional[str] = "month"  # 'month' or 'year'
 
 
 def _billing_required():
@@ -991,12 +992,13 @@ async def billing_checkout_session(payload: CheckoutRequest, current=Depends(get
     if billing.is_paid(current):
         raise HTTPException(status_code=400, detail="Already on the Family Plan")
     base = (os.environ.get("EXPO_BACKEND_URL") or "").rstrip("/")
+    interval = billing.normalize_interval(payload.interval)
     # Fallback: caller-provided URLs (Expo frontend usually sets these to the public preview URL).
     default_success = payload.success_url or f"{base}/billing-success?session_id={{CHECKOUT_SESSION_ID}}"
     default_cancel = payload.cancel_url or f"{base}/billing-cancel"
     try:
         url, session_id = await billing.create_checkout_session(
-            db, current, default_success, default_cancel
+            db, current, default_success, default_cancel, interval=interval,
         )
     except stripe.error.StripeError as e:
         logger.error(f"checkout-session stripe error: {e}")
@@ -1004,6 +1006,7 @@ async def billing_checkout_session(payload: CheckoutRequest, current=Depends(get
     return {
         "checkout_url": url,
         "session_id": session_id,
+        "interval": interval,
         "publishable_key": os.environ.get("STRIPE_PUBLISHABLE_KEY") or None,
     }
 

@@ -105,9 +105,21 @@ export type MemberSummary = {
   weekly_logged?: number;
 };
 
+export type PaidPlan = {
+  interval: 'month' | 'year';
+  label: string;
+  amount_cents: number;
+  currency: string;
+  product_name: string;
+  is_recommended: boolean;
+  savings_cents: number;
+};
+
 export type BillingStatus = {
   plan: 'free' | 'family_plan';
+  plan_label?: string | null;
   status?: string | null;
+  interval?: 'month' | 'year' | null;
   member_limit: number | null; // null when unlimited (paid)
   member_count: number;
   members_remaining: number | null;
@@ -121,6 +133,8 @@ export type BillingStatus = {
     interval: string;
     product_name: string;
   };
+  paid_plans: PaidPlan[];
+  annual_savings_cents: number;
 };
 
 export async function getBillingStatus(): Promise<BillingStatus> {
@@ -128,9 +142,13 @@ export async function getBillingStatus(): Promise<BillingStatus> {
   return r.data;
 }
 
-export async function createCheckoutSession(returnUrl?: string): Promise<{
+export async function createCheckoutSession(
+  returnUrl?: string,
+  interval: 'month' | 'year' = 'month',
+): Promise<{
   checkout_url: string;
   session_id: string;
+  interval: 'month' | 'year';
   publishable_key: string | null;
 }> {
   const successUrl = returnUrl ? `${returnUrl}?status=success` : undefined;
@@ -138,6 +156,7 @@ export async function createCheckoutSession(returnUrl?: string): Promise<{
   const r = await api.post('/billing/checkout-session', {
     success_url: successUrl,
     cancel_url: cancelUrl,
+    interval,
   });
   return r.data;
 }

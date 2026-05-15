@@ -2013,6 +2013,52 @@ agent_communication:
       summarize and finish.
 
 
+backend:
+  - task: "Annual subscription plan: $99.99/year alongside $9.99/month"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/billing.py, /app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          NEW: Two Stripe Prices on the same product:
+            - monthly ($9.99/mo) — auto-created on first checkout request for 'month'
+            - annual ($99.99/yr) — auto-created on first checkout request for 'year'
+          Both cached per-interval in db.billing_config under keys
+          'price_month' / 'price_year' so subsequent boots reuse them.
+          Confirmed creating via real Stripe API call:
+            monthly price_1TXTkOK7iLfToZYfaOgmpjwv
+            annual  price_1TXTkPK7iLfToZYfaKJRn9Yh
+          API surface:
+            - POST /api/billing/checkout-session now accepts {interval:'month'|'year'}
+              (defaults to 'month'). Returns checkout_url + interval echo.
+            - GET  /api/billing/status now returns:
+                plan, plan_label ('Monthly Plan' | 'Annual Plan' | null),
+                interval ('month' | 'year' | null),
+                paid_plans: [
+                  {interval:'month', amount_cents:999,  is_recommended:false, savings_cents:0},
+                  {interval:'year',  amount_cents:9999, is_recommended:true,  savings_cents:1989},
+                ],
+                annual_savings_cents (= 12*999 - 9999 = 1989),
+                paid_plan: still present (legacy single object), now reflects user's
+                  selected interval if paid.
+            - apply_subscription_to_user extracts the recurring interval from the
+              Stripe subscription's items[0].price.recurring.interval and writes it
+              to subscription.interval, so the plan_label and interval are correct
+              after webhook delivery.
+          Frontend should:
+            - Render two cards from paid_plans
+            - Annual gets a "Best Value" badge + "Save $19.89" pill highlighted
+              in green
+            - CTAs "Choose Monthly" / "Choose Annual" hit
+              POST /billing/checkout-session with {interval}
+
+
+
 frontend:
   - task: "Family Group screen (/family-group) — invite code, members, join/leave/rename"
     implemented: true
@@ -2383,3 +2429,117 @@ backend:
              returns 7-day series + compliance_percent. All 200.
           No backend errors in logs. Family Groups feature is shipped.
 
+
+
+backend:
+  - task: "Annual subscription plan — /billing/status structure + checkout-session interval handling"
+    implemented: true
+    working: true
+    file: "/app/backend/billing.py, /app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 10/10 checks GREEN via /app/backend_test.py against
+          https://family-guard-37.preview.emergentagent.com/api using
+          demo@kinnship.app / password123 (read-only) and fresh
+          monthly_/annual_/defint_/badint_/cache_/free_<rand>@example.com
+          signups for state-changing tests.
+
+          T1 GET /api/billing/status (demo, free):
+            - plan=='free', plan_label is None, interval is None,
+              member_limit==2, member_count==5 (int>=0).
+            - paid_plan == {amount_cents:999, currency:'usd',
+              interval:'month', product_name:'Kinnship Family Plan'}.
+            - paid_plans is a 2-entry array — exact match:
+              [{interval:'month', label:'Monthly', amount_cents:999,
+                currency:'usd', product_name:'Kinnship Family Plan',
+                is_recommended:false, savings_cents:0},
+               {interval:'year', label:'Annual', amount_cents:9999,
+                currency:'usd', product_name:'Kinnship Family Plan',
+                is_recommended:true, savings_cents:1989}].
+            - annual_savings_cents == 1989 (== 12*999 - 9999).
+
+          T2 POST /api/billing/checkout-session {interval:'month'} (fresh
+          user) -> 200 in 0.97s. checkout_url starts with
+          'https://checkout.stripe.com/' and session_id starts with 'cs_'
+          (real cs_test_b1z54q…). response.interval=='month'.
+
+          T3 POST /api/billing/checkout-session {interval:'year'} (fresh
+          user) -> 200 in 0.94s. checkout_url starts with
+          'https://checkout.stripe.com/' and session_id starts with 'cs_'
+          (real cs_test_b1rSVx…). response.interval=='year'.
+
+          T4 POST /api/billing/checkout-session WITHOUT interval (only
+          success_url + cancel_url) -> 200, response.interval=='month'.
+
+          T5 POST /api/billing/checkout-session {interval:'daily'} -> 200,
+          response.interval=='month' (normalize_interval fallback works).
+
+          T6 annual_savings_cents math: confirmed 12*999 - 9999 == 1989
+          and matches /billing/status response.
+
+          T7 Price caching: backend logs show "Auto-created Stripe price"
+          exactly ONCE per interval across the whole run —
+            INFO:billing:Auto-created Stripe price (month)=price_1TXTkOK7iLfToZYfaOgmpjwv
+              on product=prod_UVlGhfg8q5tM8c
+            INFO:billing:Auto-created Stripe price (year)=price_1TXTkPK7iLfToZYfaKJRn9Yh
+              on product=prod_UVlGhfg8q5tM8c
+          Subsequent monthly + annual checkout-session calls completed in
+          0.90s and 0.52s respectively without recreating the price; both
+          db.billing_config docs price_month and price_year persist (same
+          product_id shared across intervals). Repeat calls returned 200
+          with correct interval echoed.
+
+          T8 Fresh signup -> plan=='free', plan_label is None
+          (regression: brand-new users start free, untouched by Annual
+          additions).
+
+          T9 Group-aware billing untouched: demo /billing/status
+          member_count==5 equals len(GET /api/members)==5; member_limit==2
+          (free tier); members_remaining==0 (= max(0, 2-5)). GET
+          /api/family-group lists 3 users in demo's family group — group
+          scoping intact.
+
+          T10 plan_label resolution: field present in /billing/status and
+          is None for free demo user.
+
+          Stripe integration is REAL (live test-mode keys; real Stripe
+          Products + Prices + Customer + Checkout Session created via
+          Stripe API). Backend logs show only 200s for /auth/login,
+          /auth/signup, /billing/status, /billing/checkout-session
+          throughout the run; no errors. Annual plan additions are
+          backward compatible — legacy paid_plan object is preserved
+          alongside the new paid_plans array.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Annual subscription plan backend testing COMPLETE — 10/10 PASS via
+      /app/backend_test.py. All review-request assertions met:
+        T1 /billing/status shape (plan, plan_label=None, interval=None,
+           member_limit=2, paid_plan legacy intact with
+           product_name='Kinnship Family Plan', paid_plans 2-entry array
+           exact match, annual_savings_cents=1989).
+        T2 monthly checkout-session -> real cs_test_… on
+           checkout.stripe.com, interval='month'.
+        T3 annual checkout-session -> real cs_test_… on
+           checkout.stripe.com, interval='year'.
+        T4 missing interval defaults to 'month'.
+        T5 interval='daily' sanitized to 'month'.
+        T6 12*999-9999=1989 ✓.
+        T7 Price caching verified: "Auto-created Stripe price" logged
+           ONCE for month and ONCE for year across the run; subsequent
+           calls fast (0.5-0.9s) and successful for both intervals.
+        T8 Fresh user starts free with plan_label=None.
+        T9 Group-aware billing untouched: member_count==len(/members)==5,
+           member_limit=2, members_remaining=0 (group has 3 users via
+           /family-group).
+        T10 plan_label present and None for free user.
+      Stripe is REAL (test-mode keys); no mocks. No backend errors in
+      logs. Demo subscription was not modified. Main agent: please
+      summarize and finish.
+      YOU MUST ASK USER BEFORE DOING FRONTEND TESTING.
