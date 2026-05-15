@@ -16,7 +16,7 @@ def client():
 
 
 def _signup(client, tz="America/New_York"):
-    email = f"v4test+{uuid.uuid4().hex[:8]}@kinnectcare.app"
+    email = f"v4test+{uuid.uuid4().hex[:8]}@kinnship.app"
     r = client.post(f"{API}/auth/signup",
                     json={"email": email, "password": "password123",
                           "full_name": "V4 Test", "timezone": tz})
@@ -41,7 +41,7 @@ class TestTimezone:
         assert r.json()["timezone"] == "America/New_York"
 
     def test_signup_default_utc_when_omitted(self, client):
-        email = f"v4test+{uuid.uuid4().hex[:8]}@kinnectcare.app"
+        email = f"v4test+{uuid.uuid4().hex[:8]}@kinnship.app"
         r = requests.post(f"{API}/auth/signup",
                           json={"email": email, "password": "password123", "full_name": "V4 Default"})
         assert r.status_code == 200

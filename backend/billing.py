@@ -1,4 +1,4 @@
-"""Stripe billing helpers for KinnectCare.
+"""Stripe billing helpers for Kinnship.
 
 Plans:
   - free: up to FREE_MEMBER_LIMIT family members (default 2).
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 FREE_LIMIT_DEFAULT = int(os.getenv("FREE_MEMBER_LIMIT", "2"))
 PAID_AMOUNT_CENTS = int(os.getenv("PAID_PLAN_AMOUNT_CENTS", "999"))
 PAID_INTERVAL = os.getenv("PAID_PLAN_INTERVAL", "month")
-PAID_PRODUCT_NAME = os.getenv("PAID_PLAN_PRODUCT_NAME", "KinnectCare Family Plan")
+PAID_PRODUCT_NAME = os.getenv("PAID_PLAN_PRODUCT_NAME", "Kinnship Family Plan")
 PAID_CURRENCY = os.getenv("PAID_PLAN_CURRENCY", "usd")
 
 
@@ -65,7 +65,7 @@ async def get_or_create_price(db) -> str:
 
     product = stripe.Product.create(
         name=PAID_PRODUCT_NAME,
-        description="Unlimited family members and premium KinnectCare features.",
+        description="Unlimited family members and premium Kinnship features.",
     )
     price = stripe.Price.create(
         product=product.id,

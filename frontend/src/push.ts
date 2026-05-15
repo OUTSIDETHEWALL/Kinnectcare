@@ -17,7 +17,7 @@ Notifications.setNotificationHandler({
 export async function ensureNotificationChannel() {
   if (Platform.OS === 'android') {
     await Notifications.setNotificationChannelAsync('default', {
-      name: 'KinnectCare alerts',
+      name: 'Kinnship alerts',
       importance: Notifications.AndroidImportance.MAX,
       vibrationPattern: [0, 250, 250, 250],
       lightColor: '#1B5E35',

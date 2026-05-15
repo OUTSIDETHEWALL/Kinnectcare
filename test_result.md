@@ -1962,3 +1962,52 @@ agent_communication:
         - /checkins with coords (200)
       No backend regressions from the frontend logo asset swap. Main agent: please
       summarize and finish.
+
+
+backend:
+  - task: "Smoke after Kinnship rebrand (text + logo asset paths + demo email migration)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 9/9 rebrand smoke checks GREEN via /app/backend_test.py against
+          https://family-guard-37.preview.emergentagent.com/api.
+
+          1) GET /api/ -> 200 with body {"message":"Kinnship API","status":"ok"} ✓
+          2) POST /api/auth/login {email:"demo@kinnship.app", password:"password123"}
+             -> 200, access_token returned ✓ (demo email migration confirmed)
+          3) GET /api/auth/me -> 200, full_name="Demo User", email="demo@kinnship.app" ✓
+          4) GET /api/summary -> 200, members[] length=5 ✓
+          5) GET /api/members -> 200, count=5 ✓
+          6) GET /api/billing/status -> 200, paid_plan.product_name == "Kinnship Family Plan",
+             amount_cents=999 ✓ (PAID_PLAN_PRODUCT_NAME env var rename effective)
+          7) POST /api/sos {latitude:1.0, longitude:1.0} -> 200 with ISO-parseable timestamp
+             (2026-05-15T15:27:57.215330+00:00), member_name="Demo User",
+             coordinates={latitude:1.0, longitude:1.0}, devices_notified=2 (int) ✓
+          8) POST /api/checkins {member_id, lat:12.97, lng:77.59, location_name:"Kinnship Smoke"}
+             -> 200, record returned with id, member_name="Gregory", member_id matches ✓
+          9) Regression: POST /api/auth/login with OLD email demo@kinnectcare.app
+             -> 401 {"detail":"Invalid email or password"} ✓ (legacy demo account is gone)
+
+          Backend logs show 200s throughout for the test run (one 200 for /api/, 200 for
+          /auth/login, 200s across /me, /members, /billing/status, /summary, /sos, /checkins)
+          and a 401 only for the intentional legacy-email login attempt. Rebrand is clean —
+          no backend regressions detected.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Kinnship rebrand smoke test COMPLETE — 9/9 green via /app/backend_test.py.
+      Confirmed: FastAPI root response is "Kinnship API"; demo account migrated to
+      demo@kinnship.app/password123 and old demo@kinnectcare.app correctly returns 401;
+      billing paid_plan.product_name now "Kinnship Family Plan" (env var rename
+      effective); /summary (5 members), /members, /auth/me, /sos (timestamp +
+      member_name + coordinates + devices_notified=2), and /checkins all work as
+      before. Pure text/asset rebrand — no backend regressions. Main agent: please
+      summarize and finish.

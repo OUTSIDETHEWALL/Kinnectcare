@@ -1,5 +1,5 @@
 /**
- * KinnectCare fall detection.
+ * Kinnship fall detection.
  *
  * Algorithm (lightweight, runs on the device's accelerometer at 50 Hz):
  *   1) Wait for an IMPACT — a magnitude spike > 2.5 g.

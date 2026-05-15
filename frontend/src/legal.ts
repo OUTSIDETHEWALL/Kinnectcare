@@ -1,9 +1,9 @@
-// Static legal content for KinnectCare LLC. Used by both the Privacy Policy
+// Static legal content for Kinnship LLC. Used by both the Privacy Policy
 // and Terms of Service screens, and from the auth/settings entry points.
 
-export const COMPANY_NAME = 'KinnectCare LLC';
-export const APP_NAME = 'KinnectCare';
-export const CONTACT_EMAIL = 'support@kinnectcare.app';
+export const COMPANY_NAME = 'Kinnship LLC';
+export const APP_NAME = 'Kinnship';
+export const CONTACT_EMAIL = 'support@kinnship.app';
 export const LEGAL_EFFECTIVE_DATE = 'May 13, 2026';
 
 export type LegalSection = {
@@ -15,7 +15,7 @@ export const PRIVACY_POLICY: LegalSection[] = [
   {
     heading: '1. Who We Are',
     body:
-      `${APP_NAME} is operated by ${COMPANY_NAME} ("KinnectCare", "we", "us", or "our"). ` +
+      `${APP_NAME} is operated by ${COMPANY_NAME} ("Kinnship", "we", "us", or "our"). ` +
       `${APP_NAME} is a family safety and senior wellness application that helps families ` +
       `stay connected with loved ones through check-ins, medication reminders, daily routines, ` +
       `and emergency alerts. This Privacy Policy explains what information we collect, how we ` +
@@ -105,7 +105,7 @@ export const TERMS_OF_SERVICE: LegalSection[] = [
     heading: '1. Acceptance of Terms',
     body:
       `These Terms of Service ("Terms") are a binding agreement between you and ${COMPANY_NAME} ` +
-      `("KinnectCare", "we", "us", or "our"). By creating an account, accessing, or using ${APP_NAME}, ` +
+      `("Kinnship", "we", "us", or "our"). By creating an account, accessing, or using ${APP_NAME}, ` +
       `you agree to these Terms and our Privacy Policy. If you do not agree, please do not use the ` +
       `service.`,
   },
@@ -154,7 +154,7 @@ export const TERMS_OF_SERVICE: LegalSection[] = [
   {
     heading: '7. Intellectual Property',
     body:
-      `${APP_NAME}, the KinnectCare name and logo, and all related content other than user content ` +
+      `${APP_NAME}, the Kinnship name and logo, and all related content other than user content ` +
       `are owned by ${COMPANY_NAME} or its licensors. We grant you a limited, non-exclusive, ` +
       `non-transferable, revocable license to use the app for personal, non-commercial purposes ` +
       `consistent with these Terms.`,

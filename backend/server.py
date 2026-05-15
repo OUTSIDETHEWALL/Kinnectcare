@@ -28,14 +28,14 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-SECRET_KEY = os.environ.get("JWT_SECRET", "kinnectcare-dev-secret-change-in-prod")
+SECRET_KEY = os.environ.get("JWT_SECRET", "kinnship-dev-secret-change-in-prod")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
-app = FastAPI(title="KinnectCare API")
+app = FastAPI(title="Kinnship API")
 api_router = APIRouter(prefix="/api")
 
 
@@ -1117,7 +1117,7 @@ async def dashboard_summary(current=Depends(get_current_user)):
 
 @api_router.get("/")
 async def root():
-    return {"message": "KinnectCare API", "status": "ok"}
+    return {"message": "Kinnship API", "status": "ok"}
 
 
 app.include_router(api_router)

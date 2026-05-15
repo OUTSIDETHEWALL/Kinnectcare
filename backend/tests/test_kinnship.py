@@ -1,4 +1,4 @@
-"""KinnectCare backend API tests"""
+"""Kinnship backend API tests"""
 import os
 import uuid
 import pytest
@@ -17,7 +17,7 @@ def session():
 
 @pytest.fixture(scope="module")
 def new_user(session):
-    email = f"tester+{uuid.uuid4().hex[:8]}@kinnectcare.app"
+    email = f"tester+{uuid.uuid4().hex[:8]}@kinnship.app"
     payload = {"email": email, "password": "password123", "full_name": "Test User"}
     r = session.post(f"{API}/auth/signup", json=payload, timeout=30)
     assert r.status_code == 200, r.text

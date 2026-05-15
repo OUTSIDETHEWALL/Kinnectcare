@@ -1,106 +1,201 @@
-"""Smoke test for KinnectCare backend after frontend-only logo asset swap."""
+"""
+Kinnship rebrand smoke test.
+Verifies:
+1. GET /api/ -> 200 message "Kinnship API"
+2. POST /api/auth/login (demo@kinnship.app/password123) -> 200 + token
+3. GET /api/auth/me -> 200, full_name present
+4. GET /api/summary -> 200 with members array
+5. GET /api/members -> 200
+6. GET /api/billing/status -> 200; paid_plan.product_name == "Kinnship Family Plan"
+7. POST /api/sos lat/lng -> 200 + ISO timestamp/member_name/coords/devices_notified
+8. POST /api/checkins with member_id+lat/lng -> 200
+9. Regression: POST /api/auth/login old demo@kinnectcare.app -> 401
+"""
+
+import os
 import sys
+import json
 from datetime import datetime
 import requests
 
-FRONTEND_ENV = "/app/frontend/.env"
-BASE = None
-with open(FRONTEND_ENV) as f:
-    for line in f:
-        line = line.strip()
-        if line.startswith("EXPO_PUBLIC_BACKEND_URL=") or line.startswith("EXPO_BACKEND_URL="):
-            v = line.split("=", 1)[1].strip().strip('"')
-            BASE = v.rstrip("/") + "/api"
-            break
+BASE = "https://family-guard-37.preview.emergentagent.com/api"
 
-assert BASE, "Could not resolve backend URL from /app/frontend/.env"
-print(f"BASE = {BASE}")
+PASS = "\033[92mPASS\033[0m"
+FAIL = "\033[91mFAIL\033[0m"
 
-EMAIL = "demo@kinnectcare.app"
-PASSWORD = "password123"
+results = []
 
-failures = []
-def check(name, cond, info=""):
-    status = "PASS" if cond else "FAIL"
-    print(f"[{status}] {name}{(' - ' + info) if info else ''}")
-    if not cond:
-        failures.append(f"{name}: {info}")
 
-# 1. login
-r = requests.post(f"{BASE}/auth/login", json={"email": EMAIL, "password": PASSWORD}, timeout=30)
-check("POST /auth/login -> 200", r.status_code == 200, f"status={r.status_code} body={r.text[:200]}")
-data = r.json() if r.status_code == 200 else {}
-token = data.get("access_token")
-check("login returns access_token", bool(token), f"token_present={bool(token)}")
-H = {"Authorization": f"Bearer {token}"} if token else {}
+def check(name, ok, info=""):
+    results.append((name, ok, info))
+    tag = PASS if ok else FAIL
+    print(f"{tag}: {name}" + (f"  -- {info}" if info else ""))
 
-# 2. /auth/me
-r = requests.get(f"{BASE}/auth/me", headers=H, timeout=30)
-check("GET /auth/me -> 200", r.status_code == 200, f"status={r.status_code}")
 
-# 3. /summary
-r = requests.get(f"{BASE}/summary", headers=H, timeout=30)
-check("GET /summary -> 200", r.status_code == 200, f"status={r.status_code} body={r.text[:200]}")
-summary = r.json() if r.status_code == 200 else {}
-members_arr = summary.get("members")
-check("summary has members array", isinstance(members_arr, list),
-      f"type={type(members_arr).__name__} len={len(members_arr) if isinstance(members_arr, list) else 'n/a'}")
+def main():
+    # 1. Root
+    try:
+        r = requests.get(f"{BASE}/", timeout=15)
+        ok = r.status_code == 200 and r.json().get("message") == "Kinnship API"
+        check("1. GET /api/ -> 200 'Kinnship API'", ok, f"status={r.status_code} body={r.text[:200]}")
+    except Exception as e:
+        check("1. GET /api/", False, f"exception {e}")
+        return
 
-# 4. /members
-r = requests.get(f"{BASE}/members", headers=H, timeout=30)
-check("GET /members -> 200", r.status_code == 200, f"status={r.status_code}")
-members = r.json() if r.status_code == 200 else []
-check("/members non-empty", isinstance(members, list) and len(members) > 0,
-      f"count={len(members) if isinstance(members, list) else 'n/a'}")
+    # 2. Login new email
+    token = None
+    try:
+        r = requests.post(
+            f"{BASE}/auth/login",
+            json={"email": "demo@kinnship.app", "password": "password123"},
+            timeout=20,
+        )
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        token = body.get("access_token")
+        ok = r.status_code == 200 and bool(token)
+        check("2. POST /api/auth/login (new demo) -> 200 + token", ok,
+              f"status={r.status_code} token_present={bool(token)}")
+    except Exception as e:
+        check("2. login", False, f"exception {e}")
+        return
 
-# 5. /billing/status
-r = requests.get(f"{BASE}/billing/status", headers=H, timeout=30)
-check("GET /billing/status -> 200", r.status_code == 200, f"status={r.status_code}")
-billing = r.json() if r.status_code == 200 else {}
-paid_plan = billing.get("paid_plan") or {}
-check("billing.paid_plan.amount_cents == 999", paid_plan.get("amount_cents") == 999,
-      f"got={paid_plan.get('amount_cents')}")
+    if not token:
+        print("Cannot continue without token.")
+        return
 
-# 6. /sos with coords
-r = requests.post(f"{BASE}/sos", headers=H, json={"latitude": 37.7749, "longitude": -122.4194}, timeout=30)
-check("POST /sos -> 200", r.status_code == 200, f"status={r.status_code} body={r.text[:200]}")
-sos = r.json() if r.status_code == 200 else {}
-ts = sos.get("timestamp")
-try:
-    if ts:
-        datetime.fromisoformat(ts)
-    ts_ok = ts is not None
-except Exception:
-    ts_ok = False
-check("sos.timestamp ISO parseable", ts_ok, f"timestamp={ts}")
-check("sos.member_name present", bool(sos.get("member_name")), f"member_name={sos.get('member_name')}")
-coords = sos.get("coordinates") or {}
-check("sos.coordinates.latitude == 37.7749", coords.get("latitude") == 37.7749, f"lat={coords.get('latitude')}")
-check("sos.coordinates.longitude == -122.4194", coords.get("longitude") == -122.4194,
-      f"lng={coords.get('longitude')}")
-check("sos.devices_notified is int", isinstance(sos.get("devices_notified"), int),
-      f"devices_notified={sos.get('devices_notified')}")
+    H = {"Authorization": f"Bearer {token}"}
 
-# 7. /checkins
-first_id = members[0]["id"] if members else None
-check("first member id present", bool(first_id), f"id={first_id}")
-if first_id:
-    r = requests.post(
-        f"{BASE}/checkins", headers=H,
-        json={"member_id": first_id, "latitude": 12.97, "longitude": 77.59}, timeout=30,
-    )
-    check("POST /checkins -> 200", r.status_code == 200, f"status={r.status_code} body={r.text[:200]}")
-    ci = r.json() if r.status_code == 200 else {}
-    check("checkin returned with id", bool(ci.get("id")), f"id={ci.get('id')}")
-    check("checkin.latitude == 12.97", ci.get("latitude") == 12.97, f"lat={ci.get('latitude')}")
-    check("checkin.longitude == 77.59", ci.get("longitude") == 77.59, f"lng={ci.get('longitude')}")
+    # 3. /auth/me
+    try:
+        r = requests.get(f"{BASE}/auth/me", headers=H, timeout=15)
+        body = r.json() if r.ok else {}
+        ok = r.status_code == 200 and bool(body.get("full_name"))
+        check("3. GET /api/auth/me -> 200 with full_name", ok,
+              f"status={r.status_code} full_name={body.get('full_name')!r} email={body.get('email')!r}")
+    except Exception as e:
+        check("3. /auth/me", False, str(e))
 
-print("\n========== SUMMARY ==========")
-if failures:
-    print(f"FAILED: {len(failures)} check(s)")
-    for f in failures:
-        print(f"  - {f}")
-    sys.exit(1)
-else:
-    print("ALL GREEN")
-    sys.exit(0)
+    # 4. /summary
+    member_id = None
+    try:
+        r = requests.get(f"{BASE}/summary", headers=H, timeout=20)
+        body = r.json() if r.ok else {}
+        members = body.get("members", [])
+        ok = r.status_code == 200 and isinstance(members, list)
+        check("4. GET /api/summary -> 200 with members[]", ok,
+              f"status={r.status_code} members_count={len(members)}")
+        if members:
+            member_id = members[0].get("id") or members[0].get("member_id")
+    except Exception as e:
+        check("4. /summary", False, str(e))
+
+    # 5. /members
+    try:
+        r = requests.get(f"{BASE}/members", headers=H, timeout=20)
+        body = r.json() if r.ok else []
+        ok = r.status_code == 200 and isinstance(body, list)
+        check("5. GET /api/members -> 200", ok, f"status={r.status_code} count={len(body) if isinstance(body, list) else 'n/a'}")
+        if not member_id and isinstance(body, list) and body:
+            member_id = body[0].get("id")
+    except Exception as e:
+        check("5. /members", False, str(e))
+
+    # 6. /billing/status — product_name should be "Kinnship Family Plan"
+    try:
+        r = requests.get(f"{BASE}/billing/status", headers=H, timeout=20)
+        body = r.json() if r.ok else {}
+        paid = body.get("paid_plan") or {}
+        product_name = paid.get("product_name")
+        ok = r.status_code == 200 and product_name == "Kinnship Family Plan"
+        check("6. GET /api/billing/status -> paid_plan.product_name == 'Kinnship Family Plan'", ok,
+              f"status={r.status_code} product_name={product_name!r} amount_cents={paid.get('amount_cents')}")
+    except Exception as e:
+        check("6. /billing/status", False, str(e))
+
+    # 7. /sos
+    try:
+        r = requests.post(
+            f"{BASE}/sos",
+            headers=H,
+            json={"latitude": 1.0, "longitude": 1.0},
+            timeout=20,
+        )
+        body = r.json() if r.ok else {}
+        ts = body.get("timestamp")
+        mname = body.get("member_name")
+        coords = body.get("coordinates")
+        dn = body.get("devices_notified")
+        iso_ok = False
+        if isinstance(ts, str):
+            try:
+                datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                iso_ok = True
+            except Exception:
+                iso_ok = False
+        ok = (
+            r.status_code == 200
+            and iso_ok
+            and isinstance(mname, str) and mname
+            and isinstance(coords, dict)
+            and coords.get("latitude") == 1.0 and coords.get("longitude") == 1.0
+            and isinstance(dn, int)
+        )
+        check(
+            "7. POST /api/sos {lat:1.0, lng:1.0} -> 200 ts/member_name/coords/devices_notified",
+            ok,
+            f"status={r.status_code} ts={ts} member_name={mname!r} coords={coords} devices_notified={dn}",
+        )
+    except Exception as e:
+        check("7. /sos", False, str(e))
+
+    # 8. /checkins
+    if member_id:
+        try:
+            r = requests.post(
+                f"{BASE}/checkins",
+                headers=H,
+                json={
+                    "member_id": member_id,
+                    "latitude": 12.97,
+                    "longitude": 77.59,
+                    "location_name": "Kinnship Smoke",
+                },
+                timeout=20,
+            )
+            body = r.json() if r.ok else {}
+            ok = (
+                r.status_code == 200
+                and body.get("member_id") == member_id
+                and body.get("latitude") == 12.97
+                and body.get("longitude") == 77.59
+            )
+            check("8. POST /api/checkins -> 200", ok,
+                  f"status={r.status_code} body={json.dumps(body)[:200]}")
+        except Exception as e:
+            check("8. /checkins", False, str(e))
+    else:
+        check("8. /checkins", False, "No member_id available from /summary or /members")
+
+    # 9. Regression: old email returns 401
+    try:
+        r = requests.post(
+            f"{BASE}/auth/login",
+            json={"email": "demo@kinnectcare.app", "password": "password123"},
+            timeout=20,
+        )
+        ok = r.status_code == 401
+        check("9. OLD demo@kinnectcare.app login -> 401", ok,
+              f"status={r.status_code} body={r.text[:200]}")
+    except Exception as e:
+        check("9. old login", False, str(e))
+
+    # Summary
+    total = len(results)
+    passed = sum(1 for _, ok, _ in results if ok)
+    print(f"\n=== {passed}/{total} checks passed ===")
+    if passed != total:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

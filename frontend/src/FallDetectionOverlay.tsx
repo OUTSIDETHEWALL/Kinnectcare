@@ -136,7 +136,7 @@ export function FallDetectionOverlay() {
           <Text style={styles.emoji}>🚨</Text>
           <Text style={styles.title}>Fall detected — are you okay?</Text>
           <Text style={styles.body}>
-            We sensed a sudden fall. If you don't respond in time, KinnectCare
+            We sensed a sudden fall. If you don't respond in time, Kinnship
             will automatically call 911 and alert your family.
           </Text>
 

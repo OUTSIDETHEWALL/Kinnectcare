@@ -60,7 +60,7 @@ export default function UpgradeScreen() {
 
   useEffect(() => {
     if (params?.status === 'success') {
-      Alert.alert('Subscription Active', 'Welcome to KinnectCare Family Plan!');
+      Alert.alert('Subscription Active', 'Welcome to Kinnship Family Plan!');
       load();
     } else if (params?.status === 'cancel') {
       Alert.alert('Checkout Canceled', 'No worries — you can upgrade anytime.');
@@ -125,12 +125,12 @@ export default function UpgradeScreen() {
             <View style={styles.heroCard}>
               <Text style={styles.heroEmoji}>{isPaid ? '⭐' : '🚀'}</Text>
               <Text style={styles.heroTitle}>
-                {isPaid ? 'KinnectCare Family Plan' : 'Upgrade to Family Plan'}
+                {isPaid ? 'Kinnship Family Plan' : 'Upgrade to Family Plan'}
               </Text>
               <Text style={styles.heroPrice}>{priceLabel(status)}</Text>
               <Text style={styles.heroSub}>
                 {isPaid
-                  ? 'Thanks for supporting KinnectCare! All premium features are unlocked.'
+                  ? 'Thanks for supporting Kinnship! All premium features are unlocked.'
                   : 'Unlock unlimited family members and every premium feature. Cancel anytime.'}
               </Text>
               {isPaid && status?.current_period_end ? (

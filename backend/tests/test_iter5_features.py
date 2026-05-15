@@ -10,7 +10,7 @@ API = f"{BASE_URL}/api"
 
 
 def _signup():
-    email = f"v5test+{uuid.uuid4().hex[:10]}@kinnectcare.app"
+    email = f"v5test+{uuid.uuid4().hex[:10]}@kinnship.app"
     r = requests.post(f"{API}/auth/signup", json={
         "email": email, "password": "password123",
         "full_name": "Iter5 Tester", "timezone": "America/New_York",
@@ -104,7 +104,7 @@ class TestWeeklyCompliance:
 # --- Iter4 regressions --- #
 class TestIter4Regression:
     def test_signup_timezone_accepts(self):
-        email = f"v5tz+{uuid.uuid4().hex[:8]}@kinnectcare.app"
+        email = f"v5tz+{uuid.uuid4().hex[:8]}@kinnship.app"
         r = requests.post(f"{API}/auth/signup", json={
             "email": email, "password": "password123",
             "full_name": "TZ Reg", "timezone": "America/Los_Angeles",
@@ -187,7 +187,7 @@ class TestIter4Regression:
 class TestIter3Regression:
     def test_login_works(self):
         # Use freshly created user
-        email = f"v5log+{uuid.uuid4().hex[:8]}@kinnectcare.app"
+        email = f"v5log+{uuid.uuid4().hex[:8]}@kinnship.app"
         requests.post(f"{API}/auth/signup", json={
             "email": email, "password": "password123",
             "full_name": "Login Test", "timezone": "UTC",

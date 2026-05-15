@@ -1,7 +1,7 @@
-# KinnectCare — Product Requirements Document
+# Kinnship — Product Requirements Document
 
 ## Overview
-KinnectCare is an Expo (React Native) family safety & senior wellness mobile app for caregivers aged 35-75. It keeps families connected, tracks loved ones' wellbeing, manages medications & daily routines, and provides quick emergency response.
+Kinnship is an Expo (React Native) family safety & senior wellness mobile app for caregivers aged 35-75. It keeps families connected, tracks loved ones' wellbeing, manages medications & daily routines, and provides quick emergency response.
 
 ## Tech Stack
 - Frontend: Expo SDK 54 + Expo Router (file-based routing), @expo/vector-icons-replaced with emoji `Icon` component, expo-location, expo-secure-store
@@ -10,7 +10,7 @@ KinnectCare is an Expo (React Native) family safety & senior wellness mobile app
 - Auth: Email/password with bcrypt + JWT (7-day expiry)
 
 ## Features
-1. **Welcome / Splash** — Branded landing using real KinnectCare logo image, Get Started + Sign-in.
+1. **Welcome / Splash** — Branded landing using real Kinnship logo image, Get Started + Sign-in.
 2. **Email/Password Auth** — Signup auto-seeds Gregory + James (senior, 09:00 daily check-in) + 3 medications + 4 routine items + 2 alerts.
 3. **Family Dashboard** — Greeting, per-member cards w/ status dot + med summary chips ("X of Y taken", "N missed", "✅ Checked in"). Each card has its own **Check In** button. Persistent red 🆘 SOS button.
 4. **SOS Emergency** — Confirmation → backend SOS alert (includes lat/lon + timestamp) → tel:911 via Linking. Alert visible to all family members on this account in the alerts feed.
@@ -31,7 +31,7 @@ KinnectCare is an Expo (React Native) family safety & senior wellness mobile app
 
 ## Brand & Design
 - Dark green #1B5E35, Medium #2D8C55, Light #EAF3DE, Warm white #F9F5F0, text #1A2E20 / #5A6B5E
-- Real KinnectCare shield logo on Welcome (220×220) and Login (140×140)
+- Real Kinnship shield logo on Welcome (220×220) and Login (140×140)
 - All icons are emoji rendered via `<Icon name="...">` (text-based, no font dependency)
 
 ## API (prefixed `/api`)
@@ -49,4 +49,4 @@ KinnectCare is an Expo (React Native) family safety & senior wellness mobile app
 - `Alert.latitude/longitude` (for SOS)
 
 ## Business Enhancement Idea
-**KinnectCare Premium** ($4.99/mo) — geofence alerts ("Dad left home"), 24/7 emergency dispatch, unlimited members, pharmacy auto-refill — high-LTV recurring revenue around peace-of-mind for aging parents.
+**Kinnship Premium** ($4.99/mo) — geofence alerts ("Dad left home"), 24/7 emergency dispatch, unlimited members, pharmacy auto-refill — high-LTV recurring revenue around peace-of-mind for aging parents.

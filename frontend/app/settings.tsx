@@ -245,7 +245,7 @@ export default function SettingsScreen() {
             <Text style={styles.modalEmoji}>⚠️</Text>
             <Text style={styles.modalTitle}>Delete your account?</Text>
             <Text style={styles.modalBody}>
-              This will permanently delete your KinnectCare account and all related data:
+              This will permanently delete your Kinnship account and all related data:
               {'\n'}• family member profiles
               {'\n'}• medications, routines, and check-ins
               {'\n'}• alerts and SOS history

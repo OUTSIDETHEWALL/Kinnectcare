@@ -45,10 +45,10 @@ export default function Login() {
 
           <View style={styles.logoWrap}>
             <Image
-              source={require('../../assets/images/kinnectcare-logo-white.png')}
+              source={require('../../assets/images/kinnship-logo-white.png')}
               style={styles.logoImage}
               resizeMode="contain"
-              accessibilityLabel="KinnectCare"
+              accessibilityLabel="Kinnship"
             />
           </View>
           <Text style={styles.title}>Welcome back</Text>

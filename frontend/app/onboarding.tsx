@@ -20,7 +20,7 @@ const SLIDES: Slide[] = [
     key: 'welcome',
     emoji: '',
     bg: Colors.primary,
-    title: 'Welcome to KinnectCare',
+    title: 'Welcome to Kinnship',
     body: 'A simple, caring app that helps families stay connected and look after the people who matter most.',
   },
   {
@@ -90,7 +90,7 @@ export default function Onboarding() {
         <View style={[styles.illustration, { backgroundColor: slide.bg }]}>
           {slide.key === 'welcome' ? (
             <Image
-              source={require('../assets/images/kinnectcare-logo-dark.png')}
+              source={require('../assets/images/kinnship-logo-dark.png')}
               style={styles.logo}
               resizeMode="contain"
             />

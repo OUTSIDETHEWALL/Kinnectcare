@@ -13,7 +13,7 @@ API = f"{BASE_URL}/api"
 @pytest.fixture(scope="module")
 def auth():
     """Fresh signup → returns (session, user, members dict by name, james_id)."""
-    email = f"featuretest+{uuid.uuid4().hex[:8]}@kinnectcare.app"
+    email = f"featuretest+{uuid.uuid4().hex[:8]}@kinnship.app"
     s = requests.Session()
     s.headers.update({"Content-Type": "application/json"})
     r = s.post(f"{API}/auth/signup", json={

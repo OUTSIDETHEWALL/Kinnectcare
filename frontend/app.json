@@ -1,25 +1,25 @@
 {
   "expo": {
-    "name": "KinnectCare",
-    "slug": "kinnectcare",
+    "name": "Kinnship",
+    "slug": "kinnship",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/kinnectcare-logo-dark.png",
-    "scheme": "kinnectcare",
+    "icon": "./assets/images/kinnship-logo-dark.png",
+    "scheme": "kinnship",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "app.kinnectcare.client",
+      "bundleIdentifier": "app.kinnship.client",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Share your location with family during check-ins and SOS.",
         "NSCameraUsageDescription": "Add profile photos for family members."
       }
     },
     "android": {
-      "package": "app.kinnectcare.client",
+      "package": "app.kinnship.client",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/kinnectcare-logo-dark.png",
+        "foregroundImage": "./assets/images/kinnship-logo-dark.png",
         "backgroundColor": "#1B5E35"
       },
       "edgeToEdgeEnabled": true,
@@ -32,14 +32,14 @@
     "web": {
       "bundler": "metro",
       "output": "static",
-      "favicon": "./assets/images/kinnectcare-logo-dark.png"
+      "favicon": "./assets/images/kinnship-logo-dark.png"
     },
     "plugins": [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/kinnectcare-logo-dark.png",
+          "image": "./assets/images/kinnship-logo-dark.png",
           "imageWidth": 220,
           "resizeMode": "contain",
           "backgroundColor": "#1B5E35"
@@ -48,7 +48,7 @@
       [
         "expo-notifications",
         {
-          "icon": "./assets/images/kinnectcare-logo-white.png",
+          "icon": "./assets/images/kinnship-logo-white.png",
           "color": "#1B5E35"
         }
       ]

@@ -17,10 +17,10 @@ export default function Welcome() {
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <View style={styles.top}>
           <Image
-            source={require('../assets/images/kinnectcare-logo-dark.png')}
+            source={require('../assets/images/kinnship-logo-dark.png')}
             style={styles.logoImage}
             resizeMode="contain"
-            accessibilityLabel="KinnectCare"
+            accessibilityLabel="Kinnship"
           />
           <Text style={styles.tagline}>Family safety & senior wellness, all in one place.</Text>
         </View>
