@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
   ActivityIndicator, Alert, Linking, Platform, RefreshControl,
@@ -10,6 +10,7 @@ import * as Location from 'expo-location';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, Reminder } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
+import { isFallEnabled } from '../../src/fallDetector';
 
 const TIME_PRESETS = ['08:00', '09:00', '10:00', '12:00', '18:00', '20:00', '21:00'];
 
@@ -23,6 +24,11 @@ export default function MemberDetail() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showCheckinSettings, setShowCheckinSettings] = useState(false);
+  const [fallOn, setFallOn] = useState<boolean>(true);
+
+  useEffect(() => {
+    isFallEnabled().then(setFallOn).catch(() => {});
+  }, []);
 
   const load = async () => {
     try {
@@ -203,6 +209,32 @@ export default function MemberDetail() {
               <Text style={styles.directionsEmoji}>🗺</Text>
               <Text style={styles.directionsText}>Get Directions</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* Active Safety Features */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Active Safety</Text>
+          <View
+            testID="member-fall-badge"
+            style={[styles.featureCard, !fallOn && styles.featureCardOff]}
+          >
+            <View style={[styles.featureIcon, !fallOn && styles.featureIconOff]}>
+              <Text style={styles.featureIconText}>🚨</Text>
+            </View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={styles.featureTitle}>Fall Detection</Text>
+              <Text style={styles.featureBody}>
+                {fallOn
+                  ? 'Active — accelerometer is watching for sudden falls. 30 s grace period before automatic SOS.'
+                  : 'Off — turn on in Settings to detect falls automatically.'}
+              </Text>
+            </View>
+            <View style={[styles.featurePill, fallOn ? styles.featurePillOn : styles.featurePillOff]}>
+              <Text style={[styles.featurePillText, !fallOn && { color: Colors.textTertiary }]}>
+                {fallOn ? 'ACTIVE' : 'OFF'}
+              </Text>
+            </View>
           </View>
         </View>
 
@@ -441,6 +473,25 @@ const styles = StyleSheet.create({
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   legendDot: { width: 10, height: 10, borderRadius: 5 },
   legendText: { fontSize: 11, color: Colors.textSecondary, fontWeight: '600' },
+  featureCard: {
+    flexDirection: 'row', alignItems: 'center',
+    padding: 14, borderRadius: 14,
+    backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.tertiary,
+    boxShadow: '0px 4px 12px rgba(27,94,53,0.08)' as any,
+  },
+  featureCardOff: { borderColor: Colors.border, opacity: 0.85 },
+  featureIcon: {
+    width: 44, height: 44, borderRadius: 22, backgroundColor: Colors.tertiary,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  featureIconOff: { backgroundColor: Colors.background },
+  featureIconText: { fontSize: 22 },
+  featureTitle: { fontSize: 14, fontWeight: '800', color: Colors.textPrimary },
+  featureBody: { fontSize: 12, color: Colors.textSecondary, marginTop: 2, lineHeight: 17 },
+  featurePill: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10, marginLeft: 8 },
+  featurePillOn: { backgroundColor: Colors.primary },
+  featurePillOff: { backgroundColor: Colors.border },
+  featurePillText: { fontSize: 10, fontWeight: '800', color: Colors.surface, letterSpacing: 0.6 },
 });
 
 function ComplianceChart({ history }: { history: any }) {

@@ -208,6 +208,7 @@ class SOSRequest(BaseModel):
     member_id: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    fall_detected: Optional[bool] = False
 
 
 # ========== Auth helpers ==========
@@ -1036,7 +1037,8 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
     await db.alerts.insert_one(alert.model_dump())
 
     # Enhanced push: notify ALL devices on the family account with member name + GPS + timestamp.
-    push_title = f"🆘 SOS — {member_name}"
+    fall_prefix = "Fall detected · " if data.fall_detected else ""
+    push_title = f"🆘 {fall_prefix}SOS — {member_name}"
     push_body = f"{coord_line}\n🕒 {local_time_str}\nTap to view & respond."
     push_data = {
         "type": "sos",
@@ -1046,6 +1048,7 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         "latitude": data.latitude,
         "longitude": data.longitude,
         "timestamp": timestamp_iso,
+        "fall_detected": bool(data.fall_detected),
     }
     devices_notified = await push_to_user(current["id"], push_title, push_body, push_data)
 

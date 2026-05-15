@@ -7,6 +7,7 @@ import { View, ActivityIndicator } from 'react-native';
 import { Colors } from '../src/theme';
 import { registerForPushNotifications, useNotificationListeners } from '../src/push';
 import { isOnboardingDone } from '../src/onboardingStore';
+import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
 
 function RootNav() {
   const { user, loading } = useAuth();
@@ -99,6 +100,7 @@ export default function RootLayout() {
       <AuthProvider>
         <StatusBar style="dark" />
         <RootNav />
+        <FallDetectionOverlay />
       </AuthProvider>
     </SafeAreaProvider>
   );

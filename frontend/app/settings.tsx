@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Modal, TextInput, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Modal, TextInput, ActivityIndicator, Switch } from 'react-native';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -7,6 +7,7 @@ import { Colors } from '../src/theme';
 import { useAuth } from '../src/AuthContext';
 import { APP_NAME, COMPANY_NAME } from '../src/legal';
 import { getBillingStatus, BillingStatus, api } from '../src/api';
+import { isFallEnabled, setFallEnabled, isFallAvailable } from '../src/fallDetector';
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -16,12 +17,21 @@ export default function SettingsScreen() {
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [fallOn, setFallOn] = useState<boolean>(true);
+  const [fallAvailable, setFallAvailable] = useState<boolean>(false);
 
   useEffect(() => {
     (async () => {
       try { setBilling(await getBillingStatus()); } catch {}
+      try { setFallOn(await isFallEnabled()); } catch {}
+      try { setFallAvailable(await isFallAvailable()); } catch {}
     })();
   }, []);
+
+  const onToggleFall = async (v: boolean) => {
+    setFallOn(v);
+    await setFallEnabled(v);
+  };
 
   const planLabel = billing?.plan === 'family_plan' ? 'Family Plan' : 'Free Plan';
   const limitLine = billing
@@ -127,6 +137,36 @@ export default function SettingsScreen() {
                 <Text style={styles.planCtaSecondaryText}>Manage Subscription ›</Text>
               </TouchableOpacity>
             )}
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Safety</Text>
+          <View style={styles.card}>
+            <View style={styles.fallRow} testID="settings-fall-row">
+              <View style={{ flex: 1, paddingRight: 12 }}>
+                <View style={styles.fallTitleRow}>
+                  <Text style={styles.fallIcon}>🚨</Text>
+                  <Text style={styles.fallTitle}>Fall Detection</Text>
+                </View>
+                <Text style={styles.fallBody}>
+                  Automatically detect sudden falls using the device accelerometer. You'll get 30 seconds
+                  to cancel before SOS is triggered.
+                </Text>
+                {!fallAvailable ? (
+                  <Text style={styles.fallUnavail}>
+                    Not available on this device — works on physical phones with accelerometers.
+                  </Text>
+                ) : null}
+              </View>
+              <Switch
+                testID="settings-fall-switch"
+                value={fallOn}
+                onValueChange={onToggleFall}
+                trackColor={{ false: Colors.border, true: Colors.primary }}
+                thumbColor={Colors.surface}
+              />
+            </View>
           </View>
         </View>
 
@@ -381,4 +421,13 @@ const styles = StyleSheet.create({
     marginTop: 10, alignItems: 'center', paddingVertical: 12,
   },
   modalSecondaryText: { color: Colors.textSecondary, fontSize: 15, fontWeight: '600' },
+  fallRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 14,
+  },
+  fallTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  fallIcon: { fontSize: 18 },
+  fallTitle: { fontSize: 15, fontWeight: '800', color: Colors.textPrimary },
+  fallBody: { fontSize: 12.5, color: Colors.textSecondary, marginTop: 4, lineHeight: 18 },
+  fallUnavail: { marginTop: 6, fontSize: 11, color: Colors.textTertiary, fontStyle: 'italic' },
 });

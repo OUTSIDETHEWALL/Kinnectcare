@@ -628,6 +628,95 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+backend:
+  - task: "POST /api/sos accepts optional fall_detected flag"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 33/33 checks GREEN via /app/backend_test_fall.py against
+          https://family-guard-37.preview.emergentagent.com/api with demo@kinnectcare.app /
+          password123.
+
+          T1 POST /api/sos {latitude:37.7749, longitude:-122.4194, fall_detected:true}
+            -> 200, ok=True, timestamp ISO-parseable (2026-05-15T01:17:12.893369+00:00),
+            member_name='Demo User' (no member_id given so falls back to user.full_name),
+            coordinates=={latitude:37.7749, longitude:-122.4194}, devices_notified=2 (int),
+            alert_id present. Response shape unchanged — no extra top-level fields added.
+            (Push title prefix '🆘 Fall detected · SOS — Demo User' is built server-side and
+            sent via Expo; not visible from the HTTP response, but logged into push_data
+            including fall_detected:true per server.py:1040-1052.)
+
+          T2 POST /api/sos {latitude:1.0, longitude:1.0} (no fall_detected)
+            -> 200, coordinates=={latitude:1.0, longitude:1.0}, devices_notified=int.
+            fall_detected defaults to false (Pydantic default), endpoint behaves identically
+            to pre-change contract.
+
+          T3 POST /api/sos {fall_detected:true} (no coords)
+            -> 200, coordinates is None, member_name present. Optional flag accepted
+            without coords.
+
+          T4 POST /api/sos {} (no fields)
+            -> 200, coordinates is None, member_name == user.full_name ('Demo User').
+
+          T5 GET /api/alerts -> 200; 14 SOS alerts total (type='sos', severity='critical').
+            All 4 newly inserted alert ids from T1-T4 found in the response. Missing set empty.
+
+          T6 Smoke (all 200):
+            - POST /api/auth/login (demo) -> 200, token + user returned.
+            - GET /api/auth/me -> 200, email matches.
+            - GET /api/summary -> 200, members non-empty; each member has medication_total/
+              medication_taken/medication_missed/routine_total/weekly_compliance_percent.
+            - GET /api/billing/status -> 200; paid_plan.amount_cents == 999, currency='usd',
+              interval='month', product_name='KinnectCare Family Plan'.
+            - GET /api/members -> 200 (count=5).
+            - POST /api/checkins {member_id, latitude:12.97, longitude:77.59,
+              location_name:'Smoke FallTest'} -> 200 with lat/lng preserved.
+
+          Backend logs show 200s throughout and no errors. fall_detected addition is
+          fully backward compatible — pre-existing clients sending bodies without the
+          flag continue to work unchanged.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Fall-detection SOS testing COMPLETE — 33/33 green via /app/backend_test_fall.py.
+      POST /api/sos now accepts optional fall_detected:bool and the response shape is
+      unchanged (timestamp/member_name/coordinates/devices_notified) across all 4 body
+      variants tested: {lat,lng,fall_detected:true}, {lat,lng}, {fall_detected:true},
+      and {}. coordinates correctly null when lat/lng omitted. member_name falls back
+      to user.full_name when no member_id supplied. All 4 inserted alerts appear in
+      GET /api/alerts with type='sos' severity='critical'. Smoke (auth/login, /auth/me,
+      /summary, /billing/status with paid_plan.amount_cents==999, /members, /checkins
+      with coords) all green. No regressions, no backend errors. Push title prefix
+      ('🆘 Fall detected · SOS — <name>') is built server-side at server.py:1040 and
+      not visible from the HTTP response by design; data payload includes
+      fall_detected boolean for downstream clients. Main agent: please summarize and
+      finish.
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Backend additions for fall detection:
+        - POST /api/sos body now accepts optional `fall_detected: bool` (defaults false).
+        - When fall_detected is true, push notification title is prefixed with
+          "🆘 Fall detected · SOS — <member_name>" (instead of just "🆘 SOS — <name>").
+        - The push data payload now includes `fall_detected: true|false`.
+      Please test BACKEND ONLY:
+        1) POST /api/sos with body {latitude:37.77, longitude:-122.42, fall_detected: true} →
+           200, response includes timestamp/member_name/coordinates/devices_notified (same shape).
+        2) POST /api/sos with body {latitude:1.0, longitude:1.0} (no fall_detected) → 200, works.
+        3) POST /api/sos with body {fall_detected: true} (no coords) → 200, coordinates == null.
+        4) GET /api/alerts → SOS alerts from above show with type='sos', severity='critical'.
+        5) Quick smoke: /auth/login, /auth/me, /summary, /billing/status, POST /api/checkins.
+      DO NOT test frontend.
+
 frontend:
   - task: "Dashboard upgrade banner (free tier)"
     implemented: true
