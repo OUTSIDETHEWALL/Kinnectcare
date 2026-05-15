@@ -16,12 +16,14 @@ export default function Welcome() {
       <View style={styles.overlay} />
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <View style={styles.top}>
-          <Image
-            source={require('../assets/images/kinnship-logo-dark.png')}
-            style={styles.logoImage}
-            resizeMode="contain"
-            accessibilityLabel="Kinnship"
-          />
+          <View style={styles.logoFrame}>
+            <Image
+              source={require('../assets/images/kinnship-logo-dark.png')}
+              style={styles.logoImage}
+              resizeMode="contain"
+              accessibilityLabel="Kinnship"
+            />
+          </View>
           <Text style={styles.tagline}>Family safety & senior wellness, all in one place.</Text>
         </View>
 
@@ -72,6 +74,20 @@ const styles = StyleSheet.create({
   overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(249,245,240,0.82)' },
   container: { flex: 1, paddingHorizontal: 28, justifyContent: 'space-between' },
   top: { alignItems: 'center', marginTop: 24 },
+  // Dark-green frame that visually extends the PNG's box upward, giving the
+  // shield breathing room at the top. The frame color matches the PNG's
+  // outermost corner color (#072815) so the wrapper and the PNG blend into a
+  // single seamless dark-green rounded rectangle.
+  logoFrame: {
+    width: 200,
+    height: 200,
+    borderRadius: 40,
+    backgroundColor: '#072815',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    overflow: 'hidden',
+    paddingBottom: 0,
+  },
   logoImage: {
     width: 180, height: 180,
   },
