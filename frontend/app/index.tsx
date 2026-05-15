@@ -73,7 +73,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, paddingHorizontal: 28, justifyContent: 'space-between' },
   top: { alignItems: 'center', marginTop: 24 },
   logoImage: {
-    width: 220, height: 220,
+    width: 180, height: 180,
   },
   tagline: {
     fontSize: 17, color: Colors.textSecondary, textAlign: 'center',
