@@ -44,12 +44,14 @@ export default function Login() {
           </TouchableOpacity>
 
           <View style={styles.logoWrap}>
-            <Image
-              source={require('../../assets/images/kinnship-logo-white.png')}
-              style={styles.logoImage}
-              resizeMode="contain"
-              accessibilityLabel="Kinnship"
-            />
+            <View style={styles.logoFrame}>
+              <Image
+                source={require('../../assets/images/kinnship-logo-dark.png')}
+                style={styles.logoImage}
+                resizeMode="contain"
+                accessibilityLabel="Kinnship"
+              />
+            </View>
           </View>
           <Text style={styles.title}>Welcome back</Text>
           <Text style={styles.subtitle}>Sign in to keep your family safe.</Text>
@@ -109,7 +111,13 @@ const styles = StyleSheet.create({
   scroll: { padding: 24, paddingBottom: 48 },
   back: { width: 44, height: 44, justifyContent: 'center' },
   logoWrap: { alignItems: 'center', marginTop: 8, marginBottom: 4 },
-  logoImage: { width: 140, height: 140 },
+  logoFrame: {
+    width: 160, height: 160, borderRadius: 80,
+    backgroundColor: Colors.primary,
+    alignItems: 'center', justifyContent: 'center',
+    boxShadow: '0px 12px 24px rgba(27,94,53,0.22)' as any,
+  },
+  logoImage: { width: 96, height: 96, borderRadius: 20 },
   title: { fontSize: 28, fontWeight: '800', color: Colors.textPrimary, marginTop: 16, textAlign: 'center' },
   subtitle: { fontSize: 16, color: Colors.textSecondary, textAlign: 'center', marginTop: 6 },
   label: { fontSize: 13, fontWeight: '700', color: Colors.textSecondary, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 },

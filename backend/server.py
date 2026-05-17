@@ -21,6 +21,7 @@ from expo_push import send_expo_push
 import billing
 import family_group as fg
 import sms
+import med_scheduler
 
 
 ROOT_DIR = Path(__file__).parent
@@ -115,6 +116,7 @@ class FamilyMember(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     owner_id: str
     family_group_id: Optional[str] = None
+    user_id: Optional[str] = None  # Linked user account (for self-targeted pushes)
     name: str
     age: int
     phone: str
@@ -1307,6 +1309,44 @@ async def root():
     return {"message": "Kinnship API", "status": "ok"}
 
 
+# ========== Medication scheduler (self-alerts + family escalation) ==========
+# Single shared scheduler instance; started on app.startup, stopped on shutdown.
+_med_scheduler: Optional[med_scheduler.MedicationScheduler] = None
+
+
+@api_router.post("/medications/_tick")
+async def medications_tick(current=Depends(get_current_user)):
+    """Manually drive one medication-scheduler iteration.
+
+    Useful for testing the escalation flow without waiting for the 30-second
+    worker tick. Returns the counters from `process_pending_notifications`.
+    Auth-required so it can't be hit anonymously.
+    """
+    counters = await med_scheduler.process_pending_notifications(
+        db,
+        push_to_user=push_to_user,
+        push_to_family_group=push_to_family_group,
+    )
+    return {"ok": True, **counters}
+
+
+@api_router.get("/medications/_stages/{reminder_id}")
+async def medications_stages(reminder_id: str, current=Depends(get_current_user)):
+    """List the recorded notification stages for a given reminder. Test-only
+    introspection endpoint scoped to the caller's family group.
+    """
+    rem = await db.reminders.find_one(
+        {"id": reminder_id, "family_group_id": current["family_group_id"]},
+        {"_id": 0, "id": 1},
+    )
+    if not rem:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+    docs = await db.med_notifications.find(
+        {"reminder_id": reminder_id}, {"_id": 0}
+    ).sort("fired_at", 1).to_list(2000)
+    return {"reminder_id": reminder_id, "stages": docs}
+
+
 # Register family group routes (multi-user family invite & membership)
 api_router.include_router(fg.build_router(db, get_current_user, push_to_user=push_to_user))
 
@@ -1384,4 +1424,30 @@ async def _migrate_family_groups():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    global _med_scheduler
+    if _med_scheduler:
+        try:
+            await _med_scheduler.stop()
+        except Exception:
+            pass
     client.close()
+
+
+@app.on_event("startup")
+async def _start_med_scheduler():
+    """Start the medication-escalation background worker and ensure indexes."""
+    global _med_scheduler
+    try:
+        await med_scheduler.ensure_indexes(db)
+    except Exception as e:
+        logger.warning(f"med_scheduler index ensure skipped: {e}")
+    try:
+        _med_scheduler = med_scheduler.MedicationScheduler(
+            db,
+            push_to_user=push_to_user,
+            push_to_family_group=push_to_family_group,
+        )
+        _med_scheduler.start()
+        logger.info("Medication scheduler started.")
+    except Exception as e:
+        logger.warning(f"Medication scheduler failed to start: {e}")

@@ -2916,3 +2916,355 @@ frontend:
           existing Member fields. The Get Directions button still opens
           system Maps / Google Maps app via Linking.openURL.
 
+
+
+
+#====================================================================================================
+# 2026-06-17 — Login logo fix + Medication self-alerts with family escalation
+#====================================================================================================
+
+test_plan:
+  current_focus:
+    - "Medication self-alerts with 3-stage escalation (due / remind_30 / escalate_2h)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+
+frontend:
+  - task: "Login screen logo fix (use dark logo on green circular frame — match onboarding)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(auth)/login.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          The login screen was using the WHITE Kinnship logo
+          (`kinnship-logo-white.png`) directly on the cream background
+          (`Colors.background`), which made the logo INVISIBLE and
+          appeared distorted/stretched.
+          Fix: swapped to the DARK logo (`kinnship-logo-dark.png`) wrapped
+          in a circular green frame (160x160, borderRadius 80,
+          backgroundColor=Colors.primary, soft shadow), matching the
+          onboarding Welcome slide treatment. Inner Image is 96x96 with
+          resizeMode="contain". Verified visually on web preview at
+          http://localhost:3000/(auth)/login — logo now renders clean
+          with proper proportions, matching the onboarding screen.
+
+
+backend:
+  - task: "Medication self-alerts with 3-stage escalation (due / remind_30 / escalate_2h)"
+    implemented: true
+    working: true
+    file: "/app/backend/med_scheduler.py, /app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Implemented persistent, idempotent medication-reminder scheduler:
+
+          NEW FILE — /app/backend/med_scheduler.py
+            * MedicationScheduler — background asyncio task that wakes up
+              every 30s and calls process_pending_notifications().
+            * process_pending_notifications(db, push_to_user,
+              push_to_family_group, now_utc=None) — scans every reminder
+              where category=="medication" and times!=[], computes the
+              most-recent occurrence of each slot in the owner's tz, and
+              fires up to 3 stages:
+                  Stage `due`         — at T+0, push to the member's
+                                        OWN device only.
+                                        Title: "💊 Time to take your <name>"
+                  Stage `remind_30`   — at T+30m, gentle reminder to the
+                                        same member only.
+                                        Title: "💊 Reminder: Don't forget
+                                                 your <name>"
+                  Stage `escalate_2h` — at T+2h, push to the ENTIRE family
+                                        group AND insert a `medication_
+                                        escalation` Alert row.
+                                        Title: "💊 KINNSHIP ALERT: <name>
+                                                 hasn't taken <med>"
+                                        Body : "<name> hasn't confirmed
+                                                 their <med> after 2
+                                                 hours. Please check on
+                                                 them."
+            * Idempotency — unique index
+              {reminder_id, slot_time, local_date, stage} on
+              `med_notifications`. Every stage tries to insert before
+              firing; duplicate-key errors are silently swallowed, so we
+              can rerun process_pending_notifications() arbitrarily often
+              without sending the same push twice.
+            * Cancel-on-taken — every stage first checks
+              medication_logs.find_one({reminder_id, status:"taken",
+              marked_at>=slot_utc}). If the senior has already marked the
+              dose taken, all further stages are skipped (the counter
+              `skipped_taken` increments).
+            * Self-target resolution —
+                member.user_id     (preferred, set when senior links own
+                                    Kinnship account)
+                  fallback → member.owner_id  (the family-group owner who
+                                                created the member
+                                                profile)
+                  fallback → reminder.owner_id
+              Push goes through the existing push_to_user() / Expo path,
+              which respects the user's registered push_tokens. Member
+              docs without ANY linked user simply skip the self-push
+              (escalation still fires after 2h).
+            * MAX_STALE_MINUTES=1440 — bounds the back-fill window so a
+              scheduler that has been offline for a week won't suddenly
+              fire historic escalations.
+
+          server.py CHANGES
+            * `import med_scheduler` near the other modules.
+            * FamilyMember model gains `user_id: Optional[str] = None`
+              (for the senior-self-link path).
+            * POST /api/medications/_tick — auth-required test endpoint
+              that manually drives one scheduler iteration and returns
+              the counters dict (scanned_reminders, fired_due,
+              fired_remind_30, fired_escalate_2h, skipped_taken).
+            * GET /api/medications/_stages/{reminder_id} — auth-required
+              introspection endpoint that returns the list of recorded
+              stage entries for a reminder (sorted by fired_at). Scoped
+              to caller's family_group_id.
+            * Startup hook — ensures the unique index on
+              med_notifications and starts the background scheduler task.
+            * Shutdown hook — stops the scheduler.
+
+          OBSERVED ON BOOT
+            Initial scan of existing demo data fired 75 due + 75
+            remind_30 + 74 escalate_2h notifications (one-time backfill
+            for medications the demo account never marked taken). All
+            subsequent ticks are no-ops thanks to the unique index. Logs
+            show clean "Medication scheduler tick → {...}" line and no
+            Expo push errors.
+
+          TEST INSTRUCTIONS FOR TESTING AGENT
+            Use demo@kinnship.app / password123 (Demo user already has a
+            family group with members + medication reminders).
+
+            T1  Register a push token so push_to_user has somewhere to
+                send:
+                  POST /api/auth/push-token
+                    body {"token":"ExponentPushToken[FAKE_MED_TEST]"}
+                  → 200 {ok:true}
+
+            T2  Pick a member with no medications yet (or create one),
+                then add a medication whose slot is 1 minute in the past:
+                  POST /api/reminders body
+                    {member_id, title:"TickTest", dosage:"10mg",
+                     category:"medication", times:[{time:"<HH:MM 1 min
+                     ago in UTC for demo user (timezone:UTC)>"}]}
+                  Record the returned reminder.id.
+
+            T3  POST /api/medications/_tick → 200 with counters where
+                fired_due >= 1 and fired_remind_30 == 0 and
+                fired_escalate_2h == 0 (1 min after slot only triggers
+                stage 1).
+
+            T4  Create another medication with slot 35 minutes in the
+                past → tick → fired_due >= 1 AND fired_remind_30 >= 1,
+                fired_escalate_2h == 0.
+
+            T5  Create another medication with slot 130 minutes in the
+                past → tick → fired_due >= 1 AND fired_remind_30 >= 1
+                AND fired_escalate_2h >= 1.
+                Verify: GET /api/alerts now contains an
+                `medication_escalation` alert with severity="critical"
+                whose title starts with "<name> hasn't taken TickTest"
+                and message contains "after 2 hours".
+
+            T6  Idempotency — POST /api/medications/_tick again →
+                counters all 0 (nothing new to fire) and
+                /api/medications/_stages/{reminder_id_from_T5} shows
+                exactly 3 rows (one per stage).
+
+            T7  Cancel-on-taken — create another medication with slot
+                130 min in past, IMMEDIATELY mark it taken
+                (POST /api/reminders/{id}/mark {status:"taken"}), then
+                /api/medications/_tick → fired_due == 0,
+                fired_remind_30 == 0, fired_escalate_2h == 0,
+                skipped_taken >= 1.
+
+            T8  Regression — confirm /api/auth/login,
+                /api/family-group, /api/members, /api/summary,
+                /api/billing/status, /api/sos still return 200.
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 43/45 hard checks GREEN via /app/backend_test.py against
+          https://family-guard-37.preview.emergentagent.com/api. The 2 failing
+          checks in T3 are an unrealistic assertion (see "Minor" note below),
+          NOT a feature bug.
+
+          T1 POST /api/auth/push-token (demo, ExponentPushToken[FAKE_MED_TEST])
+            -> 200 {ok:true}. PASS.
+
+          T2 Fresh signup medtick_<rand>@example.com / password123 + timezone='UTC'
+            -> 200. GET /auth/me returns tz='UTC'. Seeded family members:
+            ['Gregory','James']. James selected as target. Push token also registered
+            for fresh user. PASS.
+
+          T3 Stage 1 only — slot 1 min in past (19:44 UTC):
+            POST /reminders {category:'medication', times:[{time:'19:44'}]} -> 200,
+            reminder.id=273d39d3-... .
+            POST /medications/_tick -> 200 with body
+              {ok:true, scanned_reminders:150, fired_due:5, fired_remind_30:4,
+               fired_escalate_2h:4, skipped_taken:1}.
+            fired_due >= 1 ✓
+            (Per-reminder stages GET /medications/_stages/{rem_t3_id} -> exactly
+             one stage doc with stage='due' ✓ — confirming THIS reminder only
+             fired due.)
+            Minor: spec asked for fired_remind_30 == 0 and fired_escalate_2h == 0,
+            but these counters are GLOBAL across every medication reminder in the
+            DB (150 scanned), and 4 OTHER pre-existing reminders happened to cross
+            those thresholds in the same tick. The just-created T3 reminder
+            correctly fired ONLY stage 'due' as proven by its stages endpoint.
+            Recommend updating the test spec to assert via the per-reminder
+            stages endpoint instead of the global counter (which is what we used
+            for the authoritative check).
+
+          T4 Stage 1+2 — slot 35 min in past (19:10 UTC):
+            POST /reminders TickTest2 -> 200.
+            POST /medications/_tick -> 200 with body
+              {scanned:151, fired_due:1, fired_remind_30:1, fired_escalate_2h:0,
+               skipped_taken:1}. fired_due>=1 ✓, fired_remind_30>=1 ✓,
+            fired_escalate_2h==0 ✓.
+            Stages endpoint -> ['due','remind_30']. PASS.
+
+          T5 All 3 stages — slot 130 min in past (17:35 UTC):
+            POST /reminders TickTest3 -> 200.
+            POST /medications/_tick -> 200 with body
+              {scanned:152, fired_due:1, fired_remind_30:1, fired_escalate_2h:1,
+               skipped_taken:1}. fired_due>=1 ✓, fired_remind_30>=1 ✓,
+            fired_escalate_2h>=1 ✓.
+            GET /alerts -> includes new medication_escalation alert for this
+            reminder:
+              title="James hasn't taken TickTest3" ✓
+              severity="critical" ✓
+              message="KINNSHIP ALERT: James hasn't confirmed their TickTest3
+              after 2 hours. Please check on them." ✓ (contains both
+              "after 2 hours" and "KINNSHIP ALERT").
+            Stages endpoint -> ['due','escalate_2h','remind_30'] (all 3). PASS.
+
+          T6 Idempotency — POST /medications/_tick again:
+            -> 200 {scanned:152, fired_due:0, fired_remind_30:0,
+                    fired_escalate_2h:0, skipped_taken:1}.
+            scanned_reminders>0 ✓ (still scans) and all 3 fired counters == 0 ✓
+            (no refiring). Stages for T5 reminder still exactly 3 docs ✓.
+            Unique index on med_notifications is doing its job. PASS.
+
+          T7 Cancel-on-taken — slot 130 min in past, immediate mark taken:
+            POST /reminders TickTest4 -> 200.
+            POST /reminders/{id}/mark {status:'taken'} -> 200 {ok:true,status:'taken'}.
+            POST /medications/_tick -> 200 {scanned:153, fired_due:0,
+              fired_remind_30:0, fired_escalate_2h:0, skipped_taken:2}.
+            skipped_taken>=1 ✓ (incremented).
+            GET /medications/_stages/{rem_t7_id} -> {stages: []} (empty) ✓
+            confirming NO stages were ever recorded for the taken reminder.
+            PASS.
+
+          T8 Regression — all 7 demo endpoints return 200:
+            POST /auth/login (demo@kinnship.app) ✓
+            GET /family-group ✓
+            GET /members (count=5) ✓
+            GET /summary ✓
+            GET /billing/status ✓
+            GET /alerts (count=44) ✓
+            POST /sos {member_id:Gregory, latitude:1.0, longitude:2.0} -> 200
+              with member_name='Gregory', triggered_by_name='Demo User',
+              SMS mock fanout fired with body "🆘 KINNSHIP ALERT: Gregory has
+              triggered an emergency SOS. Last known location: 1.00000, 2.00000.
+              Please check on them immediately or call 911." ✓
+            GET /reminders/member/{id} (count=2) ✓
+
+          The medication self-alerts feature works correctly end-to-end:
+          stages fire at the right thresholds, are idempotent, are cancelled by
+          marked-taken, and the family escalation correctly inserts a
+          medication_escalation Alert row with the expected title/severity/message.
+          Backend logs are clean (200s + Expo push 200s + SMS-MOCK line). Self
+          push delivery to the senior's user account works (Expo accepts the
+          fake ExponentPushToken[] envelope at the API level).
+
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Two tasks delivered in this iteration:
+
+      (1) LOGIN LOGO FIX — The login screen was rendering the WHITE
+          Kinnship logo on a cream background, making the logo invisible
+          and look stretched. Switched to the dark logo inside a green
+          circular frame (matches onboarding Welcome slide). Verified
+          visually — login logo now renders clean.
+
+      (2) MEDICATION SELF-ALERTS WITH FAMILY ESCALATION — Built a
+          persistent, idempotent background scheduler that fires three
+          escalating notifications per medication dose:
+            T+0    → self-push to member device only
+            T+30m  → gentle self-reminder if not taken
+            T+2h   → KINNSHIP ALERT push to the whole family group
+                     AND a `medication_escalation` Alert row.
+          Idempotency is enforced by a unique index on
+          `med_notifications` keyed by (reminder, slot, date, stage).
+          Marking a dose taken naturally cancels remaining stages via
+          the medication_logs lookup. Self-push targets member.user_id
+          (preferred) and falls back to member.owner_id when the senior
+          has no linked user account.
+
+          New endpoints (auth-required):
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Medication self-alerts 3-stage escalation testing COMPLETE — feature
+      WORKING via /app/backend_test.py (43/45 hard checks GREEN; the 2 fails
+      are an unrealistic spec assertion against GLOBAL counters, see below).
+
+      T1 push-token (demo, ExponentPushToken[FAKE_MED_TEST]) → 200 {ok:true} ✓
+      T2 Fresh signup medtick_<uuid>@example.com, tz=UTC, seeded Gregory+James ✓
+      T3 1-min-past slot → fired_due>=1 ✓; per-reminder stages endpoint shows
+          EXACTLY ['due'] ✓. Spec's hard equality
+          fired_remind_30==0 / fired_escalate_2h==0 on the GLOBAL counter
+          failed because OTHER pre-existing reminders in the shared DB also
+          crossed those thresholds in the same tick — the just-created
+          reminder behaved correctly. Recommend asserting via the per-reminder
+          stages endpoint going forward.
+      T4 35-min-past → due+remind_30 only ✓; stages ['due','remind_30'] ✓
+      T5 130-min-past → all 3 stages ✓; GET /alerts has a new
+          medication_escalation alert:
+            title  = "James hasn't taken TickTest3" ✓
+            severity = "critical" ✓
+            message contains "after 2 hours" AND "KINNSHIP ALERT" ✓
+          stages endpoint → ['due','escalate_2h','remind_30'] (all 3) ✓
+      T6 Idempotency: re-tick → fired_*==0 across the board, scanned>0 ✓;
+          stages for T5 reminder still exactly 3 ✓ (unique index works).
+      T7 Cancel-on-taken: mark taken before tick → skipped_taken incremented
+          (2 cumulative) ✓; stages endpoint returns empty [] for that
+          reminder ✓ — no stage docs were ever inserted.
+      T8 Regression on demo user: login, /family-group, /members, /summary,
+          /billing/status, /alerts, /sos (with coords, member_name='Gregory'
+          + SMS-MOCK fanout fired with the expected body),
+          /reminders/member/{id} all 200 ✓.
+
+      Backend logs are clean (200s + Expo push 200s + SMS-MOCK fanout line).
+      No source code modified. Main agent: please summarize and finish.
+      Optional polish: update the test spec for T3 to assert via
+      GET /medications/_stages/{rem_id} (per-reminder) instead of relying on
+      strict equality of the GLOBAL counters fired_remind_30 /
+      fired_escalate_2h, which can be non-zero whenever other reminders in
+      the shared DB cross those thresholds in the same tick.
+
+            POST /api/medications/_tick                — run one scan
+            GET  /api/medications/_stages/{rem_id}     — list fired
+                                                          stages for a
+                                                          reminder
+
+      Please run backend tests focusing on the medication scheduler
+      (T1-T8 in the status_history above). Login logo fix is a pure
+      frontend visual change and does NOT need backend regression.
