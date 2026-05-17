@@ -16,6 +16,7 @@ export default function AddMember() {
   const [name, setName] = useState('');
   const [age, setAge] = useState('');
   const [phone, setPhone] = useState('');
+  const [emergencyContactPhone, setEmergencyContactPhone] = useState('');
   const [gender, setGender] = useState('Male');
   const [loading, setLoading] = useState(false);
   const [paywallMsg, setPaywallMsg] = useState<string | null>(null);
@@ -29,7 +30,13 @@ export default function AddMember() {
     setLoading(true);
     try {
       const role = n >= 60 ? 'senior' : 'family';
-      await api.post('/members', { name: name.trim(), age: n, phone: phone.trim(), gender, role });
+      const body: any = {
+        name: name.trim(), age: n, phone: phone.trim(), gender, role,
+      };
+      if (emergencyContactPhone.trim()) {
+        body.emergency_contact_phone = emergencyContactPhone.trim();
+      }
+      await api.post('/members', body);
       router.back();
     } catch (e: any) {
       const pw = isPaywall(e);
@@ -90,6 +97,21 @@ export default function AddMember() {
               placeholderTextColor={Colors.textTertiary}
               style={styles.input}
             />
+          </Field>
+
+          <Field label="Emergency contact phone (SMS)" testID="member-emergency-contact">
+            <TextInput
+              testID="member-emergency-contact-input"
+              value={emergencyContactPhone}
+              onChangeText={setEmergencyContactPhone}
+              placeholder="+1 555 987 6543 (optional)"
+              keyboardType="phone-pad"
+              placeholderTextColor={Colors.textTertiary}
+              style={styles.input}
+            />
+            <Text style={styles.fieldHint}>
+              📱 Will receive an SMS alert when this member triggers SOS or a fall is detected.
+            </Text>
           </Field>
 
           <Text style={styles.label}>Gender</Text>
@@ -165,6 +187,7 @@ const styles = StyleSheet.create({
   title: { fontSize: 18, fontWeight: '700', color: Colors.textPrimary },
   subtitle: { fontSize: 15, color: Colors.textSecondary, lineHeight: 22, marginBottom: 8 },
   label: { fontSize: 13, fontWeight: '700', color: Colors.textSecondary, marginBottom: 8, marginTop: 16, textTransform: 'uppercase', letterSpacing: 0.6 },
+  fieldHint: { fontSize: 12, color: Colors.textTertiary, marginTop: 6, lineHeight: 17 },
   input: {
     backgroundColor: Colors.surface, borderRadius: 14, padding: 16, fontSize: 16,
     color: Colors.textPrimary, borderWidth: 1, borderColor: Colors.border,

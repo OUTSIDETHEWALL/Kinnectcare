@@ -20,6 +20,7 @@ from pydantic import field_validator
 from expo_push import send_expo_push
 import billing
 import family_group as fg
+import sms
 
 
 ROOT_DIR = Path(__file__).parent
@@ -92,6 +93,22 @@ class FamilyMemberCreate(BaseModel):
     phone: str
     gender: str
     role: str = "family"
+    emergency_contact_phone: Optional[str] = None
+
+
+class FamilyMemberUpdate(BaseModel):
+    name: Optional[str] = None
+    age: Optional[int] = None
+    phone: Optional[str] = None
+    gender: Optional[str] = None
+    role: Optional[str] = None
+    location_name: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    avatar_url: Optional[str] = None
+    daily_checkin_time: Optional[str] = None
+    emergency_contact_phone: Optional[str] = None
+    status: Optional[str] = None
 
 
 class FamilyMember(BaseModel):
@@ -110,6 +127,7 @@ class FamilyMember(BaseModel):
     longitude: Optional[float] = None
     avatar_url: Optional[str] = None
     daily_checkin_time: Optional[str] = None
+    emergency_contact_phone: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -652,13 +670,52 @@ async def create_member(data: FamilyMemberCreate, current=Depends(get_current_us
                 },
             )
     role = data.role if data.role in ("family", "senior") else ("senior" if data.age >= 60 else "family")
+    ec_phone = sms.normalize_e164(data.emergency_contact_phone) if data.emergency_contact_phone else None
     member = FamilyMember(
         owner_id=current["id"], family_group_id=current["family_group_id"], name=data.name, age=data.age, phone=data.phone,
         gender=data.gender, role=role, status="healthy", location_name="Unknown",
         daily_checkin_time="09:00" if role == "senior" else None,
+        emergency_contact_phone=ec_phone,
     )
     await db.members.insert_one(member.model_dump())
     return member
+
+
+@api_router.put("/members/{member_id}", response_model=FamilyMember)
+async def update_member(member_id: str, data: FamilyMemberUpdate, current=Depends(get_current_user)):
+    """Generic member profile update (name, phone, emergency contact, etc.)."""
+    payload = data.model_dump(exclude_unset=True)
+    # Normalize emergency contact phone to E.164 if present.
+    if "emergency_contact_phone" in payload:
+        raw = payload.get("emergency_contact_phone")
+        if raw is None or str(raw).strip() == "":
+            payload["emergency_contact_phone"] = None
+        else:
+            norm = sms.normalize_e164(raw)
+            if not norm:
+                raise HTTPException(
+                    status_code=400,
+                    detail="emergency_contact_phone must be a valid phone number (e.g. +15555550100 or (555) 555-0100)",
+                )
+            payload["emergency_contact_phone"] = norm
+    if "daily_checkin_time" in payload and payload["daily_checkin_time"]:
+        if parse_hhmm(payload["daily_checkin_time"]) is None:
+            raise HTTPException(status_code=400, detail="daily_checkin_time must be HH:MM format")
+    if not payload:
+        # Nothing to update — return existing doc.
+        doc = await db.members.find_one({"id": member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Member not found")
+        return FamilyMember(**doc)
+    payload["last_seen"] = datetime.now(timezone.utc)
+    r = await db.members.update_one(
+        {"id": member_id, "family_group_id": current["family_group_id"]},
+        {"$set": payload},
+    )
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Member not found")
+    doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+    return FamilyMember(**doc)
 
 
 @api_router.get("/members/{member_id}", response_model=FamilyMember)
@@ -1133,6 +1190,39 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         current["family_group_id"], push_title, push_body, push_data
     )
 
+    # ----- SMS fanout to designated emergency contacts -----
+    # Gather emergency_contact_phone from every member in the family group.
+    # We also include the triggering member's primary `phone` as a fallback
+    # when they have no explicit emergency contact set yet (so SOS still pages
+    # out *someone* on first use).
+    ec_cursor = db.members.find(
+        {"family_group_id": current["family_group_id"]},
+        {"_id": 0, "emergency_contact_phone": 1, "phone": 1, "id": 1, "name": 1},
+    )
+    ec_docs = await ec_cursor.to_list(500)
+    ec_numbers: list = []
+    for d in ec_docs:
+        if d.get("emergency_contact_phone"):
+            ec_numbers.append(d["emergency_contact_phone"])
+    # Build the SMS body in the format requested.
+    if has_coords:
+        loc_str = f"{data.latitude:.5f}, {data.longitude:.5f}"
+    else:
+        loc_str = "GPS unavailable"
+    sms_body = (
+        f"🆘 KINNSHIP ALERT: {member_name} has triggered an emergency SOS. "
+        f"Last known location: {loc_str}. "
+        "Please check on them immediately or call 911."
+    )
+    sms_results = await sms.send_sms_to_many(ec_numbers, sms_body)
+    sms_sent = sum(1 for r in sms_results if r.get("ok"))
+    sms_failed = sum(1 for r in sms_results if not r.get("ok"))
+    if sms_results:
+        logger.info(
+            f"SOS SMS fanout — mode={sms.mode()} sent={sms_sent} failed={sms_failed} "
+            f"contacts={len(ec_numbers)}"
+        )
+
     return {
         "ok": True,
         "alert_id": alert.id,
@@ -1146,6 +1236,11 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         ),
         "devices_notified": devices_notified,
         "fall_detected": bool(data.fall_detected),
+        # SMS fanout summary (for UI confirmation + tests):
+        "sms_mode": sms.mode(),  # "live" or "mock"
+        "sms_sent": sms_sent,
+        "sms_failed": sms_failed,
+        "sms_contacts_count": len(ec_numbers),
     }
 
 

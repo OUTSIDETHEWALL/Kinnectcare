@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
-  ActivityIndicator, Alert, Linking, Platform, RefreshControl,
+  ActivityIndicator, Alert, Linking, Platform, RefreshControl, TextInput,
 } from 'react-native';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
@@ -106,6 +106,28 @@ export default function MemberDetail() {
       setShowCheckinSettings(false);
     } catch (_e) {
       Alert.alert('Failed', 'Could not update.');
+    }
+  };
+
+  // ----- Emergency contact (SMS) editor state -----
+  const [ecEditing, setEcEditing] = useState(false);
+  const [ecValue, setEcValue] = useState('');
+  const startEcEdit = () => {
+    setEcValue(member?.emergency_contact_phone || '');
+    setEcEditing(true);
+  };
+  const saveEc = async () => {
+    try {
+      const r = await api.put(`/members/${id}`, {
+        emergency_contact_phone: ecValue.trim() || null,
+      });
+      setMember(r.data);
+      setEcEditing(false);
+    } catch (e: any) {
+      Alert.alert(
+        'Invalid phone',
+        e?.response?.data?.detail || 'Please enter a valid phone number (e.g. +1 555 123 4567).',
+      );
     }
   };
 
@@ -235,6 +257,57 @@ export default function MemberDetail() {
                 {fallOn ? 'ACTIVE' : 'OFF'}
               </Text>
             </View>
+          </View>
+        </View>
+
+        {/* Emergency Contact (SMS) */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Emergency Contact (SMS)</Text>
+            <TouchableOpacity
+              testID="ec-toggle"
+              onPress={() => (ecEditing ? setEcEditing(false) : startEcEdit())}
+            >
+              <Text style={styles.linkText}>{ecEditing ? 'Cancel' : member?.emergency_contact_phone ? 'Edit' : 'Add'}</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.settingCard}>
+            {ecEditing ? (
+              <>
+                <Text style={styles.settingLabel}>Phone (we'll auto-format to E.164)</Text>
+                <TextInput
+                  testID="ec-input"
+                  value={ecValue}
+                  onChangeText={setEcValue}
+                  placeholder="+1 555 123 4567"
+                  keyboardType="phone-pad"
+                  placeholderTextColor={Colors.textTertiary}
+                  style={styles.ecInput}
+                />
+                <TouchableOpacity
+                  testID="ec-save"
+                  style={styles.ecSaveBtn}
+                  onPress={saveEc}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.ecSaveText}>Save Emergency Contact</Text>
+                </TouchableOpacity>
+              </>
+            ) : member?.emergency_contact_phone ? (
+              <View testID="ec-display">
+                <Text style={styles.ecValue}>{member.emergency_contact_phone}</Text>
+                <Text style={styles.ecHelp}>
+                  📱 Receives an SMS the moment {member?.name} triggers SOS or fall detection.
+                </Text>
+              </View>
+            ) : (
+              <View testID="ec-empty">
+                <Text style={styles.ecEmpty}>No emergency contact set</Text>
+                <Text style={styles.ecHelp}>
+                  Add a phone number so a designated person gets an SMS alert during SOS or fall detection.
+                </Text>
+              </View>
+            )}
           </View>
         </View>
 
@@ -487,6 +560,19 @@ const styles = StyleSheet.create({
   featureIconOff: { backgroundColor: Colors.background },
   featureIconText: { fontSize: 22 },
   featureTitle: { fontSize: 14, fontWeight: '800', color: Colors.textPrimary },
+  ecInput: {
+    backgroundColor: Colors.background, borderRadius: 10, paddingHorizontal: 14,
+    paddingVertical: 12, fontSize: 16, borderWidth: 1, borderColor: Colors.border,
+    marginTop: 4, color: Colors.textPrimary,
+  },
+  ecSaveBtn: {
+    marginTop: 12, height: 44, borderRadius: 10, backgroundColor: Colors.primary,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  ecSaveText: { color: Colors.surface, fontSize: 14, fontWeight: '800' },
+  ecValue: { fontSize: 18, fontWeight: '800', color: Colors.textPrimary },
+  ecEmpty: { fontSize: 14, color: Colors.textTertiary, fontStyle: 'italic' },
+  ecHelp: { fontSize: 12, color: Colors.textSecondary, marginTop: 6, lineHeight: 17 },
   featureBody: { fontSize: 12, color: Colors.textSecondary, marginTop: 2, lineHeight: 17 },
   featurePill: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10, marginLeft: 8 },
   featurePillOn: { backgroundColor: Colors.primary },
