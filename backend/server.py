@@ -1200,10 +1200,18 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         {"_id": 0, "emergency_contact_phone": 1, "phone": 1, "id": 1, "name": 1},
     )
     ec_docs = await ec_cursor.to_list(500)
-    ec_numbers: list = []
+    # Collect, normalize, and de-duplicate emergency contact phones so
+    # `sms_contacts_count` reflects the actual number of UNIQUE recipients.
+    ec_normalized: list = []
+    seen_norm: set = set()
     for d in ec_docs:
-        if d.get("emergency_contact_phone"):
-            ec_numbers.append(d["emergency_contact_phone"])
+        raw = d.get("emergency_contact_phone")
+        if not raw:
+            continue
+        n = sms.normalize_e164(raw)
+        if n and n not in seen_norm:
+            seen_norm.add(n)
+            ec_normalized.append(n)
     # Build the SMS body in the format requested.
     if has_coords:
         loc_str = f"{data.latitude:.5f}, {data.longitude:.5f}"
@@ -1214,13 +1222,13 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         f"Last known location: {loc_str}. "
         "Please check on them immediately or call 911."
     )
-    sms_results = await sms.send_sms_to_many(ec_numbers, sms_body)
+    sms_results = await sms.send_sms_to_many(ec_normalized, sms_body)
     sms_sent = sum(1 for r in sms_results if r.get("ok"))
     sms_failed = sum(1 for r in sms_results if not r.get("ok"))
     if sms_results:
         logger.info(
             f"SOS SMS fanout — mode={sms.mode()} sent={sms_sent} failed={sms_failed} "
-            f"contacts={len(ec_numbers)}"
+            f"contacts={len(ec_normalized)}"
         )
 
     return {
@@ -1240,7 +1248,7 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         "sms_mode": sms.mode(),  # "live" or "mock"
         "sms_sent": sms_sent,
         "sms_failed": sms_failed,
-        "sms_contacts_count": len(ec_numbers),
+        "sms_contacts_count": len(ec_normalized),
     }
 
 
