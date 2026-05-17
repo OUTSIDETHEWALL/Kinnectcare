@@ -78,163 +78,32 @@ agenthub/agents/youtube/db
 
 memory/test_credentials.md
 
+
 # Mobile development
-android-sdk/-e 
-# Credential files (env files MUST be tracked for Emergent deployment)
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
+android-sdk/
+
+# Environment & credential files
+# NEVER COMMIT THESE — they hold real Stripe, Twilio, and Google Maps API keys.
 .env
 .env.*
 *.env
+backend/.env
+frontend/.env
 credentials.json
 *.pem
 *.key
 .credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
--e 
-# Environment and credential files
-.env
-.env.*
-*.env
-credentials.json
-*.pem
-*.key
-.credentials
+*token.json*
+
+# Screenshot artefacts (large + regenerable from /api/screenshots route)
+frontend/screenshots/*.png
+frontend/screenshots/*.jpg
+frontend/screenshots/*.zip
+
+# Build caches (Metro/Expo/Python/Node)
+**/.metro-cache/
+**/.expo/
+**/.expo-shared/
+**/__pycache__/
+node_modules/
+.venv/
