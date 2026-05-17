@@ -11,6 +11,7 @@ import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, Reminder } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
 import { isFallEnabled } from '../../src/fallDetector';
+import MemberMap from '../../src/MemberMap';
 
 const TIME_PRESETS = ['08:00', '09:00', '10:00', '12:00', '18:00', '20:00', '21:00'];
 
@@ -222,10 +223,14 @@ export default function MemberDetail() {
                 <Text style={styles.locSub}>Last seen 🕐 recently</Text>
               </View>
             </View>
-            <View style={styles.locDivider} />
-            <View style={styles.locMetaRow}>
-              <Text style={styles.locMetaLabel}>Coordinates</Text>
-              <Text style={styles.locMetaValue}>{coordsLabel}</Text>
+            <View style={{ marginTop: 12 }}>
+              <MemberMap
+                latitude={member.latitude}
+                longitude={member.longitude}
+                memberName={member.name}
+                locationName={member.location_name || undefined}
+                height={220}
+              />
             </View>
             <TouchableOpacity testID="member-get-directions" onPress={openDirections} activeOpacity={0.85} style={styles.directionsBtn}>
               <Text style={styles.directionsEmoji}>🗺</Text>

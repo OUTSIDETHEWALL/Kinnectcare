@@ -2879,3 +2879,40 @@ agent_communication:
       the sms_contacts_count dedup reporting bug in server.py:1243 (minor
       one-line change) and then summarize and finish.
 
+
+frontend:
+  - task: "Google Maps integration on Member detail screen (interactive map + green pin)"
+    implemented: true
+    working: true
+    file: "/app/frontend/src/MemberMap.tsx, /app/frontend/app/member/[id].tsx, /app/frontend/.env, /app/backend/.env"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Added EXPO_PUBLIC_GOOGLE_MAPS_API_KEY to /app/frontend/.env and mirror
+          GOOGLE_MAPS_API_KEY in /app/backend/.env. Implemented new component
+          /app/frontend/src/MemberMap.tsx that renders an interactive Google
+          Maps via the JS API inside an <iframe srcDoc> on web and inside a
+          WebView with `source={{ html }}` on iOS/Android. The marker is a
+          custom #1B5E35 (Kinnship green) circular pin with a translucent ring
+          underneath for emphasis. UI controls: zoom enabled, POI/transit
+          labels stripped for clarity, clickable POIs disabled, gestures
+          allowed.
+          Member detail screen now shows the live map (220 px) in place of the
+          old "Coordinates" text row, with the existing "Get Directions"
+          button preserved (`testID="member-get-directions"`).
+          When latitude/longitude are missing the component renders a styled
+          placeholder card (testID `member-map-empty`) with a dashed-green pin
+          icon, headline "Location not available yet", and a contextual
+          sub-line ("{name} hasn't checked in with GPS yet.").
+          Verified visually:
+            - Eleanor (40.7128,-74.006) → interactive Manhattan map with green
+              pin and working zoom buttons.
+            - James (no GPS yet) → empty-state placeholder card.
+          No backend changes required — the map reads coordinates from the
+          existing Member fields. The Get Directions button still opens
+          system Maps / Google Maps app via Linking.openURL.
+
