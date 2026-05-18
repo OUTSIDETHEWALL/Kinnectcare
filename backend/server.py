@@ -1097,7 +1097,9 @@ async def billing_webhook(request: Request):
         if etype == "checkout.session.completed":
             customer_id = obj.get("customer")
             subscription_id = obj.get("subscription")
-            user_id = (obj.get("metadata") or {}).get("kinnect_user_id")
+            meta = obj.get("metadata") or {}
+            # Prefer new key, fall back to legacy for older sessions.
+            user_id = meta.get("kinnship_user_id") or meta.get("kinnect_user_id")
             if subscription_id and customer_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
                 # Resolve user_id from customer if metadata missing
@@ -1110,7 +1112,8 @@ async def billing_webhook(request: Request):
                     await billing.apply_subscription_to_user(db, user_id, customer_id, sub)
         elif etype in ("customer.subscription.updated", "customer.subscription.created"):
             customer_id = obj.get("customer")
-            user_id = (obj.get("metadata") or {}).get("kinnect_user_id")
+            meta = obj.get("metadata") or {}
+            user_id = meta.get("kinnship_user_id") or meta.get("kinnect_user_id")
             if not user_id and customer_id:
                 u = await db.users.find_one(
                     {"subscription.stripe_customer_id": customer_id}, {"_id": 0, "id": 1}

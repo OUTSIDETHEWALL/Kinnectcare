@@ -209,7 +209,12 @@ async def _ensure_stripe_customer(db, user_doc: dict) -> str:
     customer = stripe.Customer.create(
         email=user_doc["email"],
         name=user_doc.get("full_name"),
-        metadata={"kinnect_user_id": user_doc["id"]},
+        # `kinnship_user_id` is the canonical key going forward; `kinnect_user_id`
+        # is kept for backwards-compat with older Stripe customers.
+        metadata={
+            "kinnship_user_id": user_doc["id"],
+            "kinnect_user_id": user_doc["id"],
+        },
     )
     await db.users.update_one(
         {"id": user_doc["id"]},
@@ -237,9 +242,17 @@ async def create_checkout_session(
         success_url=success_url,
         cancel_url=cancel_url,
         allow_promotion_codes=True,
-        metadata={"kinnect_user_id": user_doc["id"], "interval": interval},
+        metadata={
+            "kinnship_user_id": user_doc["id"],
+            "kinnect_user_id": user_doc["id"],
+            "interval": interval,
+        },
         subscription_data={
-            "metadata": {"kinnect_user_id": user_doc["id"], "interval": interval},
+            "metadata": {
+                "kinnship_user_id": user_doc["id"],
+                "kinnect_user_id": user_doc["id"],
+                "interval": interval,
+            },
         },
     )
     return session.url, session.id
