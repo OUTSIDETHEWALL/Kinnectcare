@@ -1306,7 +1306,9 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
     now_utc = datetime.now(timezone.utc)
     now_local = now_utc.astimezone(tz)
     timestamp_iso = now_utc.isoformat()
-    local_time_str = now_local.strftime('%H:%M %Z, %b %d')
+    # 12-hour AM/PM with the user's tz abbreviation (e.g. "2:10 PM EDT, May 21").
+    # %I gives a zero-padded 12-hour value which we strip to look natural.
+    local_time_str = now_local.strftime('%I:%M %p %Z, %b %d').lstrip('0')
 
     has_coords = data.latitude is not None and data.longitude is not None
     coord_str = ""
