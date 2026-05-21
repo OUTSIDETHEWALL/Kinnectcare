@@ -108,6 +108,8 @@ class FamilyMemberUpdate(BaseModel):
     longitude: Optional[float] = None
     avatar_url: Optional[str] = None
     daily_checkin_time: Optional[str] = None
+    checkin_interval_hours: Optional[int] = None
+    checkin_interval_started_at: Optional[datetime] = None
     emergency_contact_phone: Optional[str] = None
     status: Optional[str] = None
 
@@ -129,12 +131,20 @@ class FamilyMember(BaseModel):
     longitude: Optional[float] = None
     avatar_url: Optional[str] = None
     daily_checkin_time: Optional[str] = None
+    # Interval-based check-ins (mutually exclusive with daily_checkin_time).
+    # If set, the senior is expected to check in every N hours, anchored
+    # at `checkin_interval_started_at`. Allowed values: 2, 4, 6, 8, 12.
+    checkin_interval_hours: Optional[int] = None
+    checkin_interval_started_at: Optional[datetime] = None
     emergency_contact_phone: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class CheckinSettings(BaseModel):
     daily_checkin_time: Optional[str] = None
+    # Interval mode: one of {2,4,6,8,12} hours. When set, daily_checkin_time
+    # must be null (the modes are mutually exclusive).
+    checkin_interval_hours: Optional[int] = None
 
 
 class TimeSlot(BaseModel):
@@ -348,22 +358,118 @@ async def reset_daily_reminder_statuses(family_group_id: str, user: dict):
 
 
 async def detect_missed_checkins(family_group_id: str, user: dict):
+    """Detect members who have missed their expected check-in.
+
+    Two modes are supported per member:
+      - Fixed-time mode (`daily_checkin_time` = "HH:MM" in the owner's tz).
+        Expectation: at least one check-in today after that time.
+      - Interval mode (`checkin_interval_hours` = N, `checkin_interval_started_at`
+        anchor). Expectation: at least one check-in within the last N hours.
+
+    Modes are mutually exclusive. We grace-period each window by 15 minutes
+    before flagging it as missed.
+    """
     tz = user_tz(user)
     now_local = datetime.now(tz)
+    now_utc = datetime.now(timezone.utc)
     now_minutes = now_local.hour * 60 + now_local.minute
-    # Today start in UTC for the user's local day
     day_start_local = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz)
     day_start_utc = day_start_local.astimezone(timezone.utc)
 
+    GRACE_MIN = 15  # minutes of leeway before raising a missed alert
+
     members = await db.members.find(
-        {"family_group_id": family_group_id, "daily_checkin_time": {"$ne": None}}, {"_id": 0}
+        {
+            "family_group_id": family_group_id,
+            "$or": [
+                {"daily_checkin_time": {"$ne": None}},
+                {"checkin_interval_hours": {"$ne": None}},
+            ],
+        },
+        {"_id": 0},
     ).to_list(500)
+
     for m in members:
-        t = m.get("daily_checkin_time")
-        if not t:
+        interval = m.get("checkin_interval_hours")
+        fixed = m.get("daily_checkin_time")
+
+        # -------- Interval mode --------
+        if interval and interval in ALLOWED_CHECKIN_INTERVALS:
+            anchor = m.get("checkin_interval_started_at")
+            if not anchor:
+                continue
+            if isinstance(anchor, str):
+                try:
+                    anchor = datetime.fromisoformat(anchor.replace("Z", "+00:00"))
+                except Exception:
+                    continue
+            if anchor.tzinfo is None:
+                anchor = anchor.replace(tzinfo=timezone.utc)
+            window = timedelta(hours=interval)
+            grace = timedelta(minutes=GRACE_MIN)
+            # Number of complete windows since anchor.
+            elapsed = now_utc - anchor
+            if elapsed < window + grace:
+                # Still inside (or just past) the first window — not yet due.
+                continue
+            # Latest window cut-off that we EXPECT the senior to have checked in by.
+            # If now is t, the last expected check-in was at (now - elapsed % window)
+            # but to avoid false-positives right at the boundary we subtract the grace.
+            slots_passed = int(elapsed.total_seconds() // window.total_seconds())
+            last_due_utc = anchor + window * slots_passed
+            if now_utc < last_due_utc + grace:
+                # Inside grace period for the most-recent slot — still OK.
+                continue
+            # Did the senior check in at any point AFTER the previous slot?
+            previous_slot_utc = anchor + window * max(0, slots_passed - 1)
+            has_ci = await db.checkins.find_one(
+                {
+                    "family_group_id": family_group_id,
+                    "member_id": m["id"],
+                    "created_at": {"$gte": previous_slot_utc},
+                }
+            )
+            if has_ci:
+                continue
+            existing = await db.alerts.find_one(
+                {
+                    "family_group_id": family_group_id,
+                    "member_id": m["id"],
+                    "type": "missed_checkin",
+                    "created_at": {"$gte": previous_slot_utc},
+                }
+            )
+            if existing:
+                continue
+            label = f"every {interval} hours"
+            a = Alert(
+                owner_id=user["id"],
+                family_group_id=family_group_id,
+                member_id=m["id"],
+                member_name=m["name"],
+                type="missed_checkin",
+                severity="critical",
+                title=f"{m['name']} missed scheduled check-in",
+                message=(
+                    f"Expected {label}. The most recent {interval}-hour window has "
+                    f"passed without a check-in."
+                ),
+            )
+            await db.alerts.insert_one(a.model_dump())
+            await db.members.update_one({"id": m["id"]}, {"$set": {"status": "warning"}})
+            await push_to_family_group(
+                family_group_id,
+                f"⚠️ {m['name']} missed check-in",
+                f"Expected {label}. Tap to call or check on them.",
+                {"type": "missed_checkin", "member_id": m["id"]},
+            )
             continue
-        expected = parse_hhmm(t)
-        if expected is None or now_minutes < expected:
+
+        # -------- Fixed-time mode --------
+        if not fixed:
+            continue
+        expected = parse_hhmm(fixed)
+        if expected is None or now_minutes < expected + GRACE_MIN:
             continue
         has_ci = await db.checkins.find_one(
             {"family_group_id": family_group_id, "member_id": m["id"], "created_at": {"$gte": day_start_utc}}
@@ -381,15 +487,14 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
             member_id=m["id"], member_name=m["name"],
             type="missed_checkin", severity="critical",
             title=f"{m['name']} missed daily check-in",
-            message=f"Expected by {t} ({user.get('timezone') or 'UTC'}) today. They haven't checked in yet.",
+            message=f"Expected by {fixed} ({user.get('timezone') or 'UTC'}) today. They haven't checked in yet.",
         )
         await db.alerts.insert_one(a.model_dump())
         await db.members.update_one({"id": m["id"]}, {"$set": {"status": "warning"}})
-        # Push notify ALL members of the family group (so any caregiver gets the alert).
         await push_to_family_group(
             family_group_id,
             f"⚠️ {m['name']} missed check-in",
-            f"Expected by {t}. Tap to call or check on them.",
+            f"Expected by {fixed}. Tap to call or check on them.",
             {"type": "missed_checkin", "member_id": m["id"]},
         )
 
@@ -703,6 +808,24 @@ async def update_member(member_id: str, data: FamilyMemberUpdate, current=Depend
     if "daily_checkin_time" in payload and payload["daily_checkin_time"]:
         if parse_hhmm(payload["daily_checkin_time"]) is None:
             raise HTTPException(status_code=400, detail="daily_checkin_time must be HH:MM format")
+    if "checkin_interval_hours" in payload and payload["checkin_interval_hours"] is not None:
+        if payload["checkin_interval_hours"] not in ALLOWED_CHECKIN_INTERVALS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"checkin_interval_hours must be one of {sorted(ALLOWED_CHECKIN_INTERVALS)}",
+            )
+        # When switching to interval mode, anchor the start at now and clear
+        # any fixed time.
+        payload["daily_checkin_time"] = None
+        payload["checkin_interval_started_at"] = datetime.now(timezone.utc)
+    if (
+        "daily_checkin_time" in payload
+        and payload["daily_checkin_time"]
+        and payload.get("checkin_interval_hours") is None
+    ):
+        # When switching to fixed-time mode, clear any interval setting.
+        payload["checkin_interval_hours"] = None
+        payload["checkin_interval_started_at"] = None
     if not payload:
         # Nothing to update — return existing doc.
         doc = await db.members.find_one({"id": member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
@@ -751,14 +874,47 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     return FamilyMember(**doc)
 
 
+ALLOWED_CHECKIN_INTERVALS = {2, 4, 6, 8, 12}
+
+
 @api_router.put("/members/{member_id}/checkin-settings", response_model=FamilyMember)
 async def update_checkin_settings(member_id: str, data: CheckinSettings, current=Depends(get_current_user)):
-    val = data.daily_checkin_time
-    if val and parse_hhmm(val) is None:
+    """Set the daily check-in mode for a member.
+
+    Three valid shapes:
+      1. {daily_checkin_time:"HH:MM"}                   — fixed daily time
+      2. {checkin_interval_hours: 2|4|6|8|12}           — interval mode
+      3. {daily_checkin_time: null, checkin_interval_hours: null}  — disable
+
+    The two modes are mutually exclusive — setting one implicitly clears the other.
+    """
+    fixed = data.daily_checkin_time
+    interval = data.checkin_interval_hours
+
+    if fixed and interval:
+        raise HTTPException(
+            status_code=400,
+            detail="Set either daily_checkin_time OR checkin_interval_hours, not both.",
+        )
+    if fixed and parse_hhmm(fixed) is None:
         raise HTTPException(status_code=400, detail="daily_checkin_time must be HH:MM format")
+    if interval is not None and interval not in ALLOWED_CHECKIN_INTERVALS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"checkin_interval_hours must be one of {sorted(ALLOWED_CHECKIN_INTERVALS)}",
+        )
+
+    update: dict = {
+        "daily_checkin_time": fixed,
+        "checkin_interval_hours": interval,
+        "checkin_interval_started_at": (
+            datetime.now(timezone.utc) if interval else None
+        ),
+    }
+
     r = await db.members.update_one(
         {"id": member_id, "family_group_id": current["family_group_id"]},
-        {"$set": {"daily_checkin_time": val}}
+        {"$set": update},
     )
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")

@@ -12,8 +12,11 @@ import { api, Member, Reminder } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
 import { isFallEnabled } from '../../src/fallDetector';
 import MemberMap from '../../src/MemberMap';
+import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone } from '../../src/timeFormat';
+import { TimePicker12 } from '../../src/TimePicker12';
 
-const TIME_PRESETS = ['08:00', '09:00', '10:00', '12:00', '18:00', '20:00', '21:00'];
+const INTERVAL_OPTIONS = [2, 4, 6, 8, 12] as const;
+type CheckinMode = 'fixed' | 'interval' | 'disabled';
 
 export default function MemberDetail() {
   const router = useRouter();
@@ -100,13 +103,42 @@ export default function MemberDetail() {
     })();
   };
 
-  const setCheckinTime = async (t: string | null) => {
+  const [checkinDraftTime, setCheckinDraftTime] = useState<string>('08:00');
+
+  const saveFixedCheckin = async (hhmm: string) => {
     try {
-      const r = await api.put(`/members/${id}/checkin-settings`, { daily_checkin_time: t });
+      const r = await api.put(`/members/${id}/checkin-settings`, {
+        daily_checkin_time: hhmm,
+        checkin_interval_hours: null,
+      });
       setMember(r.data);
       setShowCheckinSettings(false);
     } catch (_e) {
-      Alert.alert('Failed', 'Could not update.');
+      Alert.alert('Failed', 'Could not update check-in time.');
+    }
+  };
+  const saveIntervalCheckin = async (hours: number) => {
+    try {
+      const r = await api.put(`/members/${id}/checkin-settings`, {
+        daily_checkin_time: null,
+        checkin_interval_hours: hours,
+      });
+      setMember(r.data);
+      setShowCheckinSettings(false);
+    } catch (_e) {
+      Alert.alert('Failed', 'Could not update check-in interval.');
+    }
+  };
+  const disableCheckin = async () => {
+    try {
+      const r = await api.put(`/members/${id}/checkin-settings`, {
+        daily_checkin_time: null,
+        checkin_interval_hours: null,
+      });
+      setMember(r.data);
+      setShowCheckinSettings(false);
+    } catch (_e) {
+      Alert.alert('Failed', 'Could not disable check-ins.');
     }
   };
 
@@ -325,28 +357,60 @@ export default function MemberDetail() {
             </TouchableOpacity>
           </View>
           <View style={styles.settingCard}>
-            <Text style={styles.settingLabel}>Expected check-in time ({user?.timezone || 'local'})</Text>
-            <Text style={styles.settingValue}>
-              {member.daily_checkin_time ? `🕐 ${member.daily_checkin_time}` : '— Not set'}
+            <Text style={styles.settingLabel}>Expected check-in ({getDeviceTimezone()})</Text>
+            <Text style={styles.settingValue} testID="checkin-display">
+              {member.checkin_interval_hours
+                ? `🔁 Every ${member.checkin_interval_hours} hours`
+                : member.daily_checkin_time
+                  ? `🕐 ${formatTime12(member.daily_checkin_time)} (daily)`
+                  : '— Not set'}
             </Text>
             {showCheckinSettings && (
-              <View style={styles.timeRow}>
-                {TIME_PRESETS.map(t => (
+              <View style={{ marginTop: 14 }}>
+                <Text style={styles.checkinModeLabel}>Custom daily time</Text>
+                <View style={styles.timeRow}>
+                  <TimePicker12
+                    testIDPrefix="checkin-time-picker"
+                    value={member.daily_checkin_time || checkinDraftTime}
+                    onChange={setCheckinDraftTime}
+                  />
                   <TouchableOpacity
-                    key={t}
-                    testID={`checkin-time-${t}`}
-                    onPress={() => setCheckinTime(t)}
-                    style={[styles.timePill, member.daily_checkin_time === t && styles.timePillActive]}
+                    testID="checkin-save-fixed"
+                    onPress={() => saveFixedCheckin(checkinDraftTime || member.daily_checkin_time || '08:00')}
+                    activeOpacity={0.85}
+                    style={styles.savePill}
                   >
-                    <Text style={[styles.timePillText, member.daily_checkin_time === t && styles.timePillTextActive]}>{t}</Text>
+                    <Text style={styles.savePillText}>Save time</Text>
                   </TouchableOpacity>
-                ))}
+                </View>
+
+                <Text style={[styles.checkinModeLabel, { marginTop: 18 }]}>Or recurring every…</Text>
+                <View style={styles.intervalRow}>
+                  {INTERVAL_OPTIONS.map(h => {
+                    const active = member.checkin_interval_hours === h;
+                    return (
+                      <TouchableOpacity
+                        key={h}
+                        testID={`checkin-interval-${h}`}
+                        onPress={() => saveIntervalCheckin(h)}
+                        activeOpacity={0.85}
+                        style={[styles.intervalPill, active && styles.intervalPillActive]}
+                      >
+                        <Text style={[styles.intervalPillText, active && styles.intervalPillTextActive]}>
+                          {h}h
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+
                 <TouchableOpacity
                   testID="checkin-time-clear"
-                  onPress={() => setCheckinTime(null)}
-                  style={[styles.timePill, { backgroundColor: Colors.errorBg }]}
+                  onPress={disableCheckin}
+                  activeOpacity={0.85}
+                  style={styles.disablePill}
                 >
-                  <Text style={[styles.timePillText, { color: Colors.error }]}>Disable</Text>
+                  <Text style={styles.disablePillText}>Disable check-ins</Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -418,8 +482,8 @@ function ReminderRow({ reminder, onMark, onDelete, onEdit }: {
   const isTaken = reminder.status === 'taken';
   const isMissed = reminder.status === 'missed';
   const timeStr = (reminder.times && reminder.times.length > 0
-    ? reminder.times.map(t => t.label ? `${t.label} ${t.time}` : t.time)
-    : [reminder.time]).filter(Boolean).join(' · ');
+    ? reminder.times.map(t => t.label ? `${t.label} ${formatTime12(t.time)}` : formatTime12(t.time))
+    : [formatTime12(reminder.time)]).filter(Boolean).join(' · ');
   return (
     <View testID={`reminder-${reminder.id}`} style={styles.reminderCard}>
       <View style={{ flex: 1 }}>
@@ -503,11 +567,21 @@ const styles = StyleSheet.create({
   settingCard: { backgroundColor: Colors.surface, borderRadius: 16, padding: 14, borderWidth: 1, borderColor: Colors.border },
   settingLabel: { fontSize: 12, fontWeight: '700', color: Colors.textTertiary, textTransform: 'uppercase', letterSpacing: 0.5 },
   settingValue: { fontSize: 16, color: Colors.textPrimary, fontWeight: '700', marginTop: 4 },
-  timeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12 },
+  timeRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 12, marginTop: 8 },
   timePill: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, backgroundColor: Colors.background, borderWidth: 1, borderColor: Colors.border },
   timePillActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
   timePillText: { fontWeight: '700', color: Colors.textSecondary, fontSize: 13 },
   timePillTextActive: { color: Colors.surface },
+  checkinModeLabel: { fontSize: 12, fontWeight: '700', color: Colors.textTertiary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 },
+  savePill: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, backgroundColor: Colors.primary },
+  savePillText: { color: Colors.surface, fontWeight: '700', fontSize: 13 },
+  intervalRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  intervalPill: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 999, backgroundColor: Colors.background, borderWidth: 1, borderColor: Colors.border, minWidth: 56, alignItems: 'center' },
+  intervalPillActive: { backgroundColor: Colors.secondary, borderColor: Colors.secondary },
+  intervalPillText: { fontWeight: '800', color: Colors.textSecondary, fontSize: 14 },
+  intervalPillTextActive: { color: Colors.surface },
+  disablePill: { marginTop: 16, paddingVertical: 12, borderRadius: 12, backgroundColor: Colors.errorBg, alignItems: 'center' },
+  disablePillText: { color: Colors.error, fontWeight: '700', fontSize: 13 },
   // Reminder row
   reminderCard: { flexDirection: 'row', backgroundColor: Colors.surface, padding: 12, borderRadius: 14, marginTop: 8, borderWidth: 1, borderColor: Colors.border, alignItems: 'center' },
   reminderTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },

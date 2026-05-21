@@ -1,10 +1,9 @@
-import { useState } from 'react';
 import {
-  View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView,
-  KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
+  View, Text, StyleSheet, TouchableOpacity,
 } from 'react-native';
 import { Colors } from './theme';
 import { TimeSlot } from './api';
+import { TimePicker12 } from './TimePicker12';
 
 export const LABEL_PRESETS: { label: string; emoji: string; suggested: string }[] = [
   { label: 'Morning', emoji: '🌅', suggested: '08:00' },
@@ -26,18 +25,6 @@ export function isValidHHMM(s: string): boolean {
   if (!/^\d{2}:\d{2}$/.test(s)) return false;
   const [h, m] = s.split(':').map(Number);
   return h >= 0 && h <= 23 && m >= 0 && m <= 59;
-}
-
-function clampHour(s: string): string {
-  const n = parseInt(s, 10);
-  if (isNaN(n)) return '';
-  return pad(Math.min(23, Math.max(0, n)));
-}
-
-function clampMin(s: string): string {
-  const n = parseInt(s, 10);
-  if (isNaN(n)) return '';
-  return pad(Math.min(59, Math.max(0, n)));
 }
 
 type Props = {
@@ -94,21 +81,6 @@ function TimeRow({ slot, index, canRemove, onRemove, onChange, testIDPrefix }: {
   onChange: (p: Partial<TimeSlot>) => void;
   testIDPrefix: string;
 }) {
-  const [h, m] = slot.time.split(':');
-  const [hStr, setHStr] = useState(h || '08');
-  const [mStr, setMStr] = useState(m || '00');
-
-  const commitH = (raw: string) => {
-    const cleaned = clampHour(raw.replace(/[^\d]/g, '').slice(0, 2));
-    setHStr(cleaned);
-    onChange({ time: `${cleaned || '00'}:${mStr || '00'}` });
-  };
-  const commitM = (raw: string) => {
-    const cleaned = clampMin(raw.replace(/[^\d]/g, '').slice(0, 2));
-    setMStr(cleaned);
-    onChange({ time: `${hStr || '00'}:${cleaned || '00'}` });
-  };
-
   return (
     <View testID={`${testIDPrefix}-row-${index}`} style={styles.rowCard}>
       <View style={styles.rowHeader}>
@@ -126,33 +98,11 @@ function TimeRow({ slot, index, canRemove, onRemove, onChange, testIDPrefix }: {
         )}
       </View>
 
-      <View style={styles.timeInputRow}>
-        <TextInput
-          testID={`${testIDPrefix}-hour-${index}`}
-          value={hStr}
-          onChangeText={setHStr}
-          onBlur={() => commitH(hStr)}
-          onEndEditing={() => commitH(hStr)}
-          keyboardType="number-pad"
-          maxLength={2}
-          placeholder="HH"
-          placeholderTextColor={Colors.textTertiary}
-          style={styles.timeInput}
-        />
-        <Text style={styles.colon}>:</Text>
-        <TextInput
-          testID={`${testIDPrefix}-minute-${index}`}
-          value={mStr}
-          onChangeText={setMStr}
-          onBlur={() => commitM(mStr)}
-          onEndEditing={() => commitM(mStr)}
-          keyboardType="number-pad"
-          maxLength={2}
-          placeholder="MM"
-          placeholderTextColor={Colors.textTertiary}
-          style={styles.timeInput}
-        />
-      </View>
+      <TimePicker12
+        testIDPrefix={`${testIDPrefix}-picker-${index}`}
+        value={slot.time}
+        onChange={(hhmm) => onChange({ time: hhmm })}
+      />
 
       <Text style={styles.labelHint}>Label (optional)</Text>
       <View style={styles.labelRow}>

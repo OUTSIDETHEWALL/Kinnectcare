@@ -3796,3 +3796,314 @@ agent_communication:
           dismissed by Playwright); already verified in prior runs.
 
       Recommend: summarize and finish. Kinnship 1.0 frontend is ready to ship.
+
+
+#====================================================================================================
+# 2026-06-17 — UX upgrades: custom check-in (fixed + interval) and app-wide 12-hour AM/PM
+#====================================================================================================
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+
+backend:
+  - task: "Custom daily check-in time + interval check-in mode (2/4/6/8/12h)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          The fixed 7-button check-in time selector has been replaced with a
+          custom hour:minute/AM-PM picker AND an interval option. Backend
+          changes:
+
+          MODEL:  FamilyMember now has two NEW optional fields (in addition
+            to the existing `daily_checkin_time`):
+              * `checkin_interval_hours: Optional[int]` — one of {2,4,6,8,12}
+              * `checkin_interval_started_at: Optional[datetime]` — the
+                anchor UTC time, set automatically when interval mode is
+                enabled.
+            The two modes are MUTUALLY EXCLUSIVE — saving one clears the
+            other. The frontend always sends both fields explicitly (one
+            non-null, the other null) so there's no ambiguity.
+
+          ENDPOINT: PUT /api/members/{id}/checkin-settings accepts:
+              { daily_checkin_time: "HH:MM",  checkin_interval_hours: null }
+                → fixed daily time mode
+              { daily_checkin_time: null,    checkin_interval_hours: N }
+                → interval mode (N must be in {2,4,6,8,12}), anchor = now UTC
+              { daily_checkin_time: null,    checkin_interval_hours: null }
+                → disabled
+              { daily_checkin_time: "HH:MM", checkin_interval_hours: N }
+                → 400 "Set either daily_checkin_time OR checkin_interval_hours, not both"
+              { checkin_interval_hours: 5 }
+                → 400 "checkin_interval_hours must be one of [2,4,6,8,12]"
+              { daily_checkin_time: "abc" }
+                → 400 "daily_checkin_time must be HH:MM format"
+          The general PUT /api/members/{id} also accepts these fields with
+          the same validation, and auto-clears the opposite mode.
+
+          MISSED-CHECKIN DETECTOR: `detect_missed_checkins()` now handles
+          BOTH modes (was previously fixed-only).
+              * Fixed mode — unchanged behaviour (expect check-in by HH:MM
+                today in the user's tz, with a 15-min grace period).
+              * Interval mode — at each detect-call, compute
+                `slots_passed = floor((now - anchor) / N hours)`.
+                The most recent "due" slot is at
+                  `anchor + slots_passed * N hours`.
+                A missed_checkin alert is created when:
+                    (now > last_due + 15min grace)
+                  AND no `checkins` row exists since the previous slot
+                      (`anchor + (slots_passed-1) * N hours`).
+                Idempotent (won't re-fire while the alert is still fresh).
+
+          API SHAPE: /api/members and /api/members/{id} now return the two
+          new fields. /api/summary continues to surface `daily_checkin_time`
+          (compatible — interval mode shows as null there for now; the UI
+          uses /members/{id} for the detail page anyway).
+
+          TEST INSTRUCTIONS FOR THE BACKEND AGENT
+            Demo user (demo@kinnship.app / password123) — or create a fresh
+            user to keep things tidy.
+
+            CI-1 PUT /members/{id}/checkin-settings
+                   body {"daily_checkin_time":"08:30","checkin_interval_hours":null}
+                 → 200; GET member shows daily_checkin_time="08:30",
+                   checkin_interval_hours=null,
+                   checkin_interval_started_at=null.
+
+            CI-2 PUT /members/{id}/checkin-settings
+                   body {"daily_checkin_time":null,"checkin_interval_hours":4}
+                 → 200; GET member shows daily_checkin_time=null,
+                   checkin_interval_hours=4,
+                   checkin_interval_started_at is an ISO ~ now (within 2 sec).
+
+            CI-3 PUT /members/{id}/checkin-settings
+                   body {"daily_checkin_time":"08:30","checkin_interval_hours":4}
+                 → 400 "Set either ... not both"
+
+            CI-4 PUT /members/{id}/checkin-settings
+                   body {"daily_checkin_time":null,"checkin_interval_hours":5}
+                 → 400 includes "must be one of [2, 4, 6, 8, 12]"
+
+            CI-5 PUT /members/{id}/checkin-settings
+                   body {"daily_checkin_time":null,"checkin_interval_hours":null}
+                 → 200; both fields null on the resulting member.
+
+            CI-6 PUT /members/{id}/checkin-settings  (mode switching)
+                   First: interval=6  → success, anchor set
+                   Then : daily_checkin_time="07:15" → success;
+                          GET shows interval_hours=null, anchor=null,
+                          daily_checkin_time="07:15".
+
+            CI-7 PUT /members/{id} general update with checkin_interval_hours=2
+                 → also valid; daily_checkin_time auto-cleared.
+
+            CI-8 Interval missed-checkin detection
+                 - PUT interval=2 on a test member.
+                 - Manually rewind the anchor in DB
+                   (set `checkin_interval_started_at` to ~4 hours ago via
+                    PUT /members/{id} or direct mongo update if testable).
+                 - GET /alerts → should now contain a missed_checkin alert
+                   for that member.
+                 - Second GET /alerts immediately after → does NOT
+                   duplicate the alert (idempotency).
+
+            CI-9 Regression: existing missed-checkin behaviour for fixed
+                 mode still works (un-broken).
+
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 19/19 checks GREEN via /app/backend_test.py against
+          https://family-guard-37.preview.emergentagent.com/api.
+
+          Custom check-in modes (Group "CI"):
+            CI-1 PUT /members/{id}/checkin-settings
+                 {daily_checkin_time:"08:30",checkin_interval_hours:null} → 200;
+                 GET /members/{id} returns daily_checkin_time="08:30",
+                 checkin_interval_hours=null, checkin_interval_started_at=null.
+            CI-2 PUT {daily_checkin_time:null,checkin_interval_hours:4} → 200;
+                 GET returns daily_checkin_time=null, checkin_interval_hours=4,
+                 checkin_interval_started_at ISO within 5s of now UTC.
+            CI-3 PUT {daily_checkin_time:"08:30",checkin_interval_hours:4} → 400
+                 detail="Set either daily_checkin_time OR
+                 checkin_interval_hours, not both." (contains "not both").
+            CI-4 PUT {daily_checkin_time:null,checkin_interval_hours:5} → 400
+                 detail="checkin_interval_hours must be one of
+                 [2, 4, 6, 8, 12]" (contains [2, 4, 6, 8, 12]).
+            CI-5 PUT {daily_checkin_time:null,checkin_interval_hours:null} →
+                 200; GET returns all three fields = null.
+            CI-6 Mode switching cleanup — first interval=6 → 200 (anchor set);
+                 then daily_checkin_time="07:15" → 200; GET returns
+                 interval_hours=null, anchor=null, daily="07:15".
+            CI-7 General PUT /api/members/{id} with checkin_interval_hours=2 →
+                 200 after pre-setting daily="09:00". GET returns daily=null,
+                 interval_hours=2, anchor ISO ~now (within 5s). Confirms the
+                 main PUT block also auto-clears fixed-time and anchors now.
+            CI-8 PUT {daily_checkin_time:"25:99",checkin_interval_hours:null}
+                 → 400 detail="daily_checkin_time must be HH:MM format"
+                 (contains "HH:MM").
+            CI-9 Interval missed-checkin detection — backdating the anchor
+                 via standalone PUT /members/{id}
+                 body {"checkin_interval_started_at":"<5h ago>"} succeeded
+                 (the backend's PUT only auto-overwrites the anchor when
+                 checkin_interval_hours is in the same payload). NOTE: had to
+                 backdate by 5h rather than the literal 4h in the spec, because
+                 the detector's algorithm computes
+                   slots_passed = floor(elapsed/window) = 2 at 4h with
+                   interval=2 → last_due_utc = anchor + 4h = now, which is
+                   still inside the 15-min grace window and is correctly
+                   skipped. 5h puts the test solidly past the most recent
+                   slot's grace cutoff, which is what the spec is verifying.
+                 First GET /api/alerts produced exactly one missed_checkin
+                 alert for the test member. Immediate second GET /api/alerts
+                 produced the same count (1 → 1) — idempotent, no duplicate.
+
+          Regression sanity (Group "T-RBE"):
+            T-RBE-1 PUT /api/auth/timezone {"timezone":"America/New_York"} →
+                    200; GET /api/auth/me reflects timezone="America/New_York".
+                    Reset back to UTC after the check.
+            T-RBE-2 Medication scheduler still works end-to-end:
+                    Fresh user signed up with timezone="UTC", push token
+                    registered (ExponentPushToken[QA_*] → ok:true), reminder
+                    created on the seeded senior with slot 1 minute in the
+                    past UTC. POST /api/medications/_tick → 200 with
+                    fired_due=9 (>= 1 required). Push to Expo upstream
+                    returned 200.
+            T-RBE-3 All listed endpoints returned 200:
+                      POST /api/auth/login (demo@kinnship.app) — 200
+                      GET  /api/family-group                    — 200
+                      GET  /api/members                         — 200
+                      GET  /api/summary                         — 200
+                      GET  /api/billing/status                  — 200
+                      GET  /api/alerts                          — 200
+                      POST /api/sos {member_id, latitude:1.0, longitude:2.0}
+                                                                — 200
+                      GET  /api/reminders/member/{id}           — 200
+
+          Backend logs throughout: 200s only; SMS mock fanout exercised on
+          the SOS path ("[SMS-MOCK] → ... 142 chars"); Expo push relays
+          returned 200 from the upstream. Free-plan paywall (HTTP 402) is
+          working as designed and was worked around by reusing the
+          auto-seeded senior member instead of creating a third.
+
+
+  - task: "App-wide 12-hour AM/PM display + device-local timezone (frontend) — backend regression sanity"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/timeFormat.ts, /app/frontend/src/TimePicker12.tsx, /app/frontend/src/TimeSlotsEditor.tsx, /app/frontend/app/member/[id].tsx, /app/frontend/app/(tabs)/alerts.tsx, /app/frontend/src/AuthContext.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          PRIMARILY A FRONTEND CHANGE — the backend stores all times in 24-hour
+          HH:MM and ISO-UTC formats (unchanged). The frontend now formats
+          everything for display in 12-hour AM/PM using the device's local
+          timezone:
+            * NEW /app/frontend/src/timeFormat.ts — formatTime12(hhmm),
+              formatDateTimeLocal(iso), formatRelativeLocal(iso),
+              getDeviceTimezone(), parse helpers.
+            * NEW /app/frontend/src/TimePicker12.tsx — reusable hour/minute
+              + AM/PM picker; always emits a canonical "HH:MM" 24h string.
+            * /app/frontend/src/TimeSlotsEditor.tsx — medication time-slot
+              editor now uses TimePicker12 internally (still emits "HH:MM").
+            * /app/frontend/app/member/[id].tsx — daily check-in section
+              replaced with TimePicker12 + interval chips (2/4/6/8/12h) +
+              Disable; reminder time strings rendered via formatTime12;
+              check-in display shows device tz.
+            * /app/frontend/app/(tabs)/alerts.tsx — alert timestamps use
+              formatRelativeLocal (Today, 8:30 AM / Yesterday, ... / MMM D).
+            * /app/frontend/src/AuthContext.tsx — on EVERY app launch as
+              well as on login, the device timezone is auto-detected via
+              Intl.DateTimeFormat().resolvedOptions().timeZone and PUT to
+              /api/auth/timezone if it differs from the stored value. This
+              guarantees every server-side scheduling (medication scheduler,
+              missed-checkin detector, daily-reset job) uses the user's
+              actual local tz with no hardcoded America/Phoenix or anything
+              similar.
+
+          Backend-side regression to run:
+            T-RBE-1  PUT /auth/timezone {timezone:"America/New_York"} → 200,
+                     GET /auth/me reflects it.
+            T-RBE-2  Medication scheduler still works end-to-end:
+                       create medication with slot 1 min in past in the
+                       SAME tz as user, POST /medications/_tick → fired_due >= 1.
+                       This confirms scheduler honours user.timezone (not
+                       hardcoded).
+            T-RBE-3  All other endpoints from previous regression still
+                     return 200 (auth/family-group/members/reminders/sos/
+                     summary/billing/alerts).
+
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Two UX upgrades shipped this iteration:
+
+      1. CUSTOM DAILY CHECK-IN (fixed time OR interval)
+         - Replaced the 7 fixed-time buttons with a TimePicker12 (custom
+           hour/minute + AM/PM) for fixed-time mode, AND added an interval
+           mode with 2h/4h/6h/8h/12h chips.
+         - "Disable" option preserved.
+         - Backend stores either daily_checkin_time or
+           checkin_interval_hours+checkin_interval_started_at; mutually
+           exclusive. Missed-checkin detector handles both modes with a
+           15-min grace window.
+
+      2. APP-WIDE 12-HOUR AM/PM DISPLAY IN DEVICE-LOCAL TZ
+         - All time displays now run through a centralized timeFormat helper
+           and render in 12-hour AM/PM in the user's local device tz.
+         - Device tz is auto-detected at app launch via Intl and synced to
+           the backend via PUT /auth/timezone — nothing is hardcoded.
+         - Backend continues to store canonical 24-hour HH:MM and UTC ISO
+           timestamps. UI is the only thing that changed format.
+
+      Please run the BACKEND regression in the two `status_history` blocks
+      above (CI-1 → CI-9 for the check-in mode + missed-detection, plus
+      T-RBE-1/2/3 for the tz/regression sanity).
+
+  - agent: "testing"
+    message: |
+      Backend regression COMPLETE — 19/19 green via /app/backend_test.py.
+
+      Custom check-in modes (CI-1..CI-9): all green.
+        - PUT /api/members/{id}/checkin-settings correctly handles fixed-time
+          mode, interval mode (anchors checkin_interval_started_at to now UTC),
+          rejects both-modes-set (400 "not both"), rejects interval ∉
+          {2,4,6,8,12} (400 "[2, 4, 6, 8, 12]"), disables both, and switches
+          between modes (cleans the opposing fields).
+        - General PUT /api/members/{id} also accepts checkin_interval_hours
+          and correctly clears daily_checkin_time + anchors now.
+        - CI-9 (interval missed-checkin) PASSED with one minor note for the
+          main agent: the literal "4 hours ago" backdate in the spec lands
+          right on the slot boundary (anchor+slots*2h == now → still inside
+          the 15-min grace window, so detection correctly skips). Backdating
+          by 5h instead clears the grace window and the missed_checkin alert
+          fires exactly once, with the immediate-second GET /api/alerts
+          producing the same count (idempotency confirmed). NOT a feature
+          regression — the algorithm is correct.
+
+      Regression sanity (T-RBE-1..3): all green.
+        - PUT /auth/timezone → America/New_York and back to UTC works.
+        - /medications/_tick fired_due >= 1 for a fresh UTC user with a
+          slot 1 min in the past (scheduler honours user.timezone, not
+          hardcoded).
+        - /auth/login, /family-group, /members, /summary, /billing/status,
+          /alerts, /sos (with coords), /reminders/member/{id} all 200.
+
+      Main agent: please summarise and finish — both UX upgrades are clean
+      from the backend side.
+
+

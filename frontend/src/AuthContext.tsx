@@ -33,6 +33,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         try {
           const res = await api.get('/auth/me');
           setUser(res.data);
+          // Auto-sync device timezone every launch so all server-side
+          // scheduling/scheduling math runs in the user's actual tz.
+          try {
+            const tz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
+            if (tz && tz !== res.data.timezone) {
+              const updated = await api.put('/auth/timezone', { timezone: tz });
+              setUser(updated.data);
+            }
+          } catch (_e) {}
         } catch (_e) {
           await clearToken();
         }

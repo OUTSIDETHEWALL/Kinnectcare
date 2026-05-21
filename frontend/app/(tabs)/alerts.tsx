@@ -5,6 +5,7 @@ import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
 import { api, Alert } from '../../src/api';
+import { formatRelativeLocal } from '../../src/timeFormat';
 
 function alertIcon(type: string) {
   if (type === 'missed_checkin') return 'time-outline';
@@ -93,7 +94,7 @@ export default function Alerts() {
                 {a.type === 'sos' && a.latitude != null && a.longitude != null && (
                   <Text style={styles.coordsLine}>📍 {a.latitude.toFixed(4)}°, {a.longitude.toFixed(4)}°</Text>
                 )}
-                <Text style={styles.alertMeta}>{a.member_name} · {new Date(a.created_at).toLocaleString()}</Text>
+                <Text style={styles.alertMeta}>{a.member_name} · {formatRelativeLocal(a.created_at)}</Text>
                 <TouchableOpacity
                   testID={`alert-ack-${a.id}`}
                   onPress={() => ack(a.id)}

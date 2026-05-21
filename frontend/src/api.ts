@@ -55,6 +55,8 @@ export type Member = {
   longitude?: number;
   avatar_url?: string;
   daily_checkin_time?: string | null;
+  checkin_interval_hours?: number | null;
+  checkin_interval_started_at?: string | null;
   emergency_contact_phone?: string | null;
 };
 
