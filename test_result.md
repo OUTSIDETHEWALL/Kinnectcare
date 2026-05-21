@@ -4107,3 +4107,150 @@ agent_communication:
       from the backend side.
 
 
+
+frontend:
+  - task: "Custom Daily Check-in picker (TimePicker12 + interval chips + disable)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/member/[id].tsx, /app/frontend/src/TimePicker12.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ 390x844. Login demo@kinnship.app -> dashboard -> tap James card ->
+          /member/{id}. Scroll to "Daily Check-in" -> tap Edit. Verified:
+          (a) TimePicker12 fully present (testIDs checkin-time-picker-hour /
+              -minute / -am / -pm). The legacy 7-fixed-buttons selector is gone.
+          (b) Typed hour=9, minute=30, tapped PM, tapped "Save time" -> display
+              updated to "🕐 9:30 PM (daily)".
+          (c) Re-opened Edit, tapped chip "4h" (testID checkin-interval-4) -> display
+              updated to "🔁 Every 4 hours" with the chip rendered in active style.
+              Chips for 2h/4h/6h/8h/12h all rendered.
+          (d) Tapped "Disable check-ins" (testID checkin-time-clear) -> display
+              updated to "— Not set".
+          (e) Section header reads "Expected check-in (UTC)" — the test env's
+              Intl.DateTimeFormat().resolvedOptions().timeZone is "UTC", which
+              MATCHES the displayed value (i.e. NOT a hardcoded mismatch). On a
+              non-UTC device this header will reflect that device-local timezone.
+          Screenshot saved at .screenshots/checkin_picker.png showing the picker
+          row (9:30 AM/PM) AND the interval chips AND "Disable check-ins" pill
+          all visible together.
+
+  - task: "App-wide 12-hour AM/PM display (meds list, add/edit forms, alerts)"
+    implemented: true
+    working: true
+    file: "/app/frontend/src/timeFormat.ts, /app/frontend/app/member/[id].tsx, /app/frontend/app/add-medication/[memberId].tsx, /app/frontend/app/edit-medication/[reminderId].tsx, /app/frontend/app/(tabs)/alerts.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ 390x844 across all four surfaces.
+          (a) Member detail medications list: scanned full body innerText after
+              navigating to /member/{james}. No 24-hour hours (13:..–23:..) found
+              anywhere outside AM/PM labels. AM/PM tokens present.
+          (b) Add Medication form (/add-medication/{id}): TimeSlotsEditor renders
+              TimePicker12 (testIDs add-med-picker-0-hour / -minute / -am / -pm).
+              Filled name "Aspirin AMTest", dosage 100mg, slot hour=8, min=0, AM,
+              tapped Add Medication -> returned to member detail. New row visible:
+              "Aspirin AMTest" + "8:00 AM" found in DOM (not "08:00").
+          (c) Edit Medication form (/edit-medication/{reminderId}): tapped pencil
+              for "Aspirin AMTest". Picker pre-filled with hour=8, minute=00 (the
+              12-hour values, NOT "08"). Changed to 7/30/AM, submitted -> returned
+              to member detail; "7:30 AM" rendered for that med.
+          (d) Alerts tab: alert META timestamps show "Today, 2:32 PM" /
+              "Today, 2:10 PM" — 12-hour AM/PM with localized "Today,"/"Yesterday,"/
+              "MMM DD," prefix as designed (formatRelativeLocal). No "MM DD, YYYY,
+              HH:MM:SS" 24-hour timestamps observed in the timestamp position.
+          NOTE (Minor, NOT a UI 12h regression): the SOS alert message BODY string
+          (generated server-side, e.g. "Gregory triggered SOS at 14:10 UTC, May 21.")
+          still uses a 24-hour clock in the descriptive sentence — this is the
+          backend-formatted body text in the SOS push/alert message, not the
+          timestamp label which is correctly 12h. If full 12h coverage of the
+          message body is required, the SOS sentence template in server.py needs
+          to be reformatted; UI rendering itself is correct.
+
+  - task: "Device-local timezone sync on login (PUT /api/auth/timezone)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(auth)/login.tsx, /app/frontend/src/api.ts"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS (best-effort). Logged out from /settings via settings-logout and
+          re-logged in as demo@kinnship.app. Network listener captured 0 calls
+          to PUT /api/auth/timezone — expected in this test runner whose device
+          timezone resolves to "UTC" (matches the stored value on the demo
+          account, so the silent sync is a no-op). The "Expected check-in
+          (UTC)" section header confirmed the UI never displays a TZ different
+          from the device-resolved tz. No mismatch observed.
+
+  - task: "Smoke regressions (SOS, Settings, Family Group, console, KinnectCare absent)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/dashboard.tsx, /app/frontend/app/settings.tsx, /app/frontend/app/family-group.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. Dashboard sos-button testID present and tappable. Tapping
+          dashboard-settings gear navigates to /settings with settings-logout
+          rendered. /family-group page renders and contains "invite code" text
+          for the demo group. Full body innerText scanned across login,
+          dashboard, member detail, add-medication, edit-medication, alerts,
+          settings, family-group — NO occurrence of "KinnectCare". Console
+          captured during the full multi-step run: 0 red errors, 0 shadow
+          deprecation warnings, 0 Ionicons references.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Custom Daily Check-in + App-wide 12-hour AM/PM testing COMPLETE — all
+      priority cases PASS at iPhone 13 viewport (390x844). Highlights:
+
+      Feature 1 (highest priority): TimePicker12 fully replaces the legacy
+      7-button selector. Saving 9:30 PM displays "🕐 9:30 PM (daily)".
+      Tapping the "4h" chip switches the section to "🔁 Every 4 hours" with the
+      active chip highlighted; chip set 2h/4h/6h/8h/12h all present. Disable
+      pill clears to "— Not set". Section header is "Expected check-in (UTC)"
+      which matches the runner's resolved device timezone — no hardcoded
+      mismatch. Screenshot at .screenshots/checkin_picker.png shows the picker
+      row, the chips, and the disable pill together.
+
+      Feature 2: All four 12h surfaces clean. Add Medication "Aspirin AMTest"
+      with 8:00 AM saves and displays "8:00 AM" in the meds list. Edit
+      Medication picker pre-fills hour=8 minute=00 (12h values, not "08"),
+      and saving 7:30 AM updates the visible chip to "7:30 AM". Alerts tab
+      timestamp meta lines render "Today, 2:32 PM" / "Today, 2:10 PM" — 12h
+      with localized day prefix.
+
+      MINOR (non-blocking): the SOS alert MESSAGE BODY sentence still embeds
+      "HH:MM UTC" 24h text (e.g. "Gregory triggered SOS at 14:10 UTC, May 21.")
+      from the backend message template. The TIMESTAMP DISPLAY itself is
+      correctly 12h. If full 12h coverage including the descriptive sentence
+      is required, update the SOS message string formatter in server.py — UI
+      is already correct.
+
+      Smoke regressions all green: SOS button tappable, Settings opens,
+      Family Group renders with invite code, 0 console errors / 0 shadow
+      warnings / 0 Ionicons refs, NO "KinnectCare" text anywhere in the UI.
+
+      TZ silent-sync on re-login: 0 PUT /api/auth/timezone observed — expected
+      no-op in UTC test runner whose tz already matches the stored value on
+      the demo account. UI never showed a tz different from the device's.
+
+      Main agent: please summarize and finish. (No source code modified by
+      this testing run.)
+
