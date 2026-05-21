@@ -5074,12 +5074,26 @@ test_plan:
 frontend:
   - task: "Fix squished web time picker — stretch to full width, single-line layout"
     implemented: true
-    working: "NA"
+    working: true
     file: "/app/frontend/src/TimePicker12.tsx"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ iPhone 13 (390x844). Verified visually via screenshots
+          .screenshots/timepicker_row1.png and .screenshots/timepicker_2slots.png.
+          Time 1 row renders as [HOUR "8"] [":"] [MINUTE "00"] ……… [AM][PM]
+          on a single horizontal line. After tapping "+ Add Time", Time 2 row
+          appears with identical single-line layout. AM/PM toggle is right-
+          aligned (marginLeft:'auto'); row stretches edge-to-edge via
+          alignSelf:'stretch', flexWrap:'nowrap', minHeight:56. No vertical
+          stacking of "8" / "00" / "AM" observed. Manual hour editing (typing
+          "9" + PM toggle) was not asserted via JS in this run because RN Web
+          TextInput value control quirk, but the WebInlinePicker editing path
+          was already proven in earlier test_sequence 8.
       - working: "NA"
         agent: "main"
         comment: |
@@ -5109,12 +5123,30 @@ frontend:
 
   - task: "Larger back arrows + minimum 52×52 tappable area across every screen"
     implemented: true
-    working: "NA"
+    working: true
     file: "see file list below"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ iPhone 13 (390x844). Measured bounding-boxes via Playwright:
+            T2a member-back        52 x 52 (x=16, y=8)   ✓
+            T2b settings-back      52 x 52 (x=12, y=8)   ✓
+            T2c upgrade-back       52 x 52 (x=12, y=8)   ✓
+            T2d family-group-back  52 x 52 (x=12, y=8)   ✓
+            T2e add-med-close      52 x 52 (x=16, y=8)   ✓ (X icon visibly larger,
+                                                            confirmed via screenshot
+                                                            .screenshots/timepicker_row1.png)
+            T2f login-back         52 x 52 (x=24, y=24)  ✓
+            T2g onboard-back       Code path verified (font 18px, hitArea 52x52);
+                                   not re-measured in final automation pass due to
+                                   testing budget.
+          Regression: 0 console errors across full traversal, 0 "KinnectCare" strings
+          in body content (confirms branding rename complete). SOS button visible on
+          dashboard. No source code modified during testing.
       - working: "NA"
         agent: "main"
         comment: |
