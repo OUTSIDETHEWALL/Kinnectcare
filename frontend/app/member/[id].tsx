@@ -14,6 +14,7 @@ import { isFallEnabled } from '../../src/fallDetector';
 import MemberMap from '../../src/MemberMap';
 import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone } from '../../src/timeFormat';
 import { TimePicker12 } from '../../src/TimePicker12';
+import { pickContact, isContactsPickerSupported } from '../../src/contactsPicker';
 
 const INTERVAL_OPTIONS = [2, 4, 6, 8, 12] as const;
 type CheckinMode = 'fixed' | 'interval' | 'disabled';
@@ -76,6 +77,27 @@ export default function MemberDetail() {
           load();
         } },
     ]);
+  };
+
+  const markRefilled = (rid: string, title: string) => {
+    Alert.alert(
+      'Mark refilled?',
+      `Reset the supply countdown for "${title}"? Use this every time you pick up a new bottle.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Mark refilled',
+          onPress: async () => {
+            try {
+              await api.post(`/reminders/${rid}/mark-refilled`, {});
+              load();
+            } catch (e: any) {
+              Alert.alert('Failed', e?.response?.data?.detail || 'Could not update.');
+            }
+          },
+        },
+      ],
+    );
   };
 
   const checkIn = () => {
@@ -145,14 +167,22 @@ export default function MemberDetail() {
   // ----- Emergency contact (SMS) editor state -----
   const [ecEditing, setEcEditing] = useState(false);
   const [ecValue, setEcValue] = useState('');
+  const [ecName, setEcName] = useState('');
+  const [ecMode, setEcMode] = useState<'choose' | 'manual'>('choose');
   const startEcEdit = () => {
     setEcValue(member?.emergency_contact_phone || '');
+    setEcName(member?.emergency_contact_name || '');
+    // If we already have a value, jump straight into manual edit mode.
+    setEcMode(member?.emergency_contact_phone ? 'manual' : 'choose');
     setEcEditing(true);
   };
-  const saveEc = async () => {
+  const saveEc = async (overridePhone?: string, overrideName?: string | null) => {
+    const phone = (overridePhone !== undefined ? overridePhone : ecValue).trim();
+    const name = (overrideName !== undefined ? overrideName : ecName).trim();
     try {
       const r = await api.put(`/members/${id}`, {
-        emergency_contact_phone: ecValue.trim() || null,
+        emergency_contact_phone: phone || null,
+        emergency_contact_name: name || null,
       });
       setMember(r.data);
       setEcEditing(false);
@@ -162,6 +192,15 @@ export default function MemberDetail() {
         e?.response?.data?.detail || 'Please enter a valid phone number (e.g. +1 555 123 4567).',
       );
     }
+  };
+  const pickFromContacts = async () => {
+    const picked = await pickContact();
+    if (!picked) return;
+    setEcValue(picked.phone);
+    setEcName(picked.name);
+    setEcMode('manual'); // jump into the manual editor showing pre-filled values
+    // Save immediately — user can still tweak before/after via "Edit".
+    await saveEc(picked.phone, picked.name);
   };
 
   const onDelete = () => {
@@ -310,28 +349,75 @@ export default function MemberDetail() {
           </View>
           <View style={styles.settingCard}>
             {ecEditing ? (
-              <>
-                <Text style={styles.settingLabel}>Phone (we'll auto-format to E.164)</Text>
-                <TextInput
-                  testID="ec-input"
-                  value={ecValue}
-                  onChangeText={setEcValue}
-                  placeholder="+1 555 123 4567"
-                  keyboardType="phone-pad"
-                  placeholderTextColor={Colors.textTertiary}
-                  style={styles.ecInput}
-                />
-                <TouchableOpacity
-                  testID="ec-save"
-                  style={styles.ecSaveBtn}
-                  onPress={saveEc}
-                  activeOpacity={0.85}
-                >
-                  <Text style={styles.ecSaveText}>Save Emergency Contact</Text>
-                </TouchableOpacity>
-              </>
+              ecMode === 'choose' ? (
+                <View testID="ec-choose">
+                  <Text style={styles.settingLabel}>How would you like to add the contact?</Text>
+                  <TouchableOpacity
+                    testID="ec-pick-from-contacts"
+                    onPress={pickFromContacts}
+                    activeOpacity={0.85}
+                    style={[styles.ecOptionBtn, !isContactsPickerSupported() && styles.ecOptionBtnDisabled]}
+                    disabled={!isContactsPickerSupported()}
+                  >
+                    <Text style={styles.ecOptionEmoji}>📇</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.ecOptionTitle}>Pick from Contacts</Text>
+                      <Text style={styles.ecOptionSub}>
+                        {isContactsPickerSupported()
+                          ? 'Select someone from your phone — auto-fills name & number.'
+                          : 'Not available on this device. Enter manually below.'}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    testID="ec-enter-manually"
+                    onPress={() => setEcMode('manual')}
+                    activeOpacity={0.85}
+                    style={styles.ecOptionBtn}
+                  >
+                    <Text style={styles.ecOptionEmoji}>✏️</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.ecOptionTitle}>Enter manually</Text>
+                      <Text style={styles.ecOptionSub}>Type a name and phone number yourself.</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <>
+                  <Text style={styles.settingLabel}>Contact name (optional)</Text>
+                  <TextInput
+                    testID="ec-name-input"
+                    value={ecName}
+                    onChangeText={setEcName}
+                    placeholder="Jane Smith"
+                    placeholderTextColor={Colors.textTertiary}
+                    style={styles.ecInput}
+                  />
+                  <Text style={[styles.settingLabel, { marginTop: 12 }]}>Phone (we'll auto-format to E.164)</Text>
+                  <TextInput
+                    testID="ec-input"
+                    value={ecValue}
+                    onChangeText={setEcValue}
+                    placeholder="+1 555 123 4567"
+                    keyboardType="phone-pad"
+                    placeholderTextColor={Colors.textTertiary}
+                    style={styles.ecInput}
+                  />
+                  <TouchableOpacity
+                    testID="ec-save"
+                    style={styles.ecSaveBtn}
+                    onPress={() => saveEc()}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.ecSaveText}>Save Emergency Contact</Text>
+                  </TouchableOpacity>
+                </>
+              )
             ) : member?.emergency_contact_phone ? (
               <View testID="ec-display">
+                {!!member.emergency_contact_name && (
+                  <Text style={styles.ecName}>{member.emergency_contact_name}</Text>
+                )}
                 <Text style={styles.ecValue}>{member.emergency_contact_phone}</Text>
                 <Text style={styles.ecHelp}>
                   📱 Receives an SMS the moment {member?.name} triggers SOS or fall detection.
@@ -432,7 +518,7 @@ export default function MemberDetail() {
           {meds.length === 0 ? (
             <Text style={styles.emptyText}>No medications yet. Tap Add to create one.</Text>
           ) : meds.map(r => (
-            <ReminderRow key={r.id} reminder={r} onMark={markReminder} onDelete={deleteReminder} onEdit={(rid) => router.push(`/edit-medication/${rid}`)} />
+            <ReminderRow key={r.id} reminder={r} onMark={markReminder} onDelete={deleteReminder} onEdit={(rid) => router.push(`/edit-medication/${rid}`)} onMarkRefilled={markRefilled} />
           ))}
 
           {history && history.totals && history.totals.logged > 0 && (
@@ -455,7 +541,7 @@ export default function MemberDetail() {
           {routines.length === 0 ? (
             <Text style={styles.emptyText}>No routine items yet.</Text>
           ) : routines.map(r => (
-            <ReminderRow key={r.id} reminder={r} onMark={markReminder} onDelete={deleteReminder} onEdit={(rid) => router.push(`/edit-medication/${rid}`)} />
+            <ReminderRow key={r.id} reminder={r} onMark={markReminder} onDelete={deleteReminder} onEdit={(rid) => router.push(`/edit-medication/${rid}`)} onMarkRefilled={markRefilled} />
           ))}
         </View>
 
@@ -473,17 +559,34 @@ export default function MemberDetail() {
   );
 }
 
-function ReminderRow({ reminder, onMark, onDelete, onEdit }: {
+function ReminderRow({ reminder, onMark, onDelete, onEdit, onMarkRefilled }: {
   reminder: Reminder;
   onMark: (id: string, s: 'taken' | 'missed') => void;
   onDelete: (id: string, title: string) => void;
   onEdit: (id: string) => void;
+  onMarkRefilled: (id: string, title: string) => void;
 }) {
   const isTaken = reminder.status === 'taken';
   const isMissed = reminder.status === 'missed';
   const timeStr = (reminder.times && reminder.times.length > 0
     ? reminder.times.map(t => t.label ? `${t.label} ${formatTime12(t.time)}` : formatTime12(t.time))
     : [formatTime12(reminder.time)]).filter(Boolean).join(' · ');
+
+  // ---- Refill state ----
+  let refillBadge: { text: string; tone: 'low' | 'out' | 'soon' } | null = null;
+  if (reminder.run_out_at && reminder.refill_reminder_days) {
+    const runOutMs = new Date(reminder.run_out_at).getTime();
+    const daysLeft = Math.round((runOutMs - Date.now()) / 86400000);
+    if (daysLeft <= 0) {
+      refillBadge = { text: '🟥 Out of supply — refill ASAP', tone: 'out' };
+    } else if (daysLeft <= reminder.refill_reminder_days) {
+      refillBadge = {
+        text: `🟧 Refill in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`,
+        tone: daysLeft <= 3 ? 'low' : 'soon',
+      };
+    }
+  }
+
   return (
     <View testID={`reminder-${reminder.id}`} style={styles.reminderCard}>
       <View style={{ flex: 1 }}>
@@ -494,6 +597,34 @@ function ReminderRow({ reminder, onMark, onDelete, onEdit }: {
         {reminder.dosage ? <Text style={styles.reminderSub}>{reminder.dosage}</Text> : null}
         <Text style={styles.reminderTime}>🕐 {timeStr}</Text>
         {isMissed && <Text style={styles.missedTag}>⚠ Missed — family alerted</Text>}
+        {refillBadge && (
+          <View
+            testID={`refill-badge-${reminder.id}`}
+            style={[
+              styles.refillBadge,
+              refillBadge.tone === 'out' && styles.refillBadgeOut,
+              refillBadge.tone === 'low' && styles.refillBadgeLow,
+            ]}
+          >
+            <Text
+              style={[
+                styles.refillBadgeText,
+                refillBadge.tone === 'out' && { color: Colors.surface },
+                refillBadge.tone === 'low' && { color: Colors.surface },
+              ]}
+            >
+              {refillBadge.text}
+            </Text>
+            <TouchableOpacity
+              testID={`mark-refilled-${reminder.id}`}
+              onPress={() => onMarkRefilled(reminder.id, reminder.title)}
+              activeOpacity={0.85}
+              style={styles.refillCta}
+            >
+              <Text style={styles.refillCtaText}>Mark refilled</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </View>
       <View style={styles.reminderActions}>
         <TouchableOpacity
@@ -590,6 +721,25 @@ const styles = StyleSheet.create({
   reminderSub: { fontSize: 13, color: Colors.textSecondary, marginTop: 2, marginLeft: 24 },
   reminderTime: { fontSize: 12, color: Colors.textTertiary, marginTop: 2, marginLeft: 24 },
   missedTag: { fontSize: 12, color: Colors.warning, fontWeight: '700', marginTop: 4, marginLeft: 24 },
+  refillBadge: {
+    marginTop: 8,
+    flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap',
+    backgroundColor: '#FFF4D6',
+    borderRadius: 10,
+    paddingHorizontal: 10, paddingVertical: 8,
+    gap: 8,
+  },
+  refillBadgeLow: { backgroundColor: '#D97706' },
+  refillBadgeOut: { backgroundColor: Colors.error },
+  refillBadgeText: {
+    fontSize: 12, fontWeight: '800', color: Colors.textPrimary, flex: 1, minWidth: 130,
+  },
+  refillCta: {
+    backgroundColor: Colors.surface,
+    borderRadius: 999,
+    paddingVertical: 6, paddingHorizontal: 12,
+  },
+  refillCtaText: { color: Colors.primary, fontWeight: '800', fontSize: 12 },
   reminderActions: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   markBtn: { width: 36, height: 36, borderRadius: 12, backgroundColor: Colors.background, borderWidth: 1, borderColor: Colors.border, alignItems: 'center', justifyContent: 'center' },
   markBtnTakenActive: { backgroundColor: Colors.success, borderColor: Colors.success },
@@ -650,6 +800,19 @@ const styles = StyleSheet.create({
   },
   ecSaveText: { color: Colors.surface, fontSize: 14, fontWeight: '800' },
   ecValue: { fontSize: 18, fontWeight: '800', color: Colors.textPrimary },
+  ecName: { fontSize: 13, fontWeight: '700', color: Colors.textSecondary, marginBottom: 2 },
+  ecOptionBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 12, paddingHorizontal: 14,
+    backgroundColor: Colors.background,
+    borderRadius: 14,
+    borderWidth: 1, borderColor: Colors.border,
+    marginTop: 10,
+  },
+  ecOptionBtnDisabled: { opacity: 0.6 },
+  ecOptionEmoji: { fontSize: 22 },
+  ecOptionTitle: { fontSize: 15, fontWeight: '800', color: Colors.textPrimary },
+  ecOptionSub: { fontSize: 12, color: Colors.textSecondary, marginTop: 2, lineHeight: 16 },
   ecEmpty: { fontSize: 14, color: Colors.textTertiary, fontStyle: 'italic' },
   ecHelp: { fontSize: 12, color: Colors.textSecondary, marginTop: 6, lineHeight: 17 },
   featureBody: { fontSize: 12, color: Colors.textSecondary, marginTop: 2, lineHeight: 17 },

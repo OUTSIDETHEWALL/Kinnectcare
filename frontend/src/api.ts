@@ -58,6 +58,7 @@ export type Member = {
   checkin_interval_hours?: number | null;
   checkin_interval_started_at?: string | null;
   emergency_contact_phone?: string | null;
+  emergency_contact_name?: string | null;
 };
 
 export type Alert = {
@@ -89,6 +90,11 @@ export type Reminder = {
   taken: boolean;
   last_marked_at?: string | null;
   last_marked_date?: string | null;
+  // Refill tracking (medication only)
+  days_supply?: number | null;
+  refill_reminder_days?: number | null;
+  last_refill_at?: string | null;
+  run_out_at?: string | null;
 };
 
 export type MemberSummary = {

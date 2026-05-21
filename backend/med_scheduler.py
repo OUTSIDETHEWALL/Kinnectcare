@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 STAGE_DUE = "due"
 STAGE_REMIND_30 = "remind_30"
 STAGE_ESCALATE_2H = "escalate_2h"
+STAGE_REFILL = "refill"
 
 STAGE_OFFSETS_MIN: Dict[str, int] = {
     STAGE_DUE: 0,
@@ -70,7 +71,7 @@ def _parse_hhmm(s: str) -> Optional[int]:
 
 
 async def ensure_indexes(db) -> None:
-    """Create the unique index used to make stage firing idempotent."""
+    """Create the unique indexes used to make stage firing idempotent."""
     try:
         await db.med_notifications.create_index(
             [
@@ -84,6 +85,17 @@ async def ensure_indexes(db) -> None:
         )
     except Exception as e:
         logger.warning(f"med_notifications index ensure skipped: {e}")
+    try:
+        # Refill notifications are keyed by (reminder, current refill cycle).
+        # `last_refill_at` advances when the user marks a refill, so a new
+        # cycle gets a fresh row and can fire again.
+        await db.refill_notifications.create_index(
+            [("reminder_id", 1), ("last_refill_at", 1)],
+            unique=True,
+            name="uniq_reminder_refill_cycle",
+        )
+    except Exception as e:
+        logger.warning(f"refill_notifications index ensure skipped: {e}")
 
 
 async def _has_taken_log_after(db, reminder_id: str, slot_utc: datetime) -> bool:
@@ -357,7 +369,130 @@ async def process_pending_notifications(
     return counters
 
 
-# ---------- Background worker ----------
+# ---------- Refill notifications ----------
+async def process_refill_notifications(
+    db,
+    *,
+    push_to_user: Callable[[str, str, str, Dict[str, Any]], Awaitable[int]],
+    now_utc: Optional[datetime] = None,
+) -> Dict[str, int]:
+    """For each medication with refill tracking enabled, fire ONE push notification
+    to the family group owner once we're within `refill_reminder_days` of run-out.
+
+    Idempotent via the `refill_notifications` unique index on
+    (reminder_id, last_refill_at). Marking a refill advances `last_refill_at`,
+    which starts a new cycle eligible to fire again.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    counters = {"scanned_refill": 0, "fired_refill": 0}
+
+    cursor = db.reminders.find(
+        {
+            "category": "medication",
+            "days_supply": {"$gt": 0},
+            "run_out_at": {"$ne": None},
+        },
+        {"_id": 0},
+    )
+    reminders = await cursor.to_list(20000)
+
+    for rem in reminders:
+        counters["scanned_refill"] += 1
+        run_out_at = rem.get("run_out_at")
+        last_refill_at = rem.get("last_refill_at")
+        lead = rem.get("refill_reminder_days") or 7
+
+        if not run_out_at or not last_refill_at:
+            continue
+        if isinstance(run_out_at, str):
+            try:
+                run_out_at = datetime.fromisoformat(run_out_at.replace("Z", "+00:00"))
+            except Exception:
+                continue
+        if isinstance(last_refill_at, str):
+            try:
+                last_refill_at = datetime.fromisoformat(last_refill_at.replace("Z", "+00:00"))
+            except Exception:
+                continue
+        if run_out_at.tzinfo is None:
+            run_out_at = run_out_at.replace(tzinfo=timezone.utc)
+        if last_refill_at.tzinfo is None:
+            last_refill_at = last_refill_at.replace(tzinfo=timezone.utc)
+
+        days_until_runout = (run_out_at - now_utc).total_seconds() / 86400.0
+        if days_until_runout > lead:
+            continue  # not yet in the reminder window
+
+        # Try to reserve the (reminder, refill cycle) slot.
+        try:
+            await db.refill_notifications.insert_one(
+                {
+                    "reminder_id": rem["id"],
+                    "last_refill_at": last_refill_at,
+                    "family_group_id": rem.get("family_group_id"),
+                    "member_id": rem.get("member_id"),
+                    "fired_at": now_utc,
+                    "days_until_runout_at_fire": round(days_until_runout, 2),
+                }
+            )
+        except Exception:
+            # Duplicate key — already fired for this refill cycle.
+            continue
+
+        # Send push to the family group OWNER specifically.
+        owner_user_id = rem.get("owner_id")
+        if not owner_user_id:
+            counters["fired_refill"] += 1
+            continue
+
+        member_name = rem.get("member_name") or "your loved one"
+        med_title = rem.get("title") or "medication"
+        days_left = max(0, int(round(days_until_runout)))
+        days_phrase = "today" if days_left == 0 else (f"in {days_left} day" + ("s" if days_left != 1 else ""))
+
+        try:
+            await push_to_user(
+                owner_user_id,
+                f"💊 {member_name}'s {med_title} may be running low",
+                f"Time to refill — supply runs out {days_phrase}.",
+                {
+                    "type": "medication_refill_due",
+                    "reminder_id": rem["id"],
+                    "member_id": rem.get("member_id"),
+                    "stage": STAGE_REFILL,
+                    "days_until_runout": days_left,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"refill push failed: {e}")
+
+        # Also drop an Alert row so caregivers can see it in the alerts feed.
+        try:
+            from uuid import uuid4
+            await db.alerts.insert_one(
+                {
+                    "id": str(uuid4()),
+                    "owner_id": owner_user_id,
+                    "family_group_id": rem.get("family_group_id"),
+                    "member_id": rem.get("member_id"),
+                    "member_name": member_name,
+                    "type": "medication_refill",
+                    "severity": "warning",
+                    "title": f"Refill {member_name}'s {med_title}",
+                    "message": (
+                        f"{member_name}'s {med_title} may be running low — "
+                        f"time to refill (supply runs out {days_phrase})."
+                    ),
+                    "acknowledged": False,
+                    "created_at": now_utc,
+                }
+            )
+        except Exception as e:
+            logger.warning(f"refill alert insert failed: {e}")
+
+        counters["fired_refill"] += 1
+
+    return counters
 class MedicationScheduler:
     """Persistent background task wrapper. Starts on app startup, stops on shutdown."""
 
@@ -377,13 +512,20 @@ class MedicationScheduler:
                     push_to_user=self.push_to_user,
                     push_to_family_group=self.push_to_family_group,
                 )
+                refill_counters = await process_refill_notifications(
+                    self.db,
+                    push_to_user=self.push_to_user,
+                )
                 fired_total = (
                     counters["fired_due"]
                     + counters["fired_remind_30"]
                     + counters["fired_escalate_2h"]
+                    + refill_counters["fired_refill"]
                 )
                 if fired_total > 0:
-                    logger.info(f"Medication scheduler tick → {counters}")
+                    logger.info(
+                        f"Medication scheduler tick → {counters} + {refill_counters}"
+                    )
             except Exception as e:
                 logger.warning(f"Medication scheduler tick failed: {e}")
             try:

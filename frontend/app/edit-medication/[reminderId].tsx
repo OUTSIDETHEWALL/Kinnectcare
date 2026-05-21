@@ -19,6 +19,10 @@ export default function EditMedication() {
   const [category, setCategory] = useState<'medication' | 'routine'>('medication');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [refillEnabled, setRefillEnabled] = useState(false);
+  const [daysSupplyStr, setDaysSupplyStr] = useState('30');
+  const [leadTimeStr, setLeadTimeStr] = useState('7');
+  const [lastRefillIso, setLastRefillIso] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -31,6 +35,12 @@ export default function EditMedication() {
           setDosage(found.dosage || '');
           setSlots(found.times.length > 0 ? found.times : [{ time: '08:00', label: null }]);
           setCategory(found.category);
+          if (found.days_supply) {
+            setRefillEnabled(true);
+            setDaysSupplyStr(String(found.days_supply));
+            setLeadTimeStr(String(found.refill_reminder_days || 7));
+            setLastRefillIso(found.last_refill_at || null);
+          }
         }
       } catch (_e) {}
       setLoading(false);
@@ -46,13 +56,37 @@ export default function EditMedication() {
         return;
       }
     }
+    let days_supply: number | null = null;
+    let refill_reminder_days: number | null = null;
+    if (!isRoutine && refillEnabled) {
+      const d = parseInt(daysSupplyStr, 10);
+      const l = parseInt(leadTimeStr, 10);
+      if (!Number.isFinite(d) || d <= 0 || d > 365) {
+        Alert.alert('Invalid days supply', 'Enter a number between 1 and 365.');
+        return;
+      }
+      if (!Number.isFinite(l) || l <= 0 || l > d) {
+        Alert.alert('Invalid lead time', 'Refill lead time must be between 1 and the days supply.');
+        return;
+      }
+      days_supply = d;
+      refill_reminder_days = l;
+    } else if (!isRoutine && !refillEnabled) {
+      // explicitly turn refill off
+      days_supply = 0;
+    }
     setSaving(true);
     try {
-      await api.put(`/reminders/${reminderId}`, {
+      const payload: any = {
         title: name.trim(),
         dosage: dosage.trim() || null,
         times: slots.map(s => ({ time: s.time, label: s.label || null })),
-      });
+      };
+      if (!isRoutine) {
+        payload.days_supply = days_supply;
+        payload.refill_reminder_days = refill_reminder_days;
+      }
+      await api.put(`/reminders/${reminderId}`, payload);
       router.back();
     } catch (e: any) {
       Alert.alert('Failed', e?.response?.data?.detail || 'Try again.');
@@ -112,6 +146,57 @@ export default function EditMedication() {
           <Text style={styles.subhelp}>Edit, add, or remove times — each can have an optional label.</Text>
           <TimeSlotsEditor slots={slots} onChange={setSlots} testIDPrefix="edit-med" />
 
+          {!isRoutine && (
+            <View style={styles.refillSection}>
+              <View style={styles.refillHeader}>
+                <Text style={styles.refillTitle}>🔄 Refill reminder</Text>
+                <TouchableOpacity
+                  testID="edit-med-refill-toggle"
+                  onPress={() => setRefillEnabled((v) => !v)}
+                  activeOpacity={0.85}
+                  style={[styles.refillToggle, refillEnabled && styles.refillToggleOn]}
+                >
+                  <Text style={[styles.refillToggleText, refillEnabled && { color: Colors.surface }]}>
+                    {refillEnabled ? 'ON' : 'OFF'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              {refillEnabled && (
+                <View>
+                  <Text style={styles.label}>Days supply</Text>
+                  <TextInput
+                    testID="edit-med-days-supply"
+                    value={daysSupplyStr}
+                    onChangeText={setDaysSupplyStr}
+                    keyboardType="number-pad"
+                    maxLength={3}
+                    placeholder="30"
+                    placeholderTextColor={Colors.textTertiary}
+                    style={styles.input}
+                  />
+                  <Text style={styles.label}>Remind me … days before run-out</Text>
+                  <TextInput
+                    testID="edit-med-lead-time"
+                    value={leadTimeStr}
+                    onChangeText={setLeadTimeStr}
+                    keyboardType="number-pad"
+                    maxLength={3}
+                    placeholder="7"
+                    placeholderTextColor={Colors.textTertiary}
+                    style={styles.input}
+                  />
+                  {lastRefillIso && (
+                    <Text style={styles.lastRefillHint}>
+                      Last refilled: {new Date(lastRefillIso).toLocaleDateString(undefined, {
+                        weekday: 'short', month: 'short', day: 'numeric',
+                      })}
+                    </Text>
+                  )}
+                </View>
+              )}
+            </View>
+          )}
+
           <TouchableOpacity
             testID="edit-med-submit"
             onPress={onSubmit}
@@ -137,4 +222,18 @@ const styles = StyleSheet.create({
   input: { backgroundColor: Colors.surface, borderRadius: 14, padding: 16, fontSize: 16, color: Colors.textPrimary, borderWidth: 1, borderColor: Colors.border },
   cta: { marginTop: 28, height: 58, backgroundColor: Colors.primary, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   ctaText: { color: Colors.surface, fontSize: 17, fontWeight: '700' },
+  refillSection: {
+    marginTop: 22, padding: 16,
+    backgroundColor: Colors.surface, borderRadius: 16,
+    borderWidth: 1, borderColor: Colors.border,
+  },
+  refillHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  refillTitle: { fontSize: 16, fontWeight: '800', color: Colors.textPrimary },
+  refillToggle: {
+    paddingHorizontal: 14, paddingVertical: 6, borderRadius: 999,
+    backgroundColor: Colors.background, borderWidth: 1, borderColor: Colors.border,
+  },
+  refillToggleOn: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  refillToggleText: { fontSize: 12, fontWeight: '800', color: Colors.textSecondary, letterSpacing: 0.5 },
+  lastRefillHint: { marginTop: 10, fontSize: 12, color: Colors.textSecondary },
 });

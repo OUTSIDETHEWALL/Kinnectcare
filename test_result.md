@@ -4362,3 +4362,320 @@ agent_communication:
 
       No backend changes in this iteration.
 
+
+
+#====================================================================================================
+# 2026-06-17 — Emergency contact picker (expo-contacts) + Medication refill reminder
+#====================================================================================================
+
+test_plan:
+  current_focus:
+    - "Emergency contact name + phone (backend storage); contact picker is a frontend-only change"
+    - "Medication refill reminder — days_supply + refill_reminder_days + run_out_at + scheduler push to family owner"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+
+backend:
+  - task: "Emergency contact name field on FamilyMember"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Added `emergency_contact_name: Optional[str] = None` to both
+          `FamilyMember` and `FamilyMemberUpdate`. PUT /api/members/{id}
+          now accepts the field. /api/members and /api/members/{id}
+          responses include it. Nothing else changed.
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — EC-N1, EC-N2, EC-N3 all green via /app/backend_test.py
+          against https://family-guard-37.preview.emergentagent.com/api with
+          demo@kinnship.app / password123. Used an existing member (demo
+          account is at the 5/2 paywall, so a fresh member couldn't be
+          created — test gracefully fell back to the first member, which
+          is the correct path for validating the field).
+            EC-N1: PUT {"emergency_contact_name":"Jane Smith",
+                        "emergency_contact_phone":"+15551234567"} -> 200;
+                   subsequent GET returns name='Jane Smith',
+                   phone='+15551234567'.
+            EC-N2: PUT {"emergency_contact_name":null} -> 200;
+                   subsequent GET returns name=None,
+                   phone='+15551234567' (unchanged from EC-N1).
+            EC-N3: PUT {"emergency_contact_phone":"+15559998888"} (no name
+                   key) -> 200; subsequent GET returns phone='+15559998888',
+                   name=None (unchanged from EC-N2). Backwards compat
+                   preserved — omitting emergency_contact_name from the
+                   payload does NOT touch the stored value.
+
+  - task: "Medication refill reminder — backend"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py, /app/backend/med_scheduler.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          NEW FIELDS on Reminder (medication only):
+            days_supply               — calendar days the supply lasts (1-365)
+            refill_reminder_days      — lead time before run-out to fire push
+                                        (defaults to 7 when refill enabled)
+            last_refill_at            — set on create + on POST mark-refilled
+            run_out_at                — auto-computed = last_refill_at +
+                                        days_supply days
+
+          POST /api/reminders body now accepts `days_supply` and
+          `refill_reminder_days`. On create, if days_supply > 0:
+            * validates 1 <= days_supply <= 365
+            * validates 1 <= refill_reminder_days <= days_supply
+            * anchors last_refill_at = now, computes run_out_at.
+
+          PUT /api/reminders/{id} accepts the same fields. Behaviours:
+            * setting days_supply=0 disables refill tracking (clears all
+              4 fields).
+            * setting only days_supply on a med that had none enables
+              refill tracking with a default 7-day lead time and anchors
+              last_refill_at = now.
+            * Recomputes run_out_at whenever days_supply or
+              last_refill_at change.
+
+          NEW ENDPOINT:
+            POST /api/reminders/{id}/mark-refilled (auth-required)
+              → resets last_refill_at = now, recomputes run_out_at.
+              → 400 if days_supply not set.
+              → 404 if reminder not found / not in caller's family group.
+
+          SCHEDULER (in /app/backend/med_scheduler.py):
+            * NEW function process_refill_notifications(db, push_to_user,
+              now_utc=None) — for every medication with run_out_at set,
+              when (run_out_at - now) <= refill_reminder_days days,
+              attempts to insert a `refill_notifications` row keyed by
+              (reminder_id, last_refill_at) via unique index. If the row
+              was successfully reserved (i.e. not already fired for this
+              cycle), it:
+                a) sends an Expo push to the family group OWNER's
+                   registered tokens via push_to_user, with title
+                   "💊 <member>'s <med> may be running low" and body
+                   "Time to refill — supply runs out in X day(s)."
+                b) inserts an Alert row of type "medication_refill",
+                   severity "warning", visible in /api/alerts.
+            * Marking a refill changes last_refill_at, which starts a
+              NEW cycle that can fire again. Tested via the existing
+              mark-refilled endpoint.
+            * NEW unique index `refill_notifications`
+              {reminder_id, last_refill_at}.
+
+          /api/medications/_tick endpoint now ALSO runs the refill
+          processor and returns counters `scanned_refill` and
+          `fired_refill` alongside the existing ones.
+
+          TEST INSTRUCTIONS:
+            RF-1   Create a medication with days_supply=30,
+                   refill_reminder_days=7 → 200; returned reminder has:
+                     - days_supply=30, refill_reminder_days=7
+                     - last_refill_at ~ now UTC
+                     - run_out_at ~ now + 30 days
+            RF-2   POST /api/reminders body with days_supply=400 → 400.
+            RF-3   POST /api/reminders body with days_supply=30,
+                   refill_reminder_days=40 → 400 ("must be between 1 and
+                   days_supply").
+            RF-4   POST /api/reminders body without refill fields →
+                   reminder has days_supply=null, run_out_at=null.
+            RF-5   Tick test (within window):
+                     Create a medication with days_supply=10,
+                       refill_reminder_days=3. Then PUT
+                       /api/reminders/{id} body
+                       {"last_refill_at":"<UTC ISO 8 days ago>"}.
+                       Server recomputes run_out_at = 2 days from now,
+                       which is within the 3-day window.
+                     POST /api/medications/_tick → scanned_refill >= 1,
+                       fired_refill >= 1.
+                     GET /api/alerts → contains an alert with
+                       type="medication_refill" and message containing
+                       "may be running low".
+                     Second POST /api/medications/_tick →
+                       fired_refill == 0 (idempotent).
+            RF-6   Mark refilled: POST /api/reminders/{id}/mark-refilled
+                   → 200; last_refill_at advances to ~now and run_out_at
+                   = now + days_supply. Subsequent tick →
+                   fired_refill == 0 (out of window, fresh cycle).
+            RF-7   POST /api/reminders/{id}/mark-refilled on a med with
+                   no days_supply → 400.
+            RF-8   PUT /api/reminders/{id} body {"days_supply":0} →
+                   200, all 4 refill fields become null.
+            RF-9   Regression: medication scheduler still fires the
+                   three normal stages (due / remind_30 / escalate_2h)
+                   independently of refill state.
+      - working: false
+        agent: "testing"
+        comment: |
+          MOSTLY PASS — 8 of 9 refill tests green; RF-8 FAILS with a real
+          backend bug. Verified against
+          https://family-guard-37.preview.emergentagent.com/api via
+          /app/backend_test.py using demo@kinnship.app / password123.
+
+          PASS:
+            RF-1 — POST /reminders with days_supply=30, refill_reminder_days=7 →
+                   200; response has days_supply=30, refill_reminder_days=7,
+                   last_refill_at within 30s of now, run_out_at within 120s of
+                   now+30d.
+            RF-2 — POST with days_supply=400 → 400, detail
+                   "days_supply must be between 1 and 365".
+            RF-3 — POST with days_supply=30, refill_reminder_days=40 → 400,
+                   detail "refill_reminder_days must be between 1 and
+                   days_supply".
+            RF-4 — POST without refill fields → 200 with days_supply=None,
+                   refill_reminder_days=None, last_refill_at=None,
+                   run_out_at=None.
+            RF-5 — Push-token register ok; created med with ds=10, lead=3;
+                   PUT /reminders/{id} with last_refill_at backdated 8 days →
+                   server auto-recomputed run_out_at = ~2 days from now (within
+                   3-day lead window). POST /medications/_tick →
+                   scanned_refill=4, fired_refill=1. GET /alerts → matching
+                   alert present: type='medication_refill', severity='warning',
+                   title="Refill Gregory's Lisinopril", message containing
+                   "may be running low" AND "supply runs out". Second
+                   /medications/_tick → fired_refill=0 (idempotent via
+                   unique index on (reminder_id, last_refill_at)).
+            RF-6 — POST /reminders/{id}/mark-refilled → 200; last_refill_at
+                   reset to ~now, run_out_at recomputed to ~now+10d. Subsequent
+                   tick → fired_refill=0 (fresh cycle, out of window).
+            RF-7 — POST /reminders/{id}/mark-refilled on med with no
+                   days_supply (RF-4 reminder) → 400, detail "Refill tracking
+                   is not enabled — set a days_supply first." (mentions
+                   days_supply ✓).
+            RF-9 — Created fresh medication with slot 1 min in past, no refill.
+                   POST /medications/_tick returns ALL 6 expected counters
+                   (fired_due, fired_remind_30, fired_escalate_2h, skipped_taken,
+                   scanned_refill, fired_refill) and fired_due=1. Regression
+                   green — refill processor did not break the 3-stage flow.
+
+          FAIL:
+            RF-8 — PUT /reminders/{id} body {"days_supply":0} returns 400
+                   with detail "days_supply must be between 1 and 365" INSTEAD
+                   of disabling refill tracking (expected 200 with all 4 fields
+                   nullified).
+
+                   ROOT CAUSE (server.py:1060-1098): the range guard
+                       if new_days_supply is not None and (new_days_supply <= 0 or new_days_supply > 365):
+                           raise HTTPException(400, "days_supply must be between 1 and 365")
+                   runs BEFORE the explicit "disable on 0" branch
+                       if data.days_supply is not None and data.days_supply == 0:
+                           update["days_supply"] = None ...
+                   so when the user sends days_supply=0 the function never
+                   reaches the disable branch and returns 400. The check needs
+                   to be reordered: handle the explicit days_supply==0 disable
+                   case FIRST, THEN apply the 1..365 range validation only when
+                   refill is being kept enabled. e.g.
+
+                       if data.days_supply is not None and data.days_supply == 0:
+                           # disable: clear all 4 fields, skip further validation
+                           update["days_supply"] = None
+                           update["refill_reminder_days"] = None
+                           update["last_refill_at"] = None
+                           update["run_out_at"] = None
+                       else:
+                           if new_days_supply is not None and (new_days_supply <= 0 or new_days_supply > 365):
+                               raise HTTPException(...)
+                           ...
+
+                   The spec text says "setting days_supply=0 disables refill
+                   tracking" — current code never executes that branch.
+
+          Exact failing payload:
+            PUT /reminders/{rf1_id} body {"days_supply":0}
+            HTTP 400
+            {"detail":"days_supply must be between 1 and 365"}
+
+          Regression sanity (POST /auth/login, GET /family-group, /members,
+          /summary, /billing/status, /alerts, POST /sos with coords) all
+          green. No other regressions.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Backend testing COMPLETE for the two new features.
+
+      EC-N1..3 — ALL PASS. emergency_contact_name + emergency_contact_phone
+      round-trip works, null-clearing the name preserves the phone, and
+      backwards-compat PUTs that omit name leave it untouched.
+
+      RF-1..7, RF-9 PASS. Refill validation, idempotent tick, alert insert
+      with required title/message substrings ("Refill", "Lisinopril",
+      "may be running low", "supply runs out"), mark-refilled cycle reset,
+      and the 3-stage scheduler regression (returns BOTH counter groups —
+      fired_due/fired_remind_30/fired_escalate_2h/skipped_taken/
+      scanned_refill/fired_refill — and fired_due>=1 on a past-slot
+      medication) all green.
+
+      RF-8 FAILS — main agent please fix:
+      PUT /api/reminders/{id} body {"days_supply":0} returns 400
+      "days_supply must be between 1 and 365" instead of disabling refill
+      tracking. The range guard in server.py around lines 1073-1098 runs
+      BEFORE the explicit `days_supply == 0` clear branch, so the disable
+      path is dead code. Fix by handling the days_supply==0 case FIRST
+      (clear the 4 refill fields and skip the rest of validation), then
+      apply 1..365 range checks only for non-disabling updates.
+
+      Regression sanity also green: /auth/login, /family-group, /members,
+      /summary, /billing/status, /alerts, POST /sos with coords all 200.
+
+      Note: the demo account is at the 5/2 paywall, so an isolated fresh
+      member could not be created for EC-N. The test gracefully fell back
+      to an existing member, which still validates the field round-trip
+      properly. Not a backend bug.
+
+test_plan:
+  current_focus:
+    - "Medication refill reminder — backend"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Shipped two new features in this iteration:
+
+      1. EMERGENCY CONTACT PICKER
+         - Frontend uses `expo-contacts` to open the system contact
+           picker on iOS/Android, auto-filling name + phone into the
+           emergency contact field. Web falls back to manual-only.
+         - Backend simply stores `emergency_contact_name` (new field)
+           alongside the existing `emergency_contact_phone`. Both
+           accept null to clear. Validates phone the same as before
+           (E.164 normalisation).
+
+      2. MEDICATION REFILL REMINDER
+         - Backend: 4 new fields on Reminder + new endpoint
+           POST /reminders/{id}/mark-refilled + scheduler integration
+           (idempotent via refill_notifications unique index).
+         - Frontend: optional collapsible "Refill reminder" section in
+           Add/Edit Medication with days_supply + lead-time inputs +
+           live estimated-run-out preview; a low-supply badge on
+           medication cards with a "Mark refilled" CTA inside the badge.
+         - Push goes ONLY to the family group OWNER (not the whole
+           group) when supply is within the lead window, accompanied
+           by a `medication_refill` alert row in /api/alerts.
+
+      BACKEND TESTS to run (groups EC-N and RF in status_history above):
+        EC-N1..3  emergency_contact_name field round-trip + null + bc
+        RF-1..9   refill validation, tick within window, idempotency,
+                  mark-refilled cycle, scheduler regression.
+
+      The frontend contact-picker can only be exercised on real iOS or
+      Android devices; on the web preview it shows the
+      "Not available on this device" hint and the user can still
+      "Enter manually" — that part IS testable in the web preview.
+

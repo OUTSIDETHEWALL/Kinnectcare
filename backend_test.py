@@ -1,469 +1,427 @@
-"""Backend tests for Kinnship UX upgrades.
-
-Covers:
-  CI-1..CI-9   — Custom check-in modes (fixed time + interval 2/4/6/8/12h)
-  T-RBE-1..3   — Regression sanity (timezone, medication scheduler, general endpoints)
-
-Target: https://family-guard-37.preview.emergentagent.com/api
+#!/usr/bin/env python3
 """
-from __future__ import annotations
-
+Kinnship Backend Test — EC-N (emergency_contact_name) + RF (medication refill reminder)
+Targets: https://family-guard-37.preview.emergentagent.com/api
+Demo creds: demo@kinnship.app / password123
+"""
 import json
-import random
-import string
+import os
+import sys
+import time
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Tuple
+from datetime import datetime, timezone, timedelta
 
-import httpx
+import requests
 
-BASE_URL = "https://family-guard-37.preview.emergentagent.com/api"
-DEMO_EMAIL = "demo@kinnship.app"
-DEMO_PASSWORD = "password123"
+BASE = "https://family-guard-37.preview.emergentagent.com/api"
+EMAIL = "demo@kinnship.app"
+PASS = "password123"
 
-results: list[Tuple[str, bool, str]] = []
+results = []  # list of (name, ok, detail)
 
 
-def record(name: str, ok: bool, detail: str = "") -> None:
+def log(name, ok, detail=""):
+    status = "PASS" if ok else "FAIL"
+    print(f"[{status}] {name}: {detail}")
     results.append((name, ok, detail))
-    flag = "PASS" if ok else "FAIL"
-    print(f"[{flag}] {name}{(' — ' + detail) if detail else ''}")
 
 
-def auth_header(token: str) -> Dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
-
-
-def rand_email(prefix: str = "ci_test") -> str:
-    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-    return f"{prefix}_{suffix}@example.com"
-
-
-def login_demo(client: httpx.Client) -> str:
-    r = client.post(f"{BASE_URL}/auth/login", json={"email": DEMO_EMAIL, "password": DEMO_PASSWORD})
+def login():
+    r = requests.post(f"{BASE}/auth/login", json={"email": EMAIL, "password": PASS}, timeout=30)
     r.raise_for_status()
     return r.json()["access_token"]
 
 
-def signup_fresh(client: httpx.Client, tz: str = "UTC") -> Tuple[str, Dict[str, Any]]:
-    email = rand_email()
-    r = client.post(
-        f"{BASE_URL}/auth/signup",
-        json={"email": email, "password": "password123", "full_name": "QA Tester", "timezone": tz},
-    )
-    r.raise_for_status()
-    data = r.json()
-    return data["access_token"], data["user"]
+def H(tok):
+    return {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
 
 
-def create_member(client: httpx.Client, token: str, name: str = "QA Senior") -> Dict[str, Any]:
-    r = client.post(
-        f"{BASE_URL}/members",
-        headers=auth_header(token),
-        json={"name": name, "age": 72, "phone": "+1-555-0100", "gender": "Male", "role": "senior"},
-    )
-    r.raise_for_status()
-    return r.json()
-
-
-def get_member(client: httpx.Client, token: str, mid: str) -> Dict[str, Any]:
-    r = client.get(f"{BASE_URL}/members/{mid}", headers=auth_header(token))
-    r.raise_for_status()
-    return r.json()
-
-
-def parse_iso(s: str) -> datetime:
-    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+def iso_parse(s):
+    if s is None:
+        return None
+    if isinstance(s, str):
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    else:
+        dt = s
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
 
 
-# =====================================================================
-# CI-1 .. CI-9: Custom Check-in Modes
-# =====================================================================
+def main():
+    token = login()
+    headers = H(token)
+    print(f"\n=== Logged in as {EMAIL} ===\n")
 
-def test_checkin_modes(client: httpx.Client) -> None:
-    token, _user = signup_fresh(client)
-    h = auth_header(token)
-    # Free plan caps members at 2 (signup already seeds 2). Reuse the senior.
-    members = client.get(f"{BASE_URL}/members", headers=h).json()
-    member = next((m for m in members if m.get("role") == "senior"), members[0])
-    mid = member["id"]
+    # ==================== Group EC-N ====================
+    print("\n--- Group EC-N: Emergency contact name ---")
 
-    # ----- CI-1: Fixed daily time -----
-    r = client.put(
-        f"{BASE_URL}/members/{mid}/checkin-settings",
-        headers=h,
-        json={"daily_checkin_time": "08:30", "checkin_interval_hours": None},
-    )
-    ok = r.status_code == 200
-    if ok:
-        m = get_member(client, token, mid)
-        ok = (
-            m.get("daily_checkin_time") == "08:30"
-            and m.get("checkin_interval_hours") is None
-            and m.get("checkin_interval_started_at") is None
-        )
-        detail = "" if ok else f"GET member: {json.dumps(m)}"
-    else:
-        detail = f"status={r.status_code} body={r.text}"
-    record("CI-1 fixed daily time '08:30'", ok, detail)
-
-    # ----- CI-2: Interval mode (4h) -----
-    before = datetime.now(timezone.utc)
-    r = client.put(
-        f"{BASE_URL}/members/{mid}/checkin-settings",
-        headers=h,
-        json={"daily_checkin_time": None, "checkin_interval_hours": 4},
-    )
-    after = datetime.now(timezone.utc)
-    ok = r.status_code == 200
-    detail = ""
-    if ok:
-        m = get_member(client, token, mid)
-        anchor_str = m.get("checkin_interval_started_at")
-        ok_fields = (
-            m.get("daily_checkin_time") is None
-            and m.get("checkin_interval_hours") == 4
-            and anchor_str is not None
-        )
-        ok_anchor = False
-        if ok_fields:
-            anchor = parse_iso(anchor_str)
-            ok_anchor = (before - timedelta(seconds=5)) <= anchor <= (after + timedelta(seconds=5))
-        ok = ok_fields and ok_anchor
-        if not ok:
-            detail = f"GET member: {json.dumps(m)}"
-    else:
-        detail = f"status={r.status_code} body={r.text}"
-    record("CI-2 interval=4 anchor~now", ok, detail)
-
-    # ----- CI-3: Reject both modes at once -----
-    r = client.put(
-        f"{BASE_URL}/members/{mid}/checkin-settings",
-        headers=h,
-        json={"daily_checkin_time": "08:30", "checkin_interval_hours": 4},
-    )
-    ok = r.status_code == 400
-    if ok:
-        detail_msg = (r.json().get("detail") or "")
-        ok = "not both" in detail_msg.lower() or "either" in detail_msg.lower()
-        detail = f"detail={detail_msg!r}"
-    else:
-        detail = f"status={r.status_code} body={r.text}"
-    record("CI-3 reject both modes at once (400)", ok, detail)
-
-    # ----- CI-4: Reject invalid interval value -----
-    r = client.put(
-        f"{BASE_URL}/members/{mid}/checkin-settings",
-        headers=h,
-        json={"daily_checkin_time": None, "checkin_interval_hours": 5},
-    )
-    ok = r.status_code == 400
-    detail = ""
-    if ok:
-        detail_msg = str(r.json().get("detail") or "")
-        ok = all(str(n) in detail_msg for n in (2, 4, 6, 8, 12))
-        detail = f"detail={detail_msg!r}"
-    else:
-        detail = f"status={r.status_code} body={r.text}"
-    record("CI-4 reject interval=5 (400 mentions [2,4,6,8,12])", ok, detail)
-
-    # ----- CI-5: Disable both -----
-    r = client.put(
-        f"{BASE_URL}/members/{mid}/checkin-settings",
-        headers=h,
-        json={"daily_checkin_time": None, "checkin_interval_hours": None},
-    )
-    ok = r.status_code == 200
-    if ok:
-        m = get_member(client, token, mid)
-        ok = (
-            m.get("daily_checkin_time") is None
-            and m.get("checkin_interval_hours") is None
-            and m.get("checkin_interval_started_at") is None
-        )
-        detail = "" if ok else f"GET member: {json.dumps(m)}"
-    else:
-        detail = f"status={r.status_code} body={r.text}"
-    record("CI-5 disable both (all null)", ok, detail)
-
-    # ----- CI-6: Mode switching cleanup -----
-    r1 = client.put(
-        f"{BASE_URL}/members/{mid}/checkin-settings",
-        headers=h,
-        json={"daily_checkin_time": None, "checkin_interval_hours": 6},
-    )
-    ok1 = r1.status_code == 200
-    r2 = client.put(
-        f"{BASE_URL}/members/{mid}/checkin-settings",
-        headers=h,
-        json={"daily_checkin_time": "07:15", "checkin_interval_hours": None},
-    )
-    ok2 = r2.status_code == 200
-    detail = ""
-    if ok1 and ok2:
-        m = get_member(client, token, mid)
-        ok = (
-            m.get("daily_checkin_time") == "07:15"
-            and m.get("checkin_interval_hours") is None
-            and m.get("checkin_interval_started_at") is None
-        )
-        detail = "" if ok else f"GET member: {json.dumps(m)}"
-    else:
-        ok = False
-        detail = f"interval-put={r1.status_code}/{r1.text}; fixed-put={r2.status_code}/{r2.text}"
-    record("CI-6 mode switch interval→fixed cleans anchor", ok, detail)
-
-    # ----- CI-7: General PUT /members/{id} accepts interval & clears fixed -----
-    pre = client.put(
-        f"{BASE_URL}/members/{mid}/checkin-settings",
-        headers=h,
-        json={"daily_checkin_time": "09:00", "checkin_interval_hours": None},
-    )
-    if pre.status_code != 200:
-        record("CI-7 general PUT with interval (precondition)", False, f"pre status={pre.status_code} body={pre.text}")
-    else:
-        before = datetime.now(timezone.utc)
-        r = client.put(
-            f"{BASE_URL}/members/{mid}",
-            headers=h,
-            json={"checkin_interval_hours": 2},
-        )
-        after = datetime.now(timezone.utc)
-        ok = r.status_code == 200
-        detail = ""
-        if ok:
-            m = get_member(client, token, mid)
-            anchor_str = m.get("checkin_interval_started_at")
-            ok_fields = (
-                m.get("daily_checkin_time") is None
-                and m.get("checkin_interval_hours") == 2
-                and anchor_str is not None
-            )
-            ok_anchor = False
-            if ok_fields:
-                anchor = parse_iso(anchor_str)
-                ok_anchor = (before - timedelta(seconds=5)) <= anchor <= (after + timedelta(seconds=5))
-            ok = ok_fields and ok_anchor
-            if not ok:
-                detail = f"GET member: {json.dumps(m)}"
-        else:
-            detail = f"status={r.status_code} body={r.text}"
-        record("CI-7 general PUT /members/{id} interval=2 clears fixed", ok, detail)
-
-    # ----- CI-8: Reject invalid HH:MM -----
-    r = client.put(
-        f"{BASE_URL}/members/{mid}/checkin-settings",
-        headers=h,
-        json={"daily_checkin_time": "25:99", "checkin_interval_hours": None},
-    )
-    ok = r.status_code == 400
-    detail = ""
-    if ok:
-        detail_msg = str(r.json().get("detail") or "")
-        ok = "HH:MM" in detail_msg
-        detail = f"detail={detail_msg!r}"
-    else:
-        detail = f"status={r.status_code} body={r.text}"
-    record("CI-8 reject invalid HH:MM '25:99'", ok, detail)
-
-    # ----- CI-9: Interval missed-checkin detection -----
-    r = client.put(
-        f"{BASE_URL}/members/{mid}/checkin-settings",
-        headers=h,
-        json={"daily_checkin_time": None, "checkin_interval_hours": 2},
-    )
+    # Create a fresh member for isolated testing
+    member_payload = {
+        "name": "EC Test Member",
+        "age": 70,
+        "role": "senior",
+        "gender": "female",
+        "phone": "+15550001111",
+    }
+    r = requests.post(f"{BASE}/members", json=member_payload, headers=headers, timeout=30)
     if r.status_code != 200:
-        record("CI-9 interval missed-checkin", False, f"failed to set interval=2: {r.status_code} {r.text}")
-        return
+        log("EC-N setup: create member", False, f"{r.status_code} {r.text}")
+        rr = requests.get(f"{BASE}/members", headers=headers, timeout=30)
+        members = rr.json()
+        if not members:
+            print("No members available, aborting")
+            return False
+        member_id = members[0]["id"]
+    else:
+        member_id = r.json()["id"]
+        print(f"  Created member id={member_id}")
 
-    # Standalone PUT to backdate anchor (avoids the auto-reset branch since we don't
-    # pass checkin_interval_hours in this update).
-    # NOTE: backdating 4h exactly puts the test right on the slot boundary
-    # (anchor+slot*2h == now → still inside the 15-min grace). Backdate by 5h
-    # to be solidly past the most recent slot's grace window.
-    backdated = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
-    r_back = client.put(
-        f"{BASE_URL}/members/{mid}",
-        headers=h,
-        json={"checkin_interval_started_at": backdated},
-    )
-    if r_back.status_code != 200:
-        record("CI-9 interval missed-checkin", False, f"BLOCKED — backdate PUT failed: {r_back.status_code} {r_back.text}")
-        return
-
-    m = get_member(client, token, mid)
-    anchor_after = m.get("checkin_interval_started_at")
-    if anchor_after is None:
-        record("CI-9 interval missed-checkin", False, "BLOCKED — anchor cleared by backdate update")
-        return
-    anchor_dt = parse_iso(anchor_after)
-    age_hours = (datetime.now(timezone.utc) - anchor_dt).total_seconds() / 3600.0
-    if age_hours < 3:
-        record(
-            "CI-9 interval missed-checkin",
-            False,
-            f"BLOCKED — anchor not backdated (age={age_hours:.2f}h). m={json.dumps(m)}",
-        )
-        return
-
-    r1 = client.get(f"{BASE_URL}/alerts", headers=h)
-    if r1.status_code != 200:
-        record("CI-9 interval missed-checkin", False, f"GET /alerts #1: {r1.status_code} {r1.text}")
-        return
-    alerts1 = r1.json()
-    missed1 = [a for a in alerts1 if a.get("type") == "missed_checkin" and a.get("member_id") == mid]
-    if not missed1:
-        record(
-            "CI-9 interval missed-checkin",
-            False,
-            f"no missed_checkin alert produced. anchor age={age_hours:.2f}h.",
-        )
-        return
-
-    count1 = len(missed1)
-    r2 = client.get(f"{BASE_URL}/alerts", headers=h)
-    alerts2 = r2.json()
-    missed2 = [a for a in alerts2 if a.get("type") == "missed_checkin" and a.get("member_id") == mid]
-    count2 = len(missed2)
-    ok = (count1 >= 1) and (count2 == count1)
-    detail = f"first={count1} second={count2}"
-    record("CI-9 interval missed-checkin detected & idempotent", ok, detail)
-
-
-# =====================================================================
-# T-RBE-1..3 Regression sanity
-# =====================================================================
-
-def test_regression_sanity(client: httpx.Client) -> None:
-    token = login_demo(client)
-    h = auth_header(token)
-
-    r = client.put(
-        f"{BASE_URL}/auth/timezone",
-        headers=h,
-        json={"timezone": "America/New_York"},
-    )
+    # EC-N1: Set both name and phone
+    body = {
+        "emergency_contact_name": "Jane Smith",
+        "emergency_contact_phone": "+15551234567",
+    }
+    r = requests.put(f"{BASE}/members/{member_id}", json=body, headers=headers, timeout=30)
     ok1 = r.status_code == 200
-    detail = ""
     if ok1:
-        me = client.get(f"{BASE_URL}/auth/me", headers=h).json()
-        ok1 = me.get("timezone") == "America/New_York"
-        detail = "" if ok1 else f"me={json.dumps(me)}"
+        rg = requests.get(f"{BASE}/members/{member_id}", headers=headers, timeout=30)
+        d = rg.json()
+        ok1 = (
+            d.get("emergency_contact_name") == "Jane Smith"
+            and d.get("emergency_contact_phone") == "+15551234567"
+        )
+        log("EC-N1", ok1, f"name={d.get('emergency_contact_name')!r} phone={d.get('emergency_contact_phone')!r}")
     else:
-        detail = f"status={r.status_code} body={r.text}"
-    record("T-RBE-1 PUT /auth/timezone America/New_York", ok1, detail)
-    client.put(f"{BASE_URL}/auth/timezone", headers=h, json={"timezone": "UTC"})
+        log("EC-N1", False, f"PUT {r.status_code} {r.text}")
 
-    # ----- T-RBE-2: medication scheduler -----
-    tok2, _user2 = signup_fresh(client, tz="UTC")
-    h2 = auth_header(tok2)
+    # EC-N2: Clear just name
+    body = {"emergency_contact_name": None}
+    r = requests.put(f"{BASE}/members/{member_id}", json=body, headers=headers, timeout=30)
+    ok2 = r.status_code == 200
+    if ok2:
+        rg = requests.get(f"{BASE}/members/{member_id}", headers=headers, timeout=30)
+        d = rg.json()
+        ok2 = (
+            d.get("emergency_contact_name") is None
+            and d.get("emergency_contact_phone") == "+15551234567"
+        )
+        log("EC-N2", ok2, f"name={d.get('emergency_contact_name')!r} phone(unchanged)={d.get('emergency_contact_phone')!r}")
+    else:
+        log("EC-N2", False, f"PUT {r.status_code} {r.text}")
 
-    r = client.post(
-        f"{BASE_URL}/auth/push-token",
-        headers=h2,
-        json={"token": f"ExponentPushToken[QA_{uuid.uuid4().hex[:10]}]", "platform": "ios"},
+    # EC-N3: backwards compat (phone only, no name)
+    body = {"emergency_contact_phone": "+15559998888"}
+    r = requests.put(f"{BASE}/members/{member_id}", json=body, headers=headers, timeout=30)
+    ok3 = r.status_code == 200
+    if ok3:
+        rg = requests.get(f"{BASE}/members/{member_id}", headers=headers, timeout=30)
+        d = rg.json()
+        ok3 = (
+            d.get("emergency_contact_phone") == "+15559998888"
+            and d.get("emergency_contact_name") is None
+        )
+        log("EC-N3", ok3, f"phone={d.get('emergency_contact_phone')!r} name(unchanged-null)={d.get('emergency_contact_name')!r}")
+    else:
+        log("EC-N3", False, f"PUT {r.status_code} {r.text}")
+
+    # ==================== Group RF ====================
+    print("\n--- Group RF: Medication refill reminder ---")
+
+    test_member_id = member_id
+
+    # RF-1: Create medication WITH refill tracking
+    rf1_payload = {
+        "member_id": test_member_id,
+        "title": "Lisinopril",
+        "category": "medication",
+        "times": [{"time": "08:00", "label": "Morning"}],
+        "days_supply": 30,
+        "refill_reminder_days": 7,
+    }
+    t0 = datetime.now(timezone.utc)
+    r = requests.post(f"{BASE}/reminders", json=rf1_payload, headers=headers, timeout=30)
+    rf1_id = None
+    if r.status_code != 200:
+        log("RF-1", False, f"{r.status_code} {r.text}")
+    else:
+        d = r.json()
+        rf1_id = d["id"]
+        ds = d.get("days_supply")
+        lead = d.get("refill_reminder_days")
+        lra = iso_parse(d.get("last_refill_at"))
+        roa = iso_parse(d.get("run_out_at"))
+        ok = ds == 30 and lead == 7
+        ok_lra = lra is not None and abs((lra - t0).total_seconds()) < 30
+        ok_roa = roa is not None and abs((roa - (t0 + timedelta(days=30))).total_seconds()) < 120
+        ok = ok and ok_lra and ok_roa
+        log("RF-1", ok, f"ds={ds} lead={lead} lra_ok={ok_lra} roa_ok={ok_roa} lra={lra} roa={roa}")
+
+    # RF-2: invalid days_supply > 365
+    rf2_payload = {
+        "member_id": test_member_id,
+        "title": "BadMed1",
+        "category": "medication",
+        "times": [{"time": "09:00"}],
+        "days_supply": 400,
+    }
+    r = requests.post(f"{BASE}/reminders", json=rf2_payload, headers=headers, timeout=30)
+    detail = ""
+    try:
+        detail = r.json().get("detail", "")
+    except Exception:
+        detail = r.text
+    ok = r.status_code == 400 and "1 and 365" in str(detail)
+    log("RF-2", ok, f"status={r.status_code} detail={detail!r}")
+
+    # RF-3: lead > days_supply
+    rf3_payload = {
+        "member_id": test_member_id,
+        "title": "BadMed2",
+        "category": "medication",
+        "times": [{"time": "09:00"}],
+        "days_supply": 30,
+        "refill_reminder_days": 40,
+    }
+    r = requests.post(f"{BASE}/reminders", json=rf3_payload, headers=headers, timeout=30)
+    try:
+        detail = r.json().get("detail", "")
+    except Exception:
+        detail = r.text
+    ok = r.status_code == 400 and "between 1 and days_supply" in str(detail)
+    log("RF-3", ok, f"status={r.status_code} detail={detail!r}")
+
+    # RF-4: create medication WITHOUT refill
+    rf4_payload = {
+        "member_id": test_member_id,
+        "title": "Metformin",
+        "category": "medication",
+        "times": [{"time": "12:00"}],
+    }
+    r = requests.post(f"{BASE}/reminders", json=rf4_payload, headers=headers, timeout=30)
+    rf4_id = None
+    if r.status_code != 200:
+        log("RF-4", False, f"{r.status_code} {r.text}")
+    else:
+        d = r.json()
+        rf4_id = d["id"]
+        ok = (
+            d.get("days_supply") is None
+            and d.get("refill_reminder_days") is None
+            and d.get("last_refill_at") is None
+            and d.get("run_out_at") is None
+        )
+        log("RF-4", ok, f"ds={d.get('days_supply')} lead={d.get('refill_reminder_days')} lra={d.get('last_refill_at')} roa={d.get('run_out_at')}")
+
+    # RF-5: tick within refill window
+    r = requests.post(
+        f"{BASE}/auth/push-token",
+        json={"token": "ExponentPushToken[FAKE_RF]"},
+        headers=headers, timeout=30,
     )
-    pushed_ok = r.status_code == 200 and r.json().get("ok") is True
+    print(f"  RF-5a push-token register: {r.status_code} body={r.text[:150]}")
 
-    members = client.get(f"{BASE_URL}/members", headers=h2).json()
-    senior = next((m for m in members if m.get("role") == "senior"), members[0] if members else None)
-    if not senior:
-        record("T-RBE-2 medication scheduler", False, "no seed members found")
+    rf5_payload = {
+        "member_id": test_member_id,
+        "title": "Lisinopril",
+        "category": "medication",
+        "times": [{"time": "08:00", "label": "Morning"}],
+        "days_supply": 10,
+        "refill_reminder_days": 3,
+    }
+    r = requests.post(f"{BASE}/reminders", json=rf5_payload, headers=headers, timeout=30)
+    rf5_id = None
+    rf5_ok = False
+    if r.status_code != 200:
+        log("RF-5", False, f"create failed {r.status_code} {r.text}")
     else:
-        past = datetime.now(timezone.utc) - timedelta(minutes=1)
-        slot = past.strftime("%H:%M")
-        r = client.post(
-            f"{BASE_URL}/reminders",
-            headers=h2,
-            json={
-                "member_id": senior["id"],
-                "title": "QA Test Med",
-                "category": "medication",
-                "dosage": "10mg",
-                "times": [{"time": slot, "label": "QA"}],
-            },
+        rf5_id = r.json()["id"]
+        print(f"  RF-5b created reminder id={rf5_id}")
+
+        # Backdate last_refill_at
+        backdated = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+        r = requests.put(
+            f"{BASE}/reminders/{rf5_id}",
+            json={"last_refill_at": backdated},
+            headers=headers, timeout=30,
         )
         if r.status_code != 200:
-            record("T-RBE-2 medication scheduler", False, f"create reminder: {r.status_code} {r.text}")
+            r = requests.put(
+                f"{BASE}/reminders/{rf5_id}",
+                json={"last_refill_at": backdated, "days_supply": 10},
+                headers=headers, timeout=30,
+            )
+        backdate_ok = r.status_code == 200
+        if backdate_ok:
+            d = r.json()
+            print(f"  RF-5c backdated: last_refill_at={d.get('last_refill_at')} run_out_at={d.get('run_out_at')}")
         else:
-            r = client.post(f"{BASE_URL}/medications/_tick", headers=h2)
-            ok2 = r.status_code == 200
-            detail = ""
-            if ok2:
-                body = r.json()
-                fired = body.get("fired_due", 0)
-                ok2 = fired >= 1
-                detail = f"push_token_ok={pushed_ok} tick body={json.dumps(body)}"
-            else:
-                detail = f"status={r.status_code} body={r.text}"
-            record("T-RBE-2 medication scheduler fired_due>=1", ok2, detail)
+            print(f"  RF-5c backdate FAILED {r.status_code} {r.text}")
 
-    # ----- T-RBE-3: General endpoints still 200 -----
-    r = client.post(f"{BASE_URL}/auth/login", json={"email": DEMO_EMAIL, "password": DEMO_PASSWORD})
-    ok = r.status_code == 200
-    record("T-RBE-3 POST /auth/login (demo)", ok, "" if ok else f"{r.status_code} {r.text}")
-    if not ok:
-        return
-    token = r.json()["access_token"]
-    h = auth_header(token)
+        # Tick
+        r = requests.post(f"{BASE}/medications/_tick", headers=headers, timeout=60)
+        tick1_ok = r.status_code == 200
+        tick1 = r.json() if tick1_ok else {}
+        scanned = tick1.get("scanned_refill", 0)
+        fired = tick1.get("fired_refill", 0)
+        print(f"  RF-5d tick1: status={r.status_code} full={tick1}")
+        ok_d = tick1_ok and scanned >= 1 and fired >= 1
 
-    for path in ("/family-group", "/members", "/summary", "/billing/status", "/alerts"):
-        rr = client.get(f"{BASE_URL}{path}", headers=h)
-        record(
-            f"T-RBE-3 GET {path}",
-            rr.status_code == 200,
-            "" if rr.status_code == 200 else f"{rr.status_code} {rr.text[:300]}",
-        )
+        # Alerts
+        r = requests.get(f"{BASE}/alerts", headers=headers, timeout=30)
+        alerts = r.json() if r.status_code == 200 else []
+        refill_alerts = [a for a in alerts if a.get("type") == "medication_refill"]
+        target_alert = None
+        for a in refill_alerts:
+            t = (a.get("title") or "")
+            m = (a.get("message") or "")
+            if "Refill" in t and "Lisinopril" in t:
+                if ("may be running low" in m or "running low" in m) and "supply runs out" in m:
+                    if a.get("severity") == "warning":
+                        target_alert = a
+                        break
+        ok_e = target_alert is not None
+        print(f"  RF-5e alerts: total medication_refill={len(refill_alerts)} matched={ok_e}")
+        if target_alert:
+            print(f"    matched alert: {target_alert}")
+        elif refill_alerts:
+            print(f"    sample refill alert: {refill_alerts[-1]}")
 
-    members = client.get(f"{BASE_URL}/members", headers=h).json()
-    if members:
-        mid = members[0]["id"]
-        rr = client.post(
-            f"{BASE_URL}/sos",
-            headers=h,
-            json={"member_id": mid, "latitude": 1.0, "longitude": 2.0},
-        )
-        record(
-            "T-RBE-3 POST /sos {member_id, lat:1.0, lng:2.0}",
-            rr.status_code == 200,
-            "" if rr.status_code == 200 else f"{rr.status_code} {rr.text}",
-        )
-        rr = client.get(f"{BASE_URL}/reminders/member/{mid}", headers=h)
-        record(
-            "T-RBE-3 GET /reminders/member/{id}",
-            rr.status_code == 200,
-            "" if rr.status_code == 200 else f"{rr.status_code} {rr.text}",
-        )
+        # Tick again — idempotent
+        r = requests.post(f"{BASE}/medications/_tick", headers=headers, timeout=60)
+        tick2 = r.json() if r.status_code == 200 else {}
+        fired2 = tick2.get("fired_refill", -1)
+        ok_f = r.status_code == 200 and fired2 == 0
+        print(f"  RF-5f tick2: status={r.status_code} fired_refill={fired2} (expect 0) full={tick2}")
 
+        rf5_ok = ok_d and ok_e and ok_f
+        log("RF-5", rf5_ok, f"tick1 fired={fired} scanned={scanned}; alert_matched={ok_e}; tick2 fired_refill={fired2}")
 
-def main() -> int:
-    with httpx.Client(timeout=30.0) as client:
-        print("=" * 60)
-        print("Custom check-in modes — CI-1..CI-9")
-        print("=" * 60)
-        test_checkin_modes(client)
+    # RF-6: mark-refilled resets cycle
+    if rf5_id:
+        t_now = datetime.now(timezone.utc)
+        r = requests.post(f"{BASE}/reminders/{rf5_id}/mark-refilled", headers=headers, timeout=30)
+        if r.status_code != 200:
+            log("RF-6", False, f"mark-refilled {r.status_code} {r.text}")
+        else:
+            d = r.json()
+            lra = iso_parse(d.get("last_refill_at"))
+            roa = iso_parse(d.get("run_out_at"))
+            ok_a = lra is not None and abs((lra - t_now).total_seconds()) < 30
+            ok_b = roa is not None and abs((roa - (t_now + timedelta(days=10))).total_seconds()) < 60
+            r = requests.post(f"{BASE}/medications/_tick", headers=headers, timeout=60)
+            tick = r.json() if r.status_code == 200 else {}
+            fired = tick.get("fired_refill", -1)
+            ok_c = fired == 0
+            ok = ok_a and ok_b and ok_c
+            log("RF-6", ok, f"lra~now={ok_a} roa~now+10d={ok_b} tick3_fired_refill={fired} (expect 0)")
 
-        print()
-        print("=" * 60)
-        print("Regression sanity — T-RBE-1..3")
-        print("=" * 60)
-        test_regression_sanity(client)
+    # RF-7: mark-refilled on med with no days_supply
+    if rf4_id:
+        r = requests.post(f"{BASE}/reminders/{rf4_id}/mark-refilled", headers=headers, timeout=30)
+        if r.status_code != 400:
+            log("RF-7", False, f"expected 400 got {r.status_code} {r.text}")
+        else:
+            try:
+                detail = r.json().get("detail", "")
+            except Exception:
+                detail = r.text
+            ok = "days_supply" in str(detail)
+            log("RF-7", ok, f"detail={detail!r}")
 
-    total = len(results)
-    failed = [r for r in results if not r[1]]
-    print()
-    print("=" * 60)
-    print(f"RESULTS: {total - len(failed)}/{total} passed")
-    if failed:
-        print("FAILED:")
-        for n, _, d in failed:
-            print(f"  - {n}: {d}")
-    print("=" * 60)
-    return 0 if not failed else 1
+    # RF-8: disable refill on RF-1's reminder via days_supply=0
+    if rf1_id:
+        r = requests.put(f"{BASE}/reminders/{rf1_id}", json={"days_supply": 0}, headers=headers, timeout=30)
+        if r.status_code != 200:
+            log("RF-8", False, f"{r.status_code} {r.text}")
+        else:
+            d = r.json()
+            ok = (
+                d.get("days_supply") is None
+                and d.get("refill_reminder_days") is None
+                and d.get("last_refill_at") is None
+                and d.get("run_out_at") is None
+            )
+            log("RF-8", ok, f"ds={d.get('days_supply')} lead={d.get('refill_reminder_days')} lra={d.get('last_refill_at')} roa={d.get('run_out_at')}")
+
+    # RF-9: regression — fresh medication with slot 1 min in past (no refill) -> fired_due >= 1
+    r = requests.get(f"{BASE}/auth/me", headers=headers, timeout=30)
+    user_tz = "UTC"
+    if r.status_code == 200:
+        user_tz = r.json().get("timezone") or "UTC"
+    print(f"  RF-9 user_tz={user_tz}")
+    try:
+        from zoneinfo import ZoneInfo
+        now_local = datetime.now(ZoneInfo(user_tz))
+    except Exception:
+        now_local = datetime.now(timezone.utc)
+    past = now_local - timedelta(minutes=1)
+    slot_hhmm = f"{past.hour:02d}:{past.minute:02d}"
+    print(f"  RF-9 slot={slot_hhmm}")
+
+    rf9_payload = {
+        "member_id": test_member_id,
+        "title": f"RegressionMed_{uuid.uuid4().hex[:6]}",
+        "category": "medication",
+        "times": [{"time": slot_hhmm}],
+    }
+    r = requests.post(f"{BASE}/reminders", json=rf9_payload, headers=headers, timeout=30)
+    if r.status_code != 200:
+        log("RF-9", False, f"create {r.status_code} {r.text}")
+    else:
+        r = requests.post(f"{BASE}/medications/_tick", headers=headers, timeout=60)
+        tick = r.json() if r.status_code == 200 else {}
+        fired_due = tick.get("fired_due", -1)
+        keys_needed = {"fired_due", "fired_remind_30", "fired_escalate_2h", "skipped_taken", "scanned_refill", "fired_refill"}
+        keys_present = set(tick.keys()) & keys_needed
+        ok = r.status_code == 200 and fired_due >= 1 and keys_present == keys_needed
+        log("RF-9", ok, f"fired_due={fired_due} keys_present={sorted(keys_present)} full={tick}")
+
+    # ==================== Regression sanity ====================
+    print("\n--- Regression sanity ---")
+    reg_ok = True
+    reg_details = []
+    for ep, method, payload in [
+        ("/auth/login", "POST", {"email": EMAIL, "password": PASS}),
+        ("/family-group", "GET", None),
+        ("/members", "GET", None),
+        ("/summary", "GET", None),
+        ("/billing/status", "GET", None),
+        ("/alerts", "GET", None),
+    ]:
+        if method == "POST":
+            r = requests.post(f"{BASE}{ep}", json=payload, headers={"Content-Type": "application/json"}, timeout=30)
+        else:
+            r = requests.get(f"{BASE}{ep}", headers=headers, timeout=30)
+        ok = r.status_code == 200
+        reg_details.append(f"{method} {ep}={r.status_code}")
+        reg_ok = reg_ok and ok
+
+    r = requests.post(
+        f"{BASE}/sos",
+        json={"member_id": test_member_id, "latitude": 1.0, "longitude": 2.0},
+        headers=headers, timeout=30,
+    )
+    sos_ok = r.status_code == 200
+    reg_details.append(f"POST /sos={r.status_code}")
+    reg_ok = reg_ok and sos_ok
+    log("Regression sanity", reg_ok, " | ".join(reg_details))
+
+    # ===== Summary =====
+    print("\n========== SUMMARY ==========")
+    passed = sum(1 for _, ok, _ in results if ok)
+    failed = sum(1 for _, ok, _ in results if not ok)
+    for name, ok, detail in results:
+        print(f"[{'PASS' if ok else 'FAIL'}] {name} :: {detail}")
+    print(f"\nTotal: {passed} passed, {failed} failed")
+    return failed == 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        ok = main()
+        sys.exit(0 if ok else 1)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        sys.exit(2)

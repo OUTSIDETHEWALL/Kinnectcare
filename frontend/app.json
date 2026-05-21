@@ -13,7 +13,8 @@
       "bundleIdentifier": "app.kinnship.client",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Share your location with family during check-ins and SOS.",
-        "NSCameraUsageDescription": "Add profile photos for family members."
+        "NSCameraUsageDescription": "Add profile photos for family members.",
+        "NSContactsUsageDescription": "Pick an emergency contact from your phone."
       }
     },
     "android": {
@@ -26,7 +27,8 @@
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
-        "POST_NOTIFICATIONS"
+        "POST_NOTIFICATIONS",
+        "READ_CONTACTS"
       ]
     },
     "web": {
