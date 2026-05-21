@@ -1057,35 +1057,36 @@ async def update_reminder(reminder_id: str, data: ReminderUpdate, current=Depend
         or data.refill_reminder_days is not None
         or data.last_refill_at is not None
     ):
-        new_days_supply = (
-            data.days_supply if data.days_supply is not None else rem.get("days_supply")
-        )
-        new_lead = (
-            data.refill_reminder_days
-            if data.refill_reminder_days is not None
-            else rem.get("refill_reminder_days")
-        )
-        new_last_refill = (
-            data.last_refill_at
-            if data.last_refill_at is not None
-            else rem.get("last_refill_at")
-        )
-        if new_days_supply is not None and (new_days_supply <= 0 or new_days_supply > 365):
-            raise HTTPException(status_code=400, detail="days_supply must be between 1 and 365")
-        if new_lead is not None and new_days_supply is not None and (
-            new_lead < 1 or new_lead > new_days_supply
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="refill_reminder_days must be between 1 and days_supply",
-            )
-        # If days_supply was explicitly set to null/0, fully disable refill tracking.
+        # Disable refill tracking (explicit days_supply=0). Handle first so the
+        # subsequent 1..365 range check doesn't reject the disable signal.
         if data.days_supply is not None and data.days_supply == 0:
             update["days_supply"] = None
             update["refill_reminder_days"] = None
             update["last_refill_at"] = None
             update["run_out_at"] = None
         else:
+            new_days_supply = (
+                data.days_supply if data.days_supply is not None else rem.get("days_supply")
+            )
+            new_lead = (
+                data.refill_reminder_days
+                if data.refill_reminder_days is not None
+                else rem.get("refill_reminder_days")
+            )
+            new_last_refill = (
+                data.last_refill_at
+                if data.last_refill_at is not None
+                else rem.get("last_refill_at")
+            )
+            if new_days_supply is not None and (new_days_supply <= 0 or new_days_supply > 365):
+                raise HTTPException(status_code=400, detail="days_supply must be between 1 and 365")
+            if new_lead is not None and new_days_supply is not None and (
+                new_lead < 1 or new_lead > new_days_supply
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="refill_reminder_days must be between 1 and days_supply",
+                )
             # Default the lead time when enabling refill tracking for the first time.
             if new_days_supply is not None and not new_lead:
                 new_lead = DEFAULT_REFILL_REMINDER_DAYS

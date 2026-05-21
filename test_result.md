@@ -4600,6 +4600,37 @@ backend:
           Regression sanity (POST /auth/login, GET /family-group, /members,
           /summary, /billing/status, /alerts, POST /sos with coords) all
           green. No other regressions.
+      - working: true
+        agent: "testing"
+        comment: |
+          RF-8 RETEST AFTER FIX — PASS via /app/backend_test_rf8_retest.py
+          against https://family-guard-37.preview.emergentagent.com/api with
+          demo@kinnship.app / password123.
+
+          Step 1 — POST /api/reminders {member_id:<Gregory>, title:"RF8RetestMed",
+          category:"medication", times:[{time:"08:00",label:null}],
+          days_supply:30, refill_reminder_days:7} → 200. Response:
+            id=915a9df9-55e0-44cc-a4d7-32174919acaa
+            days_supply=30, refill_reminder_days=7
+            last_refill_at="2026-05-21T16:15:41.960354Z"
+            run_out_at="2026-06-20T16:15:41.960354Z" (~now+30d) ✓
+
+          Step 2 — PUT /api/reminders/{id} {"days_supply":0} → 200 (previously
+          400). All 4 refill fields nullified in response:
+            days_supply           = None
+            refill_reminder_days  = None
+            last_refill_at        = None
+            run_out_at            = None
+          Fix verified in server.py:1060-1066 — the explicit `days_supply == 0`
+          disable branch now runs BEFORE the 1..365 range guard.
+
+          Step 3 — POST /api/medications/_tick → 200 with BOTH counter groups
+          present and no errors:
+            {"ok":true, "scanned_reminders":203, "fired_due":1,
+             "fired_remind_30":1, "fired_escalate_2h":1, "skipped_taken":0,
+             "scanned_refill":4, "fired_refill":0}
+
+          RF-8 is fully GREEN. No other regressions. All 9 RF cases now pass.
 
 agent_communication:
   - agent: "testing"
@@ -4636,14 +4667,44 @@ agent_communication:
       properly. Not a backend bug.
 
 test_plan:
-  current_focus:
-    - "Medication refill reminder — backend"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 
 agent_communication:
+  - agent: "testing"
+    message: |
+      RF-8 RETEST AFTER FIX — PASS. Verified via /app/backend_test_rf8_retest.py
+      against https://family-guard-37.preview.emergentagent.com/api with
+      demo@kinnship.app / password123.
+
+      Step 1 — POST /api/reminders {member_id, title:"RF8RetestMed",
+      category:"medication", times:[{time:"08:00",label:null}], days_supply:30,
+      refill_reminder_days:7} → 200. Response: days_supply=30,
+      refill_reminder_days=7, last_refill_at="2026-05-21T16:15:41.960354Z",
+      run_out_at="2026-06-20T16:15:41.960354Z" (~now+30d). ✓
+
+      Step 2 — PUT /api/reminders/{id} {"days_supply":0} → 200 (previously 400).
+      Response confirms full disable:
+        days_supply           = None
+        refill_reminder_days  = None
+        last_refill_at        = None
+        run_out_at            = None
+      The reorder fix in server.py:1060-1066 (handle days_supply==0 BEFORE
+      the 1..365 range guard) is working as intended.
+
+      Step 3 — POST /api/medications/_tick → 200. Body includes BOTH counter
+      groups:
+        {ok:true, scanned_reminders:203, fired_due:1, fired_remind_30:1,
+         fired_escalate_2h:1, skipped_taken:0, scanned_refill:4,
+         fired_refill:0}
+      No errors in backend logs.
+
+      RF-8 is now fully GREEN. The "Medication refill reminder — backend" task
+      can be marked working=true. No other regressions observed.
+
   - agent: "main"
     message: |
       Shipped two new features in this iteration:
