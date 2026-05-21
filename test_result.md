@@ -4254,3 +4254,111 @@ agent_communication:
       Main agent: please summarize and finish. (No source code modified by
       this testing run.)
 
+
+
+#====================================================================================================
+# 2026-06-17 — Native time-wheel picker (iOS spinner / Android clock dialog) for TimePicker12
+#====================================================================================================
+
+test_plan:
+  current_focus:
+    - "Native time-wheel picker integration via @react-native-community/datetimepicker"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+
+frontend:
+  - task: "Native time-wheel picker (iOS spinner / Android clock dialog) + web fallback"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/TimePicker12.tsx, /app/frontend/package.json"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Upgraded TimePicker12 to use the platform-native wheel picker on
+          mobile while keeping the existing inline custom picker as a web
+          fallback. Behaviour:
+
+            * iOS    — taps a styled "field button" (showing the current
+                       12-hour time, e.g. "9:30 PM"). On press, opens a
+                       modal sheet (semi-transparent backdrop, centered
+                       card with Cancel / Done) containing the native
+                       DateTimePicker in `display="spinner"` mode at
+                       `is24Hour={false}`. Tapping Done emits the new
+                       canonical "HH:MM" 24-hour string via onChange.
+            * Android — taps the same field button → opens the native
+                        system clock dialog via
+                        `DateTimePickerAndroid.open({display:'clock',
+                        is24Hour:false})`. The "set" event emits the new
+                        "HH:MM" string.
+            * Web    — falls back to the previous inline custom picker
+                       (number inputs + AM/PM toggle). This preserves the
+                       Playwright-driven web preview tests.
+
+          Implementation details:
+            * Added dependency `@react-native-community/datetimepicker@8.4.4`
+              (Expo SDK-compatible version).
+            * Native module is lazy-required (`Platform.OS !== 'web'`) so
+              the web bundle still builds cleanly with no native-only
+              symbols.
+            * Both native and web paths still EMIT canonical "HH:MM" 24h
+              strings to keep the backend contract unchanged.
+            * The TimeSlotsEditor used by Add/Edit Medication and the
+              Daily Check-in section both benefit automatically — they
+              already consume TimePicker12.
+
+          REGRESSION SANITY (web preview):
+            * The metro bundle compiles successfully on web
+              (Web Bundled 13992ms, 1042 modules — see expo logs).
+            * The inline web picker still renders and emits the same
+              "HH:MM" values as before; no test IDs have changed for the
+              web path (timepicker-hour / -minute / -am / -pm).
+
+          TEST INSTRUCTIONS FOR FRONTEND AGENT (web preview only):
+            T1. Login → member detail → tap "Edit" on Daily Check-in.
+                Confirm the inline web picker renders (hour / minute /
+                AM / PM elements all visible). Type "9", "30", PM, then
+                tap "Save time". Display updates to "🕐 9:30 PM (daily)".
+            T2. Tap "Edit" again, tap a "4h" interval chip → display
+                updates to "🔁 Every 4 hours".
+            T3. Open Add Medication form → confirm the TimeSlotsEditor
+                renders the same web inline picker (same test IDs as T1
+                but prefixed `add-med-picker-0-`). Save medication with
+                slot 8:00 AM → confirm the medication row on member
+                detail shows "8:00 AM".
+            T4. No console errors. No "datetimepicker" or
+                "DateTimePicker" import errors at runtime on web.
+            T5. NATIVE iOS/Android paths can ONLY be validated on real
+                devices (via Expo Go); document as "untestable on web —
+                manual device QA recommended" if asked.
+
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Added @react-native-community/datetimepicker@8.4.4 and upgraded
+      TimePicker12 so:
+        * iOS shows a native spinner-wheel inside a Cancel/Done modal.
+        * Android pops the system clock dialog.
+        * Web keeps the inline number+AM/PM picker as a graceful
+          fallback so the Playwright web tests still work.
+
+      The medication time-slots editor and the Daily Check-in custom
+      time picker both pick up the new behaviour automatically (they
+      consume TimePicker12).
+
+      Please run a quick FRONTEND regression on the web preview:
+        - T1: Daily Check-in custom time still saves & displays as
+              "9:30 PM (daily)".
+        - T2: Interval chip "4h" still works → "Every 4 hours".
+        - T3: Add Medication form still uses the picker and renders
+              the saved time in 12-hour AM/PM format.
+        - T4: 0 console errors / 0 "datetimepicker" errors at runtime.
+
+      No backend changes in this iteration.
+
