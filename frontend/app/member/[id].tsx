@@ -455,11 +455,13 @@ export default function MemberDetail() {
               <View style={{ marginTop: 14 }}>
                 <Text style={styles.checkinModeLabel}>Custom daily time</Text>
                 <View style={styles.timeRow}>
-                  <TimePicker12
-                    testIDPrefix="checkin-time-picker"
-                    value={member.daily_checkin_time || checkinDraftTime}
-                    onChange={setCheckinDraftTime}
-                  />
+                  <View style={{ flex: 1, minWidth: 180 }}>
+                    <TimePicker12
+                      testIDPrefix="checkin-time-picker"
+                      value={member.daily_checkin_time || checkinDraftTime}
+                      onChange={setCheckinDraftTime}
+                    />
+                  </View>
                   <TouchableOpacity
                     testID="checkin-save-fixed"
                     onPress={() => saveFixedCheckin(checkinDraftTime || member.daily_checkin_time || '08:00')}
