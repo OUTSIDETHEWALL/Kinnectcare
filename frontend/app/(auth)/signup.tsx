@@ -42,7 +42,7 @@ export default function Signup() {
       >
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           <TouchableOpacity testID="signup-back" onPress={() => router.back()} style={styles.back}>
-            <Icon name="arrow-back" size={24} color={Colors.textPrimary} />
+            <Icon name="arrow-back" size={28} color={Colors.textPrimary} />
           </TouchableOpacity>
           <Text style={styles.title}>Create your account</Text>
           <Text style={styles.subtitle}>Start protecting your loved ones in minutes.</Text>
@@ -105,7 +105,7 @@ function Field(props: any) {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
   scroll: { padding: 24, paddingBottom: 48 },
-  back: { width: 44, height: 44, justifyContent: 'center' },
+  back: { width: 52, height: 52, justifyContent: 'center' },
   title: { fontSize: 28, fontWeight: '800', color: Colors.textPrimary, marginTop: 8 },
   subtitle: { fontSize: 16, color: Colors.textSecondary, marginTop: 6, marginBottom: 8 },
   label: { fontSize: 13, fontWeight: '700', color: Colors.textSecondary, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 },

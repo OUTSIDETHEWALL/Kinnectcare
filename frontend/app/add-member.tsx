@@ -55,7 +55,7 @@ export default function AddMember() {
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <View style={styles.header}>
           <TouchableOpacity testID="add-member-back" onPress={() => router.back()} style={styles.iconBtn}>
-            <Icon name="close" size={22} color={Colors.textPrimary} />
+            <Icon name="close" size={26} color={Colors.textPrimary} />
           </TouchableOpacity>
           <Text style={styles.title}>Add Family Member</Text>
           <View style={{ width: 44 }} />
@@ -183,7 +183,7 @@ function Field({ label, testID, children }: any) {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 8, paddingBottom: 8 },
-  iconBtn: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.border },
+  iconBtn: { width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center', backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.border },
   title: { fontSize: 18, fontWeight: '700', color: Colors.textPrimary },
   subtitle: { fontSize: 15, color: Colors.textSecondary, lineHeight: 22, marginBottom: 8 },
   label: { fontSize: 13, fontWeight: '700', color: Colors.textSecondary, marginBottom: 8, marginTop: 16, textTransform: 'uppercase', letterSpacing: 0.6 },

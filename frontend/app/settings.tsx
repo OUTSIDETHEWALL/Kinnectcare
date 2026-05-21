@@ -86,7 +86,7 @@ export default function SettingsScreen() {
           style={styles.backBtn}
           accessibilityLabel="Back"
         >
-          <Icon name="arrow-back" size={22} color={Colors.textPrimary} />
+          <Icon name="arrow-back" size={28} color={Colors.textPrimary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Settings</Text>
         <View style={{ width: 44 }} />
@@ -345,7 +345,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 8,
     borderBottomWidth: 1, borderBottomColor: Colors.border, backgroundColor: Colors.surface,
   },
-  backBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  backBtn: { width: 52, height: 52, alignItems: 'center', justifyContent: 'center' },
   headerTitle: { fontSize: 17, fontWeight: '800', color: Colors.textPrimary, flex: 1, textAlign: 'center' },
   scroll: { paddingHorizontal: 20, paddingTop: 20, paddingBottom: 56 },
   section: { marginBottom: 24 },

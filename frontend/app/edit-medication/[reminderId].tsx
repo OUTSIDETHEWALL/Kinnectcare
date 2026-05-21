@@ -112,7 +112,7 @@ export default function EditMedication() {
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <View style={styles.header}>
           <TouchableOpacity testID="edit-med-close" onPress={() => router.back()} style={styles.iconBtn}>
-            <Icon name="close" size={22} color={Colors.textPrimary} />
+            <Icon name="close" size={26} color={Colors.textPrimary} />
           </TouchableOpacity>
           <Text style={styles.title}>{isRoutine ? '🌿 Edit Routine' : '💊 Edit Medication'}</Text>
           <View style={{ width: 44 }} />
@@ -215,7 +215,7 @@ export default function EditMedication() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 8, paddingBottom: 8 },
-  iconBtn: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.border },
+  iconBtn: { width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center', backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.border },
   title: { fontSize: 18, fontWeight: '700', color: Colors.textPrimary },
   label: { fontSize: 13, fontWeight: '700', color: Colors.textSecondary, marginTop: 18, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.6 },
   subhelp: { fontSize: 13, color: Colors.textTertiary, marginBottom: 12, marginTop: -4 },

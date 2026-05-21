@@ -5056,3 +5056,132 @@ agent_communication:
       working correctly. Main agent: please summarize and finish.
 
 
+
+
+#====================================================================================================
+# 2026-06-17 — UI fixes: time-picker layout on web + larger back arrows app-wide
+#====================================================================================================
+
+test_plan:
+  current_focus:
+    - "Web fallback TimePicker12 horizontal layout (no vertical stacking)"
+    - "Back arrow size + tappable area ≥ 52×52 across every screen"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+
+frontend:
+  - task: "Fix squished web time picker — stretch to full width, single-line layout"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/TimePicker12.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Previously the web inline picker used:
+            row:       alignSelf:'flex-start', paddingHorizontal:10, gap:6
+            numInput:  width:44
+            ampmToggle: marginLeft:8
+          On narrow viewports (390px) the rowCard squeezed the children
+          and the very-narrow 44px number inputs wrapped, making the
+          "8:" / "00" / "AM" stack vertically.
+
+          Fix:
+            row:       alignSelf:'stretch' (now fills rowCard width),
+                       columnGap:8, paddingHorizontal:14, minHeight:56,
+                       flexWrap:'nowrap'.
+            numInput:  minWidth:52 (replaces fixed width 44),
+                       paddingHorizontal:4, includeFontPadding:false.
+            ampmToggle: marginLeft:'auto' (pushes AM/PM toggle to the
+                       right edge, leaving the hour/colon/minute group
+                       on the left).
+            ampmBtn:   bumped minWidth 44→48 + larger font 13→14 for
+                       readability on senior screens.
+
+          Result: every TimePicker12 row in TimeSlotsEditor (Add and
+          Edit Medication) now renders on a single horizontal line.
+
+
+  - task: "Larger back arrows + minimum 52×52 tappable area across every screen"
+    implemented: true
+    working: "NA"
+    file: "see file list below"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Senior-friendly accessibility bump for every back/close button.
+            * Icon size: 22|24 → 28 (arrow-back), 22 → 26 (close).
+            * Tappable area: 44×44 → 52×52 (every styled iconBtn / back /
+              backBtn used by a back-or-close affordance).
+            * Onboarding "‹ Back" / "Skip" text bumped 15px → 18px,
+              wrapped in a styles.topBack with minWidth/Height 52 and
+              expanded hitSlop {14,14,14,14}.
+            * On member detail, the back arrow gets an extra
+              hitSlop {12,12,12,12} on top of the 52×52 button.
+
+          FILES TOUCHED (all touched via sed/replace):
+            app/member/[id].tsx
+            app/upgrade.tsx
+            app/settings.tsx
+            app/family-group.tsx
+            app/(auth)/login.tsx
+            app/(auth)/signup.tsx
+            app/(tabs)/dashboard.tsx (n/a — no back arrow there, but
+                                       checked safe)
+            app/add-routine/[memberId].tsx
+            app/add-member.tsx
+            app/edit-medication/[reminderId].tsx
+            app/add-medication/[memberId].tsx
+            app/onboarding.tsx
+            src/LegalScreen.tsx
+
+          TEST INSTRUCTIONS FOR FRONTEND AGENT (web preview, iPhone 13):
+            T1   Open Add Medication form → screenshot the
+                 TimePicker12 row. Hour, ":", minute, and AM/PM toggle
+                 must render on ONE HORIZONTAL line within a wide,
+                 stretched container. NOT stacked vertically.
+            T2   Login screen → confirm back arrow renders larger
+                 (no overlap with surrounding text). Same for Sign Up.
+            T3   Member Detail → top-left back arrow icon is visibly
+                 larger; tappable area visually >= 52px. Click works
+                 (returns to dashboard).
+            T4   Add Medication / Add Routine / Add Member / Edit
+                 Medication → top-left "close" (X) icon is visibly
+                 larger. Click works.
+            T5   Settings / Upgrade / Family Group / Privacy Policy /
+                 Terms of Service → back arrow visibly larger; click
+                 works.
+            T6   Onboarding → "‹ Back" text larger and easier to tap
+                 (visible only after slide 1).
+            T7   Smoke: 0 console errors, 0 "KinnectCare" hits.
+
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Two quick UI fixes:
+
+      1. TimePicker12 web layout — stretched the row to fill the
+         parent rowCard width, removed `alignSelf:'flex-start'`, used
+         minWidth (not fixed width) on the number inputs, and pushed
+         the AM/PM toggle to the right via `marginLeft:'auto'`. The
+         "8:00 AM" now renders on a single horizontal line on iPhone
+         13 width.
+
+      2. Back arrows app-wide — bumped icon size 22|24 → 28 (and
+         close icons 22 → 26), and grew every back-button tap target
+         from 44×44 to 52×52 (above the 44pt iOS / 48dp Android
+         minimums). Onboarding "Back"/"Skip" text bumped 15→18 with
+         minHeight 52.
+
+      No backend changes. Please verify on iPhone 13 viewport (390×844).
+

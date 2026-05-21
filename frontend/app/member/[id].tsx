@@ -254,8 +254,8 @@ export default function MemberDetail() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
-        <TouchableOpacity testID="member-back" onPress={() => router.back()} style={styles.iconBtn}>
-          <Icon name="arrow-back" size={22} color={Colors.textPrimary} />
+        <TouchableOpacity testID="member-back" onPress={() => router.back()} style={styles.iconBtn} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+          <Icon name="arrow-back" size={28} color={Colors.textPrimary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Member</Text>
         <TouchableOpacity testID="member-call" onPress={() => Linking.openURL(`tel:${member.phone}`)} style={styles.iconBtn}>
@@ -663,7 +663,7 @@ function ReminderRow({ reminder, onMark, onDelete, onEdit, onMarkRefilled }: {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 8 },
-  iconBtn: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.border },
+  iconBtn: { width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center', backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.border },
   headerTitle: { fontSize: 17, fontWeight: '700', color: Colors.textPrimary },
   profile: { alignItems: 'center', paddingHorizontal: 24, paddingTop: 8, paddingBottom: 16 },
   avatarWrap: { position: 'relative' },

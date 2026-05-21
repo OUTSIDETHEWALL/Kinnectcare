@@ -40,7 +40,7 @@ export default function Login() {
       >
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           <TouchableOpacity testID="login-back" onPress={() => router.back()} style={styles.back}>
-            <Icon name="arrow-back" size={24} color={Colors.textPrimary} />
+            <Icon name="arrow-back" size={28} color={Colors.textPrimary} />
           </TouchableOpacity>
 
           <View style={styles.logoWrap}>
@@ -109,7 +109,7 @@ export default function Login() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
   scroll: { padding: 24, paddingBottom: 48 },
-  back: { width: 44, height: 44, justifyContent: 'center' },
+  back: { width: 52, height: 52, justifyContent: 'center' },
   logoWrap: { alignItems: 'center', marginTop: 8, marginBottom: 4 },
   logoFrame: {
     width: 160, height: 160, borderRadius: 80,

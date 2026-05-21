@@ -26,7 +26,7 @@ export function LegalScreen({ title, intro, sections, testIDPrefix = 'legal' }: 
           style={styles.backBtn}
           accessibilityLabel="Back"
         >
-          <Icon name="arrow-back" size={22} color={Colors.textPrimary} />
+          <Icon name="arrow-back" size={28} color={Colors.textPrimary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle} numberOfLines={1}>{title}</Text>
         <View style={{ width: 44 }} />
@@ -69,7 +69,7 @@ const styles = StyleSheet.create({
     borderBottomColor: Colors.border,
     backgroundColor: Colors.surface,
   },
-  backBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  backBtn: { width: 52, height: 52, alignItems: 'center', justifyContent: 'center' },
   headerTitle: { fontSize: 17, fontWeight: '800', color: Colors.textPrimary, flex: 1, textAlign: 'center' },
   scroll: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 56 },
   appName: { fontSize: 22, fontWeight: '800', color: Colors.primary, textAlign: 'center' },

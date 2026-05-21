@@ -218,7 +218,7 @@ export default function FamilyGroupScreen() {
           onPress={() => (router.canGoBack() ? router.back() : router.replace('/(tabs)/dashboard'))}
           style={styles.backBtn}
         >
-          <Icon name="arrow-back" size={22} color={Colors.textPrimary} />
+          <Icon name="arrow-back" size={28} color={Colors.textPrimary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Family Group</Text>
         <View style={{ width: 44 }} />
@@ -458,7 +458,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: Colors.border,
   },
-  backBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  backBtn: { width: 52, height: 52, alignItems: 'center', justifyContent: 'center' },
   headerTitle: { flex: 1, textAlign: 'center', fontSize: 18, fontWeight: '700', color: Colors.textPrimary },
   scroll: { padding: 16, paddingBottom: 48 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },

@@ -75,13 +75,13 @@ export default function Onboarding() {
         <TouchableOpacity
           testID="onboarding-back"
           onPress={goBack}
-          hitSlop={12}
+          hitSlop={{ top: 14, bottom: 14, left: 14, right: 14 }}
           disabled={isFirst}
-          style={{ opacity: isFirst ? 0 : 1 }}
+          style={[styles.topBack, { opacity: isFirst ? 0 : 1 }]}
         >
           <Text style={styles.topNav}>‹ Back</Text>
         </TouchableOpacity>
-        <TouchableOpacity testID="onboarding-skip" onPress={finish} hitSlop={12}>
+        <TouchableOpacity testID="onboarding-skip" onPress={finish} hitSlop={{ top: 14, bottom: 14, left: 14, right: 14 }} style={styles.topBack}>
           <Text style={styles.topNav}>{isLast ? ' ' : 'Skip'}</Text>
         </TouchableOpacity>
       </View>
@@ -138,7 +138,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20, paddingTop: 8, height: 44,
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
   },
-  topNav: { fontSize: 15, fontWeight: '700', color: Colors.textSecondary },
+  topNav: { fontSize: 18, fontWeight: '700', color: Colors.textSecondary },
+  topBack: { minWidth: 52, minHeight: 52, alignItems: 'flex-start', justifyContent: 'center' },
   slide: { flex: 1, paddingHorizontal: 28, alignItems: 'center', justifyContent: 'center' },
   illustration: {
     width: 220, height: 220, borderRadius: 110,
