@@ -4740,3 +4740,122 @@ agent_communication:
       "Not available on this device" hint and the user can still
       "Enter manually" — that part IS testable in the web preview.
 
+
+frontend:
+  - task: "Emergency Contact picker — two-option chooser (📇/✏️) + name+phone manual form"
+    implemented: true
+    working: false
+    file: "/app/frontend/app/member/[id].tsx"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          FAIL @ iPhone 390x844. Logged in as demo@kinnship.app / password123. First-time
+          Add flow (member without an emergency_contact_phone yet — James after a fresh
+          render) does NOT render the new ec-choose two-option screen. Tapping ec-toggle
+          (label "Add") goes DIRECTLY to a phone-only manual form. Verified via DOM:
+            - data-testid="ec-choose"            → NOT FOUND
+            - data-testid="ec-pick-from-contacts"→ NOT FOUND
+            - data-testid="ec-enter-manually"    → NOT FOUND
+            - data-testid="ec-name-input"        → NOT FOUND
+            - data-testid="ec-input"             → present (phone-only)
+            - data-testid="ec-save"              → present
+          Screenshot (attached in run logs) shows only the section "PHONE (WE'LL
+          AUTO-FORMAT TO E.164)" + phone input + "Save Emergency Contact". No 📇 / ✏️
+          options, no "Contact name (optional)" label/input.
+
+          This breaks T1a (choose-screen render), T1b (web "Not supported" alert from
+          📇), T1c (name-input + phone-input manual form), and T1d (pre-fill name+phone
+          on Edit). Source at /app/frontend/app/member/[id].tsx lines 339-415 looks
+          correct, but the running app appears to skip the chooser entirely — likely
+          either:
+            (a) startEcEdit() always sets ecMode to 'manual' regardless of whether EC
+                exists,
+            (b) ecMode initial state is 'manual' and is never flipped to 'choose' on
+                Add, or
+            (c) The deployed bundle is stale relative to source (rebuild required).
+
+          ACTION: Verify startEcEdit logic + ecMode default in member/[id].tsx.
+          Confirm setEcMode('choose') is called when !member.emergency_contact_phone.
+          Restart Metro / clear bundler cache if needed so the new UI is served.
+          Also re-check the manual form renders BOTH ec-name-input (Contact name) and
+          ec-input (Phone) — current running build only shows phone.
+
+  - task: "Medication refill reminder — Add/Edit fields, runout preview, low-supply badge"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/add-medication/[memberId].tsx, /app/frontend/app/member/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "testing"
+        comment: |
+          NOT FULLY TESTED — could not complete T2 flow because the run was blocked by
+          the T1 Emergency Contact bug (script aborted on a NoneType when trying to
+          click ec-enter-manually). The /add-medication page WAS reachable in the
+          earlier run, but add-med-refill-toggle was not located in that pass either
+          (page had likely not fully rendered after navigation). Source review of
+          /app/frontend/app/add-medication/[memberId].tsx confirms all required testIDs
+          and behavior exist:
+            - add-med-refill-toggle defaults OFF; toggling ON reveals
+              add-med-days-supply (default '30'), add-med-lead-time (default '7'),
+              and add-med-runout-preview computed from Date.now() + days*86400000.
+            - Validation: invalid lead time alert text reads exactly "Refill lead
+              time must be between 1 and the days supply." (line 51).
+            - Submit sends days_supply + refill_reminder_days in the POST body.
+          And /app/frontend/app/member/[id].tsx exposes refill-badge-{id} +
+          mark-refilled-{id} with the expected "Refill in N days" wording (line 584).
+          Re-run with longer waits after the EC bug is fixed should validate T2a-T2h.
+
+  - task: "Regression sanity after EC+refill features (SOS, Settings, Family Group, no 'KinnectCare')"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/dashboard.tsx, /app/frontend/app/settings.tsx, /app/frontend/app/family-group.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. SOS button (testID sos-button) present on /dashboard. dashboard-settings
+          gear opens /settings successfully. /family-group renders with a KINN-XFNDPH
+          style invite code (regex /KINN-\w+/ matched in body). No "KinnectCare" text
+          found anywhere on /settings (re-branding to Kinnship is consistent). Login
+          flow works with demo@kinnship.app / password123 → /dashboard with 5 member
+          cards.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Frontend test of new Emergency Contact picker + Medication Refill features —
+      ONE CRITICAL BUG FOUND, blocks T1 entirely:
+
+      ❌ T1 Emergency Contact picker (HIGH PRIORITY BUG):
+         When member has NO emergency contact yet, tapping ec-toggle (label "Add")
+         renders the LEGACY phone-only manual form instead of the new ec-choose
+         two-option screen. ec-choose, ec-pick-from-contacts, ec-enter-manually,
+         and ec-name-input are all missing from the DOM. Only ec-input (phone)
+         and ec-save are present. Source at member/[id].tsx looks correct
+         (lines 339-415) — bug is likely in startEcEdit()/ecMode default, OR
+         the served bundle is stale. Please:
+           (1) Re-check startEcEdit logic / ecMode initial state.
+           (2) Confirm setEcMode('choose') runs when no EC exists.
+           (3) Restart Metro / clear Metro cache and reload web preview.
+         Screenshot attached in run logs shows the broken (legacy) form.
+
+      ⚠️  T2 Medication Refill: NOT FULLY VALIDATED due to T1 failure aborting
+         the Playwright script before T2 ran in the second pass. Source review
+         confirms all testIDs/behaviors are wired correctly per spec — please
+         have main agent fix the EC bug and request a re-run for T2a-T2h.
+
+      ✅ Regression: SOS button present, Settings opens, Family Group renders
+         with KINN- invite code, no "KinnectCare" text leakage. Login works.
+
+      Used 2 of 3 browser_automation invocations; saving last invocation in
+      case main agent wants a re-test post-fix.
