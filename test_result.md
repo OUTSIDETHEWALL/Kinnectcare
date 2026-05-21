@@ -4859,3 +4859,149 @@ agent_communication:
 
       Used 2 of 3 browser_automation invocations; saving last invocation in
       case main agent wants a re-test post-fix.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      RETEST after Metro cache clear — Feature 1 EC chooser is NOW WORKING.
+      Feature 2 Refill has 1 critical issue (badge not appearing on member detail).
+
+      === FEATURE 1: Emergency Contact picker (iPhone 390x844, demo@kinnship.app) ===
+      T1a PASS — Tapped "Add" (after clearing EC via PUT /members/{id}); ec-choose
+            view rendered with both ec-pick-from-contacts and ec-enter-manually
+            buttons visible. Screenshot .screenshots/t1a_ec_choose.png shows
+            "HOW WOULD YOU LIKE TO ADD THE CONTACT?" + 📇 Pick from Contacts
+            + ✏️ Enter manually cards.
+      T1b PASS-with-note — On web, `isContactsPickerSupported()` returns false,
+            so the Pick-from-Contacts button is rendered DISABLED with inline
+            subtext "Not available on this device. Enter manually below."
+            Click is suppressed by `disabled` prop → no Alert dialog fires.
+            This is the intended graceful-degradation UX per
+            src/contactsPicker.ts; the Alert.alert("Not supported", ...) code
+            path only runs on a supported platform where the user can actually
+            tap the button. Visually conveys "Not supported" via the inline text.
+      T1c PASS — Tapped ec-enter-manually → ec-name-input + ec-input + ec-save
+            all rendered. Filled "Jane Smith" / "5551234567" → Save → card
+            collapsed showing "Jane Smith" + "+15551234567" (E.164 formatted).
+      T1d PASS — Tapped Edit again → opened directly into manual mode (no
+            ec-choose), pre-filled name="Jane Smith", phone="+15551234567".
+
+      === FEATURE 2: Medication Refill Reminder ===
+      Note on testIDs: form uses `med-name`, `med-dosage`, `add-med-refill-toggle`,
+      `add-med-days-supply`, `add-med-lead-time`, `add-med-runout-preview`,
+      `add-med-submit` (not `refill-toggle` / `med-save` as in the spec).
+
+      T2a PASS — Bottom of /add-medication/{id} has "🔄 Refill reminder"
+            section with toggle reading "OFF" by default.
+      T2b PASS — Toggled ON → DAYS SUPPLY field appears with default 30,
+            REMIND ME ... DAYS BEFORE RUN-OUT default 7, runout preview shows
+            "📅 Estimated run-out: Sat, Jun 20" (~today+30d).
+      T2c PASS — Changed DAYS SUPPLY to 14 → preview updated to
+            "📅 Estimated run-out: Thu, Jun 4" (~today+14d).
+      T2d PASS — Filled name=RefillUITest, dosage=10mg, days_supply=14, lead=5,
+            tapped "Add Medication" → router.back() to /member/{id}.
+      T2e SKIPPED — Edit flow path (/edit-medication) not exercised in this
+            retest run; previous test_sequence verified edit pre-fill works.
+            Likely needs verification by main agent.
+      T2f SKIPPED — Same as above.
+      T2g ❌ FAIL — Added AlmostOutMed with days_supply=5, lead=3. Save succeeded
+            and returned to /member/{id}, but NO `refill-badge-<id>` testID
+            appeared on the member detail page (badge_count=0). Also no
+            `mark-refilled-<id>` CTA found. Root cause likely backend not
+            populating `run_out_at` on the reminder document (member/[id].tsx
+            line 577 gates badge render on `reminder.run_out_at &&
+            reminder.refill_reminder_days`). Main agent should verify backend
+            POST /api/reminders returns run_out_at when days_supply is set,
+            OR adjust frontend to compute run_out_at client-side from
+            last_refilled+days_supply.
+      T2h SKIP — Cannot test mark-refilled flow because no badge appears (T2g).
+      T2-validation ⚠️ AMBIGUOUS — Tried submitting with days_supply=2, lead=7.
+            Submit button did NOT navigate away (URL stayed on /add-medication),
+            which suggests the Alert.alert('Invalid lead time', ...) DID fire and
+            prevent submission, but Playwright did not capture the dialog text
+            (RN Web Alert.alert uses an in-DOM modal, not native dialog).
+            Behavior is functionally correct (form stays open, no bad save), but
+            unable to assert the exact alert message in this run.
+
+      === REGRESSION ===
+      ✅ No console errors during run (0 errors, 0 'shadow' warnings).
+      ✅ 0 "KinnectCare" string occurrences in DOM.
+      ✅ SOS button + dashboard + member nav all work.
+      ⚠️ Mark-as-taken not explicitly re-tested in this pass (previous
+         test_sequence has it PASS).
+
+      === SCREENSHOTS ===
+      .screenshots/t1a_ec_choose.png — EC chooser two-option view.
+      .screenshots/t2g_badge.png — Member detail (NO refill badge visible — bug evidence).
+
+      === ACTION ITEMS FOR MAIN AGENT ===
+      1) HIGH: Fix T2g — refill badge not rendering on member detail. Verify
+         backend POST /api/reminders persists/returns `run_out_at` and
+         `last_refilled_at` for reminders with days_supply set. If backend
+         already returns these, debug why member/[id].tsx isn't matching the
+         condition `reminder.run_out_at && reminder.refill_reminder_days`.
+      2) MED: T2e/T2f edit-medication refill on/off prefill — exercise once
+         T2g is fixed.
+
+frontend:
+  - task: "Emergency Contact chooser screen (ec-choose / ec-pick-from-contacts / ec-enter-manually)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/member/[id].tsx, /app/frontend/src/contactsPicker.ts"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ 390x844 after Metro cache clear. After clearing existing EC,
+          tapping "Add" renders ec-choose with both ec-pick-from-contacts (web:
+          disabled w/ inline "Not available on this device" subtext) and
+          ec-enter-manually buttons. ec-enter-manually opens manual form with
+          ec-name-input + ec-input + ec-save. Saving "Jane Smith"/"5551234567"
+          collapses card to show name + E.164 phone "+15551234567". Tapping Edit
+          again opens directly into manual mode pre-filled.
+
+  - task: "Medication Refill badge & Mark Refilled CTA on member detail"
+    implemented: true
+    working: false
+    file: "/app/frontend/app/member/[id].tsx (lines 577-625)"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          FAIL. Created medication "AlmostOutMed" with days_supply=5, lead=3 via
+          /add-medication form. Save succeeded; returned to /member/{id}. However
+          NO refill-badge-<id> testID appears on the member detail (badge_count=0),
+          and no mark-refilled-<id> CTA either. Condition at member/[id].tsx:577
+          requires `reminder.run_out_at && reminder.refill_reminder_days`. Likely
+          backend isn't populating run_out_at (or returning different field name)
+          for newly created reminders. Recommend main agent inspect
+          GET /reminders/member/{id} response after creating a med with
+          days_supply — confirm run_out_at present.
+
+  - task: "Medication Refill section on Add Medication form (days_supply / lead / runout preview / toggle)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/add-medication/[memberId].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. 🔄 Refill reminder section visible at bottom of form. Toggle
+          (add-med-refill-toggle) default OFF; tapping shows DAYS SUPPLY (default
+          30), REMIND ME ... DAYS BEFORE RUN-OUT (default 7), and live runout
+          preview (add-med-runout-preview) reading "📅 Estimated run-out:
+          Sat, Jun 20". Changing days_supply to 14 updated preview to
+          "📅 Estimated run-out: Thu, Jun 4". Submitting with name+dosage+
+          days_supply=14+lead=5 returned to member detail successfully.
+          Validation: submitting days_supply=2+lead=7 keeps form open (Alert
+          fires preventing save) though Playwright did not capture the dialog
+          text (RN Web in-DOM modal).
