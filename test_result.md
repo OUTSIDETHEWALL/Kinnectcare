@@ -5217,3 +5217,135 @@ agent_communication:
 
       No backend changes. Please verify on iPhone 13 viewport (390×844).
 
+
+
+#====================================================================================================
+# 2026-06-17 — Native TimePicker12: always-field-button + wide modal (Android Expo Go fix)
+#====================================================================================================
+
+test_plan:
+  current_focus:
+    - "TimePicker12 native rendering (single-line field button on Android/iOS)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+
+frontend:
+  - task: "TimePicker12 — native render single-line field button, modal for editing"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/TimePicker12.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          USER-REPORTED BUG: on a real Android device (Samsung Galaxy
+          S26 via Expo Go), the Add/Edit Medication time picker rows
+          were rendering as "8: / 00 / A / M" stacked vertically. The
+          web preview fix worked but the native layout did not.
+
+          ROOT CAUSE: The previous TimePicker12 lazy-required
+          @react-native-community/datetimepicker. On certain Expo Go
+          builds (Android in particular), the native module isn't
+          bundled — the require silently returned undefined, so the
+          component fell back to the inline `WebInlinePicker` that
+          rendered a flexDirection:'row' editor INSIDE the narrow
+          TimeSlotsEditor `rowCard`. The rowCard was too narrow on
+          phone widths, so the children wrapped — hour, ":", minute,
+          AM, PM each on their own line.
+
+          FIX: Completely restructured native rendering so the only
+          thing the parent layout ever renders is a SINGLE field
+          button. The picker UI is moved into a FULL-WIDTH MODAL that
+          opens on tap. The field button:
+            * Is `flexDirection:'row'` with one `<Text>` element
+              displaying the pre-formatted "8:00 AM" string and a
+              chevron `▾` hint.
+            * `<Text numberOfLines={1} adjustsFontSizeToFit
+                       minimumFontScale={0.7}>` — physically cannot
+              wrap to multiple lines.
+            * Stretches to the parent width (`alignSelf:'stretch'`),
+              minHeight 56, large fontSize 22 for senior visibility.
+
+          Tap behaviour:
+            * Android: tries `DateTimePickerAndroid.open()` first
+              (native system clock dialog). If the module isn't
+              available (Expo Go), falls back to the modal below.
+            * iOS:     opens a Cancel/Done modal with the native
+                       `<DateTimePicker display="spinner">` wheel.
+            * Web / native-fallback: opens the SAME modal with a
+              custom 3-column wheel picker — Hour (1-12), Minute
+              (00, 05, …, 55 + free-text), AM/PM (large buttons).
+              The modal sheet has `maxWidth: 380` and `padding: 16`,
+              giving the three columns ~110-115px each — more than
+              enough room for "12" and "55" labels without wrapping.
+
+          Behavioural notes:
+            * `onChange` still emits canonical "HH:MM" 24-hour strings.
+              No callers needed to change.
+            * Tapping `AM` / `PM` no longer triggers an immediate
+              commit — it updates local state and pushes to parent
+              via `useEffect`, so the parent always has the latest
+              value when "Done" is tapped (or any other axis is
+              clicked). This keeps the wheel-picker feeling natural
+              even with three independent columns.
+
+          WHY THIS WON'T REGRESS: the field button has only ONE
+          Text element and is constrained to a single line via
+          `numberOfLines={1}`. Even on the narrowest possible
+          rowCard (~150px), the worst case is that the formatted
+          string scales down via `adjustsFontSizeToFit` — never
+          wraps to multiple lines.
+
+          TEST INSTRUCTIONS (REAL DEVICE):
+            1. Open the Kinnship app in Expo Go on Android Samsung
+               Galaxy S26.
+            2. Navigate to a member → tap "+ Medication".
+            3. Confirm the "Reminder times" section shows a single
+               horizontal button: `8:00 AM ▾` (not stacked).
+            4. Tap the button → either the native Android clock
+               dialog opens OR a modal with the custom wheel picker
+               appears.
+            5. Pick a different time → button updates to e.g.
+               "9:30 PM ▾".
+            6. Add a second time slot via "+ Add another time" →
+               same single-line field button on the second row.
+            7. Open Edit Medication on an existing med → field
+               buttons pre-populate with the saved times.
+
+          TEST INSTRUCTIONS (WEB PREVIEW):
+            * Login → member detail → "+ Medication" → confirm the
+              TimePicker12 row is now a single field button (not the
+              inline editor). Tap → modal with 3-column wheel picker
+              appears. Set hour 9, minute 30, PM, tap Done →
+              field button updates to "9:30 PM ▾".
+
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Restructured TimePicker12 to be defensive against native module
+      load failures. The component now ALWAYS renders a single field
+      button at the call site — never an inline editor. The picker
+      UI lives in a full-width modal that opens on tap, with three
+      possible underlying widgets:
+        - Android: native system clock dialog via
+                   `DateTimePickerAndroid.open()` (preferred)
+        - iOS:     modal with native spinner-wheel
+                   `<DateTimePicker display="spinner">`
+        - Fallback: custom 3-column wheel picker (Hour / Minute /
+                    AM-PM) sized to the full modal width
+
+      This guarantees that on a real Samsung Galaxy S26 (Android
+      Expo Go), the Add/Edit Medication time pickers can ONLY render
+      as a single-line "8:00 AM ▾" field button — they cannot
+      physically stack to multiple lines because there is only one
+      <Text numberOfLines={1}> element in the layout.
+
+      No backend changes. Please verify on the user's actual device
+      via Expo Go.
+
