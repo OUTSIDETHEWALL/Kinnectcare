@@ -53,7 +53,8 @@
           "icon": "./assets/images/kinnship-logo-white.png",
           "color": "#1B5E35"
         }
-      ]
+      ],
+      "expo-font"
     ],
     "extra": {
       "eas": {
