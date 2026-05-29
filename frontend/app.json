@@ -60,12 +60,14 @@
       "expo-font"
     ],
     "extra": {
+      "router": {},
       "eas": {
-        "projectId": "REPLACE_WITH_EAS_PROJECT_ID"
+        "projectId": "11cb65a8-eab0-4745-9b4a-7b8964805381"
       }
     },
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "owner": "finalcut"
   }
 }
