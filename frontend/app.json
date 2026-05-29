@@ -44,7 +44,7 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/kinnship-logo-dark.png",
+          "image": "./assets/images/kinnship-splash-1024.png",
           "imageWidth": 220,
           "resizeMode": "contain",
           "backgroundColor": "#1B5E35"
@@ -53,7 +53,7 @@
       [
         "expo-notifications",
         {
-          "icon": "./assets/images/kinnship-logo-white.png",
+          "icon": "./assets/images/kinnship-adaptive-foreground-1024.png",
           "color": "#1B5E35"
         }
       ],

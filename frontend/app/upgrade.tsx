@@ -203,8 +203,7 @@ export default function UpgradeScreen() {
             )}
 
             <Text style={styles.footer}>
-              Payments are processed securely by Stripe. Test mode — use card number
-              4242 4242 4242 4242 with any future expiry and any CVC.
+              Payments are processed securely by Stripe. Your card is charged immediately and your subscription renews automatically until cancelled.
             </Text>
 
             <View style={{ height: 16 }} />
@@ -212,7 +211,7 @@ export default function UpgradeScreen() {
               onPress={() => Linking.openURL('https://stripe.com/legal/consumer')}
               hitSlop={10}
             >
-              <Text style={styles.fineprint}>Powered by Stripe · Test Mode</Text>
+              <Text style={styles.fineprint}>Powered by Stripe</Text>
             </TouchableOpacity>
           </>
         )}

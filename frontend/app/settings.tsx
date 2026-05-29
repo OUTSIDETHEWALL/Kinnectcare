@@ -129,6 +129,14 @@ export default function SettingsScreen() {
                   <Text style={styles.planCtaPrimaryText}>View Plans & Upgrade</Text>
                   <Text style={styles.planCtaPrimaryArrow}>›</Text>
                 </TouchableOpacity>
+                <TouchableOpacity
+                  testID="settings-manage-plan-free"
+                  style={styles.planCtaSecondary}
+                  onPress={() => router.push('/manage-subscription')}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.planCtaSecondaryText}>Manage Subscription ›</Text>
+                </TouchableOpacity>
               </>
             ) : (
               <TouchableOpacity
