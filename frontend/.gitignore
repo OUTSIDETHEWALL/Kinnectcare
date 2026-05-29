@@ -37,3 +37,8 @@ yarn-error.*
 *.tsbuildinfo
 
 app-example
+
+# EAS / Play store secrets
+play-service-account*.json
+AuthKey_*.p8
+*.appstoreconnect.json
