@@ -8,7 +8,7 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://kinnship.preview.emergentagent.com"
+        "EXPO_PUBLIC_BACKEND_URL": "https://family-guard-37.preview.emergentagent.com"
       }
     },
     "preview": {
@@ -21,7 +21,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://kinnship.preview.emergentagent.com"
+        "EXPO_PUBLIC_BACKEND_URL": "https://family-guard-37.preview.emergentagent.com"
       }
     },
     "production": {
@@ -33,7 +33,7 @@
         "buildType": "app-bundle"
       },
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://kinnship.preview.emergentagent.com"
+        "EXPO_PUBLIC_BACKEND_URL": "https://family-guard-37.preview.emergentagent.com"
       }
     }
   },
