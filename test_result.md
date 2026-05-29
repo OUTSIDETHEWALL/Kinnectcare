@@ -5480,12 +5480,31 @@ backend:
 frontend:
   - task: "Manage Subscription screen — view plan, cancel at period end, resume, billing portal"
     implemented: true
-    working: "NA"
+    working: true
     file: "/app/frontend/app/manage-subscription.tsx, /app/frontend/app/settings.tsx, /app/frontend/src/api.ts"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS @ iPhone 390x844. Free-user Manage Subscription flow VERIFIED.
+          - Login demo@kinnship.app/password123 -> /dashboard.
+          - /settings shows "View Plans & Upgrade" button (testID settings-view-plans),
+            visible with text "View Plans & Upgrade ›".
+          - Direct nav to /manage-subscription renders for free user:
+              * Header "Manage Subscription" + subscription-back present.
+              * Plan card "Free Plan" with subtitle "Up to 2 family members".
+              * "👥 Family members" section showing "5 / 2".
+              * Green "Upgrade to Family Plan" CTA (testID subscription-upgrade-cta) visible.
+              * Fineprint mentioning Stripe visible.
+              * subscription-cancel: 0 (not rendered, correct).
+              * subscription-resume: 0 (not rendered, correct).
+              * subscription-portal: 0 (not rendered, correct).
+          - Tapping subscription-back -> /settings (works).
+          - Tapping subscription-upgrade-cta -> /upgrade (works).
+          - Console: 0 errors. Screenshot at .screenshots/manage_sub_free.png.
       - working: "NA"
         agent: "main"
         comment: |
@@ -5593,5 +5612,25 @@ agent_communication:
       go. Please summarize and finish. The only thing worth noting
       is the 401-vs-403 contract wording difference — easy to update
       in client expectations if needed (no server change required).
+
+  - agent: "testing"
+    message: |
+      Manage Subscription FREE-user frontend flow VERIFIED @ iPhone 390x844.
+      All acceptance criteria met:
+        1) Login demo@kinnship.app/password123 -> /dashboard ✓.
+        2) /settings shows "View Plans & Upgrade" CTA (testID settings-view-plans). ✓
+        3) Direct nav to /manage-subscription works for free user:
+           - Header "Manage Subscription" + back arrow (subscription-back) ✓
+           - Plan card "Free Plan" + "Up to 2 family members" ✓
+           - "👥 Family members" section showing 5 / 2 ✓
+           - Green "Upgrade to Family Plan" (subscription-upgrade-cta) ✓
+           - Fineprint mentioning Stripe ✓
+           - NO subscription-cancel / subscription-resume / subscription-portal
+             (correctly hidden for free users) ✓
+        4) subscription-back -> /settings ✓.
+        5) subscription-upgrade-cta -> /upgrade ✓.
+        6) Console: 0 errors during full run.
+      Screenshot saved at .screenshots/manage_sub_free.png.
+      Non-destructive (no Stripe charges). Main agent: please summarize and finish.
 
 
