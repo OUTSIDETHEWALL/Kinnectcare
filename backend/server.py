@@ -1416,14 +1416,22 @@ async def billing_webhook(request: Request):
     # as a method (raises AttributeError) which previously broke live webhook
     # processing for invoice.paid / subscription.* events.
     if obj is not None and not isinstance(obj, dict):
+        # Normalize Stripe StripeObject → plain dict. Try public `.to_dict()`
+        # first, then private recursive helper, then a plain dict cast as a
+        # last resort. The StripeObject's __getattr__ raises AttributeError on
+        # missing attrs (including `.get`), which would otherwise break the
+        # subsequent `.get("customer")` calls in this handler.
         try:
-            obj = obj.to_dict_recursive()
+            obj = obj.to_dict()
         except Exception:
             try:
-                obj = dict(obj)
+                obj = obj._to_dict_recursive()
             except Exception:
-                logger.error("webhook obj could not be normalized to dict")
-                return {"status": "error", "message": "unrecognized payload shape"}
+                try:
+                    obj = dict(obj)
+                except Exception:
+                    logger.error("webhook obj could not be normalized to dict")
+                    return {"status": "error", "message": "unrecognized payload shape"}
     logger.info(f"stripe webhook: {etype}")
     try:
         if etype == "checkout.session.completed":
