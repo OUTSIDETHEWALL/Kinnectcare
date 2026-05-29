@@ -323,6 +323,79 @@ async def revert_user_to_free_by_customer(db, customer_id: str) -> None:
     )
 
 
+async def cancel_subscription_at_period_end(db, user_doc: dict) -> dict:
+    """Mark the user's subscription to NOT renew at the end of the current
+    period. User keeps Family Plan access until `current_period_end`.
+
+    Idempotent — calling on an already-cancelling subscription is a no-op.
+    Returns the updated sub state to surface to the caller.
+    """
+    sub = user_doc.get("subscription") or {}
+    sub_id = sub.get("stripe_subscription_id")
+    if not sub_id:
+        # User isn't on a paid subscription. Treat as immediate downgrade to free.
+        await db.users.update_one(
+            {"id": user_doc["id"]},
+            {"$set": {
+                "subscription.plan": "free",
+                "subscription.status": "canceled",
+                "subscription.cancel_at_period_end": False,
+                "subscription.updated_at": datetime.now(timezone.utc),
+            }},
+        )
+        return {"cancelled": True, "immediate": True}
+
+    if not is_configured():
+        # No Stripe configured — best-effort local revert.
+        await db.users.update_one(
+            {"id": user_doc["id"]},
+            {"$set": {
+                "subscription.plan": "free",
+                "subscription.status": "canceled",
+                "subscription.cancel_at_period_end": False,
+                "subscription.updated_at": datetime.now(timezone.utc),
+            }},
+        )
+        return {"cancelled": True, "immediate": True}
+
+    # Tell Stripe to cancel at period end. The user keeps access until
+    # current_period_end; the customer.subscription.updated webhook will
+    # later reconcile our local state.
+    updated = stripe.Subscription.modify(sub_id, cancel_at_period_end=True)
+    cpe = _ts_to_dt(updated.get("current_period_end") if isinstance(updated, dict) else updated.current_period_end)
+    await db.users.update_one(
+        {"id": user_doc["id"]},
+        {"$set": {
+            "subscription.cancel_at_period_end": True,
+            "subscription.status": (updated.get("status") if isinstance(updated, dict) else updated.status) or sub.get("status"),
+            **({"subscription.current_period_end": cpe} if cpe else {}),
+            "subscription.updated_at": datetime.now(timezone.utc),
+        }},
+    )
+    return {
+        "cancelled": True,
+        "immediate": False,
+        "current_period_end": cpe.isoformat() if cpe else None,
+    }
+
+
+async def resume_subscription(db, user_doc: dict) -> dict:
+    """Undo a pending cancel — keep the subscription auto-renewing."""
+    sub = user_doc.get("subscription") or {}
+    sub_id = sub.get("stripe_subscription_id")
+    if not sub_id or not is_configured():
+        return {"resumed": False}
+    stripe.Subscription.modify(sub_id, cancel_at_period_end=False)
+    await db.users.update_one(
+        {"id": user_doc["id"]},
+        {"$set": {
+            "subscription.cancel_at_period_end": False,
+            "subscription.updated_at": datetime.now(timezone.utc),
+        }},
+    )
+    return {"resumed": True}
+
+
 async def build_status_payload(user_doc: dict, db, free_limit: int = FREE_LIMIT_DEFAULT) -> dict:
     sub = user_doc.get("subscription") or {}
     plan = plan_for_user(user_doc)

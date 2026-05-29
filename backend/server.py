@@ -1334,6 +1334,36 @@ async def billing_status(current=Depends(get_current_user)):
     return await billing.build_status_payload(current, db)
 
 
+@api_router.post("/billing/cancel")
+async def billing_cancel(current=Depends(get_current_user)):
+    """Cancel the user's Family Plan subscription at the end of the current
+    billing period. The user keeps Family Plan access until `current_period_end`.
+    Idempotent — calling on an already-cancelling sub is a no-op success.
+    """
+    try:
+        result = await billing.cancel_subscription_at_period_end(db, current)
+    except stripe.error.StripeError as e:
+        logger.error(f"cancel stripe error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    # Return the fresh billing status so the UI can re-render without a 2nd call.
+    fresh = await db.users.find_one({"id": current["id"]}, {"_id": 0})
+    status_payload = await billing.build_status_payload(fresh, db)
+    return {**result, "billing_status": status_payload}
+
+
+@api_router.post("/billing/resume")
+async def billing_resume(current=Depends(get_current_user)):
+    """Undo a pending cancel — the subscription will renew normally again."""
+    try:
+        result = await billing.resume_subscription(db, current)
+    except stripe.error.StripeError as e:
+        logger.error(f"resume stripe error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    fresh = await db.users.find_one({"id": current["id"]}, {"_id": 0})
+    status_payload = await billing.build_status_payload(fresh, db)
+    return {**result, "billing_status": status_payload}
+
+
 @api_router.post("/billing/checkout-session")
 async def billing_checkout_session(payload: CheckoutRequest, current=Depends(get_current_user)):
     _billing_required()
