@@ -152,6 +152,24 @@ export async function getBillingStatus(): Promise<BillingStatus> {
   return r.data;
 }
 
+export async function cancelSubscription(): Promise<{
+  cancelled: boolean;
+  immediate?: boolean;
+  current_period_end?: string | null;
+  billing_status: BillingStatus;
+}> {
+  const r = await api.post('/billing/cancel');
+  return r.data;
+}
+
+export async function resumeSubscription(): Promise<{
+  resumed: boolean;
+  billing_status: BillingStatus;
+}> {
+  const r = await api.post('/billing/resume');
+  return r.data;
+}
+
 export async function createCheckoutSession(
   returnUrl?: string,
   interval: 'month' | 'year' = 'month',

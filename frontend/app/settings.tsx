@@ -134,7 +134,7 @@ export default function SettingsScreen() {
               <TouchableOpacity
                 testID="settings-manage-plan"
                 style={styles.planCtaSecondary}
-                onPress={() => router.push('/upgrade')}
+                onPress={() => router.push('/manage-subscription')}
                 activeOpacity={0.85}
               >
                 <Text style={styles.planCtaSecondaryText}>Manage Subscription ›</Text>

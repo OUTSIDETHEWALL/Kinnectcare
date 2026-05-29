@@ -1,14 +1,13 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert,
-  ActivityIndicator,
+  ActivityIndicator, Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, Stack } from 'expo-router';
 import Icon from '@expo/vector-icons/Ionicons';
 import { Colors } from '../src/theme';
 import { api } from '../src/api';
-import { formatDateTimeLocal } from '../src/timeFormat';
 
 export default function ManageSubscription() {
   const router = useRouter();
@@ -29,9 +28,7 @@ export default function ManageSubscription() {
   const isPaid = status?.plan === 'family_plan' || status?.plan === 'premium';
   const cancellingAtEnd = !!status?.cancel_at_period_end;
   const cpe = status?.current_period_end || null;
-  const cpeLabel = cpe ? formatDateTimeLocal(cpe).split(', ')[0] + ' ' + formatDateTimeLocal(cpe).split(', ')[1].split(' ')[0]
-                       : null;
-  // Simpler: full date in user's local tz.
+  // Full date in user's local tz.
   const renewalLabel = cpe ? new Date(cpe).toLocaleDateString(undefined, {
     weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
   }) : null;
@@ -95,6 +92,28 @@ export default function ManageSubscription() {
   };
 
   const onUpgrade = () => router.push('/upgrade');
+
+  const onOpenPortal = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      // Stripe portal URLs are short-lived & single-use. Always fetch a fresh one.
+      const r = await api.get('/billing/status');
+      setStatus(r.data);
+      const url: string | null = r.data?.manage_url;
+      if (!url) {
+        Alert.alert('Unavailable', 'The billing portal is currently unavailable. Please try again in a moment.');
+        return;
+      }
+      const supported = await Linking.canOpenURL(url);
+      if (supported) await Linking.openURL(url);
+      else Alert.alert('Cannot open portal', 'Your device could not open the billing portal link.');
+    } catch (e: any) {
+      Alert.alert('Failed', e?.response?.data?.detail || 'Could not open the billing portal.');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -165,6 +184,26 @@ export default function ManageSubscription() {
         {/* Action buttons */}
         <View style={{ height: 24 }} />
 
+        {/* Billing portal (payment methods, invoices, history) — paid users only */}
+        {isPaid && (
+          <TouchableOpacity
+            testID="subscription-portal"
+            onPress={onOpenPortal}
+            activeOpacity={0.85}
+            style={[styles.portalBtn, { marginBottom: 12 }]}
+            disabled={busy}
+          >
+            <Icon name="card-outline" size={20} color={Colors.primary} />
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={styles.portalBtnTitle}>Payment methods & invoices</Text>
+              <Text style={styles.portalBtnSub}>Update card, view receipts, download invoices.</Text>
+            </View>
+            {busy
+              ? <ActivityIndicator color={Colors.primary} />
+              : <Icon name="open-outline" size={18} color={Colors.textTertiary} />}
+          </TouchableOpacity>
+        )}
+
         {!isPaid && (
           <TouchableOpacity
             testID="subscription-upgrade-cta"
@@ -205,10 +244,9 @@ export default function ManageSubscription() {
         )}
 
         <Text style={styles.fineprint}>
-          Billing is handled by Stripe. Cancelling here disables auto-renewal —
-          your card will not be charged again. You can also manage payment
-          methods, invoices, and download receipts from the Stripe billing
-          portal in the future.
+          Billing is handled securely by Stripe. Cancelling here disables
+          auto-renewal — your card will not be charged again.
+          {isPaid ? ' Use "Payment methods & invoices" above to update your card or download receipts.' : ''}
         </Text>
       </ScrollView>
     </SafeAreaView>
@@ -268,6 +306,15 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: Colors.error,
   },
   dangerBtnText: { color: Colors.error, fontSize: 16, fontWeight: '800' },
+
+  portalBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: Colors.surface,
+    borderRadius: 14, paddingVertical: 14, paddingHorizontal: 16,
+    borderWidth: 1, borderColor: Colors.border,
+  },
+  portalBtnTitle: { fontSize: 15, fontWeight: '800', color: Colors.textPrimary },
+  portalBtnSub: { marginTop: 2, fontSize: 12.5, color: Colors.textSecondary, lineHeight: 17 },
 
   fineprint: {
     marginTop: 24,
