@@ -37,15 +37,21 @@ export default function UpgradeScreen() {
   const params = useLocalSearchParams<{ status?: string }>();
   const [status, setStatus] = useState<BillingStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState<'month' | 'year' | null>(null);
 
   const load = async () => {
     try {
       setLoading(true);
+      setLoadError(null);
       const s = await getBillingStatus();
       setStatus(s);
-    } catch (_e) {
-      // ignore — show defaults
+    } catch (e: any) {
+      setLoadError(
+        e?.response?.data?.detail
+        || e?.message
+        || 'Could not load plan details. You can still upgrade — buttons below use default pricing.'
+      );
     } finally {
       setLoading(false);
     }
@@ -95,9 +101,22 @@ export default function UpgradeScreen() {
   };
 
   const isPaid = status?.plan === 'family_plan';
-  const monthly = findPlan(status, 'month');
-  const annual = findPlan(status, 'year');
-  const savings = (status?.annual_savings_cents || annual?.savings_cents || 0);
+  // Hardcoded fallback pricing — used if the /billing/status request fails so
+  // the upgrade CTAs are NEVER missing (the actual price is also re-validated
+  // server-side at checkout). Keep these in sync with backend billing.py.
+  const FALLBACK_MONTHLY: PaidPlan = {
+    interval: 'month', label: 'Monthly', amount_cents: 999,
+    currency: 'usd', product_name: 'Kinnship Family Plan',
+    is_recommended: false, savings_cents: 0,
+  };
+  const FALLBACK_ANNUAL: PaidPlan = {
+    interval: 'year', label: 'Annual', amount_cents: 9999,
+    currency: 'usd', product_name: 'Kinnship Family Plan',
+    is_recommended: true, savings_cents: 1989,
+  };
+  const monthly = findPlan(status, 'month') || FALLBACK_MONTHLY;
+  const annual = findPlan(status, 'year') || FALLBACK_ANNUAL;
+  const savings = (status?.annual_savings_cents || annual?.savings_cents || 1989);
   const savingsLabel = savings > 0 ? `Save ${formatPrice(savings)}` : null;
 
   return (
@@ -146,36 +165,38 @@ export default function UpgradeScreen() {
 
             {!isPaid ? (
               <>
-                {/* Annual plan (recommended, highlighted) */}
-                {annual ? (
-                  <PlanOption
-                    testID="upgrade-plan-annual"
-                    title="Annual"
-                    price={priceLine(annual)}
-                    pricePerMonth={`Just $${(annual.amount_cents / 12 / 100).toFixed(2)}/mo billed yearly`}
-                    badge="Best Value"
-                    savings={savingsLabel}
-                    highlighted
-                    ctaLabel={submitting === 'year' ? 'Loading…' : 'Choose Annual'}
-                    ctaTestID="upgrade-cta-annual"
-                    submitting={submitting === 'year'}
-                    onPress={() => onUpgrade('year')}
-                  />
+                {loadError ? (
+                  <View style={styles.errorBanner} testID="upgrade-load-error">
+                    <Text style={styles.errorBannerText}>⚠️ {loadError}</Text>
+                  </View>
                 ) : null}
 
+                {/* Annual plan (recommended, highlighted) */}
+                <PlanOption
+                  testID="upgrade-plan-annual"
+                  title="Annual"
+                  price={priceLine(annual)}
+                  pricePerMonth={`Just $${(annual.amount_cents / 12 / 100).toFixed(2)}/mo billed yearly`}
+                  badge="Best Value"
+                  savings={savingsLabel}
+                  highlighted
+                  ctaLabel={submitting === 'year' ? 'Loading…' : 'Choose Annual'}
+                  ctaTestID="upgrade-cta-annual"
+                  submitting={submitting === 'year'}
+                  onPress={() => onUpgrade('year')}
+                />
+
                 {/* Monthly plan */}
-                {monthly ? (
-                  <PlanOption
-                    testID="upgrade-plan-monthly"
-                    title="Monthly"
-                    price={priceLine(monthly)}
-                    pricePerMonth="Billed every month · cancel anytime"
-                    ctaLabel={submitting === 'month' ? 'Loading…' : 'Choose Monthly'}
-                    ctaTestID="upgrade-cta-monthly"
-                    submitting={submitting === 'month'}
-                    onPress={() => onUpgrade('month')}
-                  />
-                ) : null}
+                <PlanOption
+                  testID="upgrade-plan-monthly"
+                  title="Monthly"
+                  price={priceLine(monthly)}
+                  pricePerMonth="Billed every month · cancel anytime"
+                  ctaLabel={submitting === 'month' ? 'Loading…' : 'Choose Monthly'}
+                  ctaTestID="upgrade-cta-monthly"
+                  submitting={submitting === 'month'}
+                  onPress={() => onUpgrade('month')}
+                />
               </>
             ) : (
               <View style={styles.activePlanCard} testID="upgrade-current-plan">
@@ -394,4 +415,9 @@ const styles = StyleSheet.create({
 
   footer: { marginTop: 24, fontSize: 12, color: Colors.textTertiary, textAlign: 'center', lineHeight: 18 },
   fineprint: { fontSize: 12, color: Colors.textTertiary, textAlign: 'center', textDecorationLine: 'underline' },
+  errorBanner: {
+    marginTop: 16, padding: 12, borderRadius: 10,
+    backgroundColor: '#FFF7E6', borderWidth: 1, borderColor: '#F2D38A',
+  },
+  errorBannerText: { color: '#8A5A00', fontSize: 12.5, lineHeight: 18, fontWeight: '600' },
 });

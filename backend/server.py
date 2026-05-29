@@ -1411,6 +1411,19 @@ async def billing_webhook(request: Request):
 
     etype = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
     obj = (event.get("data") or {}).get("object") if isinstance(event, dict) else event["data"]["object"]
+    # Normalize Stripe StripeObject → plain dict so the rest of this handler can
+    # use the dict `.get()` API uniformly. StripeObject doesn't expose `.get`
+    # as a method (raises AttributeError) which previously broke live webhook
+    # processing for invoice.paid / subscription.* events.
+    if obj is not None and not isinstance(obj, dict):
+        try:
+            obj = obj.to_dict_recursive()
+        except Exception:
+            try:
+                obj = dict(obj)
+            except Exception:
+                logger.error("webhook obj could not be normalized to dict")
+                return {"status": "error", "message": "unrecognized payload shape"}
     logger.info(f"stripe webhook: {etype}")
     try:
         if etype == "checkout.session.completed":
