@@ -143,11 +143,14 @@ export default function ManageSubscription() {
         {/* Current plan card */}
         <View style={[styles.planCard, isPaid && styles.planCardPaid]}>
           <Text style={styles.planEmoji}>{isPaid ? '👨‍👩‍👧‍👦' : '🆓'}</Text>
-          <Text style={styles.planName} testID="current-plan-name">
+          <Text
+            style={[styles.planName, isPaid && styles.planNamePaid]}
+            testID="current-plan-name"
+          >
             {isPaid ? 'Family Plan' : 'Free Plan'}
           </Text>
           {isPaid && (
-            <Text style={styles.planSub}>
+            <Text style={[styles.planSub, styles.planSubPaid]}>
               {intervalLabel}{priceLabel ? ` · ${priceLabel}/${status?.interval === 'year' ? 'year' : 'month'}` : ''}
             </Text>
           )}
@@ -280,6 +283,10 @@ const styles = StyleSheet.create({
   planEmoji: { fontSize: 38, marginBottom: 6 },
   planName: { fontSize: 22, fontWeight: '900', color: Colors.textPrimary },
   planSub: { marginTop: 4, fontSize: 14, color: Colors.textSecondary, fontWeight: '600' },
+  // High-contrast white variants used when the card switches to the dark
+  // green Family Plan background — improves WCAG contrast for senior users.
+  planNamePaid: { color: Colors.surface },
+  planSubPaid: { color: Colors.surface, opacity: 0.95 },
 
   infoCard: {
     marginTop: 14,
