@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
-  RefreshControl, Alert as RNAlert, Linking, ActivityIndicator,
+  RefreshControl, Alert as RNAlert, Linking, ActivityIndicator, Modal, Platform,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
@@ -19,6 +19,14 @@ export default function Dashboard() {
   const [billing, setBilling] = useState<BillingStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // SOS confirmation modal — purposefully in-app (NOT Alert.alert) so:
+  //   1. Cancel responds instantly with no system animation lag
+  //   2. The dialer launch fires from a clean synchronous event handler,
+  //      avoiding the Android activity-launch race that occurred when an
+  //      Alert.alert's dismiss animation overlapped with Linking.openURL
+  //   3. The styling matches the rest of the app (large finger-friendly
+  //      buttons for senior users, high-contrast brand colors)
+  const [sosConfirmOpen, setSosConfirmOpen] = useState(false);
 
   const load = async () => {
     try {
@@ -63,28 +71,33 @@ export default function Dashboard() {
     setRefreshing(false);
   };
 
+  // Step 1 — user tapped the SOS button. Show the in-app confirmation modal.
+  // This is intentionally light: no API calls, no GPS request, no permissions.
+  // We want the modal to appear in <50ms so Cancel is instantly responsive.
   const triggerSOS = () => {
-    // ONE-TAP SOS for emergency speed. The phone's dialer itself is the
-    // safeguard against accidents — user still has to tap the green Call
-    // button to actually place the call. No in-app confirmation step here
-    // because every extra tap costs precious seconds in a real emergency.
-    //
-    // Behavior:
-    //   1) Fire `tel:911` immediately (fire-and-forget — no await, no nav,
-    //      so Android can't drop the activity-launch in favor of an in-app
-    //      navigation race).
-    //   2) Background: GPS + alert + push to family runs silently.
-    //   3) If the dialer can't open at all (rare on real phones — typically
-    //      tablets without telephony), show an inline alert telling the user
-    //      to dial manually.
+    setSosConfirmOpen(true);
+  };
+
+  // Step 2 — user confirmed in the modal. Fire the dialer SYNCHRONOUSLY in
+  // the same event handler tick (before React re-renders to close the modal),
+  // then close the modal and kick off background work. This ordering is
+  // critical: queueing the `tel:911` intent first guarantees the OS picks it
+  // up before our app yields to render the modal-close, eliminating the
+  // Android activity-launch race we hit on v6.
+  const confirmSOS = () => {
     Linking.openURL('tel:911').catch(() => {
+      // Last-resort fallback if the OS refuses to launch the dialer
+      // (extremely rare on real phones — typically WiFi-only tablets).
       RNAlert.alert(
         '🆘 Call 911',
         "Your phone's dialer couldn't be opened. Please dial 911 manually right now.",
         [{ text: 'OK' }],
       );
     });
+    setSosConfirmOpen(false);
 
+    // Background: best-effort GPS + family alert + push fan-out. The dialer
+    // already has the foreground; this work runs silently.
     (async () => {
       try {
         let lat: number | undefined, lon: number | undefined;
@@ -249,6 +262,48 @@ export default function Dashboard() {
         <Text style={styles.sosEmoji}>🆘</Text>
         <Text style={styles.sosText}>SOS Emergency</Text>
       </TouchableOpacity>
+
+      {/*
+        In-app SOS confirmation modal. Replaces the previous Alert.alert
+        approach so the dialer can fire from a clean synchronous event
+        handler (no system-alert animation race with Linking.openURL).
+        Buttons are oversized (60pt tall) for senior accessibility.
+      */}
+      <Modal
+        visible={sosConfirmOpen}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setSosConfirmOpen(false)}
+      >
+        <View style={styles.sosBackdrop}>
+          <View style={styles.sosCard} testID="sos-confirm-modal">
+            <Text style={styles.sosCardEmoji}>🆘</Text>
+            <Text style={styles.sosCardTitle}>Are you sure?</Text>
+            <Text style={styles.sosCardBody}>
+              Your phone's dialer will open with 911 pre-filled and your family will be alerted with your location.
+            </Text>
+
+            <TouchableOpacity
+              testID="sos-confirm-yes"
+              style={styles.sosCardConfirm}
+              onPress={confirmSOS}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.sosCardConfirmText}>Yes, Call 911</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              testID="sos-confirm-cancel"
+              style={styles.sosCardCancel}
+              onPress={() => setSosConfirmOpen(false)}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.sosCardCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -406,4 +461,46 @@ const styles = StyleSheet.create({
   },
   upgradeCtaText: { color: Colors.surface, fontSize: 13, fontWeight: '800' },
   upgradeCtaArrow: { color: Colors.surface, fontSize: 16, fontWeight: '700' },
+
+  // In-app SOS confirmation modal — designed for senior accessibility:
+  // oversized 60pt touch targets, ≥14:1 contrast, big readable type, urgent
+  // red "Yes, Call 911" button anchored at the bottom of the modal so it
+  // sits within thumb-reach.
+  sosBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center', justifyContent: 'center', padding: 22,
+  },
+  sosCard: {
+    width: '100%', maxWidth: 400, backgroundColor: Colors.surface,
+    borderRadius: 22, padding: 24, alignItems: 'center',
+    boxShadow: '0px 12px 32px rgba(0,0,0,0.35)' as any,
+    ...Platform.select({ android: { elevation: 16 } }),
+  },
+  sosCardEmoji: { fontSize: 48, marginBottom: 4 },
+  sosCardTitle: {
+    fontSize: 24, fontWeight: '900', color: Colors.textPrimary,
+    textAlign: 'center', marginTop: 4,
+  },
+  sosCardBody: {
+    fontSize: 15.5, color: Colors.textSecondary,
+    textAlign: 'center', marginTop: 12, lineHeight: 22,
+  },
+  sosCardConfirm: {
+    marginTop: 22, alignSelf: 'stretch',
+    height: 60, backgroundColor: Colors.sos, borderRadius: 16,
+    alignItems: 'center', justifyContent: 'center',
+    boxShadow: '0px 6px 14px rgba(220,38,38,0.45)' as any,
+    ...Platform.select({ android: { elevation: 6 } }),
+  },
+  sosCardConfirmText: {
+    color: Colors.surface, fontSize: 17, fontWeight: '900', letterSpacing: 0.3,
+  },
+  sosCardCancel: {
+    marginTop: 10, alignSelf: 'stretch',
+    height: 56, borderRadius: 16,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: Colors.surface,
+    borderWidth: 2, borderColor: Colors.border,
+  },
+  sosCardCancelText: { color: Colors.textPrimary, fontSize: 16, fontWeight: '800' },
 });
