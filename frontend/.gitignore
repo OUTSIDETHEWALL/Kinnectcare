@@ -43,6 +43,11 @@ play-service-account*.json
 AuthKey_*.p8
 *.appstoreconnect.json
 
-# Firebase config (contains FCM sender info — keep out of git)
-google-services.json
+# Firebase config (google-services.json)
+# Note: this file CONTAINS the FCM project_number and an api_key, but those
+# values are CLIENT-side identifiers that ship inside every published APK
+# anyway. It is safe to commit — and EAS Build requires it to be tracked by
+# git in order to upload it during prebuild. We commit it so Android FCM
+# can initialize properly.
+# google-services.json   ← DO NOT re-add this line
 GoogleService-Info.plist
