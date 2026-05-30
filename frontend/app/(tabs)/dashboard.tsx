@@ -61,19 +61,36 @@ export default function Dashboard() {
   const triggerSOS = () => {
     RNAlert.alert(
       '🆘 Emergency SOS',
-      'Are you sure? Your family will be alerted and emergency services (911) will be called.',
+      'Are you sure? Your family will be alerted and your phone will open the dialer with 911 pre-filled — you just need to tap the call button.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Yes, Send SOS', style: 'destructive',
-          onPress: () => {
-            // INSTANT user-facing actions — do not await anything before doing these:
-            // 1) Dial 911 immediately
-            // 2) Navigate to the SOS confirmation screen
-            Linking.openURL('tel:911').catch(() => {});
-            router.push('/sos-confirmation');
+          onPress: async () => {
+            // 1) Try to open the native dialer with 911 pre-filled. AWAIT this so
+            //    we know whether the OS actually accepted the intent — on
+            //    Android 11+ without manifest <queries>, this silently fails.
+            const TEL_URL = 'tel:911';
+            let dialed = false;
+            try {
+              const supported = await Linking.canOpenURL(TEL_URL);
+              if (supported) {
+                await Linking.openURL(TEL_URL);
+                dialed = true;
+              }
+            } catch (_e) {
+              dialed = false;
+            }
 
-            // Backend work (location + alert + push) runs in the background.
+            // 2) Navigate to the SOS status screen, telling it whether the
+            //    dialer actually opened. The screen MUST NOT claim "Calling 911"
+            //    if the dial failed — that's misleading and dangerous.
+            router.push({
+              pathname: '/sos-confirmation',
+              params: { dialed: dialed ? '1' : '0' },
+            });
+
+            // 3) Backend work (location + alert + push) runs in the background.
             (async () => {
               try {
                 let lat: number | undefined, lon: number | undefined;
@@ -88,11 +105,11 @@ export default function Dashboard() {
                   }
                 } catch (_e) {}
                 await api.post('/sos', { latitude: lat, longitude: lon });
-                // Refresh dashboard data silently for the next time the user lands here.
                 load().catch(() => {});
               } catch (_e) {
-                // Best-effort: do not interrupt the confirmation flow with an error toast
-                // because the user has already been told help is on the way.
+                // Best-effort: do not interrupt the confirmation flow with an
+                // error toast because the user has already been told help is
+                // on the way.
               }
             })();
           },
