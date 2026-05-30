@@ -32,23 +32,30 @@ logger = logging.getLogger(__name__)
 
 
 # ---------- Constants ----------
+# Stages — simplified to match the v6.3 medication-reminder UX spec:
+#   T+0 min  → ONE notification to the user ("Time to take your <med>")
+#   T+15 min → ONE family alert ("<member> hasn't confirmed their <med>")
+#   never repeat after that — the unique index on
+#   (reminder_id, slot_time, local_date, stage) guarantees idempotency.
+#
+# Removed in v6.3: the old STAGE_REMIND_30 (intrusive T+30m self-reminder)
+# and the old T+120m family escalation (too slow). Users overwhelmingly
+# preferred a single self-nudge then a quick family-alert tripwire.
 STAGE_DUE = "due"
-STAGE_REMIND_30 = "remind_30"
-STAGE_ESCALATE_2H = "escalate_2h"
+STAGE_FAMILY = "family_alert"
 STAGE_REFILL = "refill"
 
 STAGE_OFFSETS_MIN: Dict[str, int] = {
     STAGE_DUE: 0,
-    STAGE_REMIND_30: 30,
-    STAGE_ESCALATE_2H: 120,
+    STAGE_FAMILY: 15,
 }
 
 # Worker cadence (seconds). Production runs every 30s; tests force-call tick().
 WORKER_INTERVAL_SECONDS = 30
 
-# Maximum age of a missed window we'll still fire (to recover from outages).
-# Anything past this is considered stale and silently skipped.
-MAX_STALE_MINUTES = 60 * 24  # 24h
+# Anything older than this we silently skip — protects against waking up
+# after an extended outage and back-firing 12 hours of missed alerts.
+MAX_STALE_MINUTES = 6 * 60  # 6h
 
 
 # ---------- Helpers ----------
