@@ -27,6 +27,10 @@ export function FallDetectionOverlay() {
   const router = useRouter();
   const [visible, setVisible] = useState(false);
   const [remaining, setRemaining] = useState(COUNTDOWN_SECONDS);
+  // Shown AFTER the cancel-countdown elapses. Tells the user family has
+  // been alerted and offers an explicit "Call 911" button. We do NOT auto-
+  // dial; that requires a deliberate tap from the user.
+  const [needsHelpVisible, setNeedsHelpVisible] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const progress = useRef(new Animated.Value(0)).current;
 
@@ -38,11 +42,18 @@ export function FallDetectionOverlay() {
     progress.stopAnimation();
   };
 
-  // Trigger SOS the same way the manual SOS button does (one-tap, dialer-only).
-  const triggerSOS = () => {
-    // Open dialer with 911 (fire and forget — no nav, no race).
-    Linking.openURL('tel:911').catch(() => {});
-    // Background: best-effort GPS + push to family.
+  // Fall-detected → notify family only. We do NOT auto-dial 911 from a
+  // passive accelerometer trigger because false positives (phone dropped,
+  // vigorous walk reminder vibration, transferring phone between hands) are
+  // common enough that auto-dialing 911 is dangerous — it wastes emergency
+  // services time and could result in welfare-check raids. Instead:
+  //   • Fire a `/sos` event with `fall_detected: true` → family gets push
+  //     to call/check on the user immediately.
+  //   • Show a follow-up modal letting the user tap "Call 911" explicitly
+  //     if they really do need emergency services.
+  // The 911 dialer is ONLY launched from an explicit user tap, never from
+  // the countdown timer expiring.
+  const notifyFamilyOfFall = () => {
     (async () => {
       try {
         let lat: number | undefined, lon: number | undefined;
@@ -63,6 +74,13 @@ export function FallDetectionOverlay() {
         });
       } catch (_e) {}
     })();
+    // Show the follow-up "family notified" screen with explicit 911 dial CTA.
+    setNeedsHelpVisible(true);
+  };
+
+  const dial911 = () => {
+    Linking.openURL('tel:911').catch(() => {});
+    setNeedsHelpVisible(false);
   };
 
   const handleFall = () => {
@@ -83,7 +101,7 @@ export function FallDetectionOverlay() {
       if (secs <= 0) {
         stopTimer();
         setVisible(false);
-        triggerSOS();
+        notifyFamilyOfFall();
       }
     }, 1000);
   };
@@ -121,6 +139,7 @@ export function FallDetectionOverlay() {
   };
 
   return (
+    <>
     <Modal
       visible={visible}
       transparent
@@ -133,8 +152,7 @@ export function FallDetectionOverlay() {
           <Text style={styles.emoji}>🚨</Text>
           <Text style={styles.title}>Fall detected — are you okay?</Text>
           <Text style={styles.body}>
-            We sensed a sudden fall. If you don't respond in time, Kinnship
-            will automatically call 911 and alert your family.
+            We sensed a sudden fall. If you don't respond in time, your family will be notified automatically — but Kinnship will NOT auto-dial 911 (you must tap the red button below).
           </Text>
 
           <View style={styles.barTrack}>
@@ -163,7 +181,7 @@ export function FallDetectionOverlay() {
           <TouchableOpacity
             testID="fall-call-now"
             style={styles.secondary}
-            onPress={() => { stopTimer(); setVisible(false); triggerSOS(); }}
+            onPress={() => { stopTimer(); setVisible(false); dial911(); }}
             activeOpacity={0.85}
           >
             <Text style={styles.secondaryText}>📞 I need help — call 911 now</Text>
@@ -181,6 +199,48 @@ export function FallDetectionOverlay() {
         </View>
       </View>
     </Modal>
+
+    {/*
+      Follow-up modal shown after the 30-second cancel window elapses with no
+      user response. Family has already been pushed an alert. Auto-dialing
+      911 was REMOVED in v6.2 — false positives (vibrating walk reminders,
+      phone drops, normal pocket movement) were dialing 911 unintentionally.
+      The user must now explicitly tap the red "Call 911 now" button to dial.
+    */}
+    <Modal
+      visible={needsHelpVisible}
+      transparent
+      animationType="fade"
+      statusBarTranslucent
+      onRequestClose={() => setNeedsHelpVisible(false)}
+    >
+      <View style={styles.backdrop}>
+        <View style={styles.card} testID="fall-followup-modal">
+          <Text style={styles.emoji}>🆘</Text>
+          <Text style={styles.title}>Family has been alerted</Text>
+          <Text style={styles.body}>
+            Your family received a push notification that you may have fallen. If you need emergency services, tap the red button to call 911 right now.
+          </Text>
+          <TouchableOpacity
+            testID="fall-followup-911"
+            style={styles.secondary}
+            onPress={dial911}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.secondaryText}>📞 Call 911 now</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            testID="fall-followup-dismiss"
+            style={styles.primary}
+            onPress={() => setNeedsHelpVisible(false)}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.primaryText}>I'm okay — dismiss</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+    </>
   );
 }
 

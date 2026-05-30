@@ -42,3 +42,7 @@ app-example
 play-service-account*.json
 AuthKey_*.p8
 *.appstoreconnect.json
+
+# Firebase config (contains FCM sender info — keep out of git)
+google-services.json
+GoogleService-Info.plist

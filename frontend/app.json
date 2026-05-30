@@ -22,6 +22,7 @@
     "android": {
       "package": "app.kinnship.client",
       "versionCode": 1,
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/kinnship-adaptive-foreground-1024.png",
         "backgroundColor": "#1B5E35"
