@@ -25,7 +25,20 @@ function RootNav() {
   }, []);
 
   useNotificationListeners((data) => {
-    if (data?.type === 'sos' || data?.type === 'missed_checkin' || data?.type === 'medication' || data?.type === 'routine') {
+    // Deep-link by notification type.
+    // Medication self-reminders → open the member screen so user can mark taken.
+    // Medication family alerts / SOS / missed check-ins → open the alerts tab.
+    const t = data?.type;
+    const subtype = data?.subtype;
+    if (t === 'medication' && subtype === 'self_due' && data?.member_id) {
+      router.push(`/member/${data.member_id}`);
+      return;
+    }
+    if (t === 'routine' && data?.member_id) {
+      router.push(`/member/${data.member_id}`);
+      return;
+    }
+    if (t === 'sos' || t === 'missed_checkin' || t === 'medication' || t === 'routine') {
       router.push('/(tabs)/alerts');
     }
   });

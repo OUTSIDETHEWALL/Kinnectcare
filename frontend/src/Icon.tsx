@@ -45,6 +45,10 @@ const MAP: Record<string, string> = {
 
   // Status pills
   'senior': '👴',
+
+  // Form helpers
+  'eye': '👁',
+  'eye-off': '🙈',
 };
 
 type Props = {

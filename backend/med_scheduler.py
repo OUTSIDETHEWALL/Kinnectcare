@@ -1,24 +1,21 @@
-"""Kinnship Medication Self-Alert Scheduler.
+"""Kinnship Medication & Routine Self-Alert Scheduler (v6.3).
 
-Runs a lightweight background task that scans medication reminders and fires
-push notifications in three stages per scheduled dose:
+Per the v6.3 spec:
+  Stage 1 — "due"           at T+0     → ONE self-push to the member's own device
+                                           with an "I Took It" action button.
+  Stage 2 — "family_alert"  at T+15m   → ONE push to the WHOLE family group
+                                           IF the user has not confirmed.
+  STOP.  No further reminders for that slot.
 
-  Stage 1 — "due"           at T+0     → self-push to the member's own device
-  Stage 2 — "remind_30"     at T+30m   → gentle self-reminder to the same device
-  Stage 3 — "escalate_2h"   at T+2h    → push to the WHOLE family group
+Routines (category="routine", e.g. walks, hydration):
+  Stage 1 — "due"           at T+0     → ONE self-push only.  No family alert.
 
-Each stage:
-  * fires at most once per (reminder_id, slot_time, local_date) thanks to a
-    unique index on `med_notifications`
-  * is skipped automatically if the member has already logged the medication
-    as `taken` for the slot (we look at medication_logs from slot time onwards)
-  * the 2-hour family escalation only happens for members who have ≥1
-    medication reminder on their profile (which is naturally satisfied since
-    we only iterate medication-category reminders).
+Each stage is idempotent thanks to the unique index on
+  (reminder_id, slot_time, local_date, stage)
+plus an early-suppress check via medication_logs.
 
-The scheduler is intentionally idempotent: scanning the same window many times
-will never duplicate notifications.  This also means we can expose a manual
-`/api/medications/_tick` endpoint for testing without any risk of double-send.
+Every fired push is ALSO recorded into the `alerts` collection so the Alerts
+tab shows a complete history of activity (per user requirement).
 """
 from __future__ import annotations
 
@@ -26,36 +23,31 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger(__name__)
 
 
-# ---------- Constants ----------
-# Stages — simplified to match the v6.3 medication-reminder UX spec:
-#   T+0 min  → ONE notification to the user ("Time to take your <med>")
-#   T+15 min → ONE family alert ("<member> hasn't confirmed their <med>")
-#   never repeat after that — the unique index on
-#   (reminder_id, slot_time, local_date, stage) guarantees idempotency.
-#
-# Removed in v6.3: the old STAGE_REMIND_30 (intrusive T+30m self-reminder)
-# and the old T+120m family escalation (too slow). Users overwhelmingly
-# preferred a single self-nudge then a quick family-alert tripwire.
+# ---------- Stages ----------
 STAGE_DUE = "due"
 STAGE_FAMILY = "family_alert"
 STAGE_REFILL = "refill"
 
+# Per v6.3: T+0 self, T+15 family. No remind_30, no 2h escalation.
 STAGE_OFFSETS_MIN: Dict[str, int] = {
     STAGE_DUE: 0,
     STAGE_FAMILY: 15,
 }
 
-# Worker cadence (seconds). Production runs every 30s; tests force-call tick().
+# Worker cadence (seconds).  Production runs every 30s; tests force-call tick().
 WORKER_INTERVAL_SECONDS = 30
 
-# Anything older than this we silently skip — protects against waking up
-# after an extended outage and back-firing 12 hours of missed alerts.
-MAX_STALE_MINUTES = 6 * 60  # 6h
+# Anything older than 16 min we silently skip.  This protects against a service
+# restart back-firing many hours of missed alerts (the original 6h window
+# was causing notification floods when a user added a medication for an
+# already-passed slot earlier in the day).
+MAX_STALE_MINUTES = 16
 
 
 # ---------- Helpers ----------
@@ -93,9 +85,6 @@ async def ensure_indexes(db) -> None:
     except Exception as e:
         logger.warning(f"med_notifications index ensure skipped: {e}")
     try:
-        # Refill notifications are keyed by (reminder, current refill cycle).
-        # `last_refill_at` advances when the user marks a refill, so a new
-        # cycle gets a fresh row and can fire again.
         await db.refill_notifications.create_index(
             [("reminder_id", 1), ("last_refill_at", 1)],
             unique=True,
@@ -128,9 +117,7 @@ async def _try_record_stage(
     stage: str,
     now_utc: datetime,
 ) -> bool:
-    """Atomically reserve a stage. Returns True if we won the race, False if
-    another worker already fired this exact (reminder, slot, date, stage).
-    """
+    """Atomically reserve a stage. Returns True if we won the race."""
     try:
         await db.med_notifications.insert_one(
             {
@@ -145,9 +132,65 @@ async def _try_record_stage(
         )
         return True
     except Exception:
-        # Likely a duplicate-key error from the unique index — meaning we
-        # already fired this notification. That's the entire point.
         return False
+
+
+async def _log_alert(
+    db,
+    *,
+    owner_id: Optional[str],
+    family_group_id: Optional[str],
+    member_id: str,
+    member_name: str,
+    a_type: str,
+    severity: str,
+    title: str,
+    message: str,
+    now_utc: datetime,
+) -> None:
+    """Insert an alert row so the Alerts tab shows complete history."""
+    if not family_group_id:
+        return
+    try:
+        await db.alerts.insert_one(
+            {
+                "id": str(uuid4()),
+                "owner_id": owner_id or "",
+                "family_group_id": family_group_id,
+                "member_id": member_id,
+                "member_name": member_name,
+                "type": a_type,
+                "severity": severity,
+                "title": title,
+                "message": message,
+                "acknowledged": False,
+                "created_at": now_utc,
+            }
+        )
+    except Exception as e:
+        logger.warning(f"alert insert failed: {e}")
+
+
+def _resolve_slot(now_local: datetime, slot_time: str) -> Optional[Dict[str, Any]]:
+    """Resolve a "HH:MM" slot string to today's slot in the user's local tz.
+
+    Returns dict { slot_local, slot_utc, local_date, delta_min } or None
+    if the slot string is malformed.  Unlike the legacy implementation this
+    does NOT fall back to yesterday's slot — we strictly evaluate the
+    CURRENT day's slot so we never re-fire across a day rollover.
+    """
+    if _parse_hhmm(slot_time) is None:
+        return None
+    hh, mm = slot_time.split(":")
+    slot_local = now_local.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+    slot_utc = slot_local.astimezone(timezone.utc)
+    now_utc = now_local.astimezone(timezone.utc)
+    return {
+        "slot_local": slot_local,
+        "slot_utc": slot_utc,
+        "local_date": slot_local.date().isoformat(),
+        "delta_min": (now_utc - slot_utc).total_seconds() / 60.0,
+    }
 
 
 # ---------- Core scan ----------
@@ -158,36 +201,20 @@ async def process_pending_notifications(
     push_to_family_group: Callable[..., Awaitable[int]],
     now_utc: Optional[datetime] = None,
 ) -> Dict[str, int]:
-    """Run one scan over medication reminders and fire any due stage(s).
-
-    Args:
-        db: motor database
-        push_to_user: async callable(user_id, title, body, data) -> #devices
-        push_to_family_group: async callable(family_group_id, title, body,
-            data, exclude_user_id=None) -> #devices
-        now_utc: optional override for "now" (testing/replay). Defaults to
-            real UTC now.
-
-    Returns a counters dict for observability:
-        {
-            "scanned_reminders": int,
-            "fired_due": int,
-            "fired_remind_30": int,
-            "fired_escalate_2h": int,
-            "skipped_taken": int,
-        }
-    """
+    """Scan reminders and fire any due stage(s).  Idempotent."""
     now_utc = now_utc or datetime.now(timezone.utc)
     counters = {
         "scanned_reminders": 0,
         "fired_due": 0,
-        "fired_remind_30": 0,
-        "fired_escalate_2h": 0,
+        "fired_family_alert": 0,
+        "fired_routine_due": 0,
         "skipped_taken": 0,
     }
 
-    # Iterate medication reminders (only — routines do NOT escalate).
-    cursor = db.reminders.find({"category": "medication"}, {"_id": 0})
+    # Iterate BOTH medication AND routine reminders.
+    cursor = db.reminders.find(
+        {"category": {"$in": ["medication", "routine"]}}, {"_id": 0}
+    )
     reminders = await cursor.to_list(20000)
 
     for rem in reminders:
@@ -195,10 +222,12 @@ async def process_pending_notifications(
         if not times:
             continue
         counters["scanned_reminders"] += 1
+        is_routine = (rem.get("category") == "routine")
 
         member_id = rem["member_id"]
         member = await db.members.find_one(
-            {"id": member_id}, {"_id": 0, "owner_id": 1, "user_id": 1, "family_group_id": 1, "name": 1}
+            {"id": member_id},
+            {"_id": 0, "owner_id": 1, "user_id": 1, "family_group_id": 1, "name": 1},
         )
         if not member:
             continue
@@ -207,13 +236,13 @@ async def process_pending_notifications(
         if not family_group_id:
             continue
 
-        # Resolve the user account who receives the SELF notification.
-        # Prefer an explicit member.user_id link; otherwise fall back to the
-        # account that owns the member profile.
+        member_name = member.get("name") or rem.get("member_name") or "your loved one"
+
+        # Resolve recipient for SELF notification.  Prefer explicit member.user_id
+        # (the senior's own account), else the owner who tracks them.
         self_user_id = member.get("user_id") or member.get("owner_id") or rem.get("owner_id")
 
-        # Resolve timezone via the user who owns the member profile, since the
-        # senior may not have their own user account yet.
+        # Resolve timezone via the owner user.
         owner_user = await db.users.find_one(
             {"id": member.get("owner_id") or rem.get("owner_id")},
             {"_id": 0, "timezone": 1},
@@ -225,38 +254,28 @@ async def process_pending_notifications(
             slot_time = slot.get("time") if isinstance(slot, dict) else None
             if not slot_time:
                 continue
-            if _parse_hhmm(slot_time) is None:
+            resolved = _resolve_slot(now_local, slot_time)
+            if not resolved:
                 continue
+            delta_min = resolved["delta_min"]
+            slot_utc = resolved["slot_utc"]
+            local_date = resolved["local_date"]
 
-            hh, mm = slot_time.split(":")
-            slot_local_today = now_local.replace(
-                hour=int(hh), minute=int(mm), second=0, microsecond=0
-            )
-            # If today's slot hasn't happened yet, fall back to yesterday's
-            # occurrence — that way the 2-hour escalation can still fire
-            # across a day rollover.
-            if slot_local_today > now_local:
-                slot_local = slot_local_today - timedelta(days=1)
-            else:
-                slot_local = slot_local_today
-            slot_utc = slot_local.astimezone(timezone.utc)
-            local_date = slot_local.date().isoformat()
-            delta_min = (now_utc - slot_utc).total_seconds() / 60.0
-
-            # Future slot — nothing to do yet.
+            # Skip future slots and stale slots.
             if delta_min < 0:
                 continue
-            # Too stale (e.g. backfill on a long-stopped server) — skip silently.
             if delta_min > MAX_STALE_MINUTES:
                 continue
 
-            # If the senior already took this dose, every stage is suppressed.
-            already_taken = await _has_taken_log_after(db, rem["id"], slot_utc)
-            if already_taken:
-                counters["skipped_taken"] += 1
-                continue
+            # If the medication was logged as taken since the slot fired,
+            # suppress all subsequent stages.
+            if not is_routine:
+                already_taken = await _has_taken_log_after(db, rem["id"], slot_utc)
+                if already_taken:
+                    counters["skipped_taken"] += 1
+                    continue
 
-            # Stage 1: due (T+0)
+            # -------- Stage 1: T+0 self-push --------
             if delta_min >= STAGE_OFFSETS_MIN[STAGE_DUE]:
                 won = await _try_record_stage(
                     db,
@@ -269,26 +288,65 @@ async def process_pending_notifications(
                     now_utc=now_utc,
                 )
                 if won and self_user_id:
+                    if is_routine:
+                        title = f"🌿 Time for {rem['title']}"
+                        body = (rem.get("dosage") or f"It's time for your {rem['title']}.")
+                        data_type = "routine"
+                        cat_id = "ROUTINE_DUE"
+                        a_type = "routine"
+                        sev = "info"
+                    else:
+                        title = f"💊 Time to take your {rem['title']}"
+                        body = (
+                            (rem.get("dosage") + " — tap 'I Took It' below.")
+                            if rem.get("dosage")
+                            else "Tap 'I Took It' below to confirm."
+                        )
+                        data_type = "medication"
+                        cat_id = "MEDICATION_DUE"
+                        a_type = "medication"
+                        sev = "info"
                     try:
                         await push_to_user(
                             self_user_id,
-                            f"💊 Time to take your {rem['title']}",
-                            (rem.get("dosage") + " — tap to mark as taken.") if rem.get("dosage")
-                            else "Tap to mark as taken.",
+                            title,
+                            body,
                             {
-                                "type": "medication_self_due",
+                                "type": data_type,
+                                "subtype": "self_due",
                                 "reminder_id": rem["id"],
                                 "member_id": member_id,
                                 "stage": STAGE_DUE,
                                 "slot_time": slot_time,
+                                "title": rem.get("title"),
+                                "categoryIdentifier": cat_id,
+                                "channelId": "meds" if not is_routine else "routines",
                             },
                         )
                     except Exception as e:
-                        logger.warning(f"med_due push failed: {e}")
-                    counters["fired_due"] += 1
+                        logger.warning(f"stage_due push failed: {e}")
+                    # Log to alerts feed.
+                    await _log_alert(
+                        db,
+                        owner_id=rem.get("owner_id"),
+                        family_group_id=family_group_id,
+                        member_id=member_id,
+                        member_name=member_name,
+                        a_type=a_type,
+                        severity=sev,
+                        title=title,
+                        message=f"Reminder sent at {slot_time} local.",
+                        now_utc=now_utc,
+                    )
+                    if is_routine:
+                        counters["fired_routine_due"] += 1
+                    else:
+                        counters["fired_due"] += 1
 
-            # Stage 2: gentle reminder (T+30)
-            if delta_min >= STAGE_OFFSETS_MIN[STAGE_REMIND_30]:
+            # -------- Stage 2: T+15m family alert (medication only) --------
+            if is_routine:
+                continue
+            if delta_min >= STAGE_OFFSETS_MIN[STAGE_FAMILY]:
                 won = await _try_record_stage(
                     db,
                     reminder_id=rem["id"],
@@ -296,82 +354,46 @@ async def process_pending_notifications(
                     member_id=member_id,
                     slot_time=slot_time,
                     local_date=local_date,
-                    stage=STAGE_REMIND_30,
-                    now_utc=now_utc,
-                )
-                if won and self_user_id:
-                    try:
-                        await push_to_user(
-                            self_user_id,
-                            f"💊 Reminder: Don't forget your {rem['title']}",
-                            "It's been 30 minutes. Tap to mark as taken.",
-                            {
-                                "type": "medication_self_remind",
-                                "reminder_id": rem["id"],
-                                "member_id": member_id,
-                                "stage": STAGE_REMIND_30,
-                                "slot_time": slot_time,
-                            },
-                        )
-                    except Exception as e:
-                        logger.warning(f"med_remind_30 push failed: {e}")
-                    counters["fired_remind_30"] += 1
-
-            # Stage 3: family escalation (T+2h)
-            if delta_min >= STAGE_OFFSETS_MIN[STAGE_ESCALATE_2H]:
-                won = await _try_record_stage(
-                    db,
-                    reminder_id=rem["id"],
-                    family_group_id=family_group_id,
-                    member_id=member_id,
-                    slot_time=slot_time,
-                    local_date=local_date,
-                    stage=STAGE_ESCALATE_2H,
+                    stage=STAGE_FAMILY,
                     now_utc=now_utc,
                 )
                 if won:
-                    member_name = member.get("name") or rem.get("member_name") or "your loved one"
-                    try:
-                        # Also record an Alert row so caregivers see it in /alerts.
-                        from uuid import uuid4
-                        await db.alerts.insert_one(
-                            {
-                                "id": str(uuid4()),
-                                "owner_id": rem.get("owner_id"),
-                                "family_group_id": family_group_id,
-                                "member_id": member_id,
-                                "member_name": member_name,
-                                "type": "medication_escalation",
-                                "severity": "critical",
-                                "title": f"{member_name} hasn't taken {rem['title']}",
-                                "message": (
-                                    f"KINNSHIP ALERT: {member_name} hasn't confirmed their "
-                                    f"{rem['title']} after 2 hours. Please check on them."
-                                ),
-                                "acknowledged": False,
-                                "created_at": now_utc,
-                            }
-                        )
-                    except Exception as e:
-                        logger.warning(f"med_escalate alert insert failed: {e}")
+                    title = f"💊 KINNSHIP ALERT: {member_name} hasn't taken {rem['title']}"
+                    body = (
+                        f"{member_name} hasn't confirmed their {rem['title']} after 15 min. "
+                        "Please check on them."
+                    )
                     try:
                         await push_to_family_group(
                             family_group_id,
-                            f"💊 KINNSHIP ALERT: {member_name} hasn't taken {rem['title']}",
-                            f"{member_name} hasn't confirmed their {rem['title']} after 2 hours. "
-                            "Please check on them.",
+                            title,
+                            body,
                             {
-                                "type": "medication_family_escalation",
+                                "type": "medication",
+                                "subtype": "family_alert",
                                 "reminder_id": rem["id"],
                                 "member_id": member_id,
-                                "stage": STAGE_ESCALATE_2H,
+                                "stage": STAGE_FAMILY,
                                 "slot_time": slot_time,
+                                "channelId": "meds",
                             },
                             exclude_user_id=None,
                         )
                     except Exception as e:
-                        logger.warning(f"med_escalate push failed: {e}")
-                    counters["fired_escalate_2h"] += 1
+                        logger.warning(f"family_alert push failed: {e}")
+                    await _log_alert(
+                        db,
+                        owner_id=rem.get("owner_id"),
+                        family_group_id=family_group_id,
+                        member_id=member_id,
+                        member_name=member_name,
+                        a_type="medication_escalation",
+                        severity="critical",
+                        title=title,
+                        message=body,
+                        now_utc=now_utc,
+                    )
+                    counters["fired_family_alert"] += 1
 
     return counters
 
@@ -383,12 +405,8 @@ async def process_refill_notifications(
     push_to_user: Callable[[str, str, str, Dict[str, Any]], Awaitable[int]],
     now_utc: Optional[datetime] = None,
 ) -> Dict[str, int]:
-    """For each medication with refill tracking enabled, fire ONE push notification
-    to the family group owner once we're within `refill_reminder_days` of run-out.
-
-    Idempotent via the `refill_notifications` unique index on
-    (reminder_id, last_refill_at). Marking a refill advances `last_refill_at`,
-    which starts a new cycle eligible to fire again.
+    """Fire ONE refill push per refill cycle when within `refill_reminder_days`
+    of run-out.  Idempotent via the `refill_notifications` unique index.
     """
     now_utc = now_utc or datetime.now(timezone.utc)
     counters = {"scanned_refill": 0, "fired_refill": 0}
@@ -428,9 +446,8 @@ async def process_refill_notifications(
 
         days_until_runout = (run_out_at - now_utc).total_seconds() / 86400.0
         if days_until_runout > lead:
-            continue  # not yet in the reminder window
+            continue
 
-        # Try to reserve the (reminder, refill cycle) slot.
         try:
             await db.refill_notifications.insert_one(
                 {
@@ -443,10 +460,8 @@ async def process_refill_notifications(
                 }
             )
         except Exception:
-            # Duplicate key — already fired for this refill cycle.
             continue
 
-        # Send push to the family group OWNER specifically.
         owner_user_id = rem.get("owner_id")
         if not owner_user_id:
             counters["fired_refill"] += 1
@@ -455,7 +470,10 @@ async def process_refill_notifications(
         member_name = rem.get("member_name") or "your loved one"
         med_title = rem.get("title") or "medication"
         days_left = max(0, int(round(days_until_runout)))
-        days_phrase = "today" if days_left == 0 else (f"in {days_left} day" + ("s" if days_left != 1 else ""))
+        days_phrase = (
+            "today" if days_left == 0
+            else (f"in {days_left} day" + ("s" if days_left != 1 else ""))
+        )
 
         try:
             await push_to_user(
@@ -463,45 +481,41 @@ async def process_refill_notifications(
                 f"💊 {member_name}'s {med_title} may be running low",
                 f"Time to refill — supply runs out {days_phrase}.",
                 {
-                    "type": "medication_refill_due",
+                    "type": "medication",
+                    "subtype": "refill",
                     "reminder_id": rem["id"],
                     "member_id": rem.get("member_id"),
                     "stage": STAGE_REFILL,
                     "days_until_runout": days_left,
+                    "channelId": "meds",
                 },
             )
         except Exception as e:
             logger.warning(f"refill push failed: {e}")
 
-        # Also drop an Alert row so caregivers can see it in the alerts feed.
-        try:
-            from uuid import uuid4
-            await db.alerts.insert_one(
-                {
-                    "id": str(uuid4()),
-                    "owner_id": owner_user_id,
-                    "family_group_id": rem.get("family_group_id"),
-                    "member_id": rem.get("member_id"),
-                    "member_name": member_name,
-                    "type": "medication_refill",
-                    "severity": "warning",
-                    "title": f"Refill {member_name}'s {med_title}",
-                    "message": (
-                        f"{member_name}'s {med_title} may be running low — "
-                        f"time to refill (supply runs out {days_phrase})."
-                    ),
-                    "acknowledged": False,
-                    "created_at": now_utc,
-                }
-            )
-        except Exception as e:
-            logger.warning(f"refill alert insert failed: {e}")
+        await _log_alert(
+            db,
+            owner_id=owner_user_id,
+            family_group_id=rem.get("family_group_id"),
+            member_id=rem.get("member_id"),
+            member_name=member_name,
+            a_type="medication_refill",
+            severity="warning",
+            title=f"Refill {member_name}'s {med_title}",
+            message=(
+                f"{member_name}'s {med_title} may be running low — "
+                f"time to refill (supply runs out {days_phrase})."
+            ),
+            now_utc=now_utc,
+        )
 
         counters["fired_refill"] += 1
 
     return counters
+
+
 class MedicationScheduler:
-    """Persistent background task wrapper. Starts on app startup, stops on shutdown."""
+    """Persistent background task wrapper."""
 
     def __init__(self, db, push_to_user, push_to_family_group):
         self.db = db
@@ -525,8 +539,8 @@ class MedicationScheduler:
                 )
                 fired_total = (
                     counters["fired_due"]
-                    + counters["fired_remind_30"]
-                    + counters["fired_escalate_2h"]
+                    + counters["fired_family_alert"]
+                    + counters["fired_routine_due"]
                     + refill_counters["fired_refill"]
                 )
                 if fired_total > 0:

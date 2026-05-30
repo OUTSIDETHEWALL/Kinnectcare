@@ -15,6 +15,7 @@ export default function Signup() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [inviteCode, setInviteCode] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -49,11 +50,42 @@ export default function Signup() {
 
           <Field label="Full name" value={name} onChangeText={setName} placeholder="Jane Smith" testID="signup-name" />
           <Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address" autoCapitalize="none" testID="signup-email" />
-          <Field label="Password" value={password} onChangeText={setPassword} placeholder="••••••••" secureTextEntry testID="signup-password" />
+
+          {/* Password with show/hide eye toggle. Min 6 chars enforced on submit. */}
+          <View style={{ marginTop: 16 }}>
+            <Text style={styles.label}>Password</Text>
+            <View style={styles.passwordRow}>
+              <TextInput
+                testID="signup-password"
+                style={styles.passwordInput}
+                placeholder="••••••••"
+                placeholderTextColor={Colors.textTertiary}
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry={!showPassword}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <TouchableOpacity
+                testID="signup-password-toggle"
+                style={styles.passwordEye}
+                onPress={() => setShowPassword((v) => !v)}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+              >
+                <Icon
+                  name={showPassword ? 'eye-off' : 'eye'}
+                  size={22}
+                  color={Colors.textSecondary}
+                />
+              </TouchableOpacity>
+            </View>
+          </View>
+
           <Field
             label="Family invite code (optional)"
             value={inviteCode}
-            onChangeText={(v) => setInviteCode(v.toUpperCase())}
+            onChangeText={(v: string) => setInviteCode(v.toUpperCase())}
             placeholder="KINN-XXXXXX"
             autoCapitalize="characters"
             testID="signup-invite-code"
@@ -112,6 +144,26 @@ const styles = StyleSheet.create({
   input: {
     backgroundColor: Colors.surface, borderRadius: 14, padding: 16, fontSize: 16,
     color: Colors.textPrimary, borderWidth: 1, borderColor: Colors.border,
+  },
+  passwordRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  passwordInput: {
+    flex: 1,
+    padding: 16,
+    fontSize: 16,
+    color: Colors.textPrimary,
+  },
+  passwordEye: {
+    width: 52,
+    height: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   cta: {
     marginTop: 28, height: 58, borderRadius: 16, backgroundColor: Colors.primary,

@@ -1536,6 +1536,7 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         "longitude": data.longitude,
         "timestamp": timestamp_iso,
         "fall_detected": bool(data.fall_detected),
+        "channelId": "sos",
     }
     devices_notified = await push_to_family_group(
         current["family_group_id"], push_title, push_body, push_data

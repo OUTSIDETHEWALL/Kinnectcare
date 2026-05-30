@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
   RefreshControl, Alert as RNAlert, Linking, ActivityIndicator, Modal, Platform,
@@ -27,6 +27,13 @@ export default function Dashboard() {
   //   3. The styling matches the rest of the app (large finger-friendly
   //      buttons for senior users, high-contrast brand colors)
   const [sosConfirmOpen, setSosConfirmOpen] = useState(false);
+  // 'idle' | 'dialing' — guards the "Yes, Call 911" button so multiple rapid
+  // taps cannot race the Linking.openURL intent (was failing ~1/10 times).
+  const [sosDialState, setSosDialState] = useState<'idle' | 'dialing'>('idle');
+  // Ref-based mutex — state updates batch async, so a second tap inside the
+  // same event loop tick can still see `sosDialState === 'idle'`. The ref is
+  // checked synchronously and is bulletproof against double-tap races.
+  const sosDialingRef = useRef(false);
 
   const load = async () => {
     try {
@@ -78,26 +85,32 @@ export default function Dashboard() {
     setSosConfirmOpen(true);
   };
 
-  // Step 2 — user confirmed in the modal. Fire the dialer SYNCHRONOUSLY in
-  // the same event handler tick (before React re-renders to close the modal),
-  // then close the modal and kick off background work. This ordering is
-  // critical: queueing the `tel:911` intent first guarantees the OS picks it
-  // up before our app yields to render the modal-close, eliminating the
-  // Android activity-launch race we hit on v6.
-  const confirmSOS = () => {
-    Linking.openURL('tel:911').catch(() => {
-      // Last-resort fallback if the OS refuses to launch the dialer
-      // (extremely rare on real phones — typically WiFi-only tablets).
-      RNAlert.alert(
-        '🆘 Call 911',
-        "Your phone's dialer couldn't be opened. Please dial 911 manually right now.",
-        [{ text: 'OK' }],
-      );
-    });
-    setSosConfirmOpen(false);
+  // Step 2 — user confirmed in the modal.
+  //
+  // SOS reliability hardening (was ~1/10 fail rate on v6.2):
+  //  • A useRef mutex blocks re-entry across render boundaries — fastest
+  //    possible synchronous guard against double-tap and onPress-during-
+  //    state-update races.
+  //  • We retry Linking.openURL up to 3x with 150ms backoff. Android
+  //    occasionally returns failure from the OS intent broker when an
+  //    activity transition (e.g. our Modal animation) overlaps the
+  //    ACTION_DIAL dispatch — a single retry resolves it nearly always.
+  //  • The modal stays open with the button in a "Calling..." disabled
+  //    state until the OS confirms the intent went through OR all retries
+  //    fail. Closing the modal is the LAST thing we do so the user never
+  //    sees a "modal closed but nothing happened" state.
+  //  • Background work (GPS, /sos alert, push fan-out) runs in parallel
+  //    and never blocks the dialer.
+  const confirmSOS = useCallback(async () => {
+    // Synchronous mutex — refs are NOT batched like state, so two taps
+    // within the same React commit cycle are perfectly serialised.
+    if (sosDialingRef.current) return;
+    sosDialingRef.current = true;
+    setSosDialState('dialing');
 
-    // Background: best-effort GPS + family alert + push fan-out. The dialer
-    // already has the foreground; this work runs silently.
+    // Kick off background work IMMEDIATELY in parallel — these calls do
+    // not block the dialer. Family/SMS fanout, GPS, and the /sos alert
+    // are best-effort; if they fail the user is still being dialed to 911.
     (async () => {
       try {
         let lat: number | undefined, lon: number | undefined;
@@ -115,7 +128,38 @@ export default function Dashboard() {
         load().catch(() => {});
       } catch (_e) {}
     })();
-  };
+
+    // Try the dialer up to 3 times. canOpenURL is intentionally NOT used —
+    // some Android OEMs return false for tel: even when the OS will happily
+    // launch the dialer, so we just trust openURL + retry.
+    let opened = false;
+    for (let attempt = 0; attempt < 3 && !opened; attempt++) {
+      try {
+        await Linking.openURL('tel:911');
+        opened = true;
+      } catch (_e) {
+        if (attempt < 2) {
+          // Tiny backoff lets the previous activity transition settle.
+          await new Promise((r) => setTimeout(r, 150));
+        }
+      }
+    }
+
+    if (!opened) {
+      // True hard failure (e.g. WiFi-only tablet with no dialer app).
+      RNAlert.alert(
+        '🆘 Call 911',
+        "Your phone's dialer couldn't be opened. Please dial 911 manually right now.",
+        [{ text: 'OK' }],
+      );
+    }
+
+    // ALL of these reset operations happen AFTER the dialer succeeds so
+    // the modal-close animation can never race the intent dispatch.
+    setSosConfirmOpen(false);
+    setSosDialState('idle');
+    sosDialingRef.current = false;
+  }, [load]);
 
   const quickCheckIn = (m: Member) => {
     // INSTANT: navigate immediately so the confirmation screen renders <1s.
@@ -274,7 +318,7 @@ export default function Dashboard() {
         transparent
         animationType="fade"
         statusBarTranslucent
-        onRequestClose={() => setSosConfirmOpen(false)}
+        onRequestClose={() => sosDialState === 'idle' && setSosConfirmOpen(false)}
       >
         <View style={styles.sosBackdrop}>
           <View style={styles.sosCard} testID="sos-confirm-modal">
@@ -286,20 +330,32 @@ export default function Dashboard() {
 
             <TouchableOpacity
               testID="sos-confirm-yes"
-              style={styles.sosCardConfirm}
+              style={[styles.sosCardConfirm, sosDialState === 'dialing' && styles.sosCardConfirmDisabled]}
               onPress={confirmSOS}
               activeOpacity={0.85}
+              disabled={sosDialState === 'dialing'}
             >
-              <Text style={styles.sosCardConfirmText}>Yes, Call 911</Text>
+              {sosDialState === 'dialing' ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  <ActivityIndicator color={Colors.surface} />
+                  <Text style={styles.sosCardConfirmText}>Calling 911...</Text>
+                </View>
+              ) : (
+                <Text style={styles.sosCardConfirmText}>Yes, Call 911</Text>
+              )}
             </TouchableOpacity>
 
             <TouchableOpacity
               testID="sos-confirm-cancel"
               style={styles.sosCardCancel}
-              onPress={() => setSosConfirmOpen(false)}
+              onPress={() => sosDialState === 'idle' && setSosConfirmOpen(false)}
               activeOpacity={0.85}
+              disabled={sosDialState === 'dialing'}
             >
-              <Text style={styles.sosCardCancelText}>Cancel</Text>
+              <Text style={[
+                styles.sosCardCancelText,
+                sosDialState === 'dialing' && { opacity: 0.4 },
+              ]}>Cancel</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -492,6 +548,7 @@ const styles = StyleSheet.create({
     boxShadow: '0px 6px 14px rgba(220,38,38,0.45)' as any,
     ...Platform.select({ android: { elevation: 6 } }),
   },
+  sosCardConfirmDisabled: { opacity: 0.75 },
   sosCardConfirmText: {
     color: Colors.surface, fontSize: 17, fontWeight: '900', letterSpacing: 0.3,
   },

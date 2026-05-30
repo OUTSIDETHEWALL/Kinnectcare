@@ -5570,6 +5570,95 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+  - agent: "main"
+    message: |
+      v6.3 medication / alert overhaul — backend changes ready for testing.
+
+      Code changes:
+
+      1) /app/backend/med_scheduler.py — REWRITTEN
+         - STAGE_DUE (T+0): self-push with categoryIdentifier 'MEDICATION_DUE'.
+           Channel: 'meds'. Fires once per (reminder, slot, local_date, stage).
+         - STAGE_FAMILY (T+15m): single family fan-out IF user has NOT yet
+           marked taken. Channel: 'meds'.
+         - REMOVED the old T+30 remind_30 and T+2h escalate_2h stages
+           entirely. Those caused spam AND the scheduler was throwing
+           NameError: STAGE_REMIND_30 every tick (half-renamed v6.3 code).
+         - Routines (category='routine') now also fire at T+0 with
+           categoryIdentifier 'ROUTINE_DUE'. NO family escalation for routines.
+         - MAX_STALE_MINUTES: 360 -> 16. Stops backfilling 6 hours of
+           pushes when a user adds a med for a past-slot earlier today.
+         - Every fired push ALSO writes to db.alerts so the Alerts tab
+           shows complete history (per user requirement).
+         - Idempotency unchanged: unique index on
+           (reminder_id, slot_time, local_date, stage).
+
+      2) /app/backend/expo_push.py — Adds channelId routing and
+         categoryId passthrough so Android lands the heads-up in the
+         right channel (meds / routines / sos / default) AND can show
+         action buttons (e.g. "I Took It").
+
+      3) /app/backend/server.py — SOS push now includes channelId='sos'.
+         No other behavior changes; alert row + SMS fanout untouched.
+
+      Please run a backend regression covering:
+
+        a) Idempotency / no spam:
+           - Login as demo@kinnship.app / password123.
+           - Create a medication reminder with `times: [{time: HH:MM}]`
+             where HH:MM is ~5 minutes in the past in the user's tz.
+           - POST /api/medications/_tick once.
+             Expected: counters.fired_due == 1, counters.fired_family_alert == 0.
+             One row inserted into db.alerts with type='medication'.
+           - POST /api/medications/_tick a SECOND time.
+             Expected: counters.fired_due == 0 (idempotent).
+
+        b) Family escalation after 15 minutes:
+           - Same user, create a med with a slot ~17 minutes in the past.
+           - POST /api/medications/_tick.
+             Expected: counters.fired_due == 1 AND
+                       counters.fired_family_alert == 1.
+             alerts collection gets BOTH a 'medication' row AND a
+             'medication_escalation' row for the member.
+           - POST /api/medications/_tick again.
+             Expected: both counters == 0.
+
+        c) Suppress family alert when user marked taken:
+           - Create a med with a slot ~10 min in the past.
+           - POST /api/reminders/{id}/mark { status: 'taken' }.
+           - POST /api/medications/_tick.
+             Expected: counters.fired_family_alert == 0 (skipped_taken
+             increments instead).
+
+        d) Routine fires once, no family alert:
+           - Create a `category='routine'` reminder with a slot ~5 min
+             in the past.
+           - POST /api/medications/_tick.
+             Expected: counters.fired_routine_due == 1,
+                       counters.fired_family_alert == 0.
+             One row in db.alerts with type='routine'.
+           - Second tick: counters.fired_routine_due == 0.
+
+        e) Stale-cutoff:
+           - Create a med with a slot 30 minutes in the past.
+           - POST /api/medications/_tick.
+             Expected: counters.fired_due == 0
+             (stale > MAX_STALE_MINUTES, silently skipped).
+
+        f) SOS regression:
+           - POST /api/sos { latitude: 33.4, longitude: -112.0 } returns 200.
+           - Response shape unchanged. The created alert has type='sos',
+             severity='critical'.
+
+        g) Scheduler health:
+           - Tail /var/log/supervisor/backend.err.log after restart.
+             Expected: NO occurrence of "STAGE_REMIND_30 is not defined".
+
+      DO NOT touch the frontend yet — user wants to manually verify on the
+      v6.2 device after a new EAS build incorporates these changes.
+
+
+agent_communication:
   - agent: "testing"
     message: |
       Manage Subscription backend endpoints VERIFIED — 27/28 functional
@@ -5716,3 +5805,124 @@ agent_communication:
       and documented acceptable behavior per the review request.
       Main agent: please summarize and finish.
 
+
+
+backend:
+  - task: "v6.3 Medication scheduler & alerts logging overhaul"
+    implemented: true
+    working: true
+    file: "/app/backend/med_scheduler.py, /app/backend/expo_push.py, /app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 13/13 v6.3 scenarios green.
+          Driver: /app/backend_test_v63.py against
+          https://family-guard-37.preview.emergentagent.com/api as
+          demo@kinnship.app / password123.
+
+          1. SCHEDULER HEALTH — "Medication scheduler loop started." present
+             after the latest restart. The last 'STAGE_REMIND_30 is not
+             defined' warning is at /var/log/supervisor/backend.err.log
+             line 3338 (process 3161); the latest server process is 3567
+             (line 3386). ZERO STAGE_REMIND_30 warnings since the v6.3
+             med_scheduler.py reload — confirmed via
+             grep ranges. ✓
+
+          2. IDEMPOTENCY — Reminder slot=HH:MM ~5min in past (UTC tz user):
+             tick #1 → fired_due=1, fired_family_alert=0; tick #2 →
+             fired_due=0. Unique index (reminder_id, slot_time, local_date,
+             stage) correctly suppresses duplicate. ✓
+
+          3. ALERTS LOGGING — GET /api/alerts shows a NEW row type='medication'
+             title='💊 Time to take your QA v6.3 Idempotency' created
+             within the last 10 min (severity='info'). ✓
+
+          4. FAMILY ESCALATION at T+15m — Built slot snapped to current-minute
+             minus 15m at a low-second-of-minute (≤25s) to land delta_min
+             deterministically in [15, 16). tick #1 → fired_due=1 AND
+             fired_family_alert=1 in a SINGLE tick (both stages fire
+             because the slot is older than both T+0 and T+15m offsets).
+             tick #2 → fired_due=0, fired_family_alert=0 (idempotent).
+             GET /api/alerts shows a NEW row type='medication_escalation',
+             severity='critical' for this reminder. ✓
+
+          5. SUPPRESS WHEN TAKEN — Slot ~5min in past, tick #1 fires due,
+             then POST /api/reminders/{id}/mark {status:'taken'} → 200.
+             tick #2 → fired_due=0 AND skipped_taken=1 (the
+             _has_taken_log_after early-return gate). Family alert is
+             gated by the same check, so escalation is suppressed once
+             the medication_logs 'taken' row exists.  ✓
+
+          6. ROUTINES (category='routine') — Slot ~5min in past:
+             tick #1 → fired_routine_due=1, fired_family_alert=0 (routines
+             never escalate to family). GET /api/alerts shows new row
+             type='routine', severity='info', title="🌿 Time for ...".
+             tick #2 → fired_routine_due=0 (idempotent). ✓
+
+          7. STALE CUTOFF — Slot 30 min in past (>MAX_STALE_MINUTES=16):
+             fired_due remained at 0 for that reminder; GET
+             /api/medications/_stages/{rid} returned an empty 'stages'
+             list — the slot was silently skipped. No 6-hour backfill
+             flood. ✓
+
+          8. SOS REGRESSION — POST /api/sos {latitude:33.4, longitude:-112.0}
+             → 200 with alert_id; the corresponding type='sos' row is in
+             db.alerts via GET /api/alerts.  Backend logs confirm push
+             went out with channelId='sos' (push_to_family_group fan-out
+             to all family users, plus mocked SMS fan-out to 3 emergency
+             contacts).  ✓
+
+          9. CLEANUP — All 5 test reminders DELETE-ed (5/5). ✓
+
+          POST-RUN backend.err.log inspection: no new 'Medication scheduler
+          tick failed' lines, no new tracebacks (only the pre-existing
+          benign passlib bcrypt __about__ AttributeError warning, which is
+          unrelated to this overhaul). Scheduler counters in the live
+          loop log already show the new v6.3 shape, e.g.:
+            Medication scheduler tick → {'scanned_reminders': 444,
+              'fired_due': 0, 'fired_family_alert': 1,
+              'fired_routine_due': 0, 'skipped_taken': 0}
+              + {'scanned_refill': 6, 'fired_refill': 0}
+
+          Channel/category passthrough (expo_push.py + server.py SOS
+          payload channelId='sos') was indirectly verified — push API
+          responses are 200 OK and no payload-shape errors were thrown
+          by the Expo client.
+
+          Verdict: v6.3 spec is fully met. No regressions detected.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      v6.3 medication scheduler & alerts logging overhaul VERIFIED PASS.
+      Driver: /app/backend_test_v63.py — 13/13 scenarios green.
+
+      Key confirmations:
+        • No "STAGE_REMIND_30 is not defined" warnings in backend.err.log
+          since the latest restart (the only occurrences are pre-restart
+          on lines 3319-3338 from a previous process, well before
+          the current server process 3567).
+        • Scheduler is firing: fired_due, fired_family_alert,
+          fired_routine_due, skipped_taken all working as spec'd.
+        • Unique-index idempotency holds — every scenario's second tick
+          returned 0s.
+        • db.alerts now contains rows for type ∈ {medication,
+          medication_escalation, routine, sos} as required for the
+          Alerts tab history.
+        • MAX_STALE_MINUTES=16 enforced — 30-min-stale slot silently
+          skipped, no backfill flood.
+        • SOS regression is clean: 200 + alert row + push + SMS fanout.
+
+      Test-side note for the main agent: my first run failed scenarios
+      4a/4c because my naïve `(now-15m30s).strftime('%H:%M')` rounded
+      DOWN to a minute boundary, pushing delta past MAX_STALE_MINUTES=16
+      once the tick HTTP round-trip elapsed.  I fixed the test by
+      waiting until second-of-minute ≤ 25 and snapping the slot to
+      `now.replace(second=0)-15min`; second run was clean.  This is a
+      test-only issue — the production scheduler is correct.
+
+      Please summarize and finish.

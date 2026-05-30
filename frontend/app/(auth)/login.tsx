@@ -14,6 +14,7 @@ export default function Login() {
   const { login } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const onSubmit = async () => {
@@ -72,15 +73,32 @@ export default function Login() {
 
           <View style={{ marginTop: 16 }}>
             <Text style={styles.label}>Password</Text>
-            <TextInput
-              testID="login-password"
-              style={styles.input}
-              placeholder="••••••••"
-              placeholderTextColor={Colors.textTertiary}
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry
-            />
+            <View style={styles.passwordRow}>
+              <TextInput
+                testID="login-password"
+                style={styles.passwordInput}
+                placeholder="••••••••"
+                placeholderTextColor={Colors.textTertiary}
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry={!showPassword}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <TouchableOpacity
+                testID="login-password-toggle"
+                style={styles.passwordEye}
+                onPress={() => setShowPassword((v) => !v)}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+              >
+                <Icon
+                  name={showPassword ? 'eye-off' : 'eye'}
+                  size={22}
+                  color={Colors.textSecondary}
+                />
+              </TouchableOpacity>
+            </View>
           </View>
 
           <TouchableOpacity testID="login-submit" style={styles.cta} onPress={onSubmit} disabled={loading} activeOpacity={0.85}>
@@ -124,6 +142,26 @@ const styles = StyleSheet.create({
   input: {
     backgroundColor: Colors.surface, borderRadius: 14, padding: 16, fontSize: 16,
     color: Colors.textPrimary, borderWidth: 1, borderColor: Colors.border,
+  },
+  passwordRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  passwordInput: {
+    flex: 1,
+    padding: 16,
+    fontSize: 16,
+    color: Colors.textPrimary,
+  },
+  passwordEye: {
+    width: 52,
+    height: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   cta: {
     marginTop: 28, height: 58, borderRadius: 16, backgroundColor: Colors.primary,
