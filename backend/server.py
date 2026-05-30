@@ -1330,8 +1330,12 @@ def _billing_required():
 
 
 @api_router.get("/billing/status")
-async def billing_status(current=Depends(get_current_user)):
-    return await billing.build_status_payload(current, db)
+async def billing_status(portal: int = 0, current=Depends(get_current_user)):
+    # Only mint a Stripe billing portal URL when the client explicitly asks
+    # (e.g., the Manage Subscription screen tapping "Payment methods").
+    # Portal session creation is slow + rate-limited; mass-firing it on every
+    # screen focus was causing the perceived perf regression in v6.
+    return await billing.build_status_payload(current, db, include_portal_url=bool(portal))
 
 
 @api_router.post("/billing/cancel")

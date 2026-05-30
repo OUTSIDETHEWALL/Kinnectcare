@@ -8,6 +8,7 @@ import { useAuth } from '../src/AuthContext';
 import { APP_NAME, COMPANY_NAME } from '../src/legal';
 import { getBillingStatus, BillingStatus, api } from '../src/api';
 import { isFallEnabled, setFallEnabled, isFallAvailable } from '../src/fallDetector';
+import { getPushStatus, subscribePushStatus, PushStatus, registerForPushNotifications } from '../src/push';
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -19,6 +20,51 @@ export default function SettingsScreen() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [fallOn, setFallOn] = useState<boolean>(true);
   const [fallAvailable, setFallAvailable] = useState<boolean>(false);
+  // Live push-registration status, surfaced in the UI so users can see why
+  // notifications aren't firing without us asking them to look at device logs.
+  const [pushStatus, setPushStatus] = useState<PushStatus>(getPushStatus());
+  const [pushRetrying, setPushRetrying] = useState(false);
+
+  useEffect(() => subscribePushStatus(setPushStatus), []);
+
+  const retryPushRegistration = async () => {
+    setPushRetrying(true);
+    try { await registerForPushNotifications(); } finally { setPushRetrying(false); }
+  };
+
+  function pushStatusCopy(s: PushStatus): { headline: string; sub: string; ok: boolean } {
+    switch (s.state) {
+      case 'registered':
+        return { ok: true,
+          headline: 'Notifications enabled',
+          sub: `Token: ${s.token.slice(0, 22)}…${s.token.slice(-6)}` };
+      case 'permission_denied':
+        return { ok: false,
+          headline: 'Permission denied',
+          sub: 'Open phone Settings → Apps → Kinnship → Notifications → Allow.' };
+      case 'no_project_id':
+        return { ok: false,
+          headline: 'Configuration error',
+          sub: 'Missing EAS project ID. Reinstall the latest build.' };
+      case 'unsupported':
+        return { ok: false,
+          headline: 'Not supported here',
+          sub: `Push doesn't run on ${s.reason}. Install the device build.` };
+      case 'token_error':
+        return { ok: false,
+          headline: 'Could not get push token',
+          sub: s.error };
+      case 'api_error':
+        return { ok: false,
+          headline: 'Could not save token to server',
+          sub: s.error };
+      default:
+        return { ok: false,
+          headline: 'Setting up notifications…',
+          sub: 'Tap Retry below if this persists for more than a minute.' };
+    }
+  }
+  const pushCopy = pushStatusCopy(pushStatus);
 
   useEffect(() => {
     (async () => {
@@ -148,6 +194,38 @@ export default function SettingsScreen() {
                 <Text style={styles.planCtaSecondaryText}>Manage Subscription ›</Text>
               </TouchableOpacity>
             )}
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Notifications</Text>
+          <View style={styles.card}>
+            <View style={styles.pushRow} testID="settings-push-row">
+              <View style={{ flex: 1, paddingRight: 12 }}>
+                <View style={styles.pushTitleRow}>
+                  <Text style={styles.pushIcon}>{pushCopy.ok ? '🔔' : '🔕'}</Text>
+                  <Text style={[styles.pushTitle, !pushCopy.ok && { color: Colors.error }]}>
+                    {pushCopy.headline}
+                  </Text>
+                </View>
+                <Text style={styles.pushSub}>{pushCopy.sub}</Text>
+              </View>
+              {!pushCopy.ok ? (
+                <TouchableOpacity
+                  testID="settings-push-retry"
+                  style={styles.pushRetryBtn}
+                  onPress={retryPushRegistration}
+                  disabled={pushRetrying}
+                  activeOpacity={0.85}
+                >
+                  {pushRetrying ? (
+                    <ActivityIndicator color={Colors.primary} />
+                  ) : (
+                    <Text style={styles.pushRetryText}>Retry</Text>
+                  )}
+                </TouchableOpacity>
+              ) : null}
+            </View>
           </View>
         </View>
 
@@ -453,4 +531,19 @@ const styles = StyleSheet.create({
   fallTitle: { fontSize: 15, fontWeight: '800', color: Colors.textPrimary },
   fallBody: { fontSize: 12.5, color: Colors.textSecondary, marginTop: 4, lineHeight: 18 },
   fallUnavail: { marginTop: 6, fontSize: 11, color: Colors.textTertiary, fontStyle: 'italic' },
+  // Push-notification diagnostic row — surfaces registration status to user.
+  pushRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 14,
+  },
+  pushTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  pushIcon: { fontSize: 18 },
+  pushTitle: { fontSize: 15, fontWeight: '800', color: Colors.textPrimary },
+  pushSub: { fontSize: 12.5, color: Colors.textSecondary, marginTop: 4, lineHeight: 18 },
+  pushRetryBtn: {
+    paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10,
+    backgroundColor: Colors.tertiary,
+    borderWidth: 1, borderColor: Colors.primary, minWidth: 64, alignItems: 'center',
+  },
+  pushRetryText: { fontSize: 13, fontWeight: '800', color: Colors.primary },
 });

@@ -92,12 +92,10 @@ export default function UpgradeScreen() {
   };
 
   const onManage = async () => {
-    if (!status?.manage_url) return;
-    if (Platform.OS === 'web') {
-      window.open(status.manage_url, '_blank');
-    } else {
-      await WebBrowser.openBrowserAsync(status.manage_url);
-    }
+    // Manage Subscription is fully handled by the dedicated screen now (which
+    // also gracefully mints a Stripe portal URL on demand). Avoid duplicating
+    // the portal-fetch logic here.
+    router.push('/manage-subscription');
   };
 
   const isPaid = status?.plan === 'family_plan';

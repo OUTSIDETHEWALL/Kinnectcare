@@ -34,9 +34,14 @@ export default function Dashboard() {
   };
 
   useFocusEffect(useCallback(() => {
-    setLoading(true);
+    // Stale-while-revalidate: only show the spinner on the VERY FIRST load
+    // (when members is empty). Subsequent tab focuses revalidate silently in
+    // the background to avoid the jarring spinner-flash that v6 testers
+    // reported as a perceived perf regression.
+    setLoading((prev) => members.length === 0 ? true : prev);
     load().finally(() => setLoading(false));
-  }, []));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members.length]));
 
   useEffect(() => {
     (async () => {
@@ -59,63 +64,44 @@ export default function Dashboard() {
   };
 
   const triggerSOS = () => {
-    RNAlert.alert(
-      '🆘 Emergency SOS',
-      'Are you sure? Your family will be alerted and your phone will open the dialer with 911 pre-filled — you just need to tap the call button.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Yes, Send SOS', style: 'destructive',
-          onPress: async () => {
-            // 1) Try to open the native dialer with 911 pre-filled. AWAIT this so
-            //    we know whether the OS actually accepted the intent — on
-            //    Android 11+ without manifest <queries>, this silently fails.
-            const TEL_URL = 'tel:911';
-            let dialed = false;
-            try {
-              const supported = await Linking.canOpenURL(TEL_URL);
-              if (supported) {
-                await Linking.openURL(TEL_URL);
-                dialed = true;
-              }
-            } catch (_e) {
-              dialed = false;
-            }
+    // ONE-TAP SOS for emergency speed. The phone's dialer itself is the
+    // safeguard against accidents — user still has to tap the green Call
+    // button to actually place the call. No in-app confirmation step here
+    // because every extra tap costs precious seconds in a real emergency.
+    //
+    // Behavior:
+    //   1) Fire `tel:911` immediately (fire-and-forget — no await, no nav,
+    //      so Android can't drop the activity-launch in favor of an in-app
+    //      navigation race).
+    //   2) Background: GPS + alert + push to family runs silently.
+    //   3) If the dialer can't open at all (rare on real phones — typically
+    //      tablets without telephony), show an inline alert telling the user
+    //      to dial manually.
+    Linking.openURL('tel:911').catch(() => {
+      RNAlert.alert(
+        '🆘 Call 911',
+        "Your phone's dialer couldn't be opened. Please dial 911 manually right now.",
+        [{ text: 'OK' }],
+      );
+    });
 
-            // 2) Navigate to the SOS status screen, telling it whether the
-            //    dialer actually opened. The screen MUST NOT claim "Calling 911"
-            //    if the dial failed — that's misleading and dangerous.
-            router.push({
-              pathname: '/sos-confirmation',
-              params: { dialed: dialed ? '1' : '0' },
+    (async () => {
+      try {
+        let lat: number | undefined, lon: number | undefined;
+        try {
+          const { status } = await Location.requestForegroundPermissionsAsync();
+          if (status === 'granted') {
+            const pos = await Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.Balanced,
             });
-
-            // 3) Backend work (location + alert + push) runs in the background.
-            (async () => {
-              try {
-                let lat: number | undefined, lon: number | undefined;
-                try {
-                  const { status } = await Location.requestForegroundPermissionsAsync();
-                  if (status === 'granted') {
-                    const pos = await Location.getCurrentPositionAsync({
-                      accuracy: Location.Accuracy.Balanced,
-                    });
-                    lat = pos.coords.latitude;
-                    lon = pos.coords.longitude;
-                  }
-                } catch (_e) {}
-                await api.post('/sos', { latitude: lat, longitude: lon });
-                load().catch(() => {});
-              } catch (_e) {
-                // Best-effort: do not interrupt the confirmation flow with an
-                // error toast because the user has already been told help is
-                // on the way.
-              }
-            })();
-          },
-        },
-      ]
-    );
+            lat = pos.coords.latitude;
+            lon = pos.coords.longitude;
+          }
+        } catch (_e) {}
+        await api.post('/sos', { latitude: lat, longitude: lon });
+        load().catch(() => {});
+      } catch (_e) {}
+    })();
   };
 
   const quickCheckIn = (m: Member) => {

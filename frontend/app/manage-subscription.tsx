@@ -97,8 +97,11 @@ export default function ManageSubscription() {
     if (busy) return;
     setBusy(true);
     try {
-      // Stripe portal URLs are short-lived & single-use. Always fetch a fresh one.
-      const r = await api.get('/billing/status');
+      // Explicitly ask the backend to mint a fresh portal URL (?portal=1).
+      // The regular /billing/status request does NOT include manage_url
+      // because portal session creation is rate-limited and slow — we only
+      // pay that cost when the user taps "Payment methods & invoices".
+      const r = await api.get('/billing/status?portal=1');
       setStatus(r.data);
       const url: string | null = r.data?.manage_url;
       if (!url) {

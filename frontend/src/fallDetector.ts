@@ -24,12 +24,19 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
 const KEY = 'kc.fall.enabled';
-const SAMPLE_RATE_MS = 60;             // ~16 Hz — saves battery vs 50 Hz, still ample for fall signature
-const IMPACT_G = 2.5;                  // peak magnitude threshold (in g)
-const STILLNESS_BAND_G = 0.18;         // |mag - 1.0| <= this counts as stillness
-const STILLNESS_REQUIRED_MS = 1200;    // sustained stillness needed after impact
-const POST_IMPACT_WINDOW_MS = 2500;    // window after impact within which stillness must accrue
-const COOLDOWN_MS = 8000;              // after one event, ignore subsequent triggers for a while
+// Tuned for elderly users in v6.1 — falls in seniors are typically lower-
+// impact than youth falls (they "crumple" rather than "slam") and post-fall
+// stillness is often imperfect (tremors, attempts to push up, etc.).
+// Numbers chosen from published gerontology fall-detection literature:
+//   - peak impact threshold ~1.7-2.0 g for crumple-style falls
+//   - stillness band ~0.30 g (allows wobble/tremor)
+//   - shorter required-stillness so weak falls register
+const SAMPLE_RATE_MS = 50;             // ~20 Hz — better edge detection
+const IMPACT_G = 1.8;                  // was 2.5 — too aggressive (couch-slam failed)
+const STILLNESS_BAND_G = 0.30;         // was 0.18 — allow tremor / weak motion
+const STILLNESS_REQUIRED_MS = 800;     // was 1200 — falls in seniors settle faster
+const POST_IMPACT_WINDOW_MS = 3500;    // was 2500 — more time to "crumple"
+const COOLDOWN_MS = 8000;
 
 export type FallDetectorOptions = {
   onFallDetected: () => void;

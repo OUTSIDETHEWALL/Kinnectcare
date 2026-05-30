@@ -396,7 +396,7 @@ async def resume_subscription(db, user_doc: dict) -> dict:
     return {"resumed": True}
 
 
-async def build_status_payload(user_doc: dict, db, free_limit: int = FREE_LIMIT_DEFAULT) -> dict:
+async def build_status_payload(user_doc: dict, db, free_limit: int = FREE_LIMIT_DEFAULT, include_portal_url: bool = False) -> dict:
     sub = user_doc.get("subscription") or {}
     plan = plan_for_user(user_doc)
     fgid = user_doc.get("family_group_id")
@@ -475,8 +475,12 @@ async def build_status_payload(user_doc: dict, db, free_limit: int = FREE_LIMIT_
         "paid_plans": paid_plans,
         "annual_savings_cents": annual_savings_cents(),
     }
-    # Best-effort billing portal link (paid users only)
-    if is_paid(user_doc) and sub.get("stripe_customer_id") and is_configured():
+    # Best-effort billing portal link (paid users only). This is gated by an
+    # explicit `include_portal_url` flag because the Stripe portal endpoint is
+    # slow (~300-600ms) and rate-limited. We skip it for the general
+    # /billing/status endpoint and only mint it on-demand from the Manage
+    # Subscription screen via /billing/status?portal=1.
+    if include_portal_url and is_paid(user_doc) and sub.get("stripe_customer_id") and is_configured():
         try:
             portal = stripe.billing_portal.Session.create(
                 customer=sub["stripe_customer_id"],

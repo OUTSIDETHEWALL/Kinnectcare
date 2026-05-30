@@ -5,6 +5,38 @@ import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { api } from './api';
 
+// Hardcoded fallback in case Constants.expoConfig is unavailable (this happens
+// in some standalone build configurations). Keep in sync with app.json →
+// extra.eas.projectId. Without a projectId, getExpoPushTokenAsync() throws on
+// FCM/APNs builds and push tokens never register.
+const HARDCODED_EAS_PROJECT_ID = '11cb65a8-eab0-4745-9b4a-7b8964805381';
+
+// In-memory cache of the last registration result so Settings can show it
+// without re-running the whole permission/token flow.
+export type PushStatus =
+  | { state: 'unknown' }
+  | { state: 'unsupported'; reason: string }
+  | { state: 'permission_denied' }
+  | { state: 'no_project_id' }
+  | { state: 'token_error'; error: string }
+  | { state: 'api_error'; error: string }
+  | { state: 'registered'; token: string };
+
+let lastStatus: PushStatus = { state: 'unknown' };
+const listeners = new Set<(s: PushStatus) => void>();
+function setStatus(s: PushStatus) {
+  lastStatus = s;
+  listeners.forEach((cb) => cb(s));
+}
+export function getPushStatus(): PushStatus {
+  return lastStatus;
+}
+export function subscribePushStatus(cb: (s: PushStatus) => void): () => void {
+  listeners.add(cb);
+  cb(lastStatus);
+  return () => listeners.delete(cb);
+}
+
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowBanner: true,
@@ -27,8 +59,14 @@ export async function ensureNotificationChannel() {
 
 export async function registerForPushNotifications(): Promise<string | null> {
   try {
-    if (Platform.OS === 'web') return null;
-    if (!Device.isDevice) return null;
+    if (Platform.OS === 'web') {
+      setStatus({ state: 'unsupported', reason: 'web preview' });
+      return null;
+    }
+    if (!Device.isDevice) {
+      setStatus({ state: 'unsupported', reason: 'simulator/emulator' });
+      return null;
+    }
 
     await ensureNotificationChannel();
 
@@ -38,24 +76,49 @@ export async function registerForPushNotifications(): Promise<string | null> {
       const { status } = await Notifications.requestPermissionsAsync();
       finalStatus = status;
     }
-    if (finalStatus !== 'granted') return null;
+    if (finalStatus !== 'granted') {
+      setStatus({ state: 'permission_denied' });
+      return null;
+    }
 
+    // Resolve the EAS project ID. Try every avenue Expo SDK might surface it,
+    // then fall back to the hardcoded constant. Without this, FCM token
+    // generation fails silently on Android standalone builds.
     const projectId =
       process.env.EXPO_PUBLIC_EAS_PROJECT_ID ||
       Constants?.expoConfig?.extra?.eas?.projectId ||
-      (Constants as any)?.easConfig?.projectId;
+      (Constants as any)?.easConfig?.projectId ||
+      HARDCODED_EAS_PROJECT_ID;
 
-    const validProjectId = projectId && projectId !== 'REPLACE_WITH_EAS_PROJECT_ID' ? projectId : undefined;
-
-    const token = validProjectId
-      ? (await Notifications.getExpoPushTokenAsync({ projectId: validProjectId })).data
-      : (await Notifications.getExpoPushTokenAsync()).data;
-
-    if (token) {
-      await api.post('/auth/push-token', { token, platform: Platform.OS }).catch(() => {});
+    if (!projectId || projectId === 'REPLACE_WITH_EAS_PROJECT_ID') {
+      setStatus({ state: 'no_project_id' });
+      return null;
     }
-    return token;
-  } catch (_e) {
+
+    let token: string;
+    try {
+      const r = await Notifications.getExpoPushTokenAsync({ projectId });
+      token = r.data;
+    } catch (e: any) {
+      setStatus({ state: 'token_error', error: e?.message || String(e) });
+      return null;
+    }
+
+    if (!token) {
+      setStatus({ state: 'token_error', error: 'empty token returned' });
+      return null;
+    }
+
+    try {
+      await api.post('/auth/push-token', { token, platform: Platform.OS });
+      setStatus({ state: 'registered', token });
+      return token;
+    } catch (e: any) {
+      setStatus({ state: 'api_error', error: e?.message || String(e) });
+      return null;
+    }
+  } catch (e: any) {
+    setStatus({ state: 'token_error', error: e?.message || String(e) });
     return null;
   }
 }

@@ -38,11 +38,10 @@ export function FallDetectionOverlay() {
     progress.stopAnimation();
   };
 
-  // Trigger SOS in the same way the manual SOS button does.
+  // Trigger SOS the same way the manual SOS button does (one-tap, dialer-only).
   const triggerSOS = () => {
-    // INSTANT: dial 911 + navigate to confirmation
+    // Open dialer with 911 (fire and forget — no nav, no race).
     Linking.openURL('tel:911').catch(() => {});
-    router.push({ pathname: '/sos-confirmation', params: { reason: 'fall' } });
     // Background: best-effort GPS + push to family.
     (async () => {
       try {
@@ -60,8 +59,6 @@ export function FallDetectionOverlay() {
         await api.post('/sos', {
           latitude: lat,
           longitude: lon,
-          // We re-use the SOS endpoint; family receives the same push, just with
-          // an alert-type hint that this came from automatic fall detection.
           fall_detected: true,
         });
       } catch (_e) {}
