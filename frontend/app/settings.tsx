@@ -279,6 +279,13 @@ export default function SettingsScreen() {
             <Row label="Email" value={user?.email || '—'} />
             <Divider />
             <Row label="Time zone" value={user?.timezone || 'UTC'} />
+            <Divider />
+            <NavRow
+              testID="settings-change-password"
+              icon="🔒"
+              label="Change Password"
+              onPress={() => router.push('/change-password')}
+            />
           </View>
         </View>
 
