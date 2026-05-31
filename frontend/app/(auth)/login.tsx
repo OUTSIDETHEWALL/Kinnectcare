@@ -8,6 +8,8 @@ import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
 import { useAuth } from '../../src/AuthContext';
+import { hasPinForUser, markUnlocked, resetAttempts } from '../../src/pinAuth';
+import { api as apiClient } from '../../src/api';
 
 export default function Login() {
   const router = useRouter();
@@ -38,6 +40,29 @@ export default function Login() {
     try {
       await login(emailTrim, passwordTrim);
       setFailHint(null);
+      // After successful email/password login decide where to go:
+      //   • If a PIN is already saved for this user on THIS device →
+      //     re-authenticating with a password is strictly stronger than
+      //     the PIN, so we mark unlocked-for-this-session, reset any
+      //     failed-PIN counter, and drop them on the dashboard.
+      //   • If no PIN exists yet → route to the PIN setup screen.
+      // /auth/me is the source of truth for the freshly-authenticated
+      // user id (AuthContext's setUser may not have flushed yet).
+      try {
+        const me = await apiClient.get('/auth/me');
+        const uid: string | undefined = me?.data?.id;
+        if (uid) {
+          await resetAttempts(uid);
+          const has = await hasPinForUser(uid);
+          if (has) {
+            markUnlocked(uid);
+            router.replace('/(tabs)/dashboard');
+          } else {
+            router.replace('/(auth)/pin-setup');
+          }
+          return;
+        }
+      } catch (_e) {}
       router.replace('/(tabs)/dashboard');
     } catch (e: any) {
       // ROOT-CAUSE-DRIVEN FAILURE UX

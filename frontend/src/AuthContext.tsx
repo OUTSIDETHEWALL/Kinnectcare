@@ -3,6 +3,7 @@ import { api, saveToken, clearToken, User } from './api';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { forgetSessionUnlock } from './pinAuth';
 
 const TOKEN_KEY = 'kc_token';
 
@@ -75,6 +76,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = async () => {
+    // Forget any in-memory "unlocked-this-session" flag for the
+    // currently-signed-in user, so the next sign-in (even on the same
+    // device account) re-prompts for the PIN. The PIN itself stays in
+    // SecureStore — it's only invalidated when the user explicitly
+    // disables it from Settings or deletes the app.
+    forgetSessionUnlock(user?.id);
     await clearToken();
     setUser(null);
   };

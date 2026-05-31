@@ -8,6 +8,7 @@ import { Colors } from '../src/theme';
 import { registerForPushNotifications, useNotificationListeners } from '../src/push';
 import { isOnboardingDone } from '../src/onboardingStore';
 import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
+import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
 
 function RootNav() {
   const { user, loading } = useAuth();
@@ -15,6 +16,12 @@ function RootNav() {
   const router = useRouter();
   const [onboardingChecked, setOnboardingChecked] = useState(false);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
+  // PIN gate state: whether THIS user has a PIN set on this device, and
+  // whether they've already unlocked-it-this-session. We re-check the
+  // "has PIN" flag whenever the authenticated user changes (sign-in,
+  // sign-out, account switch on the same device).
+  const [pinChecked, setPinChecked] = useState(false);
+  const [needsPinUnlock, setNeedsPinUnlock] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -23,6 +30,26 @@ function RootNav() {
       setOnboardingChecked(true);
     })();
   }, []);
+
+  // Re-evaluate the PIN gate whenever the auth user changes. If the
+  // user has a PIN saved AND they haven't unlocked-this-session yet,
+  // we redirect to the PIN-login screen below.
+  useEffect(() => {
+    (async () => {
+      if (!user?.id) {
+        setNeedsPinUnlock(false);
+        setPinChecked(true);
+        return;
+      }
+      const hasPin = await hasPinForUser(user.id);
+      if (hasPin && !isUnlockedNow(user.id)) {
+        setNeedsPinUnlock(true);
+      } else {
+        setNeedsPinUnlock(false);
+      }
+      setPinChecked(true);
+    })();
+  }, [user?.id]);
 
   useNotificationListeners((data) => {
     // Deep-link by notification type.
@@ -82,16 +109,19 @@ function RootNav() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (loading || !onboardingChecked) return;
+    if (loading || !onboardingChecked || !pinChecked) return;
     const inAuthGroup = segments[0] === '(auth)';
     const isWelcome = !segments[0] || segments[0] === ('index' as any);
     const isOnboarding = segments[0] === 'onboarding';
     const isPublic =
       segments[0] === 'privacy-policy' || segments[0] === 'terms-of-service';
+    // Which (auth) sub-route we're on, so we can let pin-login &
+    // pin-setup live "inside" the authenticated session without
+    // bouncing the user back to the dashboard.
+    const authSubroute = ((segments as unknown as string[])[1] || '') as string;
+    const onPinScreen = inAuthGroup && (authSubroute === 'pin-login' || authSubroute === 'pin-setup');
 
     // First-time users (not logged in, no onboarding flag) go to onboarding first.
-    // Re-verify the storage flag whenever we'd redirect — handles the case where the
-    // user just pressed "Get Started" / Skip and the in-memory flag is stale.
     if (!user && needsOnboarding && !isOnboarding && !isPublic) {
       (async () => {
         const stillNeeds = !(await isOnboardingDone());
@@ -105,12 +135,24 @@ function RootNav() {
     }
     if (!user && !inAuthGroup && !isWelcome && !isOnboarding && !isPublic) {
       router.replace('/');
-    } else if (user && (inAuthGroup || isWelcome || isOnboarding)) {
+      return;
+    }
+    // PIN GATE — authenticated user with a saved PIN must enter it
+    // before anything else. Allow them to remain on the pin-login or
+    // pin-setup screens; redirect from anywhere else.
+    if (user && needsPinUnlock && !onPinScreen) {
+      router.replace('/(auth)/pin-login');
+      return;
+    }
+    if (user && !needsPinUnlock && (inAuthGroup || isWelcome || isOnboarding)) {
+      // Only auto-bounce out of (auth) once they've cleared the PIN
+      // gate (or there is no PIN gate). Otherwise the redirect above
+      // would compete with this one.
       router.replace('/(tabs)/dashboard');
     }
-  }, [user, loading, segments, onboardingChecked, needsOnboarding]);
+  }, [user, loading, segments, onboardingChecked, needsOnboarding, pinChecked, needsPinUnlock]);
 
-  if (loading || !onboardingChecked) {
+  if (loading || !onboardingChecked || (user && !pinChecked)) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: Colors.background }}>
         <ActivityIndicator size="large" color={Colors.primary} />
