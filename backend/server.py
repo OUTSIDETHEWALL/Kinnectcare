@@ -814,7 +814,7 @@ async def _send_reset_email(to_email: str, code: str) -> bool:
         msg["To"] = to_email
         msg.set_content(
             f"Hi,\n\nYour Kinnship password reset code is: {code}\n\n"
-            "This code expires in 15 minutes. If you didn't request this, "
+            "This code expires in 60 minutes. If you didn't request this, "
             "you can safely ignore this email.\n\n— Kinnship Safety"
         )
         with smtplib.SMTP(host, port) as s:
@@ -827,6 +827,13 @@ async def _send_reset_email(to_email: str, code: str) -> bool:
         return False
 
 
+# Reset-code TTL.  Increased from 15 → 60 minutes per user feedback —
+# elderly users routinely need more than 15min to find the email, open it,
+# switch back to the app, and complete the reset flow.  60 min is the
+# industry-standard window (Google / Microsoft both use ~1 hour).
+PASSWORD_RESET_TTL_MINUTES = 60
+
+
 @api_router.post("/auth/forgot-password")
 async def forgot_password(data: ForgotPasswordRequest):
     """Generate a reset code, store with expiry, deliver via email."""
@@ -837,7 +844,7 @@ async def forgot_password(data: ForgotPasswordRequest):
     if user:
         # Hash the code before storing — never store raw codes.
         code_hash = hash_password(code)
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_TTL_MINUTES)
         await db.password_resets.update_one(
             {"user_id": user["id"]},
             {
@@ -858,7 +865,8 @@ async def forgot_password(data: ForgotPasswordRequest):
         "ok": True,
         "message": (
             "If an account exists for that email, we've sent a reset code. "
-            "Check your inbox (and spam) in the next 1-2 minutes."
+            "Check your inbox (and spam) in the next 1-2 minutes. "
+            f"The code is valid for {PASSWORD_RESET_TTL_MINUTES} minutes."
         ),
     }
 
