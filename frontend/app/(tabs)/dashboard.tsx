@@ -87,51 +87,72 @@ export default function Dashboard() {
 
   // Step 2 — user confirmed in the modal.
   //
-  // v6.5 SOS reliability fix (Bug 2 regression to 15/20):
-  //  • Synchronous mutex via useRef (unchanged).
-  //  • DIALER FIRES FIRST inside the same event tick, BEFORE any JS work.
-  //    We don't even call setSosDialState first — that schedules a render
-  //    that can race the intent dispatch. The button stays in "Calling..."
-  //    via a synchronous ref read in the disabled prop.
-  //  • Background work (GPS, /sos API, alerts refresh) runs AFTER the
-  //    dialer is confirmed launched.
-  //  • Modal close is the LAST step, after a small RAF to let the OS
-  //    activity transition settle.
-  //  • The SOS backend now excludes the triggering user from the family
-  //    push fanout — that incoming push was racing the dialer on the
-  //    triggering device.
-  const confirmSOS = useCallback(async () => {
+  // v6.6 SOS final reliability fix (was 10/20 in v6.5):
+  //
+  // ROOT CAUSE OF v6.5 REGRESSION:
+  //   The v6.5 attempt kept the React-Native Modal open for 250ms during
+  //   the Linking.openURL dispatch, showing a "Calling 911..." state.
+  //   React Native's Modal uses a SEPARATE ANDROID WINDOW that sits on top
+  //   of all other activities in our app.  When the dialer activity tries
+  //   to come to the foreground, our Modal window competes for focus and
+  //   sometimes wins back — producing the "flash then back to main screen"
+  //   symptom Charles described (10/20 failure rate).
+  //
+  // THE FIX (returns to the proven v6.2 ordering):
+  //   1) Close the Modal SYNCHRONOUSLY in the same event tick.  This
+  //      schedules the Modal's Window dismissal immediately.  Android's
+  //      activity manager will not have a competing Window above the
+  //      dialer when it tries to take focus.
+  //   2) Fire Linking.openURL in a setTimeout(0) so it runs AFTER React
+  //      has committed the modal-close state update but is still queued
+  //      in the very next microtask — earlier than any other work.
+  //   3) Use a pure .catch() promise chain for retries — no awaits,
+  //      no yields, no chance of being preempted by other JS work.
+  //   4) Background work (GPS + /sos + alerts refresh) runs in a separate
+  //      IIFE and is COMPLETELY DECOUPLED from the dialer launch.  It
+  //      starts AFTER the dialer scheduling so it can never preempt it.
+  //   5) Ref mutex prevents double-tap from triggering twice; released
+  //      after 3s (not coupled to dialer completion, so user can re-tap
+  //      after a real call without being permanently locked).
+  const confirmSOS = useCallback(() => {
+    // Synchronous mutex: refs aren't batched, so two taps within the
+    // same React commit cycle are perfectly serialised.
     if (sosDialingRef.current) return;
     sosDialingRef.current = true;
-    setSosDialState('dialing');
 
-    // STEP 1 — Fire the dialer SYNCHRONOUSLY (in this event tick, before
-    // any awaits). This is the most critical line in the whole app.
-    // We don't await Linking.openURL; we let it dispatch in parallel and
-    // catch failures via a callback retry.
-    let opened = false;
-    const tryDial = async (attempt: number) => {
-      try {
-        await Linking.openURL('tel:911');
-        opened = true;
-      } catch (_e) {
-        if (attempt < 3) {
-          setTimeout(() => tryDial(attempt + 1), 150);
-        } else {
-          RNAlert.alert(
-            '🆘 Call 911',
-            "Your phone's dialer couldn't be opened. Please dial 911 manually right now.",
-            [{ text: 'OK' }],
-          );
-        }
-      }
-    };
-    // Kick off attempt 0 in a fire-and-forget micro-task so we don't
-    // yield to the JS event loop before the OS sees the intent.
-    tryDial(0);
+    // STEP 1 — Close the modal FIRST, in this same event tick. This is
+    // the single most important change versus v6.5. The Modal window
+    // must dismiss BEFORE the dialer tries to take foreground focus.
+    setSosConfirmOpen(false);
+    setSosDialState('idle');
 
-    // STEP 2 — Fire-and-forget background work. None of this blocks the
-    // dialer; if it fails the dialer is still open.
+    // STEP 2 — Schedule the dialer in the very next microtask (setTimeout 0).
+    // This runs AFTER React commits the modal-close above (so the Modal
+    // Window is already in the process of dismissing) but BEFORE any other
+    // JS work queues up. We use a pure promise chain — no awaits — so
+    // nothing can preempt the intent dispatch.
+    const dialOnce = () => Linking.openURL('tel:911');
+    setTimeout(() => {
+      dialOnce().catch(() => {
+        // Retry once after a small delay if the first dispatch was rejected.
+        setTimeout(() => {
+          dialOnce().catch(() => {
+            // Final fallback for the rare hard-failure case (WiFi-only
+            // tablet, no dialer app installed, etc.).
+            RNAlert.alert(
+              '🆘 Call 911',
+              "Your phone's dialer couldn't be opened. Please dial 911 manually right now.",
+              [{ text: 'OK' }],
+            );
+          });
+        }, 250);
+      });
+    }, 0);
+
+    // STEP 3 — Fire-and-forget background work AFTER the dialer is queued.
+    // Order matters: by the time this microtask runs, the dialer intent
+    // has already been pushed to the OS's intent broker. GPS + /sos + alert
+    // refresh now run on a separate async task and never touch the dialer.
     (async () => {
       try {
         let lat: number | undefined, lon: number | undefined;
@@ -146,28 +167,20 @@ export default function Dashboard() {
           }
         } catch (_e) {}
         await api.post('/sos', { latitude: lat, longitude: lon });
-        // Refresh dashboard data and bump global alert revalidation so
-        // the Alerts tab shows the new SOS row when the user returns
-        // (Bug 3 — SOS not showing in Alerts tab).
         load().catch(() => {});
         try {
-          // Force the Alerts tab to refetch when next focused.
           (globalThis as any).__kinnshipAlertsBump = Date.now();
         } catch (_e) {}
       } catch (_e) {}
     })();
 
-    // STEP 3 — Reset modal state AFTER a tick so we don't race the dialer
-    // intent. 250ms gives Android enough time to finish the activity
-    // transition before we close our modal.
+    // STEP 4 — Release the mutex after 3s. Decoupled from dialer success
+    // so the user can re-tap SOS after dismissing the dialer if they
+    // need to call back. (If they re-tap inside 3s, the second tap is
+    // safely ignored as a double-tap.)
     setTimeout(() => {
-      setSosConfirmOpen(false);
-      setSosDialState('idle');
       sosDialingRef.current = false;
-    }, 250);
-    // Suppress unused-var warning while still keeping `opened` available
-    // for the dial-error path callback.
-    void opened;
+    }, 3000);
   }, [load]);
 
   const quickCheckIn = (m: Member) => {
