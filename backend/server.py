@@ -391,6 +391,11 @@ def _coerce_time_list(v):
 async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
     """Send push to all registered push tokens for a user. Best-effort.
     Returns the number of devices the push was attempted on (0 if user has none).
+
+    Automatically PRUNES tokens that Expo reports as permanently invalid
+    (DeviceNotRegistered, InvalidCredentials, MismatchSenderId).  This is
+    how we stop "ghost notifications" being sent to uninstalled-app push
+    tokens forever.
     """
     user = await db.users.find_one({"id": user_id}, {"_id": 0, "push_tokens": 1})
     if not user:
@@ -398,10 +403,25 @@ async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
     tokens = user.get("push_tokens") or []
     if not tokens:
         return 0
+    dead_tokens: List[str] = []
     try:
-        await send_expo_push(tokens, title, body, data)
+        dead_tokens = await send_expo_push(tokens, title, body, data) or []
     except Exception as e:
         logger.warning(f"push_to_user failed for {user_id}: {e}")
+    # Prune dead tokens out of the user's push_tokens array so subsequent
+    # pushes don't even attempt them.  $pullAll is idempotent.
+    if dead_tokens:
+        try:
+            r = await db.users.update_one(
+                {"id": user_id},
+                {"$pullAll": {"push_tokens": dead_tokens}},
+            )
+            logger.info(
+                f"Pruned {len(dead_tokens)} dead push token(s) for user={user_id} "
+                f"modified={r.modified_count}"
+            )
+        except Exception as e:
+            logger.warning(f"failed to prune dead tokens for {user_id}: {e}")
     return len(tokens)
 
 

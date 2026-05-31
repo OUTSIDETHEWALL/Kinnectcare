@@ -1,348 +1,387 @@
-"""Kinnship v6.4 focused regression test.
+"""Backend regression test for push-token cleanup feature + smoke checks.
 
-Validates:
-  1. Timestamp UTC suffix on Alerts/Members/CheckIns/Reminders.
-  2. SOS endpoint returns fast + new fanout_mode/sms_mode fields.
-  3. Family escalation window (delta_min=17 → only FAMILY fires).
-  4. DUE window 10-min cutoff + gap window 12-min (>10 <15 → nothing).
-  5. Cleanup test reminders.
+Covers:
+ 1. Inject a fake ExponentPushToken, trigger SOS, verify it's pruned from
+    user.push_tokens and that backend logs contain the prune log line.
+ 2. Verify healthy tokens on finalcut71@gmail.com are not pruned (count remains
+    same — we expect exactly 3 valid tokens).
+ 3. Unit-level call to send_expo_push() with a deliberately invalid token
+    returns the invalid token in its return list.
+ 4. Med scheduler regression: create a med with a slot ~5 min in the past,
+    call POST /api/medications/_tick, expect counters.fired_due == 1.
+ 5. Alerts UTC tz suffix: GET /api/alerts first row's created_at ends with
+    '+00:00' or 'Z'.
+ 6. SOS performance: returns 200 in <500ms and includes
+    fanout_mode='background'.
 """
+import asyncio
 import os
-import re
 import sys
 import time
-import json
 import uuid
-import requests
+import json
+import subprocess
 from datetime import datetime, timedelta, timezone
+from typing import Tuple
+
+import httpx
+from motor.motor_asyncio import AsyncIOMotorClient
+from dotenv import load_dotenv
+
+load_dotenv("/app/backend/.env")
 
 BASE = "https://family-guard-37.preview.emergentagent.com/api"
-EMAIL = "demo@kinnship.app"
-PASSWORD = "password123"
+DEMO_EMAIL = "demo@kinnship.app"
+DEMO_PASSWORD = "password123"
+FAKE_TOKEN = "ExponentPushToken[FAKE_TEST_TOKEN_FOR_CLEANUP]"
 
-PASS = []
-FAIL = []
+MONGO_URL = os.environ["MONGO_URL"]
+DB_NAME = os.environ.get("DB_NAME", "test_database")
+mongo = AsyncIOMotorClient(MONGO_URL)
+db = mongo[DB_NAME]
 
-
-def _ok(name, msg=""):
-    PASS.append((name, msg))
-    print(f"  PASS  {name}  {msg}")
-
-
-def _fail(name, msg):
-    FAIL.append((name, msg))
-    print(f"  FAIL  {name}  {msg}")
+results = []  # list[(name, ok, detail)]
 
 
-def check_iso_utc(ts):
-    if ts is None:
-        return False, "is None"
-    if not isinstance(ts, str):
-        return False, f"not a string: {type(ts)}"
-    if ts.endswith("+00:00") or ts.endswith("Z"):
-        return True, ""
-    return False, f"missing UTC suffix: {ts!r}"
+def record(name: str, ok: bool, detail: str = ""):
+    results.append((name, ok, detail))
+    print(("PASS " if ok else "FAIL ") + name + (f" :: {detail}" if detail else ""))
 
 
-def login():
-    r = requests.post(f"{BASE}/auth/login", json={"email": EMAIL, "password": PASSWORD}, timeout=15)
-    if r.status_code != 200:
-        _fail("auth/login", f"status={r.status_code} body={r.text[:300]}")
-        sys.exit(1)
-    tok = r.json()["access_token"]
-    _ok("auth/login", f"token len={len(tok)}")
-    return tok
+async def login(client: httpx.AsyncClient, email: str, password: str) -> Tuple[str, dict]:
+    r = await client.post(f"{BASE}/auth/login", json={"email": email, "password": password})
+    r.raise_for_status()
+    j = r.json()
+    return j["access_token"], j["user"]
 
 
-def auth_headers(tok):
-    return {"Authorization": f"Bearer {tok}"}
+async def get_user_push_tokens(user_id: str) -> list:
+    u = await db.users.find_one({"id": user_id}, {"_id": 0, "push_tokens": 1})
+    return list((u or {}).get("push_tokens") or [])
 
 
-# ---------------- Scenario 1: timestamps ----------------
-def test_timestamps(tok):
-    print("\n--- Scenario 1: UTC timestamp suffix ---")
-    h = auth_headers(tok)
+async def scenario_1_prune_dead_token():
+    """Inject fake token, trigger a push that targets demo, verify prune.
 
-    r = requests.get(f"{BASE}/alerts", headers=h, timeout=15)
-    if r.status_code != 200:
-        _fail("GET /alerts", f"status={r.status_code}")
-    else:
-        alerts = r.json()
-        bad = []
-        for a in alerts:
-            ok, msg = check_iso_utc(a.get("created_at"))
-            if not ok:
-                bad.append((a.get("id"), msg))
-        if bad:
-            _fail("alerts.created_at UTC suffix", f"{len(bad)}/{len(alerts)} bad. samples={bad[:3]}")
-        else:
-            _ok("alerts.created_at UTC suffix", f"all {len(alerts)} have +00:00/Z")
+    NOTE: POST /api/sos intentionally EXCLUDES the triggering user from the
+    push fanout (Bug 2 in v6.4 — Linking.openURL race on Android). So pressing
+    SOS as demo does NOT trigger push_to_user(demo) and therefore cannot
+    exercise the prune path on demo's own token list.
 
-    r = requests.get(f"{BASE}/members", headers=h, timeout=15)
-    if r.status_code != 200:
-        _fail("GET /members", f"status={r.status_code}")
-        return []
-    members = r.json()
-    bad = []
-    for m in members:
-        for k in ("created_at", "last_seen", "checkin_interval_started_at"):
-            v = m.get(k)
-            if v is None:
-                continue
-            ok, msg = check_iso_utc(v)
-            if not ok:
-                bad.append((m.get("id"), k, msg))
-    if bad:
-        _fail("members.* UTC suffix", f"bad={bad[:5]}")
-    else:
-        _ok("members.* UTC suffix", f"{len(members)} members; all dt fields suffixed")
+    We instead use the medication-tick path which DOES call
+    push_to_user(self_user_id=demo) when a reminder with owner=demo fires.
+    We additionally hit POST /api/sos to confirm the documented endpoint
+    still returns 200 (and to satisfy the literal step in the spec).
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        token, user = await login(client, DEMO_EMAIL, DEMO_PASSWORD)
+        headers = {"Authorization": f"Bearer {token}"}
+        user_id = user["id"]
 
-    r = requests.get(f"{BASE}/checkins/recent", headers=h, timeout=15)
-    if r.status_code != 200:
-        _fail("GET /checkins/recent", f"status={r.status_code}")
-    else:
-        cis = r.json()
-        bad = []
-        for c in cis:
-            ok, msg = check_iso_utc(c.get("created_at"))
-            if not ok:
-                bad.append((c.get("id"), msg))
-        if bad:
-            _fail("checkins.created_at UTC suffix", f"bad={bad[:3]}")
-        else:
-            _ok("checkins.created_at UTC suffix", f"{len(cis)} entries OK")
+        # Scrub any pre-existing fake test token from previous runs
+        await db.users.update_one(
+            {"id": user_id}, {"$pull": {"push_tokens": FAKE_TOKEN}}
+        )
+        await db.users.update_one(
+            {"id": user_id}, {"$addToSet": {"push_tokens": FAKE_TOKEN}}
+        )
+        injected = await get_user_push_tokens(user_id)
+        if FAKE_TOKEN not in injected:
+            record("S1: inject fake token", False, "addToSet failed")
+            return
+        record("S1: inject fake token", True, f"tokens_after_inject={len(injected)}")
 
-    r = requests.get(f"{BASE}/reminders", headers=h, timeout=15)
-    if r.status_code != 200:
-        _fail("GET /reminders", f"status={r.status_code}")
-    else:
-        rems = r.json()
-        bad = []
-        for rem in rems:
-            for k in ("created_at", "last_marked_at", "last_refill_at", "run_out_at"):
-                v = rem.get(k)
-                if v is None:
-                    continue
-                ok, msg = check_iso_utc(v)
-                if not ok:
-                    bad.append((rem.get("id"), k, msg))
-        if bad:
-            _fail("reminders.* UTC suffix", f"bad={bad[:5]}")
-        else:
-            _ok("reminders.* UTC suffix", f"{len(rems)} reminders OK")
+        # Capture log byte-offsets BEFORE we trigger the push
+        log_paths = [
+            "/var/log/supervisor/backend.err.log",
+            "/var/log/supervisor/backend.out.log",
+        ]
+        offsets = {}
+        for p in log_paths:
+            try:
+                offsets[p] = os.path.getsize(p)
+            except Exception:
+                offsets[p] = 0
 
-    return members
+        # First, hit /sos to confirm spec'd endpoint returns 200 (still
+        # required by the regression checklist).
+        sos_r = await client.post(
+            f"{BASE}/sos",
+            json={"latitude": 33.4, "longitude": -112.0},
+            headers=headers,
+        )
+        record(
+            "S1: POST /sos returns 200",
+            sos_r.status_code == 200,
+            f"status={sos_r.status_code}",
+        )
 
+        # Now trigger a push that ACTUALLY targets demo: schedule a med 5 min
+        # in the past and tick it. push_to_user(demo) will be called inline
+        # within /_tick and prune the fake token before the response returns.
+        r = await client.get(f"{BASE}/members", headers=headers)
+        members = r.json() if r.status_code == 200 else []
+        if not members:
+            record("S1: members for med-tick prune", False, "no members")
+            return
+        mid = members[0]["id"]
 
-# ---------------- Scenario 2: SOS ----------------
-def test_sos(tok):
-    print("\n--- Scenario 2: SOS fast + background fanout ---")
-    h = auth_headers(tok)
-
-    t0 = time.perf_counter()
-    r = requests.post(
-        f"{BASE}/sos",
-        headers=h,
-        json={"latitude": 33.4, "longitude": -112.0},
-        timeout=15,
-    )
-    elapsed = (time.perf_counter() - t0) * 1000.0
-    if r.status_code != 200:
-        _fail("POST /sos", f"status={r.status_code} body={r.text[:300]}")
-        return None
-    body = r.json()
-    _ok("POST /sos", f"{elapsed:.0f}ms, alert_id={(body.get('alert_id') or '')[:8]}…")
-
-    if elapsed < 500:
-        _ok("SOS <500ms", f"{elapsed:.0f}ms")
-    else:
-        _fail("SOS <500ms", f"took {elapsed:.0f}ms (>=500ms threshold)")
-
-    if body.get("fanout_mode") == "background":
-        _ok("SOS fanout_mode=background", "")
-    else:
-        _fail("SOS fanout_mode=background", f"got {body.get('fanout_mode')!r}")
-
-    sms_mode = body.get("sms_mode")
-    if sms_mode == "mock":
-        _ok("SOS sms_mode=mock (MOCKED)", "")
-    elif sms_mode == "live":
-        _ok("SOS sms_mode=live", "")
-    else:
-        _fail("SOS sms_mode present", f"got {sms_mode!r}")
-
-    for k in ("devices_notified", "sms_sent"):
-        if k in body:
-            _fail(f"SOS no {k} field", f"unexpectedly present: {body.get(k)!r}")
-        else:
-            _ok(f"SOS no {k} field", "removed as expected")
-
-    target_id = body.get("alert_id")
-    found = False
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        r2 = requests.get(f"{BASE}/alerts", headers=h, timeout=15)
-        if r2.status_code == 200:
-            for a in r2.json():
-                if a["id"] == target_id:
-                    found = True
-                    break
-        if found:
-            break
-        time.sleep(0.4)
-    if found:
-        _ok("SOS alert appears <5s", f"alert_id={target_id[:8]}…")
-    else:
-        _fail("SOS alert appears <5s", f"alert_id {target_id} not seen in GET /alerts")
-
-    return target_id
-
-
-# ---------------- Helpers ----------------
-def create_reminder(tok, member_id, title, delta_min):
-    h = auth_headers(tok)
-    when = datetime.now(timezone.utc) - timedelta(minutes=delta_min)
-    hhmm = when.strftime("%H:%M")
-    body = {
-        "member_id": member_id,
-        "title": title,
-        "category": "medication",
-        "dosage": "Test 1pill",
-        "times": [{"time": hhmm, "label": "TestSlot"}],
-    }
-    r = requests.post(f"{BASE}/reminders", headers=h, json=body, timeout=15)
-    if r.status_code != 200:
-        return None, f"create_reminder failed: {r.status_code} {r.text[:200]}"
-    return r.json(), None
-
-
-def tick(tok):
-    h = auth_headers(tok)
-    r = requests.post(f"{BASE}/medications/_tick", headers=h, timeout=15)
-    if r.status_code != 200:
-        return None, f"tick failed: {r.status_code} {r.text[:200]}"
-    return r.json(), None
-
-
-def stages_for(tok, rid):
-    r = requests.get(f"{BASE}/medications/_stages/{rid}", headers=auth_headers(tok), timeout=15)
-    if r.status_code != 200:
-        return []
-    return [s["stage"] for s in r.json().get("stages", [])]
-
-
-# ---------------- Scenarios 3 & 4 ----------------
-def test_scheduler(tok, members):
-    print("\n--- Scenario 3 & 4: scheduler stages ---")
-    if not members:
-        _fail("scheduler", "no members available")
-        return []
-    target = members[0]
-    member_id = target["id"]
-    print(f"  Using member: {target.get('name')} ({member_id[:8]}…)")
-    created = []
-
-    # ---- 4a: slot 5 min in past → DUE only
-    print("\n  [4a] slot at -5 min: expect fired_due=1, fired_family=0")
-    rem, err = create_reminder(tok, member_id, f"KSTest-DUE-{uuid.uuid4().hex[:6]}", 5)
-    if err:
-        _fail("create DUE rem", err)
-    else:
-        created.append(rem["id"])
-        c, err = tick(tok)
-        if err:
-            _fail("tick DUE", err)
-        else:
-            st = stages_for(tok, rem["id"])
-            if "due" in st and "family_alert" not in st:
-                _ok("4a DUE-only fired", f"stages={st}; tick_counters={c}")
-            else:
-                _fail("4a DUE-only fired", f"stages={st}; tick_counters={c}")
-
-            c2, _ = tick(tok)
-            st2 = stages_for(tok, rem["id"])
-            if st2 == st:
-                _ok("4a second tick idempotent", f"stages stable={st2}")
-            else:
-                _fail("4a second tick idempotent", f"before={st} after={st2}; counters={c2}")
-
-    # ---- 4b: slot 12 min in past → nothing (gap)
-    print("\n  [4b] slot at -12 min: expect fired_due=0, fired_family=0 (gap)")
-    rem, err = create_reminder(tok, member_id, f"KSTest-GAP-{uuid.uuid4().hex[:6]}", 12)
-    if err:
-        _fail("create GAP rem", err)
-    else:
-        created.append(rem["id"])
-        c, err = tick(tok)
-        if err:
-            _fail("tick GAP", err)
-        else:
-            st = stages_for(tok, rem["id"])
-            if not st:
-                _ok("4b gap → no stage fired", f"tick_counters={c}")
-            else:
-                _fail("4b gap → no stage fired", f"stages={st}; tick_counters={c}")
-
-    # ---- 3: slot 17 min in past → FAMILY only
-    print("\n  [3] slot at -17 min: expect fired_due=0, fired_family_alert=1")
-    rem, err = create_reminder(tok, member_id, f"KSTest-FAM-{uuid.uuid4().hex[:6]}", 17)
-    if err:
-        _fail("create FAM rem", err)
-    else:
-        created.append(rem["id"])
-        c, err = tick(tok)
-        if err:
-            _fail("tick FAM", err)
-        else:
-            st = stages_for(tok, rem["id"])
-            if "family_alert" in st and "due" not in st:
-                _ok("3 family-only fired", f"stages={st}; tick_counters={c}")
-            else:
-                _fail("3 family-only fired", f"stages={st}; tick_counters={c}")
-
-            c2, _ = tick(tok)
-            st2 = stages_for(tok, rem["id"])
-            if st2 == st:
-                _ok("3 family second tick idempotent", f"stages stable={st2}")
-            else:
-                _fail("3 family second tick idempotent", f"before={st} after={st2}; counters={c2}")
-
-    return created
-
-
-# ---------------- Scenario 5 ----------------
-def cleanup(tok, reminder_ids):
-    print("\n--- Scenario 5: cleanup ---")
-    h = auth_headers(tok)
-    deleted = 0
-    for rid in reminder_ids:
+        tz_name = user.get("timezone") or "UTC"
         try:
-            r = requests.delete(f"{BASE}/reminders/{rid}", headers=h, timeout=15)
-            if r.status_code == 200:
-                deleted += 1
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(tz_name)
         except Exception:
-            pass
-    if deleted == len(reminder_ids):
-        _ok("cleanup", f"{deleted}/{len(reminder_ids)} reminders deleted")
-    else:
-        _fail("cleanup", f"only {deleted}/{len(reminder_ids)} deleted")
+            tz = timezone.utc
+        past_local = datetime.now(tz) - timedelta(minutes=5)
+        hhmm = past_local.strftime("%H:%M")
+
+        rcreate = await client.post(
+            f"{BASE}/reminders",
+            json={
+                "member_id": mid,
+                "title": f"S1 Prune Med {uuid.uuid4().hex[:6]}",
+                "dosage": "5mg",
+                "category": "medication",
+                "times": [{"time": hhmm, "label": "S1"}],
+            },
+            headers=headers,
+        )
+        if rcreate.status_code != 200:
+            record(
+                "S1: create reminder for prune trigger",
+                False,
+                f"{rcreate.status_code} {rcreate.text[:200]}",
+            )
+            return
+        rem_id = rcreate.json()["id"]
+
+        # Tick — this calls push_to_user(demo) inline.
+        await client.post(f"{BASE}/medications/_tick", headers=headers)
+        # Give async tasks a moment to settle.
+        await asyncio.sleep(2)
+
+        after = await get_user_push_tokens(user_id)
+        still_has_fake = FAKE_TOKEN in after
+        record(
+            "S1: fake token pruned from push_tokens",
+            not still_has_fake,
+            f"tokens_after={[t[:35] for t in after]}",
+        )
+
+        new_log = ""
+        for p, off in offsets.items():
+            try:
+                with open(p, "rb") as f:
+                    f.seek(off)
+                    new_log += f.read().decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+        found_prune = (
+            "Pruned" in new_log
+            and "dead push token" in new_log
+            and user_id in new_log
+        )
+        record(
+            "S1: backend log contains 'Pruned N dead push token(s)' for user",
+            found_prune,
+            f"user_id={user_id} log_len={len(new_log)}",
+        )
+        if not found_prune:
+            print("--- log tail (last 1500) ---")
+            print(new_log[-1500:])
+
+        # Cleanup the temp reminder
+        await client.delete(f"{BASE}/reminders/{rem_id}", headers=headers)
 
 
-def main():
-    print(f"Base URL: {BASE}")
-    tok = login()
-    members = test_timestamps(tok)
-    test_sos(tok)
-    rids = test_scheduler(tok, members)
-    cleanup(tok, rids)
+async def scenario_2_healthy_tokens_preserved():
+    """Verify finalcut71@gmail.com still has its valid push_tokens."""
+    user = await db.users.find_one(
+        {"email": "finalcut71@gmail.com"}, {"_id": 0, "push_tokens": 1, "id": 1}
+    )
+    if not user:
+        record("S2: finalcut71@gmail.com exists", False, "user not found in db")
+        return
+    tokens = list(user.get("push_tokens") or [])
+    # All tokens should be valid ExponentPushToken[...] shape
+    all_valid_shape = all(
+        isinstance(t, str) and t.startswith("ExponentPushToken[") and t.endswith("]")
+        for t in tokens
+    )
+    record(
+        "S2: finalcut71 still has 3 healthy push_tokens",
+        len(tokens) == 3 and all_valid_shape,
+        f"count={len(tokens)} all_valid_shape={all_valid_shape} sample={[t[:35] for t in tokens]}",
+    )
 
-    print("\n" + "=" * 60)
-    print(f"SUMMARY: {len(PASS)} PASS, {len(FAIL)} FAIL")
-    for n, m in FAIL:
-        print(f"  FAIL: {n}  {m}")
-    print("=" * 60)
-    return 0 if not FAIL else 1
+
+def scenario_3_send_expo_push_unit():
+    """Call send_expo_push() via python -c and verify the bad token is returned."""
+    snippet = (
+        "import asyncio,sys,json;"
+        "sys.path.insert(0,'/app/backend');"
+        "from expo_push import send_expo_push;"
+        "bad='ExponentPushToken[FAKE_UNIT_TEST_XYZ_123456]';"
+        "out=asyncio.run(send_expo_push([bad],'t','b',{'type':'unit'}));"
+        "print('RESULT_JSON='+json.dumps(out))"
+    )
+    p = subprocess.run(
+        ["python", "-c", snippet],
+        cwd="/app/backend",
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if p.returncode != 0:
+        record("S3: send_expo_push unit run", False, f"stderr={p.stderr[:400]}")
+        return
+    line = next(
+        (l for l in p.stdout.splitlines() if l.startswith("RESULT_JSON=")), None
+    )
+    if not line:
+        record("S3: send_expo_push unit run", False, f"no RESULT_JSON in stdout={p.stdout[:300]}")
+        return
+    out = json.loads(line.replace("RESULT_JSON=", "", 1))
+    ok = isinstance(out, list) and "ExponentPushToken[FAKE_UNIT_TEST_XYZ_123456]" in out
+    record(
+        "S3: send_expo_push returns invalid token in dead-list",
+        ok,
+        f"returned={out}",
+    )
+
+
+async def scenario_4_med_tick():
+    """Create a medication with a slot ~5 min in the past, tick, expect fired_due==1."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        token, user = await login(client, DEMO_EMAIL, DEMO_PASSWORD)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        r = await client.get(f"{BASE}/members", headers=headers)
+        if r.status_code != 200:
+            record("S4: GET /members", False, f"{r.status_code} {r.text[:200]}")
+            return
+        members = r.json()
+        if not members:
+            record("S4: members exist", False, "no members")
+            return
+        mid = members[0]["id"]
+
+        tz_name = user.get("timezone") or "UTC"
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = timezone.utc
+        now_local = datetime.now(tz)
+        past_local = now_local - timedelta(minutes=5)
+        hhmm = past_local.strftime("%H:%M")
+
+        body = {
+            "member_id": mid,
+            "title": f"QA Tick Med {uuid.uuid4().hex[:6]}",
+            "dosage": "10mg",
+            "category": "medication",
+            "times": [{"time": hhmm, "label": "QA"}],
+        }
+        r = await client.post(f"{BASE}/reminders", json=body, headers=headers)
+        if r.status_code != 200:
+            record("S4: POST /reminders", False, f"{r.status_code} {r.text[:200]}")
+            return
+        rem = r.json()
+        rem_id = rem["id"]
+        record("S4: create reminder with past slot", True, f"id={rem_id} time={hhmm}")
+
+        r = await client.post(f"{BASE}/medications/_tick", headers=headers)
+        if r.status_code != 200:
+            record("S4: POST /medications/_tick", False, f"{r.status_code} {r.text[:200]}")
+            await client.delete(f"{BASE}/reminders/{rem_id}", headers=headers)
+            return
+        counters = r.json()
+        fired_due = counters.get("fired_due")
+        ok = fired_due == 1
+        record(
+            "S4: counters.fired_due == 1",
+            ok,
+            f"fired_due={fired_due} counters={counters}",
+        )
+
+        r = await client.delete(f"{BASE}/reminders/{rem_id}", headers=headers)
+        record(
+            "S4: cleanup DELETE /reminders/{id}",
+            r.status_code == 200,
+            f"status={r.status_code}",
+        )
+
+
+async def scenario_5_alerts_tz_suffix():
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        token, _user = await login(client, DEMO_EMAIL, DEMO_PASSWORD)
+        headers = {"Authorization": f"Bearer {token}"}
+        r = await client.get(f"{BASE}/alerts", headers=headers)
+        if r.status_code != 200:
+            record("S5: GET /alerts", False, f"{r.status_code}")
+            return
+        rows = r.json()
+        if not rows:
+            record("S5: at least one alert", False, "alerts list empty")
+            return
+        ca = rows[0].get("created_at")
+        ok = isinstance(ca, str) and (ca.endswith("+00:00") or ca.endswith("Z"))
+        record(
+            "S5: first alert created_at ends with +00:00 or Z",
+            ok,
+            f"created_at={ca}",
+        )
+
+
+async def scenario_6_sos_perf_and_mode():
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        token, _user = await login(client, DEMO_EMAIL, DEMO_PASSWORD)
+        headers = {"Authorization": f"Bearer {token}"}
+        t0 = time.perf_counter()
+        r = await client.post(
+            f"{BASE}/sos",
+            json={"latitude": 33.4, "longitude": -112.0},
+            headers=headers,
+        )
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        if r.status_code != 200:
+            record("S6: SOS status 200", False, f"status={r.status_code}")
+            return
+        j = r.json()
+        record(
+            "S6: POST /sos returns in <500ms",
+            elapsed_ms < 500,
+            f"elapsed_ms={elapsed_ms}",
+        )
+        record(
+            "S6: response includes fanout_mode='background'",
+            j.get("fanout_mode") == "background",
+            f"fanout_mode={j.get('fanout_mode')}",
+        )
+
+
+async def main():
+    print("=" * 70)
+    print(f"Backend regression — push-token cleanup feature @ {BASE}")
+    print("=" * 70)
+
+    await scenario_1_prune_dead_token()
+    await scenario_2_healthy_tokens_preserved()
+    scenario_3_send_expo_push_unit()
+    await scenario_4_med_tick()
+    await scenario_5_alerts_tz_suffix()
+    await scenario_6_sos_perf_and_mode()
+
+    print("\n" + "=" * 70)
+    passed = sum(1 for _, ok, _ in results if ok)
+    print(f"SUMMARY: {passed}/{len(results)} checks passed")
+    print("=" * 70)
+    for name, ok, detail in results:
+        print(("[OK]   " if ok else "[FAIL] ") + name + (f" :: {detail}" if detail and not ok else ""))
+
+    sys.exit(0 if passed == len(results) else 1)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    asyncio.run(main())

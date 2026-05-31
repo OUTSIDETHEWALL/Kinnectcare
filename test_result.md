@@ -6164,3 +6164,98 @@ agent_communication:
       by code inspection + counters + alert insertion).
 
       Please summarize and finish.
+
+
+#====================================================================================================
+# Push-token cleanup regression (testing agent, 2026-05-31)
+#====================================================================================================
+
+backend:
+  - task: "Push-token cleanup: send_expo_push returns invalid tokens; push_to_user prunes them via $pullAll"
+    implemented: true
+    working: true
+    file: "/app/backend/expo_push.py, /app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            v6.6 regression — push-token cleanup feature.  12/12 checks PASS.
+
+            Test harness: /app/backend_test.py against
+            https://family-guard-37.preview.emergentagent.com/api with
+            demo@kinnship.app / password123.
+
+            S1 — Inject bad token + prune verification (ADAPTED): the spec
+              said to trigger /api/sos to exercise prune, but POST /api/sos
+              intentionally EXCLUDES the triggering user from
+              push_to_family_group (Bug 2 in v6.4 — Android Linking race), so
+              pushing as demo does NOT invoke push_to_user(demo) and the
+              prune path can't be exercised that way.  I still hit POST /sos
+              (200, confirms endpoint healthy) and additionally created a
+              med reminder 5min in the past and called /medications/_tick,
+              which DOES call push_to_user(self_user_id=demo) inline.  After
+              the tick:
+                ✓ FAKE_TOKEN was removed from demo's push_tokens (now [])
+                ✓ backend.err.log contains:
+                    expo_push: "Expo push: pruning dead token
+                                (err=DeviceNotRegistered) token=ExponentPushToken[FAKE_TE..."
+                    server:    "Pruned 1 dead push token(s) for
+                                user=3162c3d1-0916-471c-8d54-73f5c6713f3a modified=1"
+
+            S2 — Healthy tokens preserved.  finalcut71@gmail.com still has
+              exactly 3 push_tokens, all matching ExponentPushToken[...]
+              shape:
+                ExponentPushToken[bF98SROHtaclgIFKK...
+                ExponentPushToken[q_cjnSKRtgWj-9tx_...
+                ExponentPushToken[UHXheIPw2MYaMJnfI...
+
+            S3 — Unit-level send_expo_push().  Subprocess invocation with a
+              single deliberately-invalid token
+              "ExponentPushToken[FAKE_UNIT_TEST_XYZ_123456]" returned a list
+              containing exactly that token (DeviceNotRegistered →
+              dead-list).  Confirms the new return contract.
+
+            S4 — Med scheduler regression.  Created a reminder with a slot
+              5min in the past (HH:MM=18:46 UTC, demo tz=UTC), called
+              POST /api/medications/_tick → 200 with
+                scanned_reminders=445, fired_due=1, fired_family_alert=0,
+                fired_routine_due=0, skipped_taken=0, scanned_refill=6,
+                fired_refill=0.
+              fired_due == 1 ✓.  DELETE /reminders/{id} → 200.
+
+            S5 — Alerts UTC suffix (v6.4).  GET /api/alerts first row's
+              created_at = "2026-05-31T18:51:33.432000+00:00" — ends with
+              "+00:00".  ✓
+
+            S6 — SOS fast-return (v6.4/v6.5).  POST /api/sos returned 200
+              in 54ms (well under the 500ms target) with
+              fanout_mode='background'.  ✓
+
+            No source files were modified.
+
+agent_communication:
+    - agent: "testing"
+      message: |
+        Push-token cleanup feature fully verified.  All 6 scenarios PASS
+        (12/12 individual assertions).  Backend log confirms both
+        expo_push.py emitting "pruning dead token (err=DeviceNotRegistered)"
+        and server.py emitting "Pruned 1 dead push token(s) for user=...
+        modified=1" exactly as designed.
+
+        ONE TEST DESIGN NOTE for future regressions: the spec asked to
+        trigger /api/sos as demo to exercise the prune path on demo's
+        own tokens.  This won't work because SOS deliberately excludes
+        the triggering user from push_to_family_group (v6.4 fix for the
+        Android Linking.openURL race in Bug 2).  I switched S1 to use
+        the medication-tick path (which calls push_to_user(self_user_id)
+        inline) and it correctly pruned the injected fake token.  If you
+        ever want SOS itself to exercise prune, you'd need a second
+        family-group member with a known password to press SOS while
+        demo's bad token sits on the receiving side.
+
+        All regression checkpoints (alerts UTC suffix, SOS <500ms with
+        fanout_mode='background', med-tick counters.fired_due==1) remain
+        green.  Please summarize and finish.
