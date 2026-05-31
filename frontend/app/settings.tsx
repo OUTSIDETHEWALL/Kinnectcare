@@ -35,9 +35,13 @@ export default function SettingsScreen() {
   function pushStatusCopy(s: PushStatus): { headline: string; sub: string; ok: boolean } {
     switch (s.state) {
       case 'registered':
+        // SECURITY/UX: Never expose the actual push token to end users.
+        // The token is a long technical identifier (ExponentPushToken[...])
+        // that's only useful for debugging. End users should just see a
+        // friendly confirmation that notifications are working.
         return { ok: true,
           headline: 'Notifications enabled',
-          sub: `Token: ${s.token.slice(0, 22)}…${s.token.slice(-6)}` };
+          sub: "You'll receive SOS, medication, and family alerts." };
       case 'permission_denied':
         return { ok: false,
           headline: 'Permission denied',

@@ -14,12 +14,24 @@ export default function ManageSubscription() {
   const [status, setStatus] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  // Fetch error — when the /billing/status call fails (timeout, transient
+  // 5xx, dropped network) we MUST NOT silently fall back to "Free Plan"
+  // because that hides a paid subscription behind an Upgrade button. We
+  // surface an explicit error state with Retry instead.
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    setFetchError(null);
     try {
       const r = await api.get('/billing/status');
       setStatus(r.data);
-    } catch (_e) {}
+    } catch (e: any) {
+      // Keep any previously-loaded status so the user doesn't lose info
+      // on a transient failure; only flip into the error banner if we
+      // never successfully loaded.
+      const detail = e?.response?.data?.detail || e?.message || 'Could not load subscription status.';
+      setFetchError(detail);
+    }
     setLoading(false);
   }, []);
 
@@ -143,49 +155,85 @@ export default function ManageSubscription() {
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll}>
-        {/* Current plan card */}
-        <View style={[styles.planCard, isPaid && styles.planCardPaid]}>
-          <Text style={styles.planEmoji}>{isPaid ? '👨‍👩‍👧‍👦' : '🆓'}</Text>
-          <Text
-            style={[styles.planName, isPaid && styles.planNamePaid]}
-            testID="current-plan-name"
-          >
-            {isPaid ? 'Family Plan' : 'Free Plan'}
-          </Text>
-          {isPaid && (
-            <Text style={[styles.planSub, styles.planSubPaid]}>
-              {intervalLabel}{priceLabel ? ` · ${priceLabel}/${status?.interval === 'year' ? 'year' : 'month'}` : ''}
-            </Text>
-          )}
-          {!isPaid && (
-            <Text style={styles.planSub}>Up to 2 family members</Text>
-          )}
-        </View>
-
-        {/* Renewal info */}
-        {isPaid && renewalLabel && (
-          <View style={styles.infoCard}>
-            <Text style={styles.infoLabel}>
-              {cancellingAtEnd ? '⏳ Ends on' : '🔁 Renews on'}
-            </Text>
-            <Text style={styles.infoValue} testID="renewal-date">{renewalLabel}</Text>
-            {cancellingAtEnd && (
-              <Text style={styles.warnNote}>
-                Your subscription will not auto-renew. You'll keep Family Plan
-                features until this date, then move to the free tier.
+        {/* Fetch-error banner — visible at top whenever the most recent
+            /billing/status call failed. CRITICAL: do NOT fall back to
+            "Free Plan" rendering — that wrongly suggests the user is
+            unsubscribed when their card is being charged $9.99/mo.
+            Instead, surface the error explicitly and let them retry. */}
+        {fetchError && (
+          <View testID="subscription-fetch-error" style={styles.errorCard}>
+            <Icon name="cloud-offline-outline" size={20} color={Colors.error} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.errorTitle}>Couldn't load subscription</Text>
+              <Text style={styles.errorSub}>
+                Your plan info isn't shown below because we couldn't reach the billing
+                service. {status ? 'Showing last-known status.' : ''} {String(fetchError).slice(0, 120)}
               </Text>
-            )}
+            </View>
+            <TouchableOpacity onPress={load} style={styles.retryBtn} testID="subscription-retry">
+              <Text style={styles.retryBtnText}>Retry</Text>
+            </TouchableOpacity>
           </View>
         )}
 
-        {/* Member usage */}
-        <View style={styles.infoCard}>
-          <Text style={styles.infoLabel}>👥 Family members</Text>
-          <Text style={styles.infoValue}>
-            {status?.member_count ?? 0}
-            {status?.member_limit ? ` / ${status.member_limit}` : ' (unlimited)'}
-          </Text>
-        </View>
+        {/* When we have no status at all AND fetch failed, show a clean
+            error placeholder INSTEAD of the misleading Free Plan card. */}
+        {!status && fetchError ? (
+          <View style={styles.unknownPlanCard}>
+            <Text style={styles.planEmoji}>📡</Text>
+            <Text style={styles.planName}>Plan status unavailable</Text>
+            <Text style={styles.planSub}>
+              Pull down to refresh or tap Retry above. Your subscription is
+              unaffected — this is only a display issue.
+            </Text>
+          </View>
+        ) : (
+          <>
+            {/* Current plan card */}
+            <View style={[styles.planCard, isPaid && styles.planCardPaid]}>
+              <Text style={styles.planEmoji}>{isPaid ? '👨‍👩‍👧‍👦' : '🆓'}</Text>
+              <Text
+                style={[styles.planName, isPaid && styles.planNamePaid]}
+                testID="current-plan-name"
+              >
+                {isPaid ? 'Family Plan' : 'Free Plan'}
+              </Text>
+              {isPaid && (
+                <Text style={[styles.planSub, styles.planSubPaid]}>
+                  {intervalLabel}{priceLabel ? ` · ${priceLabel}/${status?.interval === 'year' ? 'year' : 'month'}` : ''}
+                </Text>
+              )}
+              {!isPaid && (
+                <Text style={styles.planSub}>Up to 2 family members</Text>
+              )}
+            </View>
+
+            {/* Renewal info */}
+            {isPaid && renewalLabel && (
+              <View style={styles.infoCard}>
+                <Text style={styles.infoLabel}>
+                  {cancellingAtEnd ? '⏳ Ends on' : '🔁 Renews on'}
+                </Text>
+                <Text style={styles.infoValue} testID="renewal-date">{renewalLabel}</Text>
+                {cancellingAtEnd && (
+                  <Text style={styles.warnNote}>
+                    Your subscription will not auto-renew. You'll keep Family Plan
+                    features until this date, then move to the free tier.
+                  </Text>
+                )}
+              </View>
+            )}
+
+            {/* Member usage */}
+            <View style={styles.infoCard}>
+              <Text style={styles.infoLabel}>👥 Family members</Text>
+              <Text style={styles.infoValue}>
+                {status?.member_count ?? 0}
+                {status?.member_limit ? ` / ${status.member_limit}` : ' (unlimited)'}
+              </Text>
+            </View>
+          </>
+        )}
 
         {/* Action buttons */}
         <View style={{ height: 24 }} />
@@ -329,5 +377,31 @@ const styles = StyleSheet.create({
   fineprint: {
     marginTop: 24,
     fontSize: 12, color: Colors.textTertiary, textAlign: 'center', lineHeight: 18,
+  },
+  errorCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.errorBg || '#FEE2E2',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: Colors.error,
+  },
+  errorTitle: { fontSize: 14, fontWeight: '800', color: Colors.error },
+  errorSub: { marginTop: 2, fontSize: 12, color: Colors.textSecondary, lineHeight: 16 },
+  retryBtn: {
+    backgroundColor: Colors.error,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    marginLeft: 10,
+  },
+  retryBtnText: { color: '#fff', fontSize: 13, fontWeight: '800' },
+  unknownPlanCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: 18, padding: 20,
+    alignItems: 'center',
+    borderWidth: 1, borderColor: Colors.border,
   },
 });

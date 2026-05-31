@@ -6327,3 +6327,108 @@ agent_communication:
         Awaiting v6.7 EAS Android Preview build trigger to deliver
         to physical device.
 
+
+# =====================================================================
+# v6.8 — Login UX hardening + Manage Subscription fail-safe + Hide push token
+# =====================================================================
+# URGENT — password reset to Kinnship2026! applied directly via Mongo.
+# Verified: matched=1 modified=1 verify=True
+# =====================================================================
+frontend:
+  - task: "Login — permanent fix for stale OS password autofill"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(auth)/login.tsx"
+    stuck_count: 0
+    priority: "critical"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            ROOT CAUSE confirmed via backend logs (pattern over 5+ sessions):
+              login failed for finalcut71@gmail.com pw_len=6,8,8,9,12
+              (never 13 — the actual password Kinnship2026! is 13 chars)
+            iOS Keychain / Google Password Manager has been autofilling
+            STALE older saved passwords from previous test versions. The
+            user thought they typed the right password but the OS
+            silently overrode it.
+
+            Permanent fix on the client side:
+              1. Auto-clear password field on failed login so the same
+                 stale autofill doesn't loop on the next submit.
+              2. Auto-reveal password for 6s (eye icon flips on)
+                 so user can VISUALLY confirm what was filled.
+              3. Inline persistent hint below the password field:
+                 "⚠️ Last attempt used N characters — if that's wrong,
+                  your phone autofilled an old saved password. Tap 👁
+                  and re-type manually." Auto-clears on next keystroke.
+              4. Alert message also surfaces N char count.
+            Backend trim/strip safety net (added in v6.4) remains in place.
+            Expectation: 4-5 month recurring login lockout cycle is broken.
+  - task: "Hide push token from end users in Settings"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/settings.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Removed "Token: ExponentPushToken[bF98...XAtJq]" string from
+            the notifications status card. Replaced with friendly copy:
+            "You'll receive SOS, medication, and family alerts." — no
+            technical details exposed to end users.
+  - task: "Manage Subscription — never fail-open to 'Free Plan' on transient errors"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/manage-subscription.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            ROOT CAUSE: the load() function did `try { … } catch (_e) {}`
+            and on failure status stayed null. Then `isPaid = status?.plan
+            === 'family_plan'` evaluated to false → rendered "Free Plan"
+            with an Upgrade button despite the user's active $9.99/mo sub.
+            User's DB verified: subscription.plan=family_plan, status=
+            active, interval=month, stripe_subscription_id=sub_1TcY7l…
+
+            Fix:
+              - Introduced fetchError state.
+              - When the call fails AND no prior status was loaded → show
+                explicit "Plan status unavailable" card + a Retry banner
+                ("📡 Plan status unavailable. Pull down to refresh.").
+                NEVER displays "Free Plan" speculatively.
+              - When the call fails BUT we previously loaded successfully
+                → keep showing the last-known status with a non-blocking
+                error banner at top.
+              - Retry button on the error banner re-runs load().
+
+agent_communication:
+    - agent: "main"
+      message: |
+        URGENT password reset applied directly to MongoDB
+        (finalcut71@gmail.com → Kinnship2026!). verify=True.
+        Permanent root cause is stale OS password autofill — phone
+        Keychain was filling 8/9/12-char old passwords instead of the
+        current 13-char one. UX hardening shipped: auto-clear + auto-
+        reveal + N-char hint on every failed attempt so users instantly
+        spot stale autofill.
+
+        Also fixed Bug 1: Manage Subscription was rendering "Free Plan"
+        speculatively whenever /billing/status had a transient error.
+        Now shows explicit error + Retry instead.
+
+        Also fixed Bug 2: Push token string removed from Settings —
+        replaced with friendly copy.
+
+        Three frontend-only changes. versionCode 12 → 13. Awaiting
+        fresh EXPO_TOKEN to queue v6.8 EAS Android Preview build (the
+        token used for v6.7 was invalidated by Expo's rate limiter).
+

@@ -16,6 +16,11 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  // After a failed attempt we surface helpful diagnostics (length + a clear
+  // hint that stale OS-level password autofill is the likely culprit) so the
+  // user notices instantly when their phone silently filled an old password
+  // instead of the current one.
+  const [failHint, setFailHint] = useState<{ length: number } | null>(null);
 
   const onSubmit = async () => {
     // Trim whitespace on both fields before sending.  Mobile keyboards
@@ -32,9 +37,39 @@ export default function Login() {
     setLoading(true);
     try {
       await login(emailTrim, passwordTrim);
+      setFailHint(null);
       router.replace('/(tabs)/dashboard');
     } catch (e: any) {
-      Alert.alert('Sign in failed', e?.response?.data?.detail || 'Please check your credentials.');
+      // ROOT-CAUSE-DRIVEN FAILURE UX
+      //
+      // Backend logs proved the recurring login lockouts are NOT a backend
+      // bug — they're stale iOS Keychain / Google Password Manager
+      // autofill: when the user reset their password months ago, the OS
+      // keeps suggesting the *old* saved password. The user thinks they
+      // typed the right one but autofill silently overrode it
+      // (pw_len=8 when the real password is 13 chars, etc.).
+      //
+      // Permanent fix:
+      //   1. Auto-clear the password field so repeated submits don't loop
+      //      with the same wrong autofill value.
+      //   2. Auto-reveal the password field (eye → on) for 6 seconds so
+      //      the user can VISUALLY confirm what their phone is filling.
+      //   3. Show a friendly hint with the exact number of characters
+      //      that was sent — users instantly notice "8? that's wrong,
+      //      mine is 13" → they'll catch a stale autofill.
+      setFailHint({ length: passwordTrim.length });
+      setPassword('');
+      setShowPassword(true);
+      // Auto-hide the password again after a moment so we don't leave the
+      // field permanently visible (privacy).
+      setTimeout(() => setShowPassword(false), 6000);
+      const serverMsg = e?.response?.data?.detail || 'Please check your credentials.';
+      Alert.alert(
+        'Sign in failed',
+        `${serverMsg}\n\nYou entered ${passwordTrim.length} character${passwordTrim.length === 1 ? '' : 's'}. ` +
+        `If that doesn't match your password length, your phone may have autofilled an older saved password. ` +
+        `Tap the eye icon and re-type your password manually.`,
+      );
     } finally {
       setLoading(false);
     }
@@ -92,7 +127,7 @@ export default function Login() {
                 placeholder="••••••••"
                 placeholderTextColor={Colors.textTertiary}
                 value={password}
-                onChangeText={setPassword}
+                onChangeText={(t) => { setPassword(t); if (failHint) setFailHint(null); }}
                 secureTextEntry={!showPassword}
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -116,6 +151,14 @@ export default function Login() {
                 />
               </TouchableOpacity>
             </View>
+            {/* Persistent inline hint after a failed attempt — stays visible
+                so the user can spot stale autofill (e.g. "8 chars" when
+                their real password is 13 chars). Auto-clears on next typing. */}
+            {failHint && (
+              <Text testID="login-fail-hint" style={styles.failHint}>
+                ⚠️ Last attempt used {failHint.length} character{failHint.length === 1 ? '' : 's'} — if that's wrong, your phone autofilled an old saved password. Tap 👁 and re-type manually.
+              </Text>
+            )}
           </View>
 
           <TouchableOpacity testID="login-submit" style={styles.cta} onPress={onSubmit} disabled={loading} activeOpacity={0.85}>
@@ -189,6 +232,14 @@ const styles = StyleSheet.create({
     height: 52,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  failHint: {
+    marginTop: 8,
+    fontSize: 13,
+    lineHeight: 18,
+    color: Colors.error,
+    fontWeight: '600',
+    paddingHorizontal: 4,
   },
   cta: {
     marginTop: 28, height: 58, borderRadius: 16, backgroundColor: Colors.primary,
