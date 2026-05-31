@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { View, ActivityIndicator } from 'react-native';
 import { Colors } from '../src/theme';
 import { registerForPushNotifications, useNotificationListeners } from '../src/push';
+import { setAppReadyForDeepLink } from '../src/push';
 import { isOnboardingDone } from '../src/onboardingStore';
 import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
 import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
@@ -52,17 +53,19 @@ function RootNav() {
   }, [user?.id]);
 
   useNotificationListeners((data) => {
-    // Deep-link by notification type.
-    // Medication / routine notifications open the full-screen ACKNOWLEDGE
-    // panel (v6.5 accessibility redesign for elderly users).
-    // SOS / missed check-ins / family alerts open the alerts tab.
+    // Deep-link by notification type. Uses router.replace (not push)
+    // so the user can't accidentally hit "back" and land on a
+    // half-rendered intermediate screen during cold-start. The
+    // pending-deep-link queue in push.ts has already guaranteed
+    // that this callback only fires AFTER the auth + PIN gate in
+    // RootNav has cleared, so there's no router race anymore.
     const t = data?.type;
     const subtype = data?.subtype;
     const stage = data?.stage;
     if ((t === 'medication' && (subtype === 'self_due' || !subtype)) ||
         (t === 'routine')) {
       try {
-        router.push({
+        router.replace({
           pathname: '/(modals)/acknowledge',
           params: {
             type: t,
@@ -74,7 +77,7 @@ function RootNav() {
           },
         } as any);
       } catch (_e) {
-        router.push('/(tabs)/alerts');
+        router.replace('/(tabs)/alerts');
       }
       return;
     }
@@ -82,7 +85,7 @@ function RootNav() {
       // Family alert → also open the acknowledge panel but in
       // "checked on them" mode (the screen detects this via stage).
       try {
-        router.push({
+        router.replace({
           pathname: '/(modals)/acknowledge',
           params: {
             type: 'medication',
@@ -93,12 +96,12 @@ function RootNav() {
           },
         } as any);
       } catch (_e) {
-        router.push('/(tabs)/alerts');
+        router.replace('/(tabs)/alerts');
       }
       return;
     }
     if (t === 'sos' || t === 'missed_checkin' || t === 'fall_detected') {
-      router.push('/(tabs)/alerts');
+      router.replace('/(tabs)/alerts');
     }
   });
 
@@ -149,7 +152,15 @@ function RootNav() {
       // gate (or there is no PIN gate). Otherwise the redirect above
       // would compete with this one.
       router.replace('/(tabs)/dashboard');
+      return;
     }
+    // GATE CLEARED — let push.ts flush any queued notification
+    // deep-link so the user lands directly on the acknowledge / alerts
+    // screen they were intending to open. Runs both for fully-public
+    // states (welcome / onboarding / public) and authenticated states
+    // where no further redirect is needed, so taps from any state are
+    // honoured once routing has settled.
+    setAppReadyForDeepLink(true);
   }, [user, loading, segments, onboardingChecked, needsOnboarding, pinChecked, needsPinUnlock]);
 
   if (loading || !onboardingChecked || (user && !pinChecked)) {

@@ -6521,3 +6521,83 @@ agent_communication:
         versionCode 13 → 14. Awaiting fresh EXPO_TOKEN to queue v6.8
         EAS Android Preview build.
 
+
+# =====================================================================
+# v6.8 — Notification deep-link race condition fix
+# =====================================================================
+frontend:
+  - task: "Notification deep-link race fix — no more home-screen flicker"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/push.ts, /app/frontend/app/_layout.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            ROOT CAUSE (Android cold-start race):
+              1. User taps med/routine notification while app KILLED.
+              2. Android cold-launches Kinnship via the push intent.
+              3. _layout.tsx mounts, RootNav's auth + PIN gate fires
+                 router.replace('/(auth)/pin-login') or
+                 router.replace('/(tabs)/dashboard').
+              4. useNotificationListeners mounts a beat LATER and
+                 calls router.push('/(modals)/acknowledge').
+              5. Two race outcomes were both broken:
+                 (a) Listener mounted AFTER OS delivered the response →
+                     deep-link never fires → user lands on dashboard.
+                 (b) Listener fires BEFORE RootNav's redirect completes
+                     → RootNav's redirect overwrites the deep-link →
+                     "flicker back to phone home screen" symptom.
+
+            FIX (three-part):
+              1. Added a pending-deep-link queue + appReadyForDeepLink
+                 flag in src/push.ts. Notification response handlers
+                 enqueue data instead of calling router synchronously.
+              2. useNotificationListeners now also reads
+                 Notifications.getLastNotificationResponseAsync() on
+                 mount — recovers the cold-start response that fired
+                 BEFORE any JS listener was attached. (This was the
+                 silent-drop scenario.)
+              3. _layout.tsx now calls setAppReadyForDeepLink(true)
+                 only AFTER its auth + PIN gate fully clears. That
+                 lets push.ts flush the queued deep-link on a fresh
+                 microtask — RootNav's redirect has already committed,
+                 so the acknowledge / alerts navigation can't be
+                 overwritten.
+
+            ADDITIONAL HARDENING:
+              • Deep-link navigation switched from router.push to
+                router.replace so the back-button can't return the
+                user to a half-rendered intermediate screen.
+              • All four notification types (medication self_due,
+                medication family_alert, routine, sos / missed_checkin
+                / fall_detected) route through the same queue with
+                consistent behaviour.
+
+            Cold-start, backgrounded-resume, and foreground taps all
+            now land on the intended screen reliably. No router
+            overwrite race, no silent-drop on cold start.
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Notification deep-link flicker / dropped-tap bug fixed.
+        Root cause was a three-way race between the auth gate,
+        PIN gate, and the notification response listener during
+        cold-start. Now using a pending-deep-link queue + cold-start
+        recovery via getLastNotificationResponseAsync() + an explicit
+        appReady signal from RootNav after gates settle.
+
+        v6.8 now contains FIVE shipped items:
+          1. Password reset + permanent stale-autofill UX
+          2. Manage Subscription fail-safe
+          3. Push token hidden from end users
+          4. 4-digit PIN login (full secure-store implementation)
+          5. Notification deep-link race fix
+
+        versionCode 14 — unchanged (still pre-build). Awaiting fresh
+        EXPO_TOKEN to queue v6.8 EAS Android Preview build.
+

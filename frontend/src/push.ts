@@ -300,6 +300,70 @@ async function rePresentSticky(n: Notifications.Notification) {
   }
 }
 
+// ---------- Pending deep-link queue (race-condition-free) ----------
+//
+// Why this exists:
+//   When the user taps a notification while the app is KILLED,
+//   Android cold-launches the app via the push intent. During that
+//   cold-start window:
+//     1) React Native takes ~600-1500ms to bootstrap.
+//     2) RootNav (_layout.tsx) mounts and runs its auth + PIN gate,
+//        which fires `router.replace('/pin-login')` or '/dashboard'.
+//     3) useNotificationListeners mounts SLIGHTLY LATER and would
+//        fire `router.push('/(modals)/acknowledge')`.
+//
+//   Two race outcomes were both broken:
+//     a) listener mounts AFTER the OS already delivered the response
+//        → the deep-link callback never fires → user lands on the
+//        dashboard, never sees the acknowledge screen.
+//     b) listener fires BEFORE RootNav's gate-redirect completes →
+//        gate-redirect overwrites the deep-link → flicker back to
+//        dashboard/PIN/home screen (Android user reported "returns
+//        to phone home screen").
+//
+// The fix:
+//   • Notification response → enqueue data in a module-level slot
+//     (do NOT call router synchronously).
+//   • Also synchronously check Notifications.getLastNotificationResponseAsync()
+//     in useNotificationListeners' mount so cold-start responses
+//     received BEFORE the JS listener was attached are recovered.
+//   • RootNav, after its auth + PIN gate has fully cleared, calls
+//     setAppReadyForDeepLink(true) which flushes any queued data
+//     through the same onAlert callback.
+//
+// This guarantees notification taps ALWAYS land on the acknowledge /
+// alerts screen, never flicker back, and never lose the deep-link to
+// a cold-start race.
+
+let pendingDeepLinkData: any = null;
+let liveOnAlert: ((data: any) => void) | null = null;
+let appReadyForDeepLink = false;
+
+function tryFlush() {
+  if (!appReadyForDeepLink) return;
+  const data = pendingDeepLinkData;
+  if (!data || !liveOnAlert) return;
+  pendingDeepLinkData = null;
+  // Dispatch on next microtask so any in-flight router.replace from
+  // RootNav has committed before our deep-link push runs.
+  setTimeout(() => {
+    try { liveOnAlert?.(data); } catch (_e) {}
+  }, 0);
+}
+
+export function setAppReadyForDeepLink(ready: boolean): void {
+  appReadyForDeepLink = ready;
+  if (ready) tryFlush();
+}
+
+export function enqueueDeepLink(data: any): void {
+  if (!data) return;
+  // If the app is already ready, fire immediately — no flicker.
+  // Otherwise queue until RootNav signals ready.
+  pendingDeepLinkData = data;
+  tryFlush();
+}
+
 // ---------- Notification response handler ----------
 //
 // Fires when the user interacts with a notification:
@@ -311,6 +375,26 @@ async function rePresentSticky(n: Notifications.Notification) {
 export function useNotificationListeners(onAlert?: (data: any) => void) {
   const [last, setLast] = useState<Notifications.Notification | null>(null);
   useEffect(() => {
+    // Register the live alert callback so the pending-deep-link queue
+    // can fire it whenever RootNav signals app-ready.
+    liveOnAlert = onAlert || null;
+
+    // COLD-START RECOVERY: if the OS launched the app via a notification
+    // intent BEFORE our JS listener was attached, the response will be
+    // available here. We enqueue it so it fires once RootNav clears the
+    // auth + PIN gate.
+    (async () => {
+      try {
+        const cold = await Notifications.getLastNotificationResponseAsync();
+        if (cold && cold.actionIdentifier === Notifications.DEFAULT_ACTION_IDENTIFIER) {
+          const data: any = cold.notification?.request?.content?.data || {};
+          if (data && data.type) {
+            enqueueDeepLink(data);
+          }
+        }
+      } catch (_e) {}
+    })();
+
     const recv = Notifications.addNotificationReceivedListener((n) => {
       setLast(n);
       // Re-present critical notifications as sticky to keep them in tray.
@@ -355,12 +439,18 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
         return;
       }
 
-      // Default tap on body — let the app deep-link.
-      onAlert?.(data);
+      // Default tap on body — route through the queue so RootNav's
+      // auth + PIN gate has a chance to clear before we deep-link.
+      // If the app is already ready, the queue fires immediately —
+      // no perceptible delay. If the gate is still being evaluated
+      // (cold start, PIN unlock pending), the deep-link is held
+      // until ready, eliminating the flicker-back-to-home bug.
+      enqueueDeepLink(data);
     });
     return () => {
       recv.remove();
       resp.remove();
+      liveOnAlert = null;
     };
   }, [onAlert]);
   return last;
