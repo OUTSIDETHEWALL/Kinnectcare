@@ -187,7 +187,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
     marginHorizontal: 8,
     marginBottom: 16,
     ...Platform.select({
@@ -198,15 +198,16 @@ const styles = StyleSheet.create({
   ackButtonDone: { backgroundColor: '#15803D' },
   ackButtonText: {
     color: '#FFFFFF',
-    // v6.7 — further reduced 24 → 20pt with tighter letter spacing so
-    // "✅ CHECKED ON THEM" fits comfortably on a single line even on
-    // 320dp screens (smallest supported Android density). Still very
-    // bold and high-contrast — perfectly readable for elderly users.
-    // numberOfLines + adjustsFontSizeToFit auto-shrink down to 18pt
-    // (20*0.9) on the rare tiny screen.
-    fontSize: 20,
+    // v6.7 — hard-reduced baseline 20 → 17pt with negative letter-spacing.
+    // RN Android has a long-standing quirk where adjustsFontSizeToFit is
+    // unreliable when combined with numberOfLines={1} + flex parents — text
+    // sometimes wraps to two lines instead of shrinking. By making 17pt
+    // unconditionally fit on a 320dp screen (≈ 19 chars × ~9px ≈ 170px,
+    // well under the ~280px usable width after paddings), we don't have
+    // to rely on the runtime shrinker at all. Still bold + high contrast.
+    fontSize: 17,
     fontWeight: '900',
-    letterSpacing: 0,
+    letterSpacing: -0.2,
     textAlign: 'center',
   },
   dismissButton: {

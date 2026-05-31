@@ -17,10 +17,18 @@ function alertIcon(type: string) {
 }
 
 // SOS alerts (including fall-detection ones — they roll through /api/sos
-// so they're stored with type='sos' + a `fall_detected` flag) get an
-// embedded mini-map. Medication / routine / missed-checkin alerts do NOT.
+// so they're stored with type='sos' + a `fall_detected` flag in the
+// message) get an embedded mini-map. Medication / routine / missed-checkin
+// alerts do NOT — they're not location-sensitive.
 function shouldShowMap(a: Alert): boolean {
   return a.type === 'sos' && typeof a.latitude === 'number' && typeof a.longitude === 'number';
+}
+
+// Heuristic to tell fall-detection apart from manual SOS for label only.
+// Backend stores fall events as type='sos' with "Fall detected" prefix in
+// the message; we just check the message string.
+function isFallAlert(a: Alert): boolean {
+  return a.type === 'sos' && /fall detected/i.test(a.message || '');
 }
 
 // Open the device's native maps app for turn-by-turn navigation.
@@ -126,17 +134,19 @@ export default function Alerts() {
                     style={styles.mapTouch}
                     onPress={() => openInMaps(a.latitude as number, a.longitude as number, a.member_name)}
                     activeOpacity={0.85}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Open ${a.member_name}'s location in Maps`}
                   >
                     <MemberMap
                       latitude={a.latitude as number}
                       longitude={a.longitude as number}
                       memberName={a.member_name}
                       locationName={a.title}
-                      height={150}
+                      height={170}
                     />
                     <View style={styles.mapHint}>
                       <Text style={styles.mapHintText}>
-                        📍 {(a.latitude as number).toFixed(4)}°, {(a.longitude as number).toFixed(4)}° · Tap to open in Maps
+                        {isFallAlert(a) ? '🚨 Fall location' : '🆘 SOS location'} · {(a.latitude as number).toFixed(4)}°, {(a.longitude as number).toFixed(4)}° · Tap for directions
                       </Text>
                     </View>
                   </TouchableOpacity>

@@ -6259,3 +6259,71 @@ agent_communication:
         All regression checkpoints (alerts UTC suffix, SOS <500ms with
         fanout_mode='background', med-tick counters.fired_due==1) remain
         green.  Please summarize and finish.
+
+# =====================================================================
+# v6.7 — Embedded Map for SOS/Fall Alerts + CHECKED ON THEM Font Fix
+# =====================================================================
+frontend:
+  - task: "Embedded Google Map for SOS/Fall alerts in Alerts tab"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/alerts.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            v6.7 — Verified `shouldShowMap()` catches both SOS and
+            fall-detection alerts (fall events route through /api/sos
+            with type='sos' + fall_detected=true). Added
+            `isFallAlert()` helper to distinguish them via the
+            "Fall detected" prefix in the alert message, so the hint
+            label now reads "🚨 Fall location ·" for falls vs
+            "🆘 SOS location ·" for manual SOS. Bumped map height
+            150→170 for clearer pin visibility. Tap-to-open opens
+            Apple Maps on iOS, geo: intent on Android, with a Google
+            Maps URL fallback. Frontend only — no backend changes.
+            Pending real-device verification in v6.7 EAS build.
+  - task: "CHECKED ON THEM button — one-line fit on all screens"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(modals)/acknowledge.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            v6.7 — Hard-reduced baseline from 20pt → 17pt with
+            letterSpacing -0.2 and paddingHorizontal 12 → 8. Kept
+            numberOfLines={1} + adjustsFontSizeToFit as a safety net,
+            but 17pt fits "✅ CHECKED ON THEM" (~19 chars) on a 320dp
+            screen without relying on the Android auto-shrinker
+            (which has a known RN quirk where it ignores
+            adjustsFontSizeToFit when combined with numberOfLines={1}
+            in a flex parent). Still bold 900 + high contrast.
+
+agent_communication:
+    - agent: "main"
+      message: |
+        v6.7 implementation complete. Two surgical frontend-only
+        changes:
+
+        1. Alerts tab — refined existing map integration so fall
+           alerts get a "🚨 Fall location" hint vs "🆘 SOS location"
+           for manual SOS; map height bumped from 150 to 170 for
+           clarity.
+
+        2. acknowledge.tsx — button text dropped 20pt → 17pt with
+           letterSpacing -0.2 and paddingHorizontal 12 → 8 so
+           "✅ CHECKED ON THEM" hard-fits on a single line without
+           depending on Android's flaky adjustsFontSizeToFit when
+           combined with numberOfLines={1}.
+
+        No backend touched. TypeScript compiles clean for both files.
+        Awaiting v6.7 EAS Android Preview build trigger to deliver
+        to physical device.
+
