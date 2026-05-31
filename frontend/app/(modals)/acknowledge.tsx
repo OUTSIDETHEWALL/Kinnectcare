@@ -187,7 +187,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 16,
+    paddingHorizontal: 12,
     marginHorizontal: 8,
     marginBottom: 16,
     ...Platform.select({
@@ -198,14 +198,15 @@ const styles = StyleSheet.create({
   ackButtonDone: { backgroundColor: '#15803D' },
   ackButtonText: {
     color: '#FFFFFF',
-    // Slightly smaller than v6.5 (28→24) so the longest label
-    // ("✅  CHECKED ON THEM") fits on a single line even on narrow
-    // 360dp screens. Still bold and high-contrast — perfectly readable
-    // for elderly users.  Single-line guarantee via numberOfLines={1}
-    // + adjustsFontSizeToFit={true} as a safety net.
-    fontSize: 24,
+    // v6.7 — further reduced 24 → 20pt with tighter letter spacing so
+    // "✅ CHECKED ON THEM" fits comfortably on a single line even on
+    // 320dp screens (smallest supported Android density). Still very
+    // bold and high-contrast — perfectly readable for elderly users.
+    // numberOfLines + adjustsFontSizeToFit auto-shrink down to 18pt
+    // (20*0.9) on the rare tiny screen.
+    fontSize: 20,
     fontWeight: '900',
-    letterSpacing: 0.3,
+    letterSpacing: 0,
     textAlign: 'center',
   },
   dismissButton: {

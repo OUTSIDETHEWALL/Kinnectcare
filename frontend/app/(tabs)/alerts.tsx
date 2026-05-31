@@ -1,11 +1,12 @@
 import { useCallback, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator, Linking, Platform } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
 import { api, Alert } from '../../src/api';
 import { formatRelativeLocal } from '../../src/timeFormat';
+import MemberMap from '../../src/MemberMap';
 
 function alertIcon(type: string) {
   if (type === 'missed_checkin') return 'time-outline';
@@ -13,6 +14,27 @@ function alertIcon(type: string) {
   if (type === 'medication') return 'medical-outline';
   if (type === 'sos') return 'warning-outline';
   return 'alert-circle-outline';
+}
+
+// SOS alerts (including fall-detection ones — they roll through /api/sos
+// so they're stored with type='sos' + a `fall_detected` flag) get an
+// embedded mini-map. Medication / routine / missed-checkin alerts do NOT.
+function shouldShowMap(a: Alert): boolean {
+  return a.type === 'sos' && typeof a.latitude === 'number' && typeof a.longitude === 'number';
+}
+
+// Open the device's native maps app for turn-by-turn navigation.
+function openInMaps(lat: number, lon: number, label: string) {
+  const q = `${lat},${lon}`;
+  const url = Platform.select({
+    ios: `https://maps.apple.com/?q=${encodeURIComponent(label)}&ll=${q}`,
+    android: `geo:${q}?q=${q}(${encodeURIComponent(label)})`,
+    default: `https://www.google.com/maps/search/?api=1&query=${q}`,
+  }) as string;
+  // Fallback to Google Maps web URL if the native scheme can't be opened.
+  Linking.openURL(url).catch(() => {
+    Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${q}`);
+  });
 }
 
 function severityTheme(sev: string) {
@@ -98,8 +120,26 @@ export default function Alerts() {
               <View style={{ flex: 1 }}>
                 <Text style={[styles.alertTitle, { color: t.fg }]}>{a.title}</Text>
                 <Text style={styles.alertMsg}>{a.message}</Text>
-                {a.type === 'sos' && a.latitude != null && a.longitude != null && (
-                  <Text style={styles.coordsLine}>📍 {a.latitude.toFixed(4)}°, {a.longitude.toFixed(4)}°</Text>
+                {shouldShowMap(a) && (
+                  <TouchableOpacity
+                    testID={`alert-map-${a.id}`}
+                    style={styles.mapTouch}
+                    onPress={() => openInMaps(a.latitude as number, a.longitude as number, a.member_name)}
+                    activeOpacity={0.85}
+                  >
+                    <MemberMap
+                      latitude={a.latitude as number}
+                      longitude={a.longitude as number}
+                      memberName={a.member_name}
+                      locationName={a.title}
+                      height={150}
+                    />
+                    <View style={styles.mapHint}>
+                      <Text style={styles.mapHintText}>
+                        📍 {(a.latitude as number).toFixed(4)}°, {(a.longitude as number).toFixed(4)}° · Tap to open in Maps
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
                 )}
                 <Text style={styles.alertMeta}>{a.member_name} · {formatRelativeLocal(a.created_at)}</Text>
                 <TouchableOpacity
@@ -142,7 +182,18 @@ const styles = StyleSheet.create({
   iconBubble: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
   alertTitle: { fontSize: 16, fontWeight: '700' },
   alertMsg: { fontSize: 14, color: Colors.textSecondary, marginTop: 4, lineHeight: 20 },
-  coordsLine: { fontSize: 13, color: Colors.error, fontWeight: '700', marginTop: 6 },
+  mapTouch: { marginTop: 10, borderRadius: 14, overflow: 'hidden' },
+  mapHint: {
+    backgroundColor: 'rgba(27, 94, 53, 0.92)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginTop: -28,            // overlay onto bottom of map
+    marginHorizontal: 8,
+    marginBottom: 2,
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+  },
+  mapHintText: { color: '#FFFFFF', fontSize: 11, fontWeight: '700' },
   alertMeta: { fontSize: 12, color: Colors.textTertiary, marginTop: 6 },
   ackBtn: { marginTop: 10, alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, borderWidth: 1, backgroundColor: Colors.surface },
   ackText: { fontWeight: '700', fontSize: 13 },
