@@ -36,6 +36,13 @@ export default function Alerts() {
   useFocusEffect(useCallback(() => {
     setLoading(true);
     load().finally(() => setLoading(false));
+    // Poll briefly after focus to catch in-flight SOS background fanout
+    // and other late-arriving alerts (Bug 3 — SOS not appearing in Alerts).
+    // The /sos endpoint inserts the alert row synchronously BEFORE the
+    // push fanout, so within ~1s of dialer dismiss the row exists.
+    const t1 = setTimeout(() => { load(); }, 1500);
+    const t2 = setTimeout(() => { load(); }, 4000);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
   }, []));
 
   const ack = async (id: string) => {

@@ -105,6 +105,16 @@ export default function Login() {
             {loading ? <ActivityIndicator color={Colors.surface} /> : <Text style={styles.ctaText}>Sign in</Text>}
           </TouchableOpacity>
 
+          <TouchableOpacity
+            testID="login-to-forgot"
+            onPress={() => router.push('/(auth)/forgot-password')}
+            style={{ marginTop: 14, alignItems: 'center' }}
+          >
+            <Text style={[styles.link, { color: Colors.primary, fontWeight: '700' }]}>
+              Forgot password?
+            </Text>
+          </TouchableOpacity>
+
           <TouchableOpacity testID="login-to-signup" onPress={() => router.replace('/(auth)/signup')} style={{ marginTop: 18, alignItems: 'center' }}>
             <Text style={styles.link}>New here? <Text style={{ fontWeight: '700', color: Colors.primary }}>Create an account</Text></Text>
           </TouchableOpacity>

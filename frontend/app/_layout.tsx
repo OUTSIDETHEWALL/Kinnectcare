@@ -26,19 +26,51 @@ function RootNav() {
 
   useNotificationListeners((data) => {
     // Deep-link by notification type.
-    // Medication self-reminders → open the member screen so user can mark taken.
-    // Medication family alerts / SOS / missed check-ins → open the alerts tab.
+    // Medication / routine notifications open the full-screen ACKNOWLEDGE
+    // panel (v6.5 accessibility redesign for elderly users).
+    // SOS / missed check-ins / family alerts open the alerts tab.
     const t = data?.type;
     const subtype = data?.subtype;
-    if (t === 'medication' && subtype === 'self_due' && data?.member_id) {
-      router.push(`/member/${data.member_id}`);
+    const stage = data?.stage;
+    if ((t === 'medication' && (subtype === 'self_due' || !subtype)) ||
+        (t === 'routine')) {
+      try {
+        router.push({
+          pathname: '/(modals)/acknowledge',
+          params: {
+            type: t,
+            reminder_id: data?.reminder_id || '',
+            title: data?.title || '',
+            dosage: data?.dosage || '',
+            member_name: data?.member_name || '',
+            stage: stage || '',
+          },
+        } as any);
+      } catch (_e) {
+        router.push('/(tabs)/alerts');
+      }
       return;
     }
-    if (t === 'routine' && data?.member_id) {
-      router.push(`/member/${data.member_id}`);
+    if (t === 'medication' && (subtype === 'family_alert' || stage === 'family_alert')) {
+      // Family alert → also open the acknowledge panel but in
+      // "checked on them" mode (the screen detects this via stage).
+      try {
+        router.push({
+          pathname: '/(modals)/acknowledge',
+          params: {
+            type: 'medication',
+            reminder_id: data?.reminder_id || '',
+            title: data?.title || '',
+            member_name: data?.member_name || '',
+            stage: 'family_alert',
+          },
+        } as any);
+      } catch (_e) {
+        router.push('/(tabs)/alerts');
+      }
       return;
     }
-    if (t === 'sos' || t === 'missed_checkin' || t === 'medication' || t === 'routine') {
+    if (t === 'sos' || t === 'missed_checkin' || t === 'fall_detected') {
       router.push('/(tabs)/alerts');
     }
   });

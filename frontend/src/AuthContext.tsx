@@ -86,8 +86,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (_e) {}
   };
 
+  // Used by the password-reset flow to log the user in immediately after
+  // successfully resetting their password (the reset endpoint returns the
+  // same TokenResponse shape as /auth/login).
+  const hydrateFromToken = async (accessToken: string, userObj: any) => {
+    await saveToken(accessToken);
+    setUser(userObj);
+  };
+
   return (
-    <Ctx.Provider value={{ user, loading, signup, login, logout, refreshUser }}>
+    <Ctx.Provider value={{ user, loading, signup, login, logout, refreshUser, hydrateFromToken }}>
       {children}
     </Ctx.Provider>
   );

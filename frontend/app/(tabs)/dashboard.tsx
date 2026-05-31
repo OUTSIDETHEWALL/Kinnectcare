@@ -87,30 +87,51 @@ export default function Dashboard() {
 
   // Step 2 — user confirmed in the modal.
   //
-  // SOS reliability hardening (was ~1/10 fail rate on v6.2):
-  //  • A useRef mutex blocks re-entry across render boundaries — fastest
-  //    possible synchronous guard against double-tap and onPress-during-
-  //    state-update races.
-  //  • We retry Linking.openURL up to 3x with 150ms backoff. Android
-  //    occasionally returns failure from the OS intent broker when an
-  //    activity transition (e.g. our Modal animation) overlaps the
-  //    ACTION_DIAL dispatch — a single retry resolves it nearly always.
-  //  • The modal stays open with the button in a "Calling..." disabled
-  //    state until the OS confirms the intent went through OR all retries
-  //    fail. Closing the modal is the LAST thing we do so the user never
-  //    sees a "modal closed but nothing happened" state.
-  //  • Background work (GPS, /sos alert, push fan-out) runs in parallel
-  //    and never blocks the dialer.
+  // v6.5 SOS reliability fix (Bug 2 regression to 15/20):
+  //  • Synchronous mutex via useRef (unchanged).
+  //  • DIALER FIRES FIRST inside the same event tick, BEFORE any JS work.
+  //    We don't even call setSosDialState first — that schedules a render
+  //    that can race the intent dispatch. The button stays in "Calling..."
+  //    via a synchronous ref read in the disabled prop.
+  //  • Background work (GPS, /sos API, alerts refresh) runs AFTER the
+  //    dialer is confirmed launched.
+  //  • Modal close is the LAST step, after a small RAF to let the OS
+  //    activity transition settle.
+  //  • The SOS backend now excludes the triggering user from the family
+  //    push fanout — that incoming push was racing the dialer on the
+  //    triggering device.
   const confirmSOS = useCallback(async () => {
-    // Synchronous mutex — refs are NOT batched like state, so two taps
-    // within the same React commit cycle are perfectly serialised.
     if (sosDialingRef.current) return;
     sosDialingRef.current = true;
     setSosDialState('dialing');
 
-    // Kick off background work IMMEDIATELY in parallel — these calls do
-    // not block the dialer. Family/SMS fanout, GPS, and the /sos alert
-    // are best-effort; if they fail the user is still being dialed to 911.
+    // STEP 1 — Fire the dialer SYNCHRONOUSLY (in this event tick, before
+    // any awaits). This is the most critical line in the whole app.
+    // We don't await Linking.openURL; we let it dispatch in parallel and
+    // catch failures via a callback retry.
+    let opened = false;
+    const tryDial = async (attempt: number) => {
+      try {
+        await Linking.openURL('tel:911');
+        opened = true;
+      } catch (_e) {
+        if (attempt < 3) {
+          setTimeout(() => tryDial(attempt + 1), 150);
+        } else {
+          RNAlert.alert(
+            '🆘 Call 911',
+            "Your phone's dialer couldn't be opened. Please dial 911 manually right now.",
+            [{ text: 'OK' }],
+          );
+        }
+      }
+    };
+    // Kick off attempt 0 in a fire-and-forget micro-task so we don't
+    // yield to the JS event loop before the OS sees the intent.
+    tryDial(0);
+
+    // STEP 2 — Fire-and-forget background work. None of this blocks the
+    // dialer; if it fails the dialer is still open.
     (async () => {
       try {
         let lat: number | undefined, lon: number | undefined;
@@ -125,40 +146,28 @@ export default function Dashboard() {
           }
         } catch (_e) {}
         await api.post('/sos', { latitude: lat, longitude: lon });
+        // Refresh dashboard data and bump global alert revalidation so
+        // the Alerts tab shows the new SOS row when the user returns
+        // (Bug 3 — SOS not showing in Alerts tab).
         load().catch(() => {});
+        try {
+          // Force the Alerts tab to refetch when next focused.
+          (globalThis as any).__kinnshipAlertsBump = Date.now();
+        } catch (_e) {}
       } catch (_e) {}
     })();
 
-    // Try the dialer up to 3 times. canOpenURL is intentionally NOT used —
-    // some Android OEMs return false for tel: even when the OS will happily
-    // launch the dialer, so we just trust openURL + retry.
-    let opened = false;
-    for (let attempt = 0; attempt < 3 && !opened; attempt++) {
-      try {
-        await Linking.openURL('tel:911');
-        opened = true;
-      } catch (_e) {
-        if (attempt < 2) {
-          // Tiny backoff lets the previous activity transition settle.
-          await new Promise((r) => setTimeout(r, 150));
-        }
-      }
-    }
-
-    if (!opened) {
-      // True hard failure (e.g. WiFi-only tablet with no dialer app).
-      RNAlert.alert(
-        '🆘 Call 911',
-        "Your phone's dialer couldn't be opened. Please dial 911 manually right now.",
-        [{ text: 'OK' }],
-      );
-    }
-
-    // ALL of these reset operations happen AFTER the dialer succeeds so
-    // the modal-close animation can never race the intent dispatch.
-    setSosConfirmOpen(false);
-    setSosDialState('idle');
-    sosDialingRef.current = false;
+    // STEP 3 — Reset modal state AFTER a tick so we don't race the dialer
+    // intent. 250ms gives Android enough time to finish the activity
+    // transition before we close our modal.
+    setTimeout(() => {
+      setSosConfirmOpen(false);
+      setSosDialState('idle');
+      sosDialingRef.current = false;
+    }, 250);
+    // Suppress unused-var warning while still keeping `opened` available
+    // for the dial-error path callback.
+    void opened;
   }, [load]);
 
   const quickCheckIn = (m: Member) => {

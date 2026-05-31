@@ -6062,3 +6062,105 @@ agent_communication:
       forbade it and none were needed.
 
       Please summarize and finish.
+
+
+  - agent: "testing"
+    message: |
+      ========================================================
+      v6.5 REGRESSION — VERIFIED PASS (26/26 checks green)
+      ========================================================
+      Driver: /app/backend_test_v65.py
+      Backend: https://family-guard-37.preview.emergentagent.com/api
+      Test user: demo@kinnship.app / password123
+
+      1) FORGOT-PASSWORD FLOW (NEW endpoints) — ALL PASS
+         • POST /api/auth/forgot-password {demo} → 200, vague body
+           message: "If an account exists for that email, we've sent
+           a reset code. Check your inbox (...)".  ✓
+         • backend.err.log line observed:
+             "[PASSWORD-RESET] SMTP not configured. Code for
+              demo@kinnship.app: 628869"
+           6-digit code extracted successfully.  ✓
+         • POST /api/auth/reset-password {email, code, new_password
+           "Password!23"} → 200 with TokenResponse shape
+           (keys: access_token, token_type, user; user.email matches). ✓
+         • Subsequent POST /api/auth/login {demo, "Password!23"}
+           → 200 (token returned).  ✓
+         • RESTORE STEP — issued a second forgot-password +
+           reset-password call to put the password back to
+           "password123". Restore code 604961 used; reset returned
+           200; login with "password123" works again.  ✓
+         • Bad code POST /api/auth/reset-password {code:"000000"}
+           → 400 with detail exactly "Invalid or expired code".  ✓
+         • Non-existing email POST /api/auth/forgot-password
+           {email:"fake@nowhere.com"} → still 200 with the SAME vague
+           message (no email enumeration leak).  ✓
+
+      2) CHANGE-PASSWORD (NEW endpoint, authed) — ALL PASS
+         • POST /api/auth/change-password {current:"password123",
+           new:"Password!23"} → 200 body
+           {"ok":true,"message":"Password updated successfully"}.  ✓
+         • Login with new password works.  ✓
+         • Wrong current password POST /api/auth/change-password
+           {current:"wrong", new:"x123456"} → 401 detail
+           "Current password is incorrect".  ✓
+         • RESTORE STEP — change-password back to "password123"
+           with current "Password!23" → 200; login with
+           "password123" still works.  ✓
+
+      3) SOS (Bug 3 — appears in alerts tab) — ALL PASS
+         • POST /api/sos {lat:33.4, lon:-112.0} → 200 in 111ms
+           (well under the 500ms target).  ✓
+         • Response body contains fanout_mode='background'
+           (unchanged from v6.4).  ✓
+         • Within 5s, GET /api/alerts contains the new alert
+           (alert_id 639fb886-…1997d8 confirmed present).  ✓
+
+      4) MEDICATION /_tick PAYLOAD (dosage + member_name) — ALL PASS
+         • Created medication reminder with dosage "10mg" and slot 5
+           min in the past (HH:MM=13:47 UTC, demo tz=UTC). → 200.  ✓
+         • POST /api/medications/_tick → 200 with counters:
+             scanned_reminders=445, fired_due=1, fired_family_alert=0,
+             fired_routine_due=0, skipped_taken=0, scanned_refill=6,
+             fired_refill=0.  ✓
+         • fired_due == 1 confirms the new slot fired exactly once. ✓
+         • GET /api/alerts contains a row with type='medication'
+           tied to the test member, proving the alert was logged. ✓
+         • Push payload contents (dosage + member_name in `data`,
+           dosage in body) verified by code review of
+           /app/backend/med_scheduler.py lines 313-351 — the push_to_user
+           call passes:
+              body = (rem.get("dosage") + "\n\nTap ✅ TOOK IT below...")
+              data = { type, subtype, reminder_id, member_id,
+                       member_name, stage, slot_time, title,
+                       dosage, categoryIdentifier, channelId }
+           Backend log push lines are not emitted verbatim in this
+           env, so we corroborate via counters + the alert insert
+           (per review request: "you can't directly inspect the Expo
+           push payload from logs, so just verify counters.fired_due
+           == 1 and the alert row in db.alerts has type='medication'").
+         • Cleanup DELETE /api/reminders/{id} → 200.  ✓
+
+      NOTES / OBSERVATIONS
+      • No source files were modified — review request explicitly
+        forbade it and none were needed.
+      • Demo password is back to "password123" after both flows
+        (verified via final login). Other tests can continue to
+        rely on this credential.
+      • SMTP path remains MOCKED in this environment (only the
+        "[PASSWORD-RESET] SMTP not configured. Code for ... :
+        NNNNNN" log line is produced — no email is actually sent).
+        This is the documented dev-mode fallback in server.py
+        _send_reset_email at line 760.
+
+      Verdict: v6.5 spec is fully met. Forgot-password, reset-
+      password, and change-password endpoints behave correctly,
+      including the email-enumeration protection and the 400
+      "Invalid or expired code" detail. SOS continues to respond
+      in <500ms with fanout_mode='background' and the resulting
+      alert is visible via /api/alerts (Bug 3 fix verified).
+      Medication tick fires due alerts with dosage and
+      member_name plumbed into the push payload data (verified
+      by code inspection + counters + alert insertion).
+
+      Please summarize and finish.

@@ -210,36 +210,54 @@ export async function registerForPushNotifications(): Promise<string | null> {
   }
 }
 
-// ---------- Notification persistence layer ----------
+// ---------- Notification persistence + de-duplication ----------
 //
-// PROBLEM (Bug 3): Push notifications were vanishing from the heads-up
-// banner within seconds, before elderly users could read them or tap
-// the action buttons.
+// Bug 1 (v6.5): notifications were stacking — every fire created a NEW
+// row in the tray instead of replacing the prior one for the same
+// reminder. We now derive a STABLE identifier per reminder+stage and pass
+// it as the local notification `identifier`. Android replaces any prior
+// notification with the same identifier so the user sees a single,
+// latest row per reminder.
 //
-// ROOT CAUSE: Android's default heads-up display lifetime is OS-controlled
-// (~5 seconds).  The Expo Push API does not expose `sticky` / `autoDismiss`
-// in its payload contract — those flags only exist on LOCAL notifications.
-//
-// FIX: On `addNotificationReceivedListener`, immediately re-present the
-// content as a LOCAL notification with `sticky: true` and
-// `autoDismiss: false`.  We then dismiss the auto-displayed original.
-// Result: the notification stays in the tray (and re-shows the heads-up
-// with a longer body that forces Android into BigTextStyle, which keeps
-// the action buttons immediately visible).
-//
-// Only applied to medication / routine / sos / family_alert notifications
-// — informational types still behave normally.
+// Identifier scheme (Option B per user spec):
+//   medication self-due  → 'med_<reminder_id>_due'
+//   medication family    → 'med_<reminder_id>_family'
+//   medication refill    → 'med_<reminder_id>_refill'
+//   routine due          → 'rt_<reminder_id>_due'
+//   sos                  → 'sos_<alert_id>'    (per-alert is OK; SOSs are rare)
+//   fall_detected        → 'fall_<alert_id>'
+//   missed_checkin       → 'miss_<member_id>'  (per-member; auto-dedupes)
+function stableNotificationId(data: any): string | null {
+  const t = data?.type;
+  const sub = data?.subtype;
+  const stage = data?.stage;
+  const rid = data?.reminder_id;
+  const aid = data?.alert_id;
+  const mid = data?.member_id;
+  if (t === 'medication' && rid) {
+    if (stage === 'refill' || sub === 'refill') return `med_${rid}_refill`;
+    if (stage === 'family_alert' || sub === 'family_alert') return `med_${rid}_family`;
+    return `med_${rid}_due`;
+  }
+  if (t === 'routine' && rid) return `rt_${rid}_due`;
+  if (t === 'sos' && aid) return `sos_${aid}`;
+  if (t === 'fall_detected' && aid) return `fall_${aid}`;
+  if (t === 'missed_checkin' && mid) return `miss_${mid}`;
+  return null;
+}
+
 async function rePresentSticky(n: Notifications.Notification) {
   if (Platform.OS !== 'android') return;
   const content = n.request.content;
   const data: any = content.data || {};
   const t = data.type;
-  if (!t || !['medication', 'routine', 'sos'].includes(t)) return;
+  if (!t || !['medication', 'routine', 'sos', 'fall_detected'].includes(t)) return;
 
   const channelId =
     data.channelId ||
-    (t === 'sos' ? 'sos' : t === 'routine' ? 'routines' : 'meds');
+    (t === 'sos' || t === 'fall_detected' ? 'sos' : t === 'routine' ? 'routines' : 'meds');
   const cat = data.categoryIdentifier;
+  const stableId = stableNotificationId(data);
 
   // Use a longer body so Android auto-expands the notification
   // (BigTextStyle), making the "✅ TOOK IT" action buttons immediately
@@ -247,10 +265,22 @@ async function rePresentSticky(n: Notifications.Notification) {
   const body = content.body || '';
   const expanded = body.length >= 60
     ? body
-    : (body + '\n\nTap an action button below or open Kinnship to confirm.');
+    : (body + '\n\nTap to open Kinnship and acknowledge.');
 
   try {
+    // Dismiss the auto-displayed push first so we don't have a duplicate.
+    try {
+      await Notifications.dismissNotificationAsync(n.request.identifier);
+    } catch (_e) {}
+    // Also dismiss any prior sticky notification with the same stable id —
+    // this guarantees ONE row per reminder+stage at all times.
+    if (stableId) {
+      try {
+        await Notifications.dismissNotificationAsync(stableId);
+      } catch (_e) {}
+    }
     await Notifications.scheduleNotificationAsync({
+      identifier: stableId || undefined,  // <-- KEY: stable id makes new fires REPLACE
       content: {
         title: content.title || '',
         body: expanded,
@@ -260,14 +290,10 @@ async function rePresentSticky(n: Notifications.Notification) {
         sticky: true,        // can't be swiped away on Android
         autoDismiss: false,  // doesn't auto-dismiss on tap
         priority: Notifications.AndroidNotificationPriority.MAX,
-        color: t === 'sos' ? '#DC2626' : '#1B5E35',
+        color: (t === 'sos' || t === 'fall_detected') ? '#DC2626' : '#1B5E35',
       } as any,
       trigger: { channelId } as any,
     });
-    // Dismiss the auto-displayed push so we don't have a duplicate.
-    try {
-      await Notifications.dismissNotificationAsync(n.request.identifier);
-    } catch (_e) {}
   } catch (e) {
     // eslint-disable-next-line no-console
     console.warn('Failed to re-present sticky:', e);

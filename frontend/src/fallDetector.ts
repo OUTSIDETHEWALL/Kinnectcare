@@ -24,19 +24,21 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
 const KEY = 'kc.fall.enabled';
-// Tuned for elderly users in v6.1 — falls in seniors are typically lower-
-// impact than youth falls (they "crumple" rather than "slam") and post-fall
-// stillness is often imperfect (tremors, attempts to push up, etc.).
-// Numbers chosen from published gerontology fall-detection literature:
-//   - peak impact threshold ~1.7-2.0 g for crumple-style falls
-//   - stillness band ~0.30 g (allows wobble/tremor)
-//   - shorter required-stillness so weak falls register
-const SAMPLE_RATE_MS = 50;             // ~20 Hz — better edge detection
-const IMPACT_G = 1.8;                  // was 2.5 — too aggressive (couch-slam failed)
-const STILLNESS_BAND_G = 0.30;         // was 0.18 — allow tremor / weak motion
-const STILLNESS_REQUIRED_MS = 800;     // was 1200 — falls in seniors settle faster
-const POST_IMPACT_WINDOW_MS = 3500;    // was 2500 — more time to "crumple"
-const COOLDOWN_MS = 8000;
+// v6.5 retuning — user reported over-sensitivity in v6.4 (triggering from
+// normal phone handling: setting on counter, picking up off table, etc.).
+// We tighten the impact threshold AND require a brief PRE-IMPACT freefall
+// signature (mag < 0.6g for ~120ms) to filter out everyday handling spikes.
+// Real falls have a tell-tale freefall→impact→stillness profile that
+// normal handling never produces.
+const SAMPLE_RATE_MS = 50;             // ~20 Hz
+const FREEFALL_G = 0.6;                // require sub-0.6g for freefall
+const FREEFALL_REQUIRED_MS = 120;      // ~120ms of freefall = ~7cm minimum drop
+const FREEFALL_LOOKBACK_MS = 600;      // look back this far for the freefall
+const IMPACT_G = 2.6;                  // raised from 1.8 — phone handling rarely hits 2.6g
+const STILLNESS_BAND_G = 0.25;         // slightly tighter
+const STILLNESS_REQUIRED_MS = 1200;    // longer stillness — falls settle for >1s
+const POST_IMPACT_WINDOW_MS = 3500;
+const COOLDOWN_MS = 12000;             // longer cooldown so the user has time to react
 
 export type FallDetectorOptions = {
   onFallDetected: () => void;
@@ -79,6 +81,10 @@ export function useFallDetector({ onFallDetected }: FallDetectorOptions) {
   const impactAtRef = useRef<number>(0);
   const stillnessStartRef = useRef<number>(0);
   const cooldownUntilRef = useRef<number>(0);
+  // Ring buffer of recent magnitudes — used to detect a pre-impact
+  // freefall (magnitude < 0.6g for ≥120ms). This is the v6.5 false-positive
+  // killer: phone-handling spikes never have a preceding freefall window.
+  const recentRef = useRef<Array<{ t: number; m: number }>>([]);
   const callbackRef = useRef(onFallDetected);
   useEffect(() => { callbackRef.current = onFallDetected; }, [onFallDetected]);
 
@@ -109,6 +115,13 @@ export function useFallDetector({ onFallDetected }: FallDetectorOptions) {
       const now = Date.now();
       const mag = Math.sqrt(x * x + y * y + z * z);
 
+      // Maintain rolling ring buffer used by the freefall check below.
+      // We keep ~1 second of history (FREEFALL_LOOKBACK_MS + slack).
+      const buf = recentRef.current;
+      buf.push({ t: now, m: mag });
+      const cutoff = now - (FREEFALL_LOOKBACK_MS + 200);
+      while (buf.length && buf[0].t < cutoff) buf.shift();
+
       if (stateRef.current === 'cooldown') {
         if (now >= cooldownUntilRef.current) {
           stateRef.current = 'idle';
@@ -119,6 +132,27 @@ export function useFallDetector({ onFallDetected }: FallDetectorOptions) {
 
       if (stateRef.current === 'idle') {
         if (mag >= IMPACT_G) {
+          // v6.5: Before accepting this as a fall impact, look back for
+          // a freefall signature. A real fall has ~120ms+ of sub-0.6g
+          // magnitude during the actual fall through the air. Phone
+          // handling spikes (smacking the phone on a table, dropping
+          // into your lap, etc.) DON'T have this pre-impact freefall.
+          let freefallMs = 0;
+          let freefallStart = 0;
+          for (let i = 0; i < buf.length - 1; i++) {
+            if (buf[i].t > now - 20) break;  // ignore the impact sample itself
+            if (buf[i].m < FREEFALL_G) {
+              if (!freefallStart) freefallStart = buf[i].t;
+              freefallMs = buf[i].t - freefallStart;
+            } else {
+              freefallStart = 0;
+              freefallMs = 0;
+            }
+          }
+          if (freefallMs < FREEFALL_REQUIRED_MS) {
+            // No freefall → likely a phone-handling spike. Ignore.
+            return;
+          }
           stateRef.current = 'impact-wait-stillness';
           impactAtRef.current = now;
           stillnessStartRef.current = 0;

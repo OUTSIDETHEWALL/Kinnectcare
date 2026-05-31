@@ -707,9 +707,175 @@ async def login(data: UserLogin):
     )
 
 
+@api_router.post("/auth/me", response_model=UserResponse, include_in_schema=False)
 @api_router.get("/auth/me", response_model=UserResponse)
 async def me(current=Depends(get_current_user)):
     return _user_response(current)
+
+
+# ========== Forgot / Reset password ==========
+#
+# Self-serve password recovery. Generates a 6-digit reset code valid for
+# 15 minutes. The code is delivered via email (if SMTP env vars set) OR
+# is captured in backend logs for the operator to relay if SMTP isn't
+# configured yet. Charles can wire SMTP later by adding SMTP_HOST etc.
+#
+# All responses are intentionally vague (200 OK regardless) so attackers
+# can't enumerate registered emails.
+import secrets
+import smtplib
+from email.message import EmailMessage
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    code: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _v_pw(cls, v: str) -> str:
+        if len(v) < 6:
+            raise ValueError("Password must be at least 6 characters")
+        return v
+
+
+async def _send_reset_email(to_email: str, code: str) -> bool:
+    """Send password reset email. Returns True if SMTP delivered, False
+    if SMTP isn't configured (in which case the code is logged so an
+    operator can relay it).
+    """
+    host = os.environ.get("SMTP_HOST")
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    user = os.environ.get("SMTP_USER")
+    pwd = os.environ.get("SMTP_PASSWORD")
+    sender = os.environ.get("SMTP_FROM", user or "noreply@kinnship.app")
+    if not (host and user and pwd):
+        # No SMTP configured — log so operator can relay.
+        logger.warning(
+            f"[PASSWORD-RESET] SMTP not configured. Code for {to_email}: {code}"
+        )
+        return False
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = "Your Kinnship password reset code"
+        msg["From"] = sender
+        msg["To"] = to_email
+        msg.set_content(
+            f"Hi,\n\nYour Kinnship password reset code is: {code}\n\n"
+            "This code expires in 15 minutes. If you didn't request this, "
+            "you can safely ignore this email.\n\n— Kinnship Safety"
+        )
+        with smtplib.SMTP(host, port) as s:
+            s.starttls()
+            s.login(user, pwd)
+            s.send_message(msg)
+        return True
+    except Exception as e:
+        logger.warning(f"SMTP send failed: {e}. Code for {to_email}: {code}")
+        return False
+
+
+@api_router.post("/auth/forgot-password")
+async def forgot_password(data: ForgotPasswordRequest):
+    """Generate a reset code, store with expiry, deliver via email."""
+    email = data.email.lower()
+    user = await db.users.find_one({"email": email}, {"_id": 0, "id": 1})
+    # Generate code regardless to avoid timing-side-channel email enumeration.
+    code = f"{secrets.randbelow(900000) + 100000:06d}"  # 6-digit
+    if user:
+        # Hash the code before storing — never store raw codes.
+        code_hash = hash_password(code)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+        await db.password_resets.update_one(
+            {"user_id": user["id"]},
+            {
+                "$set": {
+                    "user_id": user["id"],
+                    "email": email,
+                    "code_hash": code_hash,
+                    "expires_at": expires_at,
+                    "created_at": datetime.now(timezone.utc),
+                    "attempts": 0,
+                }
+            },
+            upsert=True,
+        )
+        await _send_reset_email(email, code)
+    # Intentionally vague — never confirm whether the email is registered.
+    return {
+        "ok": True,
+        "message": (
+            "If an account exists for that email, we've sent a reset code. "
+            "Check your inbox (and spam) in the next 1-2 minutes."
+        ),
+    }
+
+
+@api_router.post("/auth/reset-password", response_model=TokenResponse)
+async def reset_password(data: ResetPasswordRequest):
+    email = data.email.lower()
+    rec = await db.password_resets.find_one({"email": email})
+    if not rec:
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+    # Expiry check.
+    exp = rec.get("expires_at")
+    if exp:
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp < datetime.now(timezone.utc):
+            raise HTTPException(status_code=400, detail="Invalid or expired code")
+    # Attempts throttle (5 max).
+    attempts = int(rec.get("attempts", 0))
+    if attempts >= 5:
+        raise HTTPException(status_code=429, detail="Too many attempts. Request a new code.")
+    # Verify code.
+    if not verify_password(data.code, rec.get("code_hash", "")):
+        await db.password_resets.update_one(
+            {"_id": rec["_id"]}, {"$inc": {"attempts": 1}}
+        )
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+    # OK — reset the password and consume the code.
+    user = await db.users.find_one({"email": email})
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+    new_hash = hash_password(data.new_password)
+    await db.users.update_one({"id": user["id"]}, {"$set": {"hashed_password": new_hash}})
+    await db.password_resets.delete_one({"_id": rec["_id"]})
+    user["hashed_password"] = new_hash
+    return TokenResponse(
+        access_token=create_access_token(user["id"]),
+        user=_user_response(user),
+    )
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _v_pw(cls, v: str) -> str:
+        if len(v) < 6:
+            raise ValueError("Password must be at least 6 characters")
+        return v
+
+
+@api_router.post("/auth/change-password")
+async def change_password(
+    data: ChangePasswordRequest, current=Depends(get_current_user)
+):
+    if not verify_password(data.current_password, current.get("hashed_password", "")):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    new_hash = hash_password(data.new_password)
+    await db.users.update_one(
+        {"id": current["id"]}, {"$set": {"hashed_password": new_hash}}
+    )
+    return {"ok": True, "message": "Password updated successfully"}
 
 
 @api_router.put("/auth/timezone", response_model=UserResponse)
@@ -1586,8 +1752,17 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
     # while push/SMS continues in the background.
     async def _sos_fanout():
         try:
+            # Exclude the triggering user — they're the one calling 911 and
+            # are mid-dialer-transition. Receiving their own SOS push during
+            # this window can race the Linking.openURL intent on Android,
+            # causing the modal to close without the dialer opening
+            # (Bug 2 in v6.4 — 15/20 reliability).
             await push_to_family_group(
-                current["family_group_id"], push_title, push_body, push_data
+                current["family_group_id"],
+                push_title,
+                push_body,
+                push_data,
+                exclude_user_id=current["id"],
             )
         except Exception as e:
             logger.warning(f"sos push fanout failed: {e}")
