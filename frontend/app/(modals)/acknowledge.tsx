@@ -108,7 +108,14 @@ export default function NotificationActionScreen() {
             you can really miss. Massive touch target (90pt high). */}
         {done ? (
           <View style={[styles.ackButton, styles.ackButtonDone]}>
-            <Text style={styles.ackButtonText}>✅  Acknowledged</Text>
+            <Text
+              style={styles.ackButtonText}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.8}
+            >
+              ✅  Acknowledged
+            </Text>
           </View>
         ) : (
           <TouchableOpacity
@@ -123,7 +130,12 @@ export default function NotificationActionScreen() {
             {loading ? (
               <ActivityIndicator color={Colors.surface} size="large" />
             ) : (
-              <Text style={styles.ackButtonText}>
+              <Text
+                style={styles.ackButtonText}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.8}
+              >
                 {isFamilyAlert ? '✅  CHECKED ON THEM' : '✅  ACKNOWLEDGE'}
               </Text>
             )}
@@ -175,6 +187,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 16,
     marginHorizontal: 8,
     marginBottom: 16,
     ...Platform.select({
@@ -185,9 +198,15 @@ const styles = StyleSheet.create({
   ackButtonDone: { backgroundColor: '#15803D' },
   ackButtonText: {
     color: '#FFFFFF',
-    fontSize: 28,
+    // Slightly smaller than v6.5 (28→24) so the longest label
+    // ("✅  CHECKED ON THEM") fits on a single line even on narrow
+    // 360dp screens. Still bold and high-contrast — perfectly readable
+    // for elderly users.  Single-line guarantee via numberOfLines={1}
+    // + adjustsFontSizeToFit={true} as a safety net.
+    fontSize: 24,
     fontWeight: '900',
-    letterSpacing: 0.5,
+    letterSpacing: 0.3,
+    textAlign: 'center',
   },
   dismissButton: {
     height: 56,

@@ -24,17 +24,18 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
 const KEY = 'kc.fall.enabled';
-// v6.5 retuning — user reported over-sensitivity in v6.4 (triggering from
-// normal phone handling: setting on counter, picking up off table, etc.).
-// We tighten the impact threshold AND require a brief PRE-IMPACT freefall
-// signature (mag < 0.6g for ~120ms) to filter out everyday handling spikes.
-// Real falls have a tell-tale freefall→impact→stillness profile that
-// normal handling never produces.
+// v6.6 retuning — Charles reported "throwing phone at couch" no longer
+// triggered. Lowered impact threshold 2.6g → 2.2g to catch couch-impact
+// falls (which produce lower peak G than hard-floor falls).  The
+// freefall PRE-CHECK is what kills false positives now — we still
+// require ~120ms of sub-0.6g BEFORE the impact spike, which no everyday
+// phone handling motion produces. Net effect: catches more real falls
+// without re-introducing the v6.4 over-sensitivity.
 const SAMPLE_RATE_MS = 50;             // ~20 Hz
 const FREEFALL_G = 0.6;                // require sub-0.6g for freefall
 const FREEFALL_REQUIRED_MS = 120;      // ~120ms of freefall = ~7cm minimum drop
 const FREEFALL_LOOKBACK_MS = 600;      // look back this far for the freefall
-const IMPACT_G = 2.6;                  // raised from 1.8 — phone handling rarely hits 2.6g
+const IMPACT_G = 2.2;                  // lowered 2.6 → 2.2 (couch-impact falls)
 const STILLNESS_BAND_G = 0.25;         // slightly tighter
 const STILLNESS_REQUIRED_MS = 1200;    // longer stillness — falls settle for >1s
 const POST_IMPACT_WINDOW_MS = 3500;
