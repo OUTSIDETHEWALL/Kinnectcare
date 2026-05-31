@@ -21,6 +21,7 @@ import { Colors } from '../../src/theme';
 import { useAuth } from '../../src/AuthContext';
 import PinPad, { PinPadHandle } from '../../src/PinPad';
 import { setPin, markUnlocked, PIN_LENGTH } from '../../src/pinAuth';
+import { markPinSetupDismissed } from '../../src/pinSetupPrompt';
 
 export default function PinSetup() {
   const router = useRouter();
@@ -81,7 +82,19 @@ export default function PinSetup() {
       'Skip PIN setup?',
       "You can always add a PIN later from Settings → Account. You'll keep signing in with your email and password until then.",
       [
-        { text: 'Keep email login', style: 'default', onPress: () => router.replace('/(tabs)/dashboard') },
+        {
+          text: 'Keep email login',
+          style: 'default',
+          onPress: async () => {
+            // Persist the dismissal so RootNav doesn't keep
+            // re-routing the user back here on every app open /
+            // re-sign-in.
+            if (user?.id) {
+              try { await markPinSetupDismissed(user.id); } catch (_e) {}
+            }
+            router.replace('/(tabs)/dashboard');
+          },
+        },
         { text: 'Set up PIN', style: 'cancel' },
       ],
     );

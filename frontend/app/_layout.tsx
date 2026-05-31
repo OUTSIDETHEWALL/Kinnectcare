@@ -10,6 +10,7 @@ import { setAppReadyForDeepLink } from '../src/push';
 import { isOnboardingDone } from '../src/onboardingStore';
 import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
 import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
+import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
 
 function RootNav() {
   const { user, loading } = useAuth();
@@ -23,6 +24,14 @@ function RootNav() {
   // sign-out, account switch on the same device).
   const [pinChecked, setPinChecked] = useState(false);
   const [needsPinUnlock, setNeedsPinUnlock] = useState(false);
+  // Set after first successful login when no PIN is configured AND the
+  // user hasn't tapped "Not now" before. This is the source of truth
+  // for the post-login "Set up a 4-digit PIN?" prompt — putting it
+  // here in RootNav eliminates the race we had when login.tsx tried
+  // to navigate to /(auth)/pin-setup itself (RootNav would overwrite
+  // with /(tabs)/dashboard since both runs were redirecting at the
+  // same time).
+  const [needsPinSetup, setNeedsPinSetup] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -34,19 +43,32 @@ function RootNav() {
 
   // Re-evaluate the PIN gate whenever the auth user changes. If the
   // user has a PIN saved AND they haven't unlocked-this-session yet,
-  // we redirect to the PIN-login screen below.
+  // we redirect to the PIN-login screen below. If they have NO PIN
+  // saved AND they haven't dismissed the setup prompt yet, we route
+  // them to /(auth)/pin-setup.
   useEffect(() => {
     (async () => {
       if (!user?.id) {
         setNeedsPinUnlock(false);
+        setNeedsPinSetup(false);
         setPinChecked(true);
         return;
       }
       const hasPin = await hasPinForUser(user.id);
-      if (hasPin && !isUnlockedNow(user.id)) {
-        setNeedsPinUnlock(true);
+      if (hasPin) {
+        // Existing PIN — gate behind unlock unless we've already
+        // unlocked-this-session (e.g. after a fresh email login,
+        // login.tsx calls markUnlocked).
+        if (!isUnlockedNow(user.id)) setNeedsPinUnlock(true);
+        else setNeedsPinUnlock(false);
+        setNeedsPinSetup(false);
       } else {
+        // No PIN yet — prompt unless the user previously tapped
+        // "Not now". The flag is per-user so signing in with a
+        // different account re-prompts that account.
         setNeedsPinUnlock(false);
+        const dismissed = await wasPinSetupDismissed(user.id);
+        setNeedsPinSetup(!dismissed);
       }
       setPinChecked(true);
     })();
@@ -147,10 +169,21 @@ function RootNav() {
       router.replace('/(auth)/pin-login');
       return;
     }
-    if (user && !needsPinUnlock && (inAuthGroup || isWelcome || isOnboarding)) {
-      // Only auto-bounce out of (auth) once they've cleared the PIN
-      // gate (or there is no PIN gate). Otherwise the redirect above
-      // would compete with this one.
+    // PIN SETUP — authenticated user with NO PIN yet (and who hasn't
+    // dismissed the prompt) must be routed to the setup screen. This
+    // is the SINGLE source of truth for the post-login PIN setup
+    // prompt — login.tsx used to attempt this navigation itself, but
+    // the older code below ("inAuthGroup → dashboard") would
+    // overwrite that nav. Now we own it here.
+    if (user && needsPinSetup && !onPinScreen) {
+      router.replace('/(auth)/pin-setup');
+      return;
+    }
+    if (user && !needsPinUnlock && !needsPinSetup && !onPinScreen && (inAuthGroup || isWelcome || isOnboarding)) {
+      // Only auto-bounce out of (auth) once both PIN gates have
+      // cleared. The !onPinScreen guard prevents this branch from
+      // racing with the two redirects above and dragging the user
+      // back to the dashboard mid-setup.
       router.replace('/(tabs)/dashboard');
       return;
     }
@@ -161,7 +194,7 @@ function RootNav() {
     // where no further redirect is needed, so taps from any state are
     // honoured once routing has settled.
     setAppReadyForDeepLink(true);
-  }, [user, loading, segments, onboardingChecked, needsOnboarding, pinChecked, needsPinUnlock]);
+  }, [user, loading, segments, onboardingChecked, needsOnboarding, pinChecked, needsPinUnlock, needsPinSetup]);
 
   if (loading || !onboardingChecked || (user && !pinChecked)) {
     return (

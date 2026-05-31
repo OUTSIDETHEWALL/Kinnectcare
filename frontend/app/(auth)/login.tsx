@@ -40,29 +40,43 @@ export default function Login() {
     try {
       await login(emailTrim, passwordTrim);
       setFailHint(null);
-      // After successful email/password login decide where to go:
-      //   • If a PIN is already saved for this user on THIS device →
-      //     re-authenticating with a password is strictly stronger than
-      //     the PIN, so we mark unlocked-for-this-session, reset any
-      //     failed-PIN counter, and drop them on the dashboard.
-      //   • If no PIN exists yet → route to the PIN setup screen.
-      // /auth/me is the source of truth for the freshly-authenticated
-      // user id (AuthContext's setUser may not have flushed yet).
+      // After a successful email/password login we DO NOT navigate to
+      // the PIN setup or dashboard from here — RootNav in _layout.tsx
+      // is the SINGLE source of truth for that decision. It will pick
+      // one of:
+      //   • /(auth)/pin-setup  → user has no PIN and hasn't skipped
+      //   • /(auth)/pin-login  → user has a PIN and hasn't unlocked
+      //   • /(tabs)/dashboard  → all PIN gates already cleared
+      //
+      // The reason this is centralised: previously login.tsx tried
+      // to `router.replace('/(auth)/pin-setup')` itself, but
+      // RootNav's "kick user out of (auth) once authenticated"
+      // branch fired at the same time and overwrote that nav with
+      // a /dashboard redirect — so the PIN setup screen never
+      // actually appeared (the bug the user reported in v6.8).
+      //
+      // We just reset the failed-PIN counter on a fresh password
+      // login (a strictly stronger credential) and let RootNav take
+      // it from there.
       try {
         const me = await apiClient.get('/auth/me');
         const uid: string | undefined = me?.data?.id;
         if (uid) {
           await resetAttempts(uid);
+          // If the user already has a PIN saved on this device,
+          // a fresh email+password sign-in is strictly STRONGER than
+          // the PIN, so we mark them unlocked-for-this-session so
+          // RootNav's PIN-unlock gate doesn't immediately bounce them
+          // to /(auth)/pin-login (which would be a UX dead-end: "you
+          // just typed your password, now type your PIN too?").
           const has = await hasPinForUser(uid);
-          if (has) {
-            markUnlocked(uid);
-            router.replace('/(tabs)/dashboard');
-          } else {
-            router.replace('/(auth)/pin-setup');
-          }
-          return;
+          if (has) markUnlocked(uid);
         }
       } catch (_e) {}
+      // Bounce to a public route so RootNav can decide. Going to
+      // '/(tabs)/dashboard' is fine — RootNav will intercept and
+      // redirect to pin-setup or pin-login as needed once it has
+      // re-evaluated the PIN gate for the new user.id.
       router.replace('/(tabs)/dashboard');
     } catch (e: any) {
       // ROOT-CAUSE-DRIVEN FAILURE UX

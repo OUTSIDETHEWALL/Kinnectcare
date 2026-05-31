@@ -9,6 +9,8 @@ import { APP_NAME, COMPANY_NAME } from '../src/legal';
 import { getBillingStatus, BillingStatus, api } from '../src/api';
 import { isFallEnabled, setFallEnabled, isFallAvailable } from '../src/fallDetector';
 import { getPushStatus, subscribePushStatus, PushStatus, registerForPushNotifications } from '../src/push';
+import { hasPinForUser, clearPin } from '../src/pinAuth';
+import { clearPinSetupDismissed } from '../src/pinSetupPrompt';
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -24,6 +26,19 @@ export default function SettingsScreen() {
   // notifications aren't firing without us asking them to look at device logs.
   const [pushStatus, setPushStatus] = useState<PushStatus>(getPushStatus());
   const [pushRetrying, setPushRetrying] = useState(false);
+  // Whether this device has a PIN saved for the current user. Drives
+  // the "Set up PIN" vs "Remove PIN" row label in the Account section.
+  const [pinOn, setPinOn] = useState<boolean>(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!user?.id) { setPinOn(false); return; }
+      const v = await hasPinForUser(user.id);
+      if (!cancelled) setPinOn(v);
+    })();
+    return () => { cancelled = true; };
+  }, [user?.id]);
 
   useEffect(() => subscribePushStatus(setPushStatus), []);
 
@@ -290,6 +305,53 @@ export default function SettingsScreen() {
               label="Change Password"
               onPress={() => router.push('/change-password')}
             />
+            <Divider />
+            {pinOn ? (
+              <NavRow
+                testID="settings-remove-pin"
+                icon="🔢"
+                label="Remove 4-digit PIN"
+                onPress={() => {
+                  if (!user?.id) return;
+                  Alert.alert(
+                    'Remove PIN?',
+                    "You'll go back to signing in with your email and password each time.",
+                    [
+                      { text: 'Cancel', style: 'cancel' },
+                      {
+                        text: 'Remove',
+                        style: 'destructive',
+                        onPress: async () => {
+                          try {
+                            await clearPin(user.id);
+                            await clearPinSetupDismissed(user.id);
+                            setPinOn(false);
+                            Alert.alert('PIN removed', "You'll sign in with email & password from now on.");
+                          } catch (e: any) {
+                            Alert.alert('Error', e?.message || 'Could not remove PIN.');
+                          }
+                        },
+                      },
+                    ],
+                  );
+                }}
+              />
+            ) : (
+              <NavRow
+                testID="settings-setup-pin"
+                icon="🔢"
+                label="Set up 4-digit PIN"
+                onPress={async () => {
+                  // Clear any prior "Not now" dismissal so RootNav
+                  // will honour the explicit user request and route
+                  // them to /(auth)/pin-setup.
+                  if (user?.id) {
+                    try { await clearPinSetupDismissed(user.id); } catch (_e) {}
+                  }
+                  router.push('/(auth)/pin-setup');
+                }}
+              />
+            )}
           </View>
         </View>
 
