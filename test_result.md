@@ -5926,3 +5926,139 @@ agent_communication:
       test-only issue — the production scheduler is correct.
 
       Please summarize and finish.
+
+
+
+backend:
+  - task: "v6.4 regression — UTC tz suffix, SOS fast/background fanout, per-stage med scheduler windows"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py, /app/backend/med_scheduler.py, /app/backend/expo_push.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 18/18 v6.4 focused regression scenarios green on second
+          full run. Driver: /app/backend_test.py against
+          https://family-guard-37.preview.emergentagent.com/api as
+          demo@kinnship.app / password123.
+
+          1. UTC TIMESTAMP SUFFIX (Bug 2 fix) — Field serializers on
+             Alert/Member/CheckIn/Reminder are emitting "+00:00" (or "Z")
+             on EVERY datetime field returned by:
+               • GET /api/alerts          — 207/207 created_at suffixed ✓
+               • GET /api/members         — created_at + last_seen +
+                 checkin_interval_started_at on all 5 members suffixed ✓
+               • GET /api/checkins/recent — 0 rows, none malformed ✓
+               • GET /api/reminders       — 26 reminders; created_at,
+                 last_marked_at, last_refill_at, run_out_at all
+                 suffixed where present ✓
+
+          2. SOS FAST RESPONSE + BACKGROUND FANOUT (Bug 5 fix) —
+               • POST /api/sos {lat:33.4, lon:-112.0} → 200 in 147ms
+                 (well under the 500ms target). ✓
+               • Response body contains fanout_mode='background' and
+                 sms_mode='mock'. ✓
+               • Legacy fields devices_notified and sms_sent are
+                 ABSENT from the response (confirmed two ways). ✓
+               • The new SOS alert appears in GET /api/alerts within
+                 5s — fire-and-forget asyncio.create_task is delivering
+                 the alert-row insert as well as push+SMS fanout
+                 asynchronously. ✓
+               • Backend log shows the same alert_id flowed into
+                 push_to_family_group and the mocked SMS fanout:
+                   INFO:server:SOS SMS fanout (bg) — mode=mock sent=3
+                                                     failed=0 contacts=3
+                 NOTE: SMS path is MOCKED (sms_mode='mock'), no live
+                 SMS carrier is hit — this is the expected /api/sos
+                 behavior in this environment.
+
+          3. FAMILY ESCALATION WINDOW (Bug 1 fix) — Created a brand new
+             medication reminder for member Gregory with a slot 17 min
+             in the past (UTC). Immediately POST /api/medications/_tick:
+               • Tick #1 counters: scanned=447, fired_due=0,
+                 fired_family_alert=1, fired_routine_due=0,
+                 skipped_taken=0, scanned_refill=6, fired_refill=0.
+               • GET /api/medications/_stages/{rid} → stages=['family_alert']
+                 (DUE NOT fired because 17 > DUE_MAX_STALE=10; FAMILY
+                 fired because 17 is within [15, 75]). ✓
+               • Tick #2 counters: all firing counters back to 0;
+                 stages unchanged → idempotent via unique index
+                 (reminder_id, slot_time, local_date, stage). ✓
+
+          4. DUE WINDOW (0-10min) + GAP (10-15min) —
+             4a) Slot -5min, tick #1 → fired_due=1, fired_family=0,
+                 stages=['due'].  Tick #2 → fired_due=0, stages stable.
+                 ✓ (DUE fired exactly once for delta_min ∈ [0,10])
+             4b) Slot -12min, tick → fired_due=0, fired_family=0,
+                 stages=[]. ✓ (gap window correctly suppresses both
+                 stages; family_alert window starts at 15min).
+
+          5. CLEANUP — All 3 test reminders DELETE'd successfully.
+
+          CRITICAL FIX VERIFICATIONS:
+            • Per-stage stale cutoffs are correctly bounding firing
+              decisions:
+                STAGE_OFFSETS_MIN  = {due:0, family_alert:15}
+                STAGE_MAX_STALE_MIN= {due:10, family_alert:75}
+              The "gap" 10-15 produces no fires, confirming the
+              previously-buggy 1-minute family window has been
+              expanded to 60 minutes and is no longer bound by the
+              global MAX_STALE_MINUTES.
+            • SOS endpoint timing (<500ms) and `fanout_mode='background'`
+              flag confirm the fire-and-forget asyncio.create_task
+              refactor is in place; the previous synchronous path
+              would not have hit those numbers and would have
+              included the old `devices_notified`/`sms_sent` keys.
+            • Field serializers (Alert/CheckIn/FamilyMember/Reminder)
+              always emit UTC suffix — verified across all four
+              listing endpoints with zero violations.
+
+          Test-side note: first test run during a UTC-near-midnight
+          window failed scenario 3 (-17m slot) because the scheduler
+          intentionally evaluates HH:MM against TODAY only (no
+          yesterday-fallback), so a HH:MM string that crosses
+          midnight ended up in the future. Re-run after waiting past
+          00:17 UTC produced the expected family_alert fire. This is
+          a TEST-ONLY artifact — the scheduler design is correct and
+          matches the v6.3/v6.4 spec ("strictly evaluate the CURRENT
+          day's slot so we never re-fire across a day rollover").
+
+          POST-RUN backend.err.log inspection: no new tracebacks; only
+          the pre-existing benign passlib bcrypt __about__ warning
+          remains (unrelated).
+
+          Verdict: v6.4 spec is fully met. Bug 1 (family escalation
+          window), Bug 2 (UTC tz suffix), and Bug 5 (SOS fast +
+          background fanout) are all verified fixed. No regressions
+          detected in Scenarios 1-4.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      v6.4 focused regression VERIFIED PASS — 18/18 checks green.
+      Driver: /app/backend_test.py.
+
+      Bug 1 (family escalation 15-75min window): FIXED — slot at -17m
+      fires family_alert only; -12m gap fires nothing; -5m fires
+      due only. Idempotent on second tick.
+
+      Bug 2 (UTC suffix on datetime fields): FIXED — Alerts (207),
+      Members (5), CheckIns (0), Reminders (26) all emit "+00:00" /
+      "Z" on every datetime field returned.
+
+      Bug 5 (SOS fast + background fanout): FIXED — POST /api/sos
+      returns in 147ms (target <500ms), response includes
+      fanout_mode='background' and sms_mode='mock', legacy keys
+      `devices_notified` and `sms_sent` are absent, the alert row
+      appears in GET /api/alerts within 5s, and the backend log
+      confirms the push + mocked SMS fanout completed in the
+      background. SMS path is MOCKED in this env (sms_mode='mock').
+
+      No source-code changes were made — review request explicitly
+      forbade it and none were needed.
+
+      Please summarize and finish.

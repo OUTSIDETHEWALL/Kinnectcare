@@ -43,6 +43,7 @@ Notifications.setNotificationHandler({
     shouldShowList: true,
     shouldPlaySound: true,
     shouldSetBadge: true,
+    priority: Notifications.AndroidNotificationPriority.MAX,
   }),
 });
 
@@ -51,21 +52,22 @@ Notifications.setNotificationHandler({
 // Categories must be registered BEFORE the first push that references one
 // arrives. We register on app startup via ensureNotificationCategories().
 //
-// MEDICATION_DUE → adds two action buttons: "I Took It" and "Snooze 10m"
-// ROUTINE_DUE    → adds one action button: "Done"
+// v6.4 accessibility tuning: button labels are intentionally short,
+// emoji-led, and UPPERCASE so the Android system renders them at the
+// largest possible action-button typography weight.
 async function ensureNotificationCategories() {
   try {
     await Notifications.setNotificationCategoryAsync('MEDICATION_DUE', [
       {
         identifier: 'TOOK_IT',
-        buttonTitle: '✓  I Took It',
+        buttonTitle: '✅  TOOK IT',
         options: {
           opensAppToForeground: false,  // Mark taken silently — no UI interrupt
         },
       },
       {
         identifier: 'SNOOZE_10',
-        buttonTitle: 'Snooze 10m',
+        buttonTitle: '⏰  SNOOZE',
         options: {
           opensAppToForeground: false,
         },
@@ -74,15 +76,13 @@ async function ensureNotificationCategories() {
     await Notifications.setNotificationCategoryAsync('ROUTINE_DUE', [
       {
         identifier: 'DONE',
-        buttonTitle: '✓  Done',
+        buttonTitle: '✅  DONE',
         options: {
           opensAppToForeground: false,
         },
       },
     ]);
   } catch (e) {
-    // Best-effort — older platforms may not support categories.
-    // The notification still displays as a normal heads-up without buttons.
     // eslint-disable-next-line no-console
     console.warn('Failed to register notification categories:', e);
   }
@@ -90,20 +90,17 @@ async function ensureNotificationCategories() {
 
 // ---------- Android Notification Channels ----------
 //
-// Each push includes a `channelId` in its data payload; we route it via the
-// top-level channelId field on the push send call (handled server-side).
-//
-// Critical channels (sos, meds) use IMPORTANCE_MAX with vibration so the
-// notification persists in the heads-up area + tray until the user dismisses
-// it. They also enable lights and bypass DND for SOS.
+// v6.4: stronger vibration patterns + verbose body text so the OS
+// auto-expands the notification (Android uses BigTextStyle when the body
+// is longer than the collapsed line). Channel importance MAX guarantees
+// the heads-up appears and the system keeps it in the tray.
 export async function ensureNotificationChannel() {
   if (Platform.OS !== 'android') return;
   try {
-    // Default — used by anything without an explicit channel.
     await Notifications.setNotificationChannelAsync('default', {
       name: 'Kinnship alerts',
       importance: Notifications.AndroidImportance.MAX,
-      vibrationPattern: [0, 250, 250, 250],
+      vibrationPattern: [0, 350, 250, 350],
       lightColor: '#1B5E35',
       sound: 'default',
       enableVibrate: true,
@@ -114,30 +111,28 @@ export async function ensureNotificationChannel() {
       name: 'Medication reminders',
       description: 'Time-to-take, family alerts, and refill reminders',
       importance: Notifications.AndroidImportance.MAX,
-      vibrationPattern: [0, 300, 200, 300],
+      vibrationPattern: [0, 500, 250, 500, 250, 500],
       lightColor: '#1B5E35',
       sound: 'default',
       enableVibrate: true,
       enableLights: true,
       showBadge: true,
     });
-    // Routines — gentler nudge, still heads-up.
     await Notifications.setNotificationChannelAsync('routines', {
       name: 'Daily routines',
       description: 'Walks, hydration, meals, and other routine nudges',
       importance: Notifications.AndroidImportance.HIGH,
-      vibrationPattern: [0, 200, 100, 200],
+      vibrationPattern: [0, 300, 150, 300],
       lightColor: '#1B5E35',
       sound: 'default',
       enableVibrate: true,
       showBadge: true,
     });
-    // SOS — critical, bypass DND when allowed.
     await Notifications.setNotificationChannelAsync('sos', {
       name: 'SOS emergencies',
       description: 'Critical safety alerts — never silenced',
       importance: Notifications.AndroidImportance.MAX,
-      vibrationPattern: [0, 500, 200, 500, 200, 500],
+      vibrationPattern: [0, 800, 300, 800, 300, 800],
       lightColor: '#DC2626',
       sound: 'default',
       enableVibrate: true,
@@ -215,6 +210,70 @@ export async function registerForPushNotifications(): Promise<string | null> {
   }
 }
 
+// ---------- Notification persistence layer ----------
+//
+// PROBLEM (Bug 3): Push notifications were vanishing from the heads-up
+// banner within seconds, before elderly users could read them or tap
+// the action buttons.
+//
+// ROOT CAUSE: Android's default heads-up display lifetime is OS-controlled
+// (~5 seconds).  The Expo Push API does not expose `sticky` / `autoDismiss`
+// in its payload contract — those flags only exist on LOCAL notifications.
+//
+// FIX: On `addNotificationReceivedListener`, immediately re-present the
+// content as a LOCAL notification with `sticky: true` and
+// `autoDismiss: false`.  We then dismiss the auto-displayed original.
+// Result: the notification stays in the tray (and re-shows the heads-up
+// with a longer body that forces Android into BigTextStyle, which keeps
+// the action buttons immediately visible).
+//
+// Only applied to medication / routine / sos / family_alert notifications
+// — informational types still behave normally.
+async function rePresentSticky(n: Notifications.Notification) {
+  if (Platform.OS !== 'android') return;
+  const content = n.request.content;
+  const data: any = content.data || {};
+  const t = data.type;
+  if (!t || !['medication', 'routine', 'sos'].includes(t)) return;
+
+  const channelId =
+    data.channelId ||
+    (t === 'sos' ? 'sos' : t === 'routine' ? 'routines' : 'meds');
+  const cat = data.categoryIdentifier;
+
+  // Use a longer body so Android auto-expands the notification
+  // (BigTextStyle), making the "✅ TOOK IT" action buttons immediately
+  // visible without the user having to swipe down.
+  const body = content.body || '';
+  const expanded = body.length >= 60
+    ? body
+    : (body + '\n\nTap an action button below or open Kinnship to confirm.');
+
+  try {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: content.title || '',
+        body: expanded,
+        data,
+        sound: 'default',
+        categoryIdentifier: cat,
+        sticky: true,        // can't be swiped away on Android
+        autoDismiss: false,  // doesn't auto-dismiss on tap
+        priority: Notifications.AndroidNotificationPriority.MAX,
+        color: t === 'sos' ? '#DC2626' : '#1B5E35',
+      } as any,
+      trigger: { channelId } as any,
+    });
+    // Dismiss the auto-displayed push so we don't have a duplicate.
+    try {
+      await Notifications.dismissNotificationAsync(n.request.identifier);
+    } catch (_e) {}
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn('Failed to re-present sticky:', e);
+  }
+}
+
 // ---------- Notification response handler ----------
 //
 // Fires when the user interacts with a notification:
@@ -226,19 +285,21 @@ export async function registerForPushNotifications(): Promise<string | null> {
 export function useNotificationListeners(onAlert?: (data: any) => void) {
   const [last, setLast] = useState<Notifications.Notification | null>(null);
   useEffect(() => {
-    const recv = Notifications.addNotificationReceivedListener(n => setLast(n));
+    const recv = Notifications.addNotificationReceivedListener((n) => {
+      setLast(n);
+      // Re-present critical notifications as sticky to keep them in tray.
+      rePresentSticky(n);
+    });
     const resp = Notifications.addNotificationResponseReceivedListener(async (r) => {
       const data: any = r.notification.request.content.data || {};
       const actionId = r.actionIdentifier;
 
-      // Action button taps — silent mark-taken / snooze. These come from
-      // notification category buttons we registered above.
+      // Action button taps — silent mark-taken / snooze.
       if (actionId === 'TOOK_IT' || actionId === 'DONE') {
         const rid = data.reminder_id;
         if (rid) {
           try {
             await api.post(`/reminders/${rid}/mark`, { status: 'taken' });
-            // Dismiss the notification from the tray so the user sees confirmation.
             try {
               await Notifications.dismissNotificationAsync(r.notification.request.identifier);
             } catch (_e) {}
@@ -247,18 +308,18 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
         return;
       }
       if (actionId === 'SNOOZE_10') {
-        // Schedule a local re-fire in 10 min using the same category so the
-        // action buttons reappear.
         const rid = data.reminder_id;
         try {
           await Notifications.scheduleNotificationAsync({
             content: {
               title: r.notification.request.content.title || '💊 Medication reminder',
-              body: r.notification.request.content.body || 'Tap "I Took It" to confirm.',
+              body: r.notification.request.content.body || 'Tap "TOOK IT" to confirm.',
               data,
               categoryIdentifier: 'MEDICATION_DUE',
               sound: 'default',
-            },
+              sticky: true,
+              autoDismiss: false,
+            } as any,
             trigger: { seconds: 600, channelId: 'meds' } as any,
           });
         } catch (_e) {}

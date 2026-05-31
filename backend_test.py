@@ -1,427 +1,348 @@
-#!/usr/bin/env python3
+"""Kinnship v6.4 focused regression test.
+
+Validates:
+  1. Timestamp UTC suffix on Alerts/Members/CheckIns/Reminders.
+  2. SOS endpoint returns fast + new fanout_mode/sms_mode fields.
+  3. Family escalation window (delta_min=17 → only FAMILY fires).
+  4. DUE window 10-min cutoff + gap window 12-min (>10 <15 → nothing).
+  5. Cleanup test reminders.
 """
-Kinnship Backend Test — EC-N (emergency_contact_name) + RF (medication refill reminder)
-Targets: https://family-guard-37.preview.emergentagent.com/api
-Demo creds: demo@kinnship.app / password123
-"""
-import json
 import os
+import re
 import sys
 import time
+import json
 import uuid
-from datetime import datetime, timezone, timedelta
-
 import requests
+from datetime import datetime, timedelta, timezone
 
 BASE = "https://family-guard-37.preview.emergentagent.com/api"
 EMAIL = "demo@kinnship.app"
-PASS = "password123"
+PASSWORD = "password123"
 
-results = []  # list of (name, ok, detail)
+PASS = []
+FAIL = []
 
 
-def log(name, ok, detail=""):
-    status = "PASS" if ok else "FAIL"
-    print(f"[{status}] {name}: {detail}")
-    results.append((name, ok, detail))
+def _ok(name, msg=""):
+    PASS.append((name, msg))
+    print(f"  PASS  {name}  {msg}")
+
+
+def _fail(name, msg):
+    FAIL.append((name, msg))
+    print(f"  FAIL  {name}  {msg}")
+
+
+def check_iso_utc(ts):
+    if ts is None:
+        return False, "is None"
+    if not isinstance(ts, str):
+        return False, f"not a string: {type(ts)}"
+    if ts.endswith("+00:00") or ts.endswith("Z"):
+        return True, ""
+    return False, f"missing UTC suffix: {ts!r}"
 
 
 def login():
-    r = requests.post(f"{BASE}/auth/login", json={"email": EMAIL, "password": PASS}, timeout=30)
-    r.raise_for_status()
-    return r.json()["access_token"]
+    r = requests.post(f"{BASE}/auth/login", json={"email": EMAIL, "password": PASSWORD}, timeout=15)
+    if r.status_code != 200:
+        _fail("auth/login", f"status={r.status_code} body={r.text[:300]}")
+        sys.exit(1)
+    tok = r.json()["access_token"]
+    _ok("auth/login", f"token len={len(tok)}")
+    return tok
 
 
-def H(tok):
-    return {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
+def auth_headers(tok):
+    return {"Authorization": f"Bearer {tok}"}
 
 
-def iso_parse(s):
-    if s is None:
-        return None
-    if isinstance(s, str):
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+# ---------------- Scenario 1: timestamps ----------------
+def test_timestamps(tok):
+    print("\n--- Scenario 1: UTC timestamp suffix ---")
+    h = auth_headers(tok)
+
+    r = requests.get(f"{BASE}/alerts", headers=h, timeout=15)
+    if r.status_code != 200:
+        _fail("GET /alerts", f"status={r.status_code}")
     else:
-        dt = s
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+        alerts = r.json()
+        bad = []
+        for a in alerts:
+            ok, msg = check_iso_utc(a.get("created_at"))
+            if not ok:
+                bad.append((a.get("id"), msg))
+        if bad:
+            _fail("alerts.created_at UTC suffix", f"{len(bad)}/{len(alerts)} bad. samples={bad[:3]}")
+        else:
+            _ok("alerts.created_at UTC suffix", f"all {len(alerts)} have +00:00/Z")
+
+    r = requests.get(f"{BASE}/members", headers=h, timeout=15)
+    if r.status_code != 200:
+        _fail("GET /members", f"status={r.status_code}")
+        return []
+    members = r.json()
+    bad = []
+    for m in members:
+        for k in ("created_at", "last_seen", "checkin_interval_started_at"):
+            v = m.get(k)
+            if v is None:
+                continue
+            ok, msg = check_iso_utc(v)
+            if not ok:
+                bad.append((m.get("id"), k, msg))
+    if bad:
+        _fail("members.* UTC suffix", f"bad={bad[:5]}")
+    else:
+        _ok("members.* UTC suffix", f"{len(members)} members; all dt fields suffixed")
+
+    r = requests.get(f"{BASE}/checkins/recent", headers=h, timeout=15)
+    if r.status_code != 200:
+        _fail("GET /checkins/recent", f"status={r.status_code}")
+    else:
+        cis = r.json()
+        bad = []
+        for c in cis:
+            ok, msg = check_iso_utc(c.get("created_at"))
+            if not ok:
+                bad.append((c.get("id"), msg))
+        if bad:
+            _fail("checkins.created_at UTC suffix", f"bad={bad[:3]}")
+        else:
+            _ok("checkins.created_at UTC suffix", f"{len(cis)} entries OK")
+
+    r = requests.get(f"{BASE}/reminders", headers=h, timeout=15)
+    if r.status_code != 200:
+        _fail("GET /reminders", f"status={r.status_code}")
+    else:
+        rems = r.json()
+        bad = []
+        for rem in rems:
+            for k in ("created_at", "last_marked_at", "last_refill_at", "run_out_at"):
+                v = rem.get(k)
+                if v is None:
+                    continue
+                ok, msg = check_iso_utc(v)
+                if not ok:
+                    bad.append((rem.get("id"), k, msg))
+        if bad:
+            _fail("reminders.* UTC suffix", f"bad={bad[:5]}")
+        else:
+            _ok("reminders.* UTC suffix", f"{len(rems)} reminders OK")
+
+    return members
+
+
+# ---------------- Scenario 2: SOS ----------------
+def test_sos(tok):
+    print("\n--- Scenario 2: SOS fast + background fanout ---")
+    h = auth_headers(tok)
+
+    t0 = time.perf_counter()
+    r = requests.post(
+        f"{BASE}/sos",
+        headers=h,
+        json={"latitude": 33.4, "longitude": -112.0},
+        timeout=15,
+    )
+    elapsed = (time.perf_counter() - t0) * 1000.0
+    if r.status_code != 200:
+        _fail("POST /sos", f"status={r.status_code} body={r.text[:300]}")
+        return None
+    body = r.json()
+    _ok("POST /sos", f"{elapsed:.0f}ms, alert_id={(body.get('alert_id') or '')[:8]}…")
+
+    if elapsed < 500:
+        _ok("SOS <500ms", f"{elapsed:.0f}ms")
+    else:
+        _fail("SOS <500ms", f"took {elapsed:.0f}ms (>=500ms threshold)")
+
+    if body.get("fanout_mode") == "background":
+        _ok("SOS fanout_mode=background", "")
+    else:
+        _fail("SOS fanout_mode=background", f"got {body.get('fanout_mode')!r}")
+
+    sms_mode = body.get("sms_mode")
+    if sms_mode == "mock":
+        _ok("SOS sms_mode=mock (MOCKED)", "")
+    elif sms_mode == "live":
+        _ok("SOS sms_mode=live", "")
+    else:
+        _fail("SOS sms_mode present", f"got {sms_mode!r}")
+
+    for k in ("devices_notified", "sms_sent"):
+        if k in body:
+            _fail(f"SOS no {k} field", f"unexpectedly present: {body.get(k)!r}")
+        else:
+            _ok(f"SOS no {k} field", "removed as expected")
+
+    target_id = body.get("alert_id")
+    found = False
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        r2 = requests.get(f"{BASE}/alerts", headers=h, timeout=15)
+        if r2.status_code == 200:
+            for a in r2.json():
+                if a["id"] == target_id:
+                    found = True
+                    break
+        if found:
+            break
+        time.sleep(0.4)
+    if found:
+        _ok("SOS alert appears <5s", f"alert_id={target_id[:8]}…")
+    else:
+        _fail("SOS alert appears <5s", f"alert_id {target_id} not seen in GET /alerts")
+
+    return target_id
+
+
+# ---------------- Helpers ----------------
+def create_reminder(tok, member_id, title, delta_min):
+    h = auth_headers(tok)
+    when = datetime.now(timezone.utc) - timedelta(minutes=delta_min)
+    hhmm = when.strftime("%H:%M")
+    body = {
+        "member_id": member_id,
+        "title": title,
+        "category": "medication",
+        "dosage": "Test 1pill",
+        "times": [{"time": hhmm, "label": "TestSlot"}],
+    }
+    r = requests.post(f"{BASE}/reminders", headers=h, json=body, timeout=15)
+    if r.status_code != 200:
+        return None, f"create_reminder failed: {r.status_code} {r.text[:200]}"
+    return r.json(), None
+
+
+def tick(tok):
+    h = auth_headers(tok)
+    r = requests.post(f"{BASE}/medications/_tick", headers=h, timeout=15)
+    if r.status_code != 200:
+        return None, f"tick failed: {r.status_code} {r.text[:200]}"
+    return r.json(), None
+
+
+def stages_for(tok, rid):
+    r = requests.get(f"{BASE}/medications/_stages/{rid}", headers=auth_headers(tok), timeout=15)
+    if r.status_code != 200:
+        return []
+    return [s["stage"] for s in r.json().get("stages", [])]
+
+
+# ---------------- Scenarios 3 & 4 ----------------
+def test_scheduler(tok, members):
+    print("\n--- Scenario 3 & 4: scheduler stages ---")
+    if not members:
+        _fail("scheduler", "no members available")
+        return []
+    target = members[0]
+    member_id = target["id"]
+    print(f"  Using member: {target.get('name')} ({member_id[:8]}…)")
+    created = []
+
+    # ---- 4a: slot 5 min in past → DUE only
+    print("\n  [4a] slot at -5 min: expect fired_due=1, fired_family=0")
+    rem, err = create_reminder(tok, member_id, f"KSTest-DUE-{uuid.uuid4().hex[:6]}", 5)
+    if err:
+        _fail("create DUE rem", err)
+    else:
+        created.append(rem["id"])
+        c, err = tick(tok)
+        if err:
+            _fail("tick DUE", err)
+        else:
+            st = stages_for(tok, rem["id"])
+            if "due" in st and "family_alert" not in st:
+                _ok("4a DUE-only fired", f"stages={st}; tick_counters={c}")
+            else:
+                _fail("4a DUE-only fired", f"stages={st}; tick_counters={c}")
+
+            c2, _ = tick(tok)
+            st2 = stages_for(tok, rem["id"])
+            if st2 == st:
+                _ok("4a second tick idempotent", f"stages stable={st2}")
+            else:
+                _fail("4a second tick idempotent", f"before={st} after={st2}; counters={c2}")
+
+    # ---- 4b: slot 12 min in past → nothing (gap)
+    print("\n  [4b] slot at -12 min: expect fired_due=0, fired_family=0 (gap)")
+    rem, err = create_reminder(tok, member_id, f"KSTest-GAP-{uuid.uuid4().hex[:6]}", 12)
+    if err:
+        _fail("create GAP rem", err)
+    else:
+        created.append(rem["id"])
+        c, err = tick(tok)
+        if err:
+            _fail("tick GAP", err)
+        else:
+            st = stages_for(tok, rem["id"])
+            if not st:
+                _ok("4b gap → no stage fired", f"tick_counters={c}")
+            else:
+                _fail("4b gap → no stage fired", f"stages={st}; tick_counters={c}")
+
+    # ---- 3: slot 17 min in past → FAMILY only
+    print("\n  [3] slot at -17 min: expect fired_due=0, fired_family_alert=1")
+    rem, err = create_reminder(tok, member_id, f"KSTest-FAM-{uuid.uuid4().hex[:6]}", 17)
+    if err:
+        _fail("create FAM rem", err)
+    else:
+        created.append(rem["id"])
+        c, err = tick(tok)
+        if err:
+            _fail("tick FAM", err)
+        else:
+            st = stages_for(tok, rem["id"])
+            if "family_alert" in st and "due" not in st:
+                _ok("3 family-only fired", f"stages={st}; tick_counters={c}")
+            else:
+                _fail("3 family-only fired", f"stages={st}; tick_counters={c}")
+
+            c2, _ = tick(tok)
+            st2 = stages_for(tok, rem["id"])
+            if st2 == st:
+                _ok("3 family second tick idempotent", f"stages stable={st2}")
+            else:
+                _fail("3 family second tick idempotent", f"before={st} after={st2}; counters={c2}")
+
+    return created
+
+
+# ---------------- Scenario 5 ----------------
+def cleanup(tok, reminder_ids):
+    print("\n--- Scenario 5: cleanup ---")
+    h = auth_headers(tok)
+    deleted = 0
+    for rid in reminder_ids:
+        try:
+            r = requests.delete(f"{BASE}/reminders/{rid}", headers=h, timeout=15)
+            if r.status_code == 200:
+                deleted += 1
+        except Exception:
+            pass
+    if deleted == len(reminder_ids):
+        _ok("cleanup", f"{deleted}/{len(reminder_ids)} reminders deleted")
+    else:
+        _fail("cleanup", f"only {deleted}/{len(reminder_ids)} deleted")
 
 
 def main():
-    token = login()
-    headers = H(token)
-    print(f"\n=== Logged in as {EMAIL} ===\n")
+    print(f"Base URL: {BASE}")
+    tok = login()
+    members = test_timestamps(tok)
+    test_sos(tok)
+    rids = test_scheduler(tok, members)
+    cleanup(tok, rids)
 
-    # ==================== Group EC-N ====================
-    print("\n--- Group EC-N: Emergency contact name ---")
-
-    # Create a fresh member for isolated testing
-    member_payload = {
-        "name": "EC Test Member",
-        "age": 70,
-        "role": "senior",
-        "gender": "female",
-        "phone": "+15550001111",
-    }
-    r = requests.post(f"{BASE}/members", json=member_payload, headers=headers, timeout=30)
-    if r.status_code != 200:
-        log("EC-N setup: create member", False, f"{r.status_code} {r.text}")
-        rr = requests.get(f"{BASE}/members", headers=headers, timeout=30)
-        members = rr.json()
-        if not members:
-            print("No members available, aborting")
-            return False
-        member_id = members[0]["id"]
-    else:
-        member_id = r.json()["id"]
-        print(f"  Created member id={member_id}")
-
-    # EC-N1: Set both name and phone
-    body = {
-        "emergency_contact_name": "Jane Smith",
-        "emergency_contact_phone": "+15551234567",
-    }
-    r = requests.put(f"{BASE}/members/{member_id}", json=body, headers=headers, timeout=30)
-    ok1 = r.status_code == 200
-    if ok1:
-        rg = requests.get(f"{BASE}/members/{member_id}", headers=headers, timeout=30)
-        d = rg.json()
-        ok1 = (
-            d.get("emergency_contact_name") == "Jane Smith"
-            and d.get("emergency_contact_phone") == "+15551234567"
-        )
-        log("EC-N1", ok1, f"name={d.get('emergency_contact_name')!r} phone={d.get('emergency_contact_phone')!r}")
-    else:
-        log("EC-N1", False, f"PUT {r.status_code} {r.text}")
-
-    # EC-N2: Clear just name
-    body = {"emergency_contact_name": None}
-    r = requests.put(f"{BASE}/members/{member_id}", json=body, headers=headers, timeout=30)
-    ok2 = r.status_code == 200
-    if ok2:
-        rg = requests.get(f"{BASE}/members/{member_id}", headers=headers, timeout=30)
-        d = rg.json()
-        ok2 = (
-            d.get("emergency_contact_name") is None
-            and d.get("emergency_contact_phone") == "+15551234567"
-        )
-        log("EC-N2", ok2, f"name={d.get('emergency_contact_name')!r} phone(unchanged)={d.get('emergency_contact_phone')!r}")
-    else:
-        log("EC-N2", False, f"PUT {r.status_code} {r.text}")
-
-    # EC-N3: backwards compat (phone only, no name)
-    body = {"emergency_contact_phone": "+15559998888"}
-    r = requests.put(f"{BASE}/members/{member_id}", json=body, headers=headers, timeout=30)
-    ok3 = r.status_code == 200
-    if ok3:
-        rg = requests.get(f"{BASE}/members/{member_id}", headers=headers, timeout=30)
-        d = rg.json()
-        ok3 = (
-            d.get("emergency_contact_phone") == "+15559998888"
-            and d.get("emergency_contact_name") is None
-        )
-        log("EC-N3", ok3, f"phone={d.get('emergency_contact_phone')!r} name(unchanged-null)={d.get('emergency_contact_name')!r}")
-    else:
-        log("EC-N3", False, f"PUT {r.status_code} {r.text}")
-
-    # ==================== Group RF ====================
-    print("\n--- Group RF: Medication refill reminder ---")
-
-    test_member_id = member_id
-
-    # RF-1: Create medication WITH refill tracking
-    rf1_payload = {
-        "member_id": test_member_id,
-        "title": "Lisinopril",
-        "category": "medication",
-        "times": [{"time": "08:00", "label": "Morning"}],
-        "days_supply": 30,
-        "refill_reminder_days": 7,
-    }
-    t0 = datetime.now(timezone.utc)
-    r = requests.post(f"{BASE}/reminders", json=rf1_payload, headers=headers, timeout=30)
-    rf1_id = None
-    if r.status_code != 200:
-        log("RF-1", False, f"{r.status_code} {r.text}")
-    else:
-        d = r.json()
-        rf1_id = d["id"]
-        ds = d.get("days_supply")
-        lead = d.get("refill_reminder_days")
-        lra = iso_parse(d.get("last_refill_at"))
-        roa = iso_parse(d.get("run_out_at"))
-        ok = ds == 30 and lead == 7
-        ok_lra = lra is not None and abs((lra - t0).total_seconds()) < 30
-        ok_roa = roa is not None and abs((roa - (t0 + timedelta(days=30))).total_seconds()) < 120
-        ok = ok and ok_lra and ok_roa
-        log("RF-1", ok, f"ds={ds} lead={lead} lra_ok={ok_lra} roa_ok={ok_roa} lra={lra} roa={roa}")
-
-    # RF-2: invalid days_supply > 365
-    rf2_payload = {
-        "member_id": test_member_id,
-        "title": "BadMed1",
-        "category": "medication",
-        "times": [{"time": "09:00"}],
-        "days_supply": 400,
-    }
-    r = requests.post(f"{BASE}/reminders", json=rf2_payload, headers=headers, timeout=30)
-    detail = ""
-    try:
-        detail = r.json().get("detail", "")
-    except Exception:
-        detail = r.text
-    ok = r.status_code == 400 and "1 and 365" in str(detail)
-    log("RF-2", ok, f"status={r.status_code} detail={detail!r}")
-
-    # RF-3: lead > days_supply
-    rf3_payload = {
-        "member_id": test_member_id,
-        "title": "BadMed2",
-        "category": "medication",
-        "times": [{"time": "09:00"}],
-        "days_supply": 30,
-        "refill_reminder_days": 40,
-    }
-    r = requests.post(f"{BASE}/reminders", json=rf3_payload, headers=headers, timeout=30)
-    try:
-        detail = r.json().get("detail", "")
-    except Exception:
-        detail = r.text
-    ok = r.status_code == 400 and "between 1 and days_supply" in str(detail)
-    log("RF-3", ok, f"status={r.status_code} detail={detail!r}")
-
-    # RF-4: create medication WITHOUT refill
-    rf4_payload = {
-        "member_id": test_member_id,
-        "title": "Metformin",
-        "category": "medication",
-        "times": [{"time": "12:00"}],
-    }
-    r = requests.post(f"{BASE}/reminders", json=rf4_payload, headers=headers, timeout=30)
-    rf4_id = None
-    if r.status_code != 200:
-        log("RF-4", False, f"{r.status_code} {r.text}")
-    else:
-        d = r.json()
-        rf4_id = d["id"]
-        ok = (
-            d.get("days_supply") is None
-            and d.get("refill_reminder_days") is None
-            and d.get("last_refill_at") is None
-            and d.get("run_out_at") is None
-        )
-        log("RF-4", ok, f"ds={d.get('days_supply')} lead={d.get('refill_reminder_days')} lra={d.get('last_refill_at')} roa={d.get('run_out_at')}")
-
-    # RF-5: tick within refill window
-    r = requests.post(
-        f"{BASE}/auth/push-token",
-        json={"token": "ExponentPushToken[FAKE_RF]"},
-        headers=headers, timeout=30,
-    )
-    print(f"  RF-5a push-token register: {r.status_code} body={r.text[:150]}")
-
-    rf5_payload = {
-        "member_id": test_member_id,
-        "title": "Lisinopril",
-        "category": "medication",
-        "times": [{"time": "08:00", "label": "Morning"}],
-        "days_supply": 10,
-        "refill_reminder_days": 3,
-    }
-    r = requests.post(f"{BASE}/reminders", json=rf5_payload, headers=headers, timeout=30)
-    rf5_id = None
-    rf5_ok = False
-    if r.status_code != 200:
-        log("RF-5", False, f"create failed {r.status_code} {r.text}")
-    else:
-        rf5_id = r.json()["id"]
-        print(f"  RF-5b created reminder id={rf5_id}")
-
-        # Backdate last_refill_at
-        backdated = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
-        r = requests.put(
-            f"{BASE}/reminders/{rf5_id}",
-            json={"last_refill_at": backdated},
-            headers=headers, timeout=30,
-        )
-        if r.status_code != 200:
-            r = requests.put(
-                f"{BASE}/reminders/{rf5_id}",
-                json={"last_refill_at": backdated, "days_supply": 10},
-                headers=headers, timeout=30,
-            )
-        backdate_ok = r.status_code == 200
-        if backdate_ok:
-            d = r.json()
-            print(f"  RF-5c backdated: last_refill_at={d.get('last_refill_at')} run_out_at={d.get('run_out_at')}")
-        else:
-            print(f"  RF-5c backdate FAILED {r.status_code} {r.text}")
-
-        # Tick
-        r = requests.post(f"{BASE}/medications/_tick", headers=headers, timeout=60)
-        tick1_ok = r.status_code == 200
-        tick1 = r.json() if tick1_ok else {}
-        scanned = tick1.get("scanned_refill", 0)
-        fired = tick1.get("fired_refill", 0)
-        print(f"  RF-5d tick1: status={r.status_code} full={tick1}")
-        ok_d = tick1_ok and scanned >= 1 and fired >= 1
-
-        # Alerts
-        r = requests.get(f"{BASE}/alerts", headers=headers, timeout=30)
-        alerts = r.json() if r.status_code == 200 else []
-        refill_alerts = [a for a in alerts if a.get("type") == "medication_refill"]
-        target_alert = None
-        for a in refill_alerts:
-            t = (a.get("title") or "")
-            m = (a.get("message") or "")
-            if "Refill" in t and "Lisinopril" in t:
-                if ("may be running low" in m or "running low" in m) and "supply runs out" in m:
-                    if a.get("severity") == "warning":
-                        target_alert = a
-                        break
-        ok_e = target_alert is not None
-        print(f"  RF-5e alerts: total medication_refill={len(refill_alerts)} matched={ok_e}")
-        if target_alert:
-            print(f"    matched alert: {target_alert}")
-        elif refill_alerts:
-            print(f"    sample refill alert: {refill_alerts[-1]}")
-
-        # Tick again — idempotent
-        r = requests.post(f"{BASE}/medications/_tick", headers=headers, timeout=60)
-        tick2 = r.json() if r.status_code == 200 else {}
-        fired2 = tick2.get("fired_refill", -1)
-        ok_f = r.status_code == 200 and fired2 == 0
-        print(f"  RF-5f tick2: status={r.status_code} fired_refill={fired2} (expect 0) full={tick2}")
-
-        rf5_ok = ok_d and ok_e and ok_f
-        log("RF-5", rf5_ok, f"tick1 fired={fired} scanned={scanned}; alert_matched={ok_e}; tick2 fired_refill={fired2}")
-
-    # RF-6: mark-refilled resets cycle
-    if rf5_id:
-        t_now = datetime.now(timezone.utc)
-        r = requests.post(f"{BASE}/reminders/{rf5_id}/mark-refilled", headers=headers, timeout=30)
-        if r.status_code != 200:
-            log("RF-6", False, f"mark-refilled {r.status_code} {r.text}")
-        else:
-            d = r.json()
-            lra = iso_parse(d.get("last_refill_at"))
-            roa = iso_parse(d.get("run_out_at"))
-            ok_a = lra is not None and abs((lra - t_now).total_seconds()) < 30
-            ok_b = roa is not None and abs((roa - (t_now + timedelta(days=10))).total_seconds()) < 60
-            r = requests.post(f"{BASE}/medications/_tick", headers=headers, timeout=60)
-            tick = r.json() if r.status_code == 200 else {}
-            fired = tick.get("fired_refill", -1)
-            ok_c = fired == 0
-            ok = ok_a and ok_b and ok_c
-            log("RF-6", ok, f"lra~now={ok_a} roa~now+10d={ok_b} tick3_fired_refill={fired} (expect 0)")
-
-    # RF-7: mark-refilled on med with no days_supply
-    if rf4_id:
-        r = requests.post(f"{BASE}/reminders/{rf4_id}/mark-refilled", headers=headers, timeout=30)
-        if r.status_code != 400:
-            log("RF-7", False, f"expected 400 got {r.status_code} {r.text}")
-        else:
-            try:
-                detail = r.json().get("detail", "")
-            except Exception:
-                detail = r.text
-            ok = "days_supply" in str(detail)
-            log("RF-7", ok, f"detail={detail!r}")
-
-    # RF-8: disable refill on RF-1's reminder via days_supply=0
-    if rf1_id:
-        r = requests.put(f"{BASE}/reminders/{rf1_id}", json={"days_supply": 0}, headers=headers, timeout=30)
-        if r.status_code != 200:
-            log("RF-8", False, f"{r.status_code} {r.text}")
-        else:
-            d = r.json()
-            ok = (
-                d.get("days_supply") is None
-                and d.get("refill_reminder_days") is None
-                and d.get("last_refill_at") is None
-                and d.get("run_out_at") is None
-            )
-            log("RF-8", ok, f"ds={d.get('days_supply')} lead={d.get('refill_reminder_days')} lra={d.get('last_refill_at')} roa={d.get('run_out_at')}")
-
-    # RF-9: regression — fresh medication with slot 1 min in past (no refill) -> fired_due >= 1
-    r = requests.get(f"{BASE}/auth/me", headers=headers, timeout=30)
-    user_tz = "UTC"
-    if r.status_code == 200:
-        user_tz = r.json().get("timezone") or "UTC"
-    print(f"  RF-9 user_tz={user_tz}")
-    try:
-        from zoneinfo import ZoneInfo
-        now_local = datetime.now(ZoneInfo(user_tz))
-    except Exception:
-        now_local = datetime.now(timezone.utc)
-    past = now_local - timedelta(minutes=1)
-    slot_hhmm = f"{past.hour:02d}:{past.minute:02d}"
-    print(f"  RF-9 slot={slot_hhmm}")
-
-    rf9_payload = {
-        "member_id": test_member_id,
-        "title": f"RegressionMed_{uuid.uuid4().hex[:6]}",
-        "category": "medication",
-        "times": [{"time": slot_hhmm}],
-    }
-    r = requests.post(f"{BASE}/reminders", json=rf9_payload, headers=headers, timeout=30)
-    if r.status_code != 200:
-        log("RF-9", False, f"create {r.status_code} {r.text}")
-    else:
-        r = requests.post(f"{BASE}/medications/_tick", headers=headers, timeout=60)
-        tick = r.json() if r.status_code == 200 else {}
-        fired_due = tick.get("fired_due", -1)
-        keys_needed = {"fired_due", "fired_remind_30", "fired_escalate_2h", "skipped_taken", "scanned_refill", "fired_refill"}
-        keys_present = set(tick.keys()) & keys_needed
-        ok = r.status_code == 200 and fired_due >= 1 and keys_present == keys_needed
-        log("RF-9", ok, f"fired_due={fired_due} keys_present={sorted(keys_present)} full={tick}")
-
-    # ==================== Regression sanity ====================
-    print("\n--- Regression sanity ---")
-    reg_ok = True
-    reg_details = []
-    for ep, method, payload in [
-        ("/auth/login", "POST", {"email": EMAIL, "password": PASS}),
-        ("/family-group", "GET", None),
-        ("/members", "GET", None),
-        ("/summary", "GET", None),
-        ("/billing/status", "GET", None),
-        ("/alerts", "GET", None),
-    ]:
-        if method == "POST":
-            r = requests.post(f"{BASE}{ep}", json=payload, headers={"Content-Type": "application/json"}, timeout=30)
-        else:
-            r = requests.get(f"{BASE}{ep}", headers=headers, timeout=30)
-        ok = r.status_code == 200
-        reg_details.append(f"{method} {ep}={r.status_code}")
-        reg_ok = reg_ok and ok
-
-    r = requests.post(
-        f"{BASE}/sos",
-        json={"member_id": test_member_id, "latitude": 1.0, "longitude": 2.0},
-        headers=headers, timeout=30,
-    )
-    sos_ok = r.status_code == 200
-    reg_details.append(f"POST /sos={r.status_code}")
-    reg_ok = reg_ok and sos_ok
-    log("Regression sanity", reg_ok, " | ".join(reg_details))
-
-    # ===== Summary =====
-    print("\n========== SUMMARY ==========")
-    passed = sum(1 for _, ok, _ in results if ok)
-    failed = sum(1 for _, ok, _ in results if not ok)
-    for name, ok, detail in results:
-        print(f"[{'PASS' if ok else 'FAIL'}] {name} :: {detail}")
-    print(f"\nTotal: {passed} passed, {failed} failed")
-    return failed == 0
+    print("\n" + "=" * 60)
+    print(f"SUMMARY: {len(PASS)} PASS, {len(FAIL)} FAIL")
+    for n, m in FAIL:
+        print(f"  FAIL: {n}  {m}")
+    print("=" * 60)
+    return 0 if not FAIL else 1
 
 
 if __name__ == "__main__":
-    try:
-        ok = main()
-        sys.exit(0 if ok else 1)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        sys.exit(2)
+    sys.exit(main())

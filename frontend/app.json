@@ -21,7 +21,7 @@
     },
     "android": {
       "package": "app.kinnship.client",
-      "versionCode": 7,
+      "versionCode": 8,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/kinnship-adaptive-foreground-1024.png",
@@ -55,8 +55,9 @@
       [
         "expo-notifications",
         {
-          "icon": "./assets/images/kinnship-adaptive-foreground-1024.png",
-          "color": "#1B5E35"
+          "icon": "./assets/images/kinnship-notification-icon.png",
+          "color": "#1B5E35",
+          "defaultChannel": "default"
         }
       ],
       "expo-font"

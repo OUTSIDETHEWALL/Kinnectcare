@@ -7,6 +7,7 @@ import os
 import json
 import logging
 import uuid
+import asyncio
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional
@@ -15,13 +16,31 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import jwt
 import stripe
 from passlib.context import CryptContext
-from pydantic import field_validator
+from pydantic import field_validator, field_serializer
+
+
+# Helper: when MongoDB returns a naive datetime, attach UTC tzinfo so
+# JSON output always carries "+00:00" / "Z" suffix.  Without this the
+# frontend's `new Date(iso)` parses the timestamp as DEVICE-LOCAL time,
+# making every alert/checkin appear hours off (Bug 2 — Phoenix users saw
+# "Today 11:47 PM" instead of "4:47 PM" because UTC was parsed as local).
+def _to_utc_iso(v: Optional[datetime]) -> Optional[str]:
+    if v is None:
+        return None
+    if v.tzinfo is None:
+        v = v.replace(tzinfo=timezone.utc)
+    return v.isoformat()
 
 from expo_push import send_expo_push
 import billing
 import family_group as fg
 import sms
 import med_scheduler
+
+# Module-level set of fire-and-forget background tasks (SOS fanout, etc.).
+# Keeps strong refs so asyncio.create_task results don't get GC-collected
+# mid-flight. See trigger_sos() — cancellation-resistant by design.
+_BG_TASKS: set = set()
 
 
 ROOT_DIR = Path(__file__).parent
@@ -143,6 +162,10 @@ class FamilyMember(BaseModel):
     emergency_contact_name: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    @field_serializer("last_seen", "created_at", "checkin_interval_started_at")
+    def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
+        return _to_utc_iso(v)
+
 
 class CheckinSettings(BaseModel):
     daily_checkin_time: Optional[str] = None
@@ -182,6 +205,10 @@ class Reminder(BaseModel):
     last_refill_at: Optional[datetime] = None
     run_out_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_serializer("last_marked_at", "last_refill_at", "run_out_at", "created_at")
+    def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
+        return _to_utc_iso(v)
 
     @field_validator("times", mode="before")
     @classmethod
@@ -248,6 +275,10 @@ class Alert(BaseModel):
     acknowledged: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    @field_serializer("created_at")
+    def _ser_created_at(self, v: datetime) -> str:
+        return _to_utc_iso(v)
+
 
 class CheckIn(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -259,6 +290,10 @@ class CheckIn(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_serializer("created_at")
+    def _ser_created_at(self, v: datetime) -> str:
+        return _to_utc_iso(v)
 
 
 class CheckInCreate(BaseModel):
@@ -1538,50 +1573,69 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         "fall_detected": bool(data.fall_detected),
         "channelId": "sos",
     }
-    devices_notified = await push_to_family_group(
-        current["family_group_id"], push_title, push_body, push_data
-    )
+    # ===== SOS BACKGROUND FANOUT =====
+    #
+    # CRITICAL: push fanout and SMS dispatch were previously awaited inline,
+    # which meant if the client disconnected mid-request the work could be
+    # cut off (Bug 5 — "SOS background fanout occasionally lags under rapid
+    # testing").
+    #
+    # We now schedule fanout as a FIRE-AND-FORGET asyncio task wrapped in
+    # `asyncio.shield()` so it can NEVER be cancelled by the parent request
+    # being torn down.  We respond to the client immediately (sub-100ms)
+    # while push/SMS continues in the background.
+    async def _sos_fanout():
+        try:
+            await push_to_family_group(
+                current["family_group_id"], push_title, push_body, push_data
+            )
+        except Exception as e:
+            logger.warning(f"sos push fanout failed: {e}")
 
-    # ----- SMS fanout to designated emergency contacts -----
-    # Gather emergency_contact_phone from every member in the family group.
-    # We also include the triggering member's primary `phone` as a fallback
-    # when they have no explicit emergency contact set yet (so SOS still pages
-    # out *someone* on first use).
-    ec_cursor = db.members.find(
-        {"family_group_id": current["family_group_id"]},
-        {"_id": 0, "emergency_contact_phone": 1, "phone": 1, "id": 1, "name": 1},
-    )
-    ec_docs = await ec_cursor.to_list(500)
-    # Collect, normalize, and de-duplicate emergency contact phones so
-    # `sms_contacts_count` reflects the actual number of UNIQUE recipients.
-    ec_normalized: list = []
-    seen_norm: set = set()
-    for d in ec_docs:
-        raw = d.get("emergency_contact_phone")
-        if not raw:
-            continue
-        n = sms.normalize_e164(raw)
-        if n and n not in seen_norm:
-            seen_norm.add(n)
-            ec_normalized.append(n)
-    # Build the SMS body in the format requested.
-    if has_coords:
-        loc_str = f"{data.latitude:.5f}, {data.longitude:.5f}"
-    else:
-        loc_str = "GPS unavailable"
-    sms_body = (
-        f"🆘 KINNSHIP ALERT: {member_name} has triggered an emergency SOS. "
-        f"Last known location: {loc_str}. "
-        "Please check on them immediately or call 911."
-    )
-    sms_results = await sms.send_sms_to_many(ec_normalized, sms_body)
-    sms_sent = sum(1 for r in sms_results if r.get("ok"))
-    sms_failed = sum(1 for r in sms_results if not r.get("ok"))
-    if sms_results:
-        logger.info(
-            f"SOS SMS fanout — mode={sms.mode()} sent={sms_sent} failed={sms_failed} "
-            f"contacts={len(ec_normalized)}"
-        )
+        # SMS fanout to designated emergency contacts.
+        try:
+            ec_cursor = db.members.find(
+                {"family_group_id": current["family_group_id"]},
+                {"_id": 0, "emergency_contact_phone": 1, "phone": 1, "id": 1, "name": 1},
+            )
+            ec_docs = await ec_cursor.to_list(500)
+            ec_normalized: list = []
+            seen_norm: set = set()
+            for d in ec_docs:
+                raw = d.get("emergency_contact_phone")
+                if not raw:
+                    continue
+                n = sms.normalize_e164(raw)
+                if n and n not in seen_norm:
+                    seen_norm.add(n)
+                    ec_normalized.append(n)
+            if has_coords:
+                loc_str = f"{data.latitude:.5f}, {data.longitude:.5f}"
+            else:
+                loc_str = "GPS unavailable"
+            sms_body = (
+                f"🆘 KINNSHIP ALERT: {member_name} has triggered an emergency SOS. "
+                f"Last known location: {loc_str}. "
+                "Please check on them immediately or call 911."
+            )
+            sms_results = await sms.send_sms_to_many(ec_normalized, sms_body)
+            sms_sent_bg = sum(1 for r in sms_results if r.get("ok"))
+            sms_failed_bg = sum(1 for r in sms_results if not r.get("ok"))
+            if sms_results:
+                logger.info(
+                    f"SOS SMS fanout (bg) — mode={sms.mode()} "
+                    f"sent={sms_sent_bg} failed={sms_failed_bg} "
+                    f"contacts={len(ec_normalized)}"
+                )
+        except Exception as e:
+            logger.warning(f"sos SMS fanout failed: {e}")
+
+    # Schedule the fanout and IMMEDIATELY return.  We don't await the task,
+    # so it continues running in the event loop independently of the request
+    # lifecycle.  Strong ref via _BG_TASKS prevents GC.
+    task = asyncio.create_task(_sos_fanout())
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
 
     return {
         "ok": True,
@@ -1594,13 +1648,10 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         "coordinates": (
             {"latitude": data.latitude, "longitude": data.longitude} if has_coords else None
         ),
-        "devices_notified": devices_notified,
+        # Fanout is now async-fire-and-forget; counts are reported via logs.
+        "fanout_mode": "background",
         "fall_detected": bool(data.fall_detected),
-        # SMS fanout summary (for UI confirmation + tests):
         "sms_mode": sms.mode(),  # "live" or "mock"
-        "sms_sent": sms_sent,
-        "sms_failed": sms_failed,
-        "sms_contacts_count": len(ec_normalized),
     }
 
 

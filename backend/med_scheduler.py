@@ -40,14 +40,29 @@ STAGE_OFFSETS_MIN: Dict[str, int] = {
     STAGE_FAMILY: 15,
 }
 
-# Worker cadence (seconds).  Production runs every 30s; tests force-call tick().
-WORKER_INTERVAL_SECONDS = 30
+# Per-stage stale cutoff (delta_min upper bound):
+#   STAGE_DUE     — fires if delta_min in [0, 10].  Past 10min stale → skip
+#                    so adding a med for an earlier-today slot doesn't backfire.
+#   STAGE_FAMILY  — fires if delta_min in [15, 75].  Gives a 60-minute window
+#                    for the family alert to fire reliably (previous 16-min
+#                    global cap was a 1-min sliver and routinely missed by
+#                    the 30s scheduler tick — caused Bug 1 in v6.3).
+#
+# Critical: these are PER-STAGE so the family alert is NOT bound by the
+# (smaller) DUE window, fixing the "no family alert ever fired" regression.
+STAGE_MAX_STALE_MIN: Dict[str, int] = {
+    STAGE_DUE: 10,
+    STAGE_FAMILY: 75,
+}
 
-# Anything older than 16 min we silently skip.  This protects against a service
-# restart back-firing many hours of missed alerts (the original 6h window
-# was causing notification floods when a user added a medication for an
-# already-passed slot earlier in the day).
-MAX_STALE_MINUTES = 16
+# Worker cadence (seconds). Reduced from 30 → 15 to halve the worst-case
+# delivery delay for medication reminders (Bug 4 — 5-7min lag complaint).
+WORKER_INTERVAL_SECONDS = 15
+
+# Legacy global cutoff — retained as a safety net for "obviously stale" slots
+# (e.g. server restart with reminders 6+ hours old).  Per-stage cutoffs are
+# checked FIRST and are stricter, so this only catches edge cases.
+MAX_STALE_MINUTES = 90
 
 
 # ---------- Helpers ----------
@@ -276,7 +291,12 @@ async def process_pending_notifications(
                     continue
 
             # -------- Stage 1: T+0 self-push --------
-            if delta_min >= STAGE_OFFSETS_MIN[STAGE_DUE]:
+            # Per-stage stale gate: only fire DUE if within 10 min of the slot.
+            # Past that, the family alert stage takes over without firing the
+            # T+0 retroactively (prevents "you should have taken this 30 min
+            # ago" pings to the senior).
+            if (delta_min >= STAGE_OFFSETS_MIN[STAGE_DUE]
+                    and delta_min <= STAGE_MAX_STALE_MIN[STAGE_DUE]):
                 won = await _try_record_stage(
                     db,
                     reminder_id=rem["id"],
@@ -290,7 +310,11 @@ async def process_pending_notifications(
                 if won and self_user_id:
                     if is_routine:
                         title = f"🌿 Time for {rem['title']}"
-                        body = (rem.get("dosage") or f"It's time for your {rem['title']}.")
+                        body = (
+                            (rem.get("dosage") + "\n\nTap ✅ DONE when complete.")
+                            if rem.get("dosage")
+                            else f"It's time for your {rem['title']}.\n\nTap ✅ DONE below when complete."
+                        )
                         data_type = "routine"
                         cat_id = "ROUTINE_DUE"
                         a_type = "routine"
@@ -298,9 +322,9 @@ async def process_pending_notifications(
                     else:
                         title = f"💊 Time to take your {rem['title']}"
                         body = (
-                            (rem.get("dosage") + " — tap 'I Took It' below.")
+                            (rem.get("dosage") + "\n\nTap ✅ TOOK IT below when done, or ⏰ SNOOZE for 10 minutes.")
                             if rem.get("dosage")
-                            else "Tap 'I Took It' below to confirm."
+                            else f"It's time for your {rem['title']}.\n\nTap ✅ TOOK IT below when done, or ⏰ SNOOZE for 10 minutes."
                         )
                         data_type = "medication"
                         cat_id = "MEDICATION_DUE"
@@ -346,7 +370,14 @@ async def process_pending_notifications(
             # -------- Stage 2: T+15m family alert (medication only) --------
             if is_routine:
                 continue
-            if delta_min >= STAGE_OFFSETS_MIN[STAGE_FAMILY]:
+            # Per-stage stale gate: fire family alert if delta_min in
+            # [15, 75].  CRITICAL: previously bound by the 16-min global cap
+            # which gave a 1-minute window that the 30s tick routinely
+            # missed (Bug 1 in v6.3 — "no family alert ever").  Now 60-min
+            # window guarantees the alert fires even if the scheduler tick
+            # lands a bit late or the server briefly stalled.
+            if (delta_min >= STAGE_OFFSETS_MIN[STAGE_FAMILY]
+                    and delta_min <= STAGE_MAX_STALE_MIN[STAGE_FAMILY]):
                 won = await _try_record_stage(
                     db,
                     reminder_id=rem["id"],
