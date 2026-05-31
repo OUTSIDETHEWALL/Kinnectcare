@@ -958,12 +958,37 @@ async def set_timezone(data: TimezoneUpdate, current=Depends(get_current_user)):
 
 @api_router.post("/auth/push-token")
 async def register_push_token(data: PushTokenRegister, current=Depends(get_current_user)):
+    """Register a push token for the current user.
+
+    A push token uniquely identifies a PHYSICAL DEVICE/install pair.  If the
+    same device previously logged into a different account (or was a test
+    account), that earlier account still has this token in its push_tokens
+    array — which causes "ghost notifications": notifications for someone
+    else's family group landing on this device.
+
+    To prevent that, we FIRST pull the token from EVERY OTHER user's
+    push_tokens array, THEN add it to the current user.  One token can
+    only belong to one user at a time.  This is the v6.6+ fix for
+    cross-account notification leakage.
+    """
     if not data.token or not data.token.startswith("ExponentPushToken["):
         return {"ok": False, "reason": "invalid token format"}
-    await db.users.update_one(
-        {"id": current["id"]}, {"$addToSet": {"push_tokens": data.token}}
+    token = data.token
+    # 1) Remove this token from any OTHER user that has it (ownership transfer).
+    detached = await db.users.update_many(
+        {"id": {"$ne": current["id"]}, "push_tokens": token},
+        {"$pull": {"push_tokens": token}},
     )
-    return {"ok": True}
+    if detached.modified_count:
+        logger.info(
+            f"push-token: detached token from {detached.modified_count} prior owner(s) "
+            f"new_owner={current['id']} token={token[:25]}..."
+        )
+    # 2) Idempotently add to current user.
+    await db.users.update_one(
+        {"id": current["id"]}, {"$addToSet": {"push_tokens": token}}
+    )
+    return {"ok": True, "detached_from": detached.modified_count}
 
 
 class DeleteAccountRequest(BaseModel):
