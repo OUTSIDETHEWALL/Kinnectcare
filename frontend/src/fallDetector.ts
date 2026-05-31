@@ -133,26 +133,46 @@ export function useFallDetector({ onFallDetected }: FallDetectorOptions) {
 
       if (stateRef.current === 'idle') {
         if (mag >= IMPACT_G) {
-          // v6.5: Before accepting this as a fall impact, look back for
-          // a freefall signature. A real fall has ~120ms+ of sub-0.6g
-          // magnitude during the actual fall through the air. Phone
-          // handling spikes (smacking the phone on a table, dropping
-          // into your lap, etc.) DON'T have this pre-impact freefall.
-          let freefallMs = 0;
-          let freefallStart = 0;
+          // v6.8.1 — the freefall pre-check now tracks the MAXIMUM
+          // sub-0.6g streak length in the lookback window, not the
+          // last-consecutive one. Couch-impact falls have ~100-200ms
+          // of clean freefall followed by 1-2 transition samples
+          // (~0.7-1.2g as the body starts decelerating into the
+          // soft surface) BEFORE the impact spike. The previous
+          // implementation reset the streak counter to 0 on those
+          // transition samples — so even a perfectly valid 150ms
+          // freefall got discarded if it didn't continue right up
+          // to the impact sample. Tracking max-streak fixes this
+          // without loosening the threshold itself (still 120ms /
+          // sub-0.6g) and without re-introducing false positives
+          // from phone-handling spikes (which never produce a
+          // sub-0.6g window of any meaningful duration).
+          let maxFreefallMs = 0;
+          let curStart = 0;
+          let curMs = 0;
           for (let i = 0; i < buf.length - 1; i++) {
-            if (buf[i].t > now - 20) break;  // ignore the impact sample itself
+            if (buf[i].t > now - 20) break;  // skip the impact sample
             if (buf[i].m < FREEFALL_G) {
-              if (!freefallStart) freefallStart = buf[i].t;
-              freefallMs = buf[i].t - freefallStart;
+              if (!curStart) curStart = buf[i].t;
+              curMs = buf[i].t - curStart;
+              if (curMs > maxFreefallMs) maxFreefallMs = curMs;
             } else {
-              freefallStart = 0;
-              freefallMs = 0;
+              curStart = 0;
+              curMs = 0;
             }
           }
-          if (freefallMs < FREEFALL_REQUIRED_MS) {
-            // No freefall → likely a phone-handling spike. Ignore.
+          if (__DEV__) {
+            // eslint-disable-next-line no-console
+            console.log('[fall] impact', mag.toFixed(2), 'g — maxFreefall', maxFreefallMs, 'ms');
+          }
+          if (maxFreefallMs < FREEFALL_REQUIRED_MS) {
+            // No qualifying freefall window → likely a phone-handling
+            // spike. Ignore.
             return;
+          }
+          if (__DEV__) {
+            // eslint-disable-next-line no-console
+            console.log('[fall] freefall window passed — waiting for stillness');
           }
           stateRef.current = 'impact-wait-stillness';
           impactAtRef.current = now;
