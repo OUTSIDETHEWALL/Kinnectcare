@@ -683,8 +683,11 @@ async def signup(data: UserSignup):
 
     user_id = str(uuid.uuid4())
     doc = {
-        "id": user_id, "email": data.email.lower(), "full_name": data.full_name,
-        "hashed_password": hash_password(data.password),
+        "id": user_id, "email": data.email.lower().strip(), "full_name": (data.full_name or "").strip(),
+        # ALWAYS hash the trimmed password. Same normalization is applied
+        # at /auth/login so a saved-password autofill that adds a stray
+        # trailing space can never lock the user out.
+        "hashed_password": hash_password((data.password or "").strip()),
         "timezone": tz, "push_tokens": [],
         "created_at": datetime.now(timezone.utc),
     }
@@ -716,8 +719,32 @@ async def signup(data: UserSignup):
 
 @api_router.post("/auth/login", response_model=TokenResponse)
 async def login(data: UserLogin):
-    user = await db.users.find_one({"email": data.email.lower()})
-    if not user or not verify_password(data.password, user["hashed_password"]):
+    # Normalize email + password the same way every code path does.
+    # Mobile keyboards (Gboard / iOS autocomplete) routinely inject
+    # leading/trailing whitespace via autosuggestions, especially when
+    # the user accepts an autofill suggestion. We trim BOTH sides so
+    # we never reject a valid login over a stray space.
+    email_norm = (data.email or "").strip().lower()
+    password_raw = data.password or ""
+    password_trimmed = password_raw.strip()
+
+    user = await db.users.find_one({"email": email_norm})
+    ok = bool(user) and verify_password(password_trimmed, user["hashed_password"])
+    if not ok:
+        # Tertiary fallback: if trim didn't match, try the raw password
+        # (in case the user's hash was created with intentional whitespace).
+        if user and password_raw != password_trimmed:
+            ok = verify_password(password_raw, user["hashed_password"])
+    if not ok:
+        # Diagnostic logging — NEVER log the password, only metadata so
+        # we can correlate recurring login failures with mobile keyboard
+        # quirks (length, whether trim changed it, etc.).
+        logger.info(
+            f"login failed for email={email_norm!r} "
+            f"user_exists={bool(user)} "
+            f"pw_len={len(password_raw)} pw_trim_len={len(password_trimmed)} "
+            f"had_ws={password_raw != password_trimmed}"
+        )
         raise HTTPException(status_code=401, detail="Invalid email or password")
     # Ensure user has a family_group_id (lazy-creates for legacy users)
     await fg.ensure_family_group(db, user)
@@ -838,7 +865,7 @@ async def forgot_password(data: ForgotPasswordRequest):
 
 @api_router.post("/auth/reset-password", response_model=TokenResponse)
 async def reset_password(data: ResetPasswordRequest):
-    email = data.email.lower()
+    email = data.email.lower().strip()
     rec = await db.password_resets.find_one({"email": email})
     if not rec:
         raise HTTPException(status_code=400, detail="Invalid or expired code")
@@ -853,8 +880,9 @@ async def reset_password(data: ResetPasswordRequest):
     attempts = int(rec.get("attempts", 0))
     if attempts >= 5:
         raise HTTPException(status_code=429, detail="Too many attempts. Request a new code.")
-    # Verify code.
-    if not verify_password(data.code, rec.get("code_hash", "")):
+    # Verify code (trim defensively — the user may have pasted with spaces).
+    code = (data.code or "").strip()
+    if not verify_password(code, rec.get("code_hash", "")):
         await db.password_resets.update_one(
             {"_id": rec["_id"]}, {"$inc": {"attempts": 1}}
         )
@@ -863,7 +891,12 @@ async def reset_password(data: ResetPasswordRequest):
     user = await db.users.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=400, detail="Invalid or expired code")
-    new_hash = hash_password(data.new_password)
+    # Always store a trimmed password so future logins (which also trim)
+    # match exactly. This is the SAME normalization the login endpoint
+    # applies, which permanently eliminates the "saved password has
+    # whitespace" recurring-401 issue.
+    new_password = (data.new_password or "").strip()
+    new_hash = hash_password(new_password)
     await db.users.update_one({"id": user["id"]}, {"$set": {"hashed_password": new_hash}})
     await db.password_resets.delete_one({"_id": rec["_id"]})
     user["hashed_password"] = new_hash
@@ -889,9 +922,15 @@ class ChangePasswordRequest(BaseModel):
 async def change_password(
     data: ChangePasswordRequest, current=Depends(get_current_user)
 ):
-    if not verify_password(data.current_password, current.get("hashed_password", "")):
+    # Trim both inputs — same normalization as /auth/login so we never
+    # reject a valid password change because of a stray autosuggest space.
+    current_raw = (data.current_password or "")
+    current_trimmed = current_raw.strip()
+    new_password = (data.new_password or "").strip()
+    if not (verify_password(current_trimmed, current.get("hashed_password", "")) or
+            verify_password(current_raw, current.get("hashed_password", ""))):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
-    new_hash = hash_password(data.new_password)
+    new_hash = hash_password(new_password)
     await db.users.update_one(
         {"id": current["id"]}, {"$set": {"hashed_password": new_hash}}
     )

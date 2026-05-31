@@ -18,13 +18,20 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
 
   const onSubmit = async () => {
-    if (!email.trim() || !password) {
+    // Trim whitespace on both fields before sending.  Mobile keyboards
+    // (especially Gboard with autosuggest, and iOS password autofill)
+    // routinely inject leading or trailing spaces.  The backend ALSO
+    // trims as a safety net, but trimming here means the user sees a
+    // working login on the FIRST attempt instead of a mystery 401.
+    const emailTrim = (email || '').trim().toLowerCase();
+    const passwordTrim = (password || '').trim();
+    if (!emailTrim || !passwordTrim) {
       Alert.alert('Missing info', 'Please enter your email and password.');
       return;
     }
     setLoading(true);
     try {
-      await login(email.trim(), password);
+      await login(emailTrim, passwordTrim);
       router.replace('/(tabs)/dashboard');
     } catch (e: any) {
       Alert.alert('Sign in failed', e?.response?.data?.detail || 'Please check your credentials.');
@@ -68,6 +75,11 @@ export default function Login() {
               onChangeText={setEmail}
               keyboardType="email-address"
               autoCapitalize="none"
+              autoCorrect={false}
+              textContentType="username"
+              autoComplete="email"
+              importantForAutofill="yes"
+              returnKeyType="next"
             />
           </View>
 
@@ -84,6 +96,11 @@ export default function Login() {
                 secureTextEntry={!showPassword}
                 autoCapitalize="none"
                 autoCorrect={false}
+                textContentType="password"
+                autoComplete="current-password"
+                importantForAutofill="yes"
+                returnKeyType="go"
+                onSubmitEditing={onSubmit}
               />
               <TouchableOpacity
                 testID="login-password-toggle"
