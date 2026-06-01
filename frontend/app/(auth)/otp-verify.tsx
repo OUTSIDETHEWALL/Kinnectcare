@@ -12,7 +12,10 @@
  * the dots and surface the hint.
  */
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
+import {
+  View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert,
+  ScrollView,
+} from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
@@ -45,19 +48,13 @@ export default function OtpVerify() {
   const [errorState, setErrorState] = useState(false);
   const [resendIn, setResendIn] = useState(RESEND_COOLDOWN_S);
 
-  // Tick the resend countdown once per second.
   useEffect(() => {
     if (resendIn <= 0) return;
-    const t = setInterval(() => {
-      setResendIn((s) => (s > 0 ? s - 1 : 0));
-    }, 1000);
+    const t = setInterval(() => setResendIn((s) => (s > 0 ? s - 1 : 0)), 1000);
     return () => clearInterval(t);
   }, [resendIn]);
 
-  // Defensive guard: if we arrived here without an email, kick back
-  // to login. (Should never happen — login/signup always push with
-  // a populated email param — but better to fail soft than to render
-  // an unusable screen.)
+  // Defensive guard: kick back to login if we lost the email param.
   useEffect(() => {
     if (!email) {
       router.replace('/(auth)/login');
@@ -67,15 +64,13 @@ export default function OtpVerify() {
   const onComplete = async (code: string) => {
     if (busy) return;
     setBusy(true);
-    setHint('Checking…');
+    setHint('');
     setHintTone('normal');
     try {
       await verifyOtp({ email, code });
       setHint('Signed in!');
       setHintTone('success');
-      // RootNav will take it from here — it will route the now-
-      // authenticated user to PIN setup or dashboard depending on
-      // whether they have a PIN saved.
+      // RootNav takes it from here.
     } catch (e: any) {
       const status = e?.response?.status;
       const detail = e?.response?.data?.detail || 'Invalid code. Please try again.';
@@ -85,7 +80,6 @@ export default function OtpVerify() {
       setHint(detail);
       setHintTone('error');
       if (status === 429) {
-        // Out of attempts — gently send them back to request a new code.
         Alert.alert(
           'Too many attempts',
           'Please request a new 6-digit code.',
@@ -120,68 +114,89 @@ export default function OtpVerify() {
     }
   };
 
+  // ------- Layout note (Issues 2 + 3 from user feedback v6.11) -------
+  //   ❌ v6.11 had a 3-line header (title + "We sent a 6-digit code
+  //      to {email}" subtitle) AND a PinPad `label` prop ("Enter the
+  //      6-digit code"), which overlapped visually on phones.
+  //   ❌ v6.11 used `flex: 1` on the keypad area so on small screens
+  //      the PinPad's 4-row keypad ran THROUGH the footer's "Resend
+  //      code in 58s" text, covering the 0 key.
+  //
+  //   v6.11.1 fix:
+  //   1. Single instruction line — drop the PinPad `label` and let
+  //      the email-recipient subtitle be the sole instruction.
+  //   2. Wrap the whole thing in a vertical ScrollView with no
+  //      `flex: 1` on any section, so on small screens the footer
+  //      can scroll into view rather than overlap the keypad.
+  //   3. Footer sits BELOW the keypad with a real margin, never
+  //      stacked on top of it.
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <TouchableOpacity testID="otp-back" onPress={() => router.back()} style={styles.back}>
         <Text style={styles.backText}>‹ Back</Text>
       </TouchableOpacity>
 
-      <View style={styles.header}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
         <Text style={styles.title}>Check your email</Text>
         <Text style={styles.subtitle}>
           We sent a 6-digit code to{'\n'}
           <Text style={styles.emailText}>{email}</Text>
         </Text>
-      </View>
 
-      <View style={styles.padArea}>
-        {busy && (
-          <ActivityIndicator color={Colors.primary} style={{ marginBottom: 8 }} />
-        )}
-        <PinPad
-          ref={padRef}
-          length={OTP_LENGTH}
-          onComplete={onComplete}
-          errorState={errorState}
-          label="Enter the 6-digit code"
-          hint={hint || 'Codes expire after 10 minutes'}
-          hintTone={hintTone}
-          disabled={busy}
-        />
-      </View>
+        <View style={styles.padArea}>
+          {busy && (
+            <ActivityIndicator color={Colors.primary} style={{ marginBottom: 4 }} />
+          )}
+          <PinPad
+            ref={padRef}
+            length={OTP_LENGTH}
+            onComplete={onComplete}
+            errorState={errorState}
+            hint={hint || 'Codes expire after 10 minutes'}
+            hintTone={hintTone}
+            disabled={busy}
+          />
+        </View>
 
-      <View style={styles.footer}>
-        <TouchableOpacity
-          testID="otp-resend"
-          onPress={onResend}
-          disabled={resendIn > 0 || busy}
-          style={[styles.resendBtn, (resendIn > 0 || busy) && styles.resendBtnDisabled]}
-          activeOpacity={0.6}
-        >
-          <Text style={[styles.resendText, (resendIn > 0 || busy) && styles.resendTextDisabled]}>
-            {resendIn > 0 ? `Resend code in ${resendIn}s` : 'Resend code'}
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          testID="otp-change-email"
-          onPress={() => router.back()}
-          style={styles.changeBtn}
-          activeOpacity={0.6}
-        >
-          <Text style={styles.changeText}>Use a different email</Text>
-        </TouchableOpacity>
-      </View>
+        <View style={styles.footer}>
+          <TouchableOpacity
+            testID="otp-resend"
+            onPress={onResend}
+            disabled={resendIn > 0 || busy}
+            style={[styles.resendBtn, (resendIn > 0 || busy) && styles.resendBtnDisabled]}
+            activeOpacity={0.6}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            <Text style={[styles.resendText, (resendIn > 0 || busy) && styles.resendTextDisabled]}>
+              {resendIn > 0 ? `Resend code in ${resendIn}s` : 'Resend code'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            testID="otp-change-email"
+            onPress={() => router.back()}
+            style={styles.changeBtn}
+            activeOpacity={0.6}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Text style={styles.changeText}>Use a different email</Text>
+          </TouchableOpacity>
+        </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
-  back: { paddingHorizontal: 16, paddingTop: 4 },
+  back: { paddingHorizontal: 16, paddingTop: 4, paddingBottom: 4 },
   backText: { fontSize: 17, color: Colors.primary, fontWeight: '600' },
-  header: {
-    paddingTop: 12,
-    paddingHorizontal: 24,
+  scroll: {
+    paddingHorizontal: 16,
+    paddingBottom: 32,
     alignItems: 'center',
   },
   title: {
@@ -189,31 +204,34 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: Colors.textPrimary,
     textAlign: 'center',
+    marginTop: 8,
   },
   subtitle: {
-    marginTop: 8,
+    marginTop: 10,
+    marginBottom: 4,
     fontSize: 15,
     color: Colors.textSecondary,
     textAlign: 'center',
     lineHeight: 22,
+    paddingHorizontal: 8,
   },
   emailText: {
     fontWeight: '700',
     color: Colors.textPrimary,
   },
   padArea: {
-    flex: 1,
-    paddingTop: 12,
-    paddingHorizontal: 12,
-    justifyContent: 'center',
+    marginTop: 18,
+    alignItems: 'center',
+    width: '100%',
   },
   footer: {
-    paddingBottom: 16,
-    paddingHorizontal: 24,
+    marginTop: 24,    // Explicit gap above the resend buttons so they
+                      // never overlap the keypad's last row.
     alignItems: 'center',
+    width: '100%',
   },
   resendBtn: {
-    paddingVertical: 14,
+    paddingVertical: 12,
     paddingHorizontal: 22,
   },
   resendBtnDisabled: { opacity: 0.5 },
@@ -224,7 +242,7 @@ const styles = StyleSheet.create({
   },
   resendTextDisabled: { color: Colors.textTertiary },
   changeBtn: {
-    paddingVertical: 10,
+    paddingVertical: 8,
     paddingHorizontal: 22,
   },
   changeText: {
