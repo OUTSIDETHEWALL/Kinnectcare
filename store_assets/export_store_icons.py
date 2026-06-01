@@ -92,23 +92,54 @@ def export_feature(out_path: str):
     img.paste(logo, (logo_x, logo_y))
 
     # ----- CENTER: tagline (since the logo already says "Kinnship") -----
-    try:
-        font_tag_big = ImageFont.truetype(BOLD, size=76)
-        font_tag_sml = ImageFont.truetype(REG,  size=44)
-    except Exception:
-        font_tag_big = font_tag_sml = ImageFont.load_default()
+    # FIT-TO-WIDTH: the second tagline "Even When You Can't Be." is the
+    # longest line and previously overflowed past the phone mockup on the
+    # right. We now measure both candidate strings at decreasing font
+    # sizes until they BOTH fit inside [tag_x, phone_left - margin].
+    tag_x = logo_x + logo_size + 56          # tightened 70 → 56 to claw a bit more width
+    phone_left_x = int(W * 0.76)             # matches the phone block below
+    right_margin = 32                        # safe gap to the phone shadow
+    avail_width = phone_left_x - tag_x - right_margin
 
-    tag_x = logo_x + logo_size + 70
-    tag_y = int(H * 0.34)
+    line1 = "Always There."
+    line2 = "Even When You Can't Be."
+    sub   = "Family safety · Senior wellness"
+
+    # Start at the original 76pt and shrink until line2 fits. Floors at
+    # 44pt — well above any "looks like fine print" threshold.
+    font_tag_big = None
+    big_size = 76
+    while big_size >= 44:
+        try:
+            candidate = ImageFont.truetype(BOLD, size=big_size)
+        except Exception:
+            candidate = ImageFont.load_default()
+        bb = ImageDraw.Draw(img).textbbox((0, 0), line2, font=candidate)
+        w = bb[2] - bb[0]
+        if w <= avail_width:
+            font_tag_big = candidate
+            break
+        big_size -= 4
+    if font_tag_big is None:
+        font_tag_big = ImageFont.truetype(BOLD, size=44)
+
+    try:
+        font_tag_sml = ImageFont.truetype(REG, size=42)
+    except Exception:
+        font_tag_sml = ImageFont.load_default()
+
+    # Vertically re-center the three text lines as a block (so the
+    # reduced font size doesn't leave the bottom looking empty).
+    line_h_big = big_size + 18                # leading
+    block_h = (line_h_big * 2) + 60 + 50      # two big lines + gap + sub
+    tag_y = (H - block_h) // 2 + 4
+
     d.text((tag_x, tag_y),
-           "Always There.",
-           font=font_tag_big, fill=WHITE)
-    d.text((tag_x, tag_y + 90),
-           "Even When You Can't Be.",
-           font=font_tag_big, fill=WHITE)
-    d.text((tag_x, tag_y + 200),
-           "Family safety · Senior wellness",
-           font=font_tag_sml, fill=(190, 220, 200))
+           line1, font=font_tag_big, fill=WHITE)
+    d.text((tag_x, tag_y + line_h_big),
+           line2, font=font_tag_big, fill=WHITE)
+    d.text((tag_x, tag_y + line_h_big * 2 + 30),
+           sub, font=font_tag_sml, fill=(190, 220, 200))
 
     # ----- RIGHT: phone mockup -----
     phone_w = int(W * 0.22)
