@@ -4,6 +4,7 @@ import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { forgetSessionUnlock, hasPinForUser, markUnlocked } from './pinAuth';
+import { maybeClearStaleSecureStoreOnFreshInstall } from './freshInstallGuard';
 
 const TOKEN_KEY = 'kc_token';
 
@@ -29,6 +30,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     (async () => {
+      // FRESH-INSTALL GUARD — clear any stale Keychain/SecureStore
+      // entries that may have survived a previous app uninstall
+      // (iOS Keychain entries persist by Apple design, and some
+      // Android OEM ROMs preserve EncryptedSharedPreferences too).
+      // Without this, v6.9 users could end up with a stale auth
+      // token after reinstall, which forced RootNav to route them
+      // straight to /(auth)/pin-setup with no way back to the
+      // welcome / login screen.
+      try {
+        await maybeClearStaleSecureStoreOnFreshInstall();
+      } catch (_e) {}
       const token = await readToken();
       if (token) {
         try {

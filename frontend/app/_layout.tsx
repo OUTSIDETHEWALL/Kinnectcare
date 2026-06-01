@@ -204,6 +204,23 @@ function RootNav() {
       })();
       return;
     }
+    // DEFENSIVE: an unauthenticated user must NEVER be on a PIN
+    // screen. PIN is per-account; without an account there's
+    // nothing to set up or unlock. The v6.9 bug was a stale
+    // Keychain token from a previous install briefly making
+    // `user` truthy → RootNav routed to pin-setup → token
+    // eventually got cleared by /auth/me failing → user back to
+    // null but already stuck on pin-setup with no way out.
+    //
+    // Belt-and-suspenders fix: if we ever see user==null while
+    // currently on a PIN screen, force-redirect to welcome.
+    // (The pin-setup.tsx and pin-login.tsx screens have their
+    // own identical guard, but doing it here too means we don't
+    // depend on those screens having mounted yet.)
+    if (!user && onPinScreen) {
+      router.replace('/');
+      return;
+    }
     if (!user && !inAuthGroup && !isWelcome && !isOnboarding && !isPublic) {
       router.replace('/');
       return;

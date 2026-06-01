@@ -37,7 +37,7 @@ function formatLockMs(ms: number): string {
 
 export default function PinLogin() {
   const router = useRouter();
-  const { user, logout } = useAuth();
+  const { user, loading, logout } = useAuth();
   const padRef = useRef<PinPadHandle>(null);
   const [busy, setBusy] = useState(false);
   const [hint, setHint] = useState<string>('');
@@ -45,6 +45,17 @@ export default function PinLogin() {
   const [errorState, setErrorState] = useState(false);
   const [lockUntilMs, setLockUntilMs] = useState(0);
   const [remaining, setRemaining] = useState(MAX_PIN_ATTEMPTS);
+
+  // HARD GUARD: unauthenticated users must NEVER see this screen.
+  // PIN unlock is a per-account secret; without an account there's
+  // nothing to unlock. If we somehow land here with user==null
+  // (e.g. logout race, stale Keychain token wipe), bounce to the
+  // welcome screen so the user can sign in normally.
+  useEffect(() => {
+    if (!loading && !user?.id) {
+      router.replace('/');
+    }
+  }, [loading, user?.id]);
 
   // Load initial state (in case user is mid-lockout).
   useEffect(() => {

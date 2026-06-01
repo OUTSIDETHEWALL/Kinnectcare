@@ -13,7 +13,7 @@
  * The user can also tap "Not now" — that skips PIN setup; they'll keep
  * logging in with email/password until they decide to set one later.
  */
-import { useRef, useState } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -25,11 +25,27 @@ import { markPinSetupDismissed } from '../../src/pinSetupPrompt';
 
 export default function PinSetup() {
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
   const params = useLocalSearchParams<{ required?: string }>();
   // When `required=1` we hide the "Not now" button — used after a forced
   // PIN reset where the user MUST set a new one before continuing.
   const isRequired = params?.required === '1';
+
+  // ============================================================
+  // HARD GUARD: unauthenticated users must NEVER see this screen.
+  // ============================================================
+  // A PIN is a per-account secret — there's nothing to "set up"
+  // without an account. The v6.9 bug was: a stale Keychain token
+  // from a previous install was being honoured, RootNav saw the
+  // ghost user, and shoved the user into pin-setup with no exit
+  // ramp. Even if RootNav misbehaves, this screen-level guard
+  // ensures the worst-case is "blink → welcome screen" rather
+  // than "infinite PIN-setup loop with no way out".
+  useEffect(() => {
+    if (!loading && !user?.id) {
+      router.replace('/');
+    }
+  }, [loading, user?.id]);
 
   const [step, setStep] = useState<'enter' | 'confirm'>('enter');
   const [firstPin, setFirstPin] = useState('');
