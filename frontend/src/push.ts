@@ -339,6 +339,28 @@ let pendingDeepLinkData: any = null;
 let liveOnAlert: ((data: any) => void) | null = null;
 let appReadyForDeepLink = false;
 
+// Set of notification request IDs we have ALREADY enqueued as
+// deep-links during this app launch. Used to prevent the same
+// notification from getting re-deep-linked on every listener remount.
+//
+// Why this exists: `Notifications.getLastNotificationResponseAsync()`
+// on Android keeps returning the SAME response object across
+// repeated calls (the OS treats it as "the last notification
+// response that launched/resumed the app"). Our useNotificationListeners
+// hook re-runs its effect every time its `onAlert` dependency
+// changes (which happens on every RootNav render, because the
+// inline arrow function is fresh each time). So on every RootNav
+// render we were re-enqueueing the same notification → router
+// bounced back to /(modals)/acknowledge after the user already
+// dismissed it. The medication-follow-up "acknowledge loop" bug.
+const consumedNotificationIds = new Set<string>();
+function markNotificationConsumed(id?: string | null): void {
+  if (id) consumedNotificationIds.add(id);
+}
+function isNotificationConsumed(id?: string | null): boolean {
+  return !!id && consumedNotificationIds.has(id);
+}
+
 function tryFlush() {
   if (!appReadyForDeepLink) return;
   const data = pendingDeepLinkData;
@@ -383,12 +405,24 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
     // intent BEFORE our JS listener was attached, the response will be
     // available here. We enqueue it so it fires once RootNav clears the
     // auth + PIN gate.
+    //
+    // IMPORTANT — only fire ONCE per notification id per launch. Without
+    // this guard, every re-render of RootNav (which has an inline
+    // `onAlert` arrow function as the only dep on this effect) re-runs
+    // the effect, which re-fires `getLastNotificationResponseAsync()` —
+    // and Android keeps returning the SAME response forever, so the
+    // same notification would get deep-linked again and again, bouncing
+    // the user back to /(modals)/acknowledge after they already
+    // dismissed it. (See "medication acknowledge loop" bug.)
     (async () => {
       try {
         const cold = await Notifications.getLastNotificationResponseAsync();
         if (cold && cold.actionIdentifier === Notifications.DEFAULT_ACTION_IDENTIFIER) {
+          const reqId = cold.notification?.request?.identifier;
+          if (isNotificationConsumed(reqId)) return;
           const data: any = cold.notification?.request?.content?.data || {};
           if (data && data.type) {
+            markNotificationConsumed(reqId);
             enqueueDeepLink(data);
           }
         }
@@ -403,21 +437,24 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
     const resp = Notifications.addNotificationResponseReceivedListener(async (r) => {
       const data: any = r.notification.request.content.data || {};
       const actionId = r.actionIdentifier;
+      const reqId = r.notification.request.identifier;
 
       // Action button taps — silent mark-taken / snooze.
       if (actionId === 'TOOK_IT' || actionId === 'DONE') {
+        markNotificationConsumed(reqId);
         const rid = data.reminder_id;
         if (rid) {
           try {
             await api.post(`/reminders/${rid}/mark`, { status: 'taken' });
             try {
-              await Notifications.dismissNotificationAsync(r.notification.request.identifier);
+              await Notifications.dismissNotificationAsync(reqId);
             } catch (_e) {}
           } catch (_e) {}
         }
         return;
       }
       if (actionId === 'SNOOZE_10') {
+        markNotificationConsumed(reqId);
         const rid = data.reminder_id;
         try {
           await Notifications.scheduleNotificationAsync({
@@ -445,6 +482,13 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
       // no perceptible delay. If the gate is still being evaluated
       // (cold start, PIN unlock pending), the deep-link is held
       // until ready, eliminating the flicker-back-to-home bug.
+      //
+      // Mark this notification id as consumed so the cold-start
+      // recovery branch above doesn't re-enqueue it on the next
+      // useEffect re-run. This is the core fix for the "acknowledge
+      // loops back" bug — see the consumedNotificationIds doc-block
+      // for the full backstory.
+      markNotificationConsumed(reqId);
       enqueueDeepLink(data);
     });
     return () => {

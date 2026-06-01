@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import * as Notifications from 'expo-notifications';
 import { Colors } from '../../src/theme';
 import { api } from '../../src/api';
 
@@ -57,6 +58,34 @@ export default function NotificationActionScreen() {
           ? `${params.dosage}\n\nTap ACKNOWLEDGE below once you've taken it.`
           : 'Tap ACKNOWLEDGE below once you\'ve taken it.');
 
+  // When the user lands on this screen via notification tap, also
+  // dismiss any sticky/active notifications for the SAME reminder
+  // so the tray doesn't keep nagging them while they're actively
+  // dealing with it. (Not strictly needed for the loop fix — the
+  // consumedNotificationIds dedupe in push.ts handles that — but
+  // good UX hygiene either way.)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const presented = await Notifications.getPresentedNotificationsAsync();
+        if (cancelled) return;
+        for (const n of presented) {
+          const nData: any = n.request?.content?.data || {};
+          if (
+            params.reminder_id &&
+            nData.reminder_id === params.reminder_id
+          ) {
+            try {
+              await Notifications.dismissNotificationAsync(n.request.identifier);
+            } catch (_e) {}
+          }
+        }
+      } catch (_e) {}
+    })();
+    return () => { cancelled = true; };
+  }, [params.reminder_id]);
+
   const acknowledge = async () => {
     if (loading) return;
     setLoading(true);
@@ -66,6 +95,11 @@ export default function NotificationActionScreen() {
           status: 'taken',
         });
       }
+      // Also clear ALL presented notifications so the sticky
+      // follow-up doesn't keep haunting the tray after acknowledge.
+      try {
+        await Notifications.dismissAllNotificationsAsync();
+      } catch (_e) {}
       setDone(true);
       setTimeout(() => router.replace('/(tabs)/dashboard'), 1200);
     } catch (e: any) {
