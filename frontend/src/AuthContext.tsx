@@ -3,8 +3,12 @@ import { api, saveToken, clearToken, User } from './api';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { forgetSessionUnlock, hasPinForUser, markUnlocked } from './pinAuth';
-import { maybeClearStaleSecureStoreOnFreshInstall } from './freshInstallGuard';
+import { forgetSessionUnlock, hasPinForUser, markUnlocked, clearPin } from './pinAuth';
+import {
+  maybeClearStaleSecureStoreOnFreshInstall,
+  wasFreshInstallThisLaunch,
+  consumeFreshInstallFlag,
+} from './freshInstallGuard';
 
 const TOKEN_KEY = 'kc_token';
 
@@ -77,6 +81,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (email: string, password: string) => {
     const res = await api.post('/auth/login', { email, password });
     const u: User = res.data.user;
+    // FRESH-INSTALL PIN CLEANUP — if this launch was detected as a
+    // fresh install (Keychain auth-token wiped by freshInstallGuard),
+    // we ALSO want to wipe any stale kc_pin_<userId> Keychain record
+    // that may have survived the previous install. We couldn't do this
+    // earlier (didn't know the user id then), but now that the user
+    // has successfully signed in we know exactly which PIN record to
+    // clear. Without this step, the user would be sent to
+    // /(auth)/pin-login asking for the OLD PIN they don't remember
+    // setting — which was a major contributor to the "I'm locked out"
+    // reports we saw in v6.9.
+    if (wasFreshInstallThisLaunch()) {
+      try { await clearPin(u.id); } catch (_e) {}
+      consumeFreshInstallFlag();
+    }
     // CRITICAL ORDERING — pre-flag the PIN as unlocked-for-this-session
     // BEFORE calling setUser. Why?
     //

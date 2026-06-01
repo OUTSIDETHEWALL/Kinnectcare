@@ -43,6 +43,24 @@ import { Platform } from 'react-native';
 const SENTINEL_KEY = '@kinnship/install_sentinel_v1';
 const SENTINEL_VAL = 'installed';
 
+// Module-level flag set during a fresh-install run. Read by AuthContext
+// after the first successful user load so we can also clear that
+// user's kc_pin_<userId> SecureStore record (which we couldn't reach
+// during freshInstallGuard itself because we didn't know the user id
+// yet). Without this cleanup, an iOS Keychain PIN record from a
+// previous install would resurrect itself the moment the user
+// re-logs-in with the same email — sending them straight to
+// /(auth)/pin-login asking for a PIN they don't remember setting.
+let _wasFreshInstall = false;
+
+export function wasFreshInstallThisLaunch(): boolean {
+  return _wasFreshInstall;
+}
+
+export function consumeFreshInstallFlag(): void {
+  _wasFreshInstall = false;
+}
+
 // Keys we explicitly want to nuke on a fresh install. We keep this
 // list narrow on purpose — only auth/PIN secrets, NOT app preferences
 // (which are in AsyncStorage anyway and would already be gone).
@@ -70,6 +88,7 @@ export async function maybeClearStaleSecureStoreOnFreshInstall(): Promise<void> 
       return;
     }
     // First run after install (or after a "clear data" wipe).
+    _wasFreshInstall = true;
     if (Platform.OS !== 'web') {
       for (const key of SECURE_STORE_KEYS_TO_WIPE) {
         try {
