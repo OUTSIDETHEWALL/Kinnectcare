@@ -3,7 +3,7 @@ import { api, saveToken, clearToken, User } from './api';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { forgetSessionUnlock } from './pinAuth';
+import { forgetSessionUnlock, hasPinForUser, markUnlocked } from './pinAuth';
 
 const TOKEN_KEY = 'kc_token';
 
@@ -64,8 +64,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (email: string, password: string) => {
     const res = await api.post('/auth/login', { email, password });
+    const u: User = res.data.user;
+    // CRITICAL ORDERING — pre-flag the PIN as unlocked-for-this-session
+    // BEFORE calling setUser. Why?
+    //
+    // setUser triggers a re-render of RootNav, which fires its
+    // [user?.id] useEffect. That effect calls hasPinForUser + checks
+    // isUnlockedNow. If the user has a saved PIN AND we haven't yet
+    // marked them unlocked, the effect will set needsPinUnlock=true,
+    // and the routing-effect will then redirect to /(auth)/pin-login
+    // — even though login.tsx is about to call markUnlocked a beat
+    // later (after its /auth/me round-trip).
+    //
+    // Result: a brief PIN-screen FLASH between the dashboard redirect
+    // and the actual landing on dashboard. User-visible regression.
+    //
+    // Fix: do the markUnlocked HERE, synchronously, before setUser
+    // fires. By the time RootNav's effect runs, isUnlockedNow already
+    // returns true → needsPinUnlock stays false → no flash.
+    try {
+      const has = await hasPinForUser(u.id);
+      if (has) markUnlocked(u.id);
+    } catch (_e) {}
     await saveToken(res.data.access_token);
-    setUser(res.data.user);
+    setUser(u);
     // Sync timezone if it doesn't match device tz
     try {
       const tz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';

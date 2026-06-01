@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator, Linking, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator, Linking, Platform, Alert as RNAlert } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -86,6 +86,33 @@ export default function Alerts() {
     setRefreshing(false);
   };
 
+  // Clear All — deletes every alert in the user's family group via
+  // the new DELETE /api/alerts endpoint. Confirmed via a native
+  // Alert.alert so an accidental tap can't wipe the history (these
+  // are safety-relevant records the user may want to keep).
+  const clearAll = () => {
+    if (alerts.length === 0) return;
+    RNAlert.alert(
+      'Clear all alerts?',
+      `This will permanently delete all ${alerts.length} alert${alerts.length === 1 ? '' : 's'} in your family group — including SOS, fall, medication and check-in history. This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear all',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await api.delete('/alerts');
+              setAlerts([]);
+            } catch (_e) {
+              RNAlert.alert('Could not clear', 'Please check your connection and try again.');
+            }
+          },
+        },
+      ],
+    );
+  };
+
   if (loading) {
     return (
       <SafeAreaView style={styles.safe}>
@@ -102,8 +129,23 @@ export default function Alerts() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
-        <Text style={styles.title}>Alerts</Text>
-        <Text style={styles.sub}>{active.length} active · {cleared.length} cleared</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.title}>Alerts</Text>
+          <Text style={styles.sub}>{active.length} active · {cleared.length} cleared</Text>
+        </View>
+        {alerts.length > 0 && (
+          <TouchableOpacity
+            testID="alerts-clear-all"
+            style={styles.clearAllBtn}
+            onPress={clearAll}
+            activeOpacity={0.7}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Clear all alerts"
+          >
+            <Icon name="trash-outline" size={16} color={Colors.error} />
+            <Text style={styles.clearAllText}>Clear All</Text>
+          </TouchableOpacity>
+        )}
       </View>
       <ScrollView
         contentContainerStyle={{ paddingBottom: 40 }}
@@ -181,7 +223,19 @@ export default function Alerts() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
-  header: { paddingHorizontal: 24, paddingTop: 12, paddingBottom: 12 },
+  header: { paddingHorizontal: 24, paddingTop: 12, paddingBottom: 12, flexDirection: 'row', alignItems: 'flex-end' },
+  clearAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: Colors.errorBg || '#FEE2E2',
+    borderWidth: 1,
+    borderColor: Colors.error,
+  },
+  clearAllText: { color: Colors.error, fontSize: 13, fontWeight: '800' },
   title: { fontSize: 28, fontWeight: '800', color: Colors.textPrimary },
   sub: { fontSize: 14, color: Colors.textTertiary, marginTop: 4 },
   section: { fontSize: 13, fontWeight: '700', color: Colors.textTertiary, marginHorizontal: 24, marginTop: 14, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.6 },

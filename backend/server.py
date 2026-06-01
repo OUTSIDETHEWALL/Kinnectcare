@@ -1257,6 +1257,17 @@ async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
     return {"ok": True}
 
 
+@api_router.delete("/alerts")
+async def clear_all_alerts(current=Depends(get_current_user)):
+    """
+    Delete every alert in the caller's family group. Used by the
+    "Clear All" button in the Alerts tab. Scoped to family_group_id
+    so a user cannot wipe another family's alerts.
+    """
+    r = await db.alerts.delete_many({"family_group_id": current["family_group_id"]})
+    return {"ok": True, "deleted": r.deleted_count}
+
+
 # ========== Reminders ==========
 @api_router.get("/reminders", response_model=List[Reminder])
 async def list_reminders(current=Depends(get_current_user)):

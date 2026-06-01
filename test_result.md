@@ -6705,3 +6705,63 @@ agent_communication:
             --non-interactive --no-wait
             --message "v6.9 - PIN re-lock on reopen + Fall test page (vc 18)"
 
+
+backend:
+  - task: "DELETE /api/alerts — Clear All alerts endpoint"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 12/12 checks GREEN via /app/backend_test_delete_alerts.py against
+          http://localhost:8001/api with demo@kinnship.app / password123.
+
+          Scenario coverage:
+            1) POST /api/auth/login -> 200, access_token + user returned.
+            2) GET /api/auth/me with bearer token -> 200, email=demo@kinnship.app.
+            3) POST /api/sos {latitude:37.7749, longitude:-122.4194} x2 -> 200,
+               both returned alert_ids (b5ac2ca7..., 96d5e548...).
+            4) GET /api/alerts -> 200; count=258 (history accumulated). Both new
+               SOS alert_ids confirmed present in the list.
+            5) DELETE /api/alerts -> 200 with body {"ok": true, "deleted": 258}.
+               Response shape verified: ok===True, deleted===int>=2.
+            6) GET /api/alerts again -> 200; count=3 (these are freshly auto-
+               generated missed_checkin alerts emitted by detect_missed_checkins()
+               which runs at the start of GET /api/alerts — expected behavior, not
+               leftover data). Both previously deleted SOS alert_ids are gone
+               (still_present=0).
+            7) DELETE /api/alerts WITHOUT Authorization header -> 403.
+               Note: FastAPI's HTTPBearer security dependency returns 403 (not 401)
+               by default when the Authorization header is missing. Test accepted
+               either 401 or 403; actual response was 403 which is the standard
+               FastAPI contract. This still correctly blocks unauthenticated
+               access — a malicious client cannot clear another user's alerts.
+
+          The endpoint is correctly scoped by family_group_id (server.py line
+          1267), so users cannot wipe other families' alerts. Backend logs show
+          all 200s/expected 403 for unauthenticated call, no errors.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      DELETE /api/alerts testing COMPLETE — 12/12 green via
+      /app/backend_test_delete_alerts.py against http://localhost:8001/api.
+      All requested scenario steps pass:
+        - Login (demo@kinnship.app/password123) -> 200, token works on /auth/me.
+        - 2x POST /api/sos with GPS coords created 2 alerts.
+        - GET /api/alerts confirmed both new alerts present (alongside 256
+          historical alerts in demo's family group, total 258).
+        - DELETE /api/alerts -> 200 {"ok": true, "deleted": 258}.
+        - Subsequent GET /api/alerts shows 3 alerts but ALL are freshly-generated
+          missed_checkin alerts (detect_missed_checkins runs on every GET);
+          none of the 2 deleted SOS ids are present.
+        - DELETE /api/alerts without Authorization header -> 403 (FastAPI
+          HTTPBearer default; functionally blocks unauthenticated access).
+      Main agent: endpoint is working correctly and family-group-scoped. Please
+      summarize and finish.
+
