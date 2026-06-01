@@ -1,3 +1,12 @@
+/**
+ * signup.tsx — passwordless email-OTP sign-up.
+ *
+ * Collects name + email + optional invite code, then sends a 6-digit
+ * verification code to the email. The account is actually CREATED
+ * on the backend only after the user successfully types the OTP on
+ * the next screen — so an unverified email can never become an
+ * account. (See /api/auth/verify-otp.)
+ */
 import { useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity, KeyboardAvoidingView,
@@ -11,25 +20,50 @@ import { useAuth } from '../../src/AuthContext';
 
 export default function Signup() {
   const router = useRouter();
-  const { signup } = useAuth();
+  const { requestOtp } = useAuth();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
   const [inviteCode, setInviteCode] = useState('');
   const [loading, setLoading] = useState(false);
 
   const onSubmit = async () => {
-    if (!name.trim() || !email.trim() || password.length < 6) {
-      Alert.alert('Missing info', 'Please enter your name, a valid email, and a password (min 6 chars).');
+    const nameTrim = (name || '').trim();
+    const emailTrim = (email || '').trim().toLowerCase();
+    if (!nameTrim) {
+      Alert.alert('Name needed', 'Please enter your name so your family knows who you are.');
+      return;
+    }
+    if (!emailTrim || !/^\S+@\S+\.\S+$/.test(emailTrim)) {
+      Alert.alert('Email needed', "Please enter a valid email address — we'll send your verification code there.");
       return;
     }
     setLoading(true);
     try {
-      await signup(email.trim(), password, name.trim(), inviteCode.trim() || undefined);
-      router.replace('/(tabs)/dashboard');
+      await requestOtp({
+        email: emailTrim,
+        purpose: 'signup',
+        fullName: nameTrim,
+        inviteCode: inviteCode.trim() || undefined,
+      });
+      router.push({
+        pathname: '/(auth)/otp-verify',
+        params: {
+          email: emailTrim,
+          purpose: 'signup',
+          fullName: nameTrim,
+          inviteCode: inviteCode.trim() || '',
+        },
+      } as any);
     } catch (e: any) {
-      Alert.alert('Sign up failed', e?.response?.data?.detail || 'Please try again.');
+      const status = e?.response?.status;
+      const detail = e?.response?.data?.detail || '';
+      if (status === 410) {
+        Alert.alert('Update required', detail);
+      } else if (status === 429) {
+        Alert.alert('Please wait', detail || 'You requested a code recently. Try again in a few seconds.');
+      } else {
+        Alert.alert('Could not create account', detail || 'Please check your connection and try again.');
+      }
     } finally {
       setLoading(false);
     }
@@ -46,42 +80,30 @@ export default function Signup() {
             <Icon name="arrow-back" size={28} color={Colors.textPrimary} />
           </TouchableOpacity>
           <Text style={styles.title}>Create your account</Text>
-          <Text style={styles.subtitle}>Start protecting your loved ones in minutes.</Text>
+          <Text style={styles.subtitle}>
+            No password to remember — we'll email you a 6-digit code instead.
+          </Text>
 
-          <Field label="Full name" value={name} onChangeText={setName} placeholder="Jane Smith" testID="signup-name" />
-          <Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address" autoCapitalize="none" testID="signup-email" />
-
-          {/* Password with show/hide eye toggle. Min 6 chars enforced on submit. */}
-          <View style={{ marginTop: 16 }}>
-            <Text style={styles.label}>Password</Text>
-            <View style={styles.passwordRow}>
-              <TextInput
-                testID="signup-password"
-                style={styles.passwordInput}
-                placeholder="••••••••"
-                placeholderTextColor={Colors.textTertiary}
-                value={password}
-                onChangeText={setPassword}
-                secureTextEntry={!showPassword}
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-              <TouchableOpacity
-                testID="signup-password-toggle"
-                style={styles.passwordEye}
-                onPress={() => setShowPassword((v) => !v)}
-                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-                accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
-              >
-                <Icon
-                  name={showPassword ? 'eye-off' : 'eye'}
-                  size={22}
-                  color={Colors.textSecondary}
-                />
-              </TouchableOpacity>
-            </View>
-          </View>
-
+          <Field
+            label="Full name"
+            value={name}
+            onChangeText={setName}
+            placeholder="Jane Smith"
+            testID="signup-name"
+            autoCapitalize="words"
+          />
+          <Field
+            label="Email"
+            value={email}
+            onChangeText={setEmail}
+            placeholder="you@example.com"
+            keyboardType="email-address"
+            autoCapitalize="none"
+            autoCorrect={false}
+            textContentType="emailAddress"
+            autoComplete="email"
+            testID="signup-email"
+          />
           <Field
             label="Family invite code (optional)"
             value={inviteCode}
@@ -96,8 +118,16 @@ export default function Signup() {
             </Text>
           ) : null}
 
-          <TouchableOpacity testID="signup-submit" style={styles.cta} onPress={onSubmit} disabled={loading} activeOpacity={0.85}>
-            {loading ? <ActivityIndicator color={Colors.surface} /> : <Text style={styles.ctaText}>Create Account</Text>}
+          <TouchableOpacity
+            testID="signup-submit"
+            style={styles.cta}
+            onPress={onSubmit}
+            disabled={loading}
+            activeOpacity={0.85}
+          >
+            {loading
+              ? <ActivityIndicator color={Colors.surface} />
+              : <Text style={styles.ctaText}>Email me a code</Text>}
           </TouchableOpacity>
 
           <Text style={styles.agreement}>
@@ -112,8 +142,14 @@ export default function Signup() {
             .
           </Text>
 
-          <TouchableOpacity testID="signup-to-login" onPress={() => router.replace('/(auth)/login')} style={{ marginTop: 18, alignItems: 'center' }}>
-            <Text style={styles.link}>Already have an account? <Text style={{ fontWeight: '700', color: Colors.primary }}>Sign in</Text></Text>
+          <TouchableOpacity
+            testID="signup-to-login"
+            onPress={() => router.replace('/(auth)/login')}
+            style={{ marginTop: 18, alignItems: 'center' }}
+          >
+            <Text style={styles.link}>
+              Already have an account? <Text style={{ fontWeight: '700', color: Colors.primary }}>Sign in</Text>
+            </Text>
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -139,31 +175,14 @@ const styles = StyleSheet.create({
   scroll: { padding: 24, paddingBottom: 48 },
   back: { width: 52, height: 52, justifyContent: 'center' },
   title: { fontSize: 28, fontWeight: '800', color: Colors.textPrimary, marginTop: 8 },
-  subtitle: { fontSize: 16, color: Colors.textSecondary, marginTop: 6, marginBottom: 8 },
-  label: { fontSize: 13, fontWeight: '700', color: Colors.textSecondary, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 },
+  subtitle: { fontSize: 16, color: Colors.textSecondary, marginTop: 6, marginBottom: 8, lineHeight: 22 },
+  label: {
+    fontSize: 13, fontWeight: '700', color: Colors.textSecondary,
+    marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5,
+  },
   input: {
     backgroundColor: Colors.surface, borderRadius: 14, padding: 16, fontSize: 16,
     color: Colors.textPrimary, borderWidth: 1, borderColor: Colors.border,
-  },
-  passwordRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: Colors.surface,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  passwordInput: {
-    flex: 1,
-    padding: 16,
-    fontSize: 16,
-    color: Colors.textPrimary,
-  },
-  passwordEye: {
-    width: 52,
-    height: 52,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   cta: {
     marginTop: 28, height: 58, borderRadius: 16, backgroundColor: Colors.primary,

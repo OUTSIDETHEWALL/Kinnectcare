@@ -82,16 +82,41 @@ if os.path.isdir(STORE_ASSETS_DIR):
 
 # ========== Models ==========
 class UserSignup(BaseModel):
+    """Legacy password-signup payload (kept only for the 410 stub —
+    the live signup path is /auth/request-otp + /auth/verify-otp)."""
     email: EmailStr
-    password: str
+    password: Optional[str] = None
     full_name: str
     timezone: Optional[str] = None
-    invite_code: Optional[str] = None  # Optional: join an existing family group
+    invite_code: Optional[str] = None
 
 
 class UserLogin(BaseModel):
+    """Legacy password-login payload (kept only for the 410 stub)."""
     email: EmailStr
-    password: str
+    password: Optional[str] = None
+
+
+# ============ OTP (passwordless) auth payloads ============
+# Email-OTP replaces the entire password-based flow. Sign-in and
+# sign-up both funnel through /auth/request-otp → email delivery →
+# /auth/verify-otp → JWT issued. The `purpose` discriminator on
+# request-otp tells the server whether the email is expected to
+# already exist (login) or be net-new (signup). For signup we also
+# accept full_name + invite_code, which we stash in the OTP record
+# and apply when the code is verified.
+class OtpRequest(BaseModel):
+    email: EmailStr
+    purpose: str  # "login" | "signup"
+    # Only used when purpose == "signup":
+    full_name: Optional[str] = None
+    timezone: Optional[str] = None
+    invite_code: Optional[str] = None
+
+
+class OtpVerify(BaseModel):
+    email: EmailStr
+    code: str
 
 
 class UserResponse(BaseModel):
@@ -675,89 +700,280 @@ def _user_response(u: dict) -> UserResponse:
     )
 
 
-@api_router.post("/auth/signup", response_model=TokenResponse)
-async def signup(data: UserSignup):
-    if await db.users.find_one({"email": data.email.lower()}):
-        raise HTTPException(status_code=409, detail="Email already registered")
-    tz = data.timezone or "UTC"
-    try:
-        ZoneInfo(tz)
-    except ZoneInfoNotFoundError:
-        tz = "UTC"
+# ========== Auth Routes — passwordless email-OTP ==========
+#
+# Architectural note: as of v6.11 Kinnship is FULLY passwordless.  All
+# sign-in / sign-up flows funnel through email OTP:
+#   1. POST /auth/request-otp { email, purpose, full_name?, invite_code? }
+#      → generates a 6-digit code, hashes it, stores in `otp_codes`,
+#        emails the user via SMTP, returns 200 OK (vague).
+#   2. POST /auth/verify-otp { email, code }
+#      → on match, consumes the code and either creates the user
+#        (purpose=signup) or just returns a fresh JWT (purpose=login).
+#   3. POST /auth/resend-otp { email }  → bumps the 60-second cooldown,
+#      generates a NEW code, re-emails.
+#
+# The legacy /auth/login, /auth/signup, /auth/forgot-password and
+# /auth/reset-password endpoints return 410 Gone with a helpful
+# upgrade message so any user still running v6.10 or earlier gets a
+# clear signal to update.
+#
+# /auth/change-password is removed outright — there is no password.
 
-    # Resolve invite code (if any) BEFORE creating the user.
-    target_group = None
-    if data.invite_code:
-        target_group = await fg.get_group_by_code(db, data.invite_code)
-        if not target_group:
-            raise HTTPException(status_code=404, detail="Invite code not found")
+import secrets
+import smtplib
+from email.message import EmailMessage
 
-    user_id = str(uuid.uuid4())
-    doc = {
-        "id": user_id, "email": data.email.lower().strip(), "full_name": (data.full_name or "").strip(),
-        # ALWAYS hash the trimmed password. Same normalization is applied
-        # at /auth/login so a saved-password autofill that adds a stray
-        # trailing space can never lock the user out.
-        "hashed_password": hash_password((data.password or "").strip()),
-        "timezone": tz, "push_tokens": [],
-        "created_at": datetime.now(timezone.utc),
-    }
-    await db.users.insert_one(doc)
 
-    if target_group:
-        # Join existing family group; do NOT seed demo data — they already have a family.
-        await db.users.update_one(
-            {"id": user_id},
-            {"$set": {
-                "family_group_id": target_group["id"],
-                "family_group_role": "member",
-            }},
-        )
-        doc["family_group_id"] = target_group["id"]
-        doc["family_group_role"] = "member"
-    else:
-        # Create a new solo family group + seed demo data
-        group = await fg.create_group_for_user(db, doc)
-        doc["family_group_id"] = group["id"]
-        doc["family_group_role"] = "owner"
-        await seed_demo_data(user_id, group["id"])
+OTP_LENGTH = 6
+OTP_TTL_MINUTES = 10        # how long a code stays valid
+OTP_MAX_ATTEMPTS = 5        # per code, before we lock it
+OTP_RESEND_COOLDOWN_S = 60  # how often /auth/resend-otp may be called
 
-    return TokenResponse(
-        access_token=create_access_token(user_id),
-        user=_user_response(doc),
+
+def _generate_otp() -> str:
+    """Return a zero-padded 6-digit code as a string."""
+    return f"{secrets.randbelow(900000) + 100000:0{OTP_LENGTH}d}"
+
+
+def _otp_email_body(code: str, purpose: str) -> tuple[str, str]:
+    """Returns (subject, plain_text_body) for the OTP delivery email."""
+    verb = "Welcome to Kinnship" if purpose == "signup" else "Sign in to Kinnship"
+    subject = f"Your Kinnship code: {code}"
+    body = (
+        f"Hi,\n\n"
+        f"{verb}.\n\n"
+        f"Your 6-digit code is:  {code}\n\n"
+        f"This code expires in {OTP_TTL_MINUTES} minutes. "
+        f"If you didn't request this, you can safely ignore this email — "
+        f"someone may have mistyped their address.\n\n"
+        f"— Kinnship Safety"
     )
+    return subject, body
 
 
-@api_router.post("/auth/login", response_model=TokenResponse)
-async def login(data: UserLogin):
-    # Normalize email + password the same way every code path does.
-    # Mobile keyboards (Gboard / iOS autocomplete) routinely inject
-    # leading/trailing whitespace via autosuggestions, especially when
-    # the user accepts an autofill suggestion. We trim BOTH sides so
-    # we never reject a valid login over a stray space.
-    email_norm = (data.email or "").strip().lower()
-    password_raw = data.password or ""
-    password_trimmed = password_raw.strip()
+async def _deliver_otp_email(to_email: str, code: str, purpose: str) -> bool:
+    """Send the OTP via SMTP. Falls back to logging-only if SMTP isn't
+    configured (dev environments). Returns True if delivery succeeded.
+    """
+    host = os.environ.get("SMTP_HOST")
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    user = os.environ.get("SMTP_USER")
+    pwd = os.environ.get("SMTP_PASSWORD")
+    sender = os.environ.get("SMTP_FROM", user or "noreply@kinnship.app")
+    subject, body = _otp_email_body(code, purpose)
+    if not (host and user and pwd):
+        logger.warning(f"[OTP] SMTP not configured. Code for {to_email}: {code}")
+        return False
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = sender
+        msg["To"] = to_email
+        msg.set_content(body)
+        with smtplib.SMTP(host, port) as s:
+            s.starttls()
+            s.login(user, pwd)
+            s.send_message(msg)
+        return True
+    except Exception as e:
+        # Log the actual error AND the code so an operator can relay it
+        # manually if Gmail rate-limits or rejects.
+        logger.warning(f"[OTP] SMTP send failed: {e}. Code for {to_email}: {code}")
+        return False
 
-    user = await db.users.find_one({"email": email_norm})
-    ok = bool(user) and verify_password(password_trimmed, user["hashed_password"])
-    if not ok:
-        # Tertiary fallback: if trim didn't match, try the raw password
-        # (in case the user's hash was created with intentional whitespace).
-        if user and password_raw != password_trimmed:
-            ok = verify_password(password_raw, user["hashed_password"])
-    if not ok:
-        # Diagnostic logging — NEVER log the password, only metadata so
-        # we can correlate recurring login failures with mobile keyboard
-        # quirks (length, whether trim changed it, etc.).
-        logger.info(
-            f"login failed for email={email_norm!r} "
-            f"user_exists={bool(user)} "
-            f"pw_len={len(password_raw)} pw_trim_len={len(password_trimmed)} "
-            f"had_ws={password_raw != password_trimmed}"
+
+@api_router.post("/auth/request-otp")
+async def request_otp(data: OtpRequest):
+    """Generate a 6-digit OTP, persist (hashed), email it to the user.
+
+    Always returns 200 OK with a vague message regardless of whether
+    the email is registered — this prevents an attacker from probing
+    which addresses have Kinnship accounts.
+    """
+    email = data.email.lower().strip()
+    purpose = (data.purpose or "").strip().lower()
+    if purpose not in ("login", "signup"):
+        raise HTTPException(status_code=400, detail="Invalid purpose")
+
+    existing_user = await db.users.find_one({"email": email}, {"_id": 0, "id": 1})
+
+    # On a login request for an unknown email we STILL generate and
+    # "deliver" a code, but don't actually email anything — same
+    # response shape, no enumeration side-channel.
+    if purpose == "login" and not existing_user:
+        return {
+            "ok": True,
+            "message": (
+                "If an account exists for that email, we've sent a 6-digit "
+                "sign-in code. Check your inbox (and spam) in the next "
+                "1-2 minutes."
+            ),
+            "expires_in_seconds": OTP_TTL_MINUTES * 60,
+        }
+
+    # On a signup request for an already-registered email, also pretend
+    # the request worked (no enumeration), but ROUTE the code through
+    # the login pipeline so the user can still get in. Practically this
+    # means if a user accidentally hits signup with their real email,
+    # they'll receive a login OTP and end up signed in.
+    if purpose == "signup" and existing_user:
+        purpose = "login"
+
+    # Cooldown — refuse if a recent code was issued within the cooldown
+    # window. Prevents accidental spam / abuse.
+    prev = await db.otp_codes.find_one({"email": email})
+    if prev:
+        created = prev.get("created_at")
+        if created and created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if created and (datetime.now(timezone.utc) - created).total_seconds() < OTP_RESEND_COOLDOWN_S:
+            remaining = int(
+                OTP_RESEND_COOLDOWN_S - (datetime.now(timezone.utc) - created).total_seconds()
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=f"Please wait {max(1, remaining)}s before requesting a new code.",
+            )
+
+    code = _generate_otp()
+    code_hash = hash_password(code)
+    now = datetime.now(timezone.utc)
+    rec = {
+        "email": email,
+        "purpose": purpose,
+        "code_hash": code_hash,
+        "expires_at": now + timedelta(minutes=OTP_TTL_MINUTES),
+        "created_at": now,
+        "attempts": 0,
+    }
+    # If purpose=signup, stash the metadata so verify-otp can create
+    # the user without requiring it again.
+    if purpose == "signup":
+        rec["full_name"] = (data.full_name or "").strip() or "Friend"
+        rec["timezone"] = data.timezone or "UTC"
+        if data.invite_code:
+            rec["invite_code"] = data.invite_code.strip().upper()
+
+    await db.otp_codes.update_one({"email": email}, {"$set": rec}, upsert=True)
+    await _deliver_otp_email(email, code, purpose)
+    return {
+        "ok": True,
+        "message": (
+            "If an account exists for that email, we've sent a 6-digit "
+            "code. Check your inbox (and spam) in the next 1-2 minutes."
+        ),
+        "expires_in_seconds": OTP_TTL_MINUTES * 60,
+    }
+
+
+@api_router.post("/auth/resend-otp")
+async def resend_otp(data: OtpRequest):
+    """Re-issue an OTP for the same email. Identical semantics to
+    request-otp — the only reason this lives as a separate endpoint is
+    to make the client intent explicit and to surface clearer 429s.
+    """
+    return await request_otp(data)
+
+
+@api_router.post("/auth/verify-otp", response_model=TokenResponse)
+async def verify_otp(data: OtpVerify):
+    """Verify a 6-digit code. On success, return a fresh JWT — and if
+    the code was issued for signup, create the user record + family
+    group at the same time.
+    """
+    email = data.email.lower().strip()
+    code = (data.code or "").strip()
+    if not (code.isdigit() and len(code) == OTP_LENGTH):
+        raise HTTPException(status_code=400, detail="Invalid code")
+
+    rec = await db.otp_codes.find_one({"email": email})
+    if not rec:
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+
+    # Expiry
+    exp = rec.get("expires_at")
+    if exp and exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if not exp or exp < datetime.now(timezone.utc):
+        await db.otp_codes.delete_one({"_id": rec["_id"]})
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+
+    # Attempt throttle
+    attempts = int(rec.get("attempts", 0))
+    if attempts >= OTP_MAX_ATTEMPTS:
+        await db.otp_codes.delete_one({"_id": rec["_id"]})
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts. Please request a new code.",
         )
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    # Ensure user has a family_group_id (lazy-creates for legacy users)
+
+    if not verify_password(code, rec.get("code_hash", "")):
+        await db.otp_codes.update_one({"_id": rec["_id"]}, {"$inc": {"attempts": 1}})
+        remaining = max(0, OTP_MAX_ATTEMPTS - attempts - 1)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid code. {remaining} attempt(s) remaining.",
+        )
+
+    # Code matches — consume it.
+    await db.otp_codes.delete_one({"_id": rec["_id"]})
+
+    purpose = rec.get("purpose", "login")
+    user = await db.users.find_one({"email": email})
+
+    # === SIGNUP path: create the user + family group on the fly. ===
+    if purpose == "signup" and not user:
+        tz = rec.get("timezone") or "UTC"
+        try:
+            ZoneInfo(tz)
+        except ZoneInfoNotFoundError:
+            tz = "UTC"
+
+        # Resolve invite code (if any) BEFORE creating the user.
+        target_group = None
+        invite_code = rec.get("invite_code")
+        if invite_code:
+            target_group = await fg.get_group_by_code(db, invite_code)
+            if not target_group:
+                raise HTTPException(status_code=404, detail="Invite code not found")
+
+        user_id = str(uuid.uuid4())
+        doc = {
+            "id": user_id,
+            "email": email,
+            "full_name": (rec.get("full_name") or "Friend").strip(),
+            # No password stored — this field stays absent on
+            # passwordless accounts. The presence check is now done
+            # purely against `email` + OTP-verification.
+            "timezone": tz,
+            "push_tokens": [],
+            "created_at": datetime.now(timezone.utc),
+        }
+        await db.users.insert_one(doc)
+        if target_group:
+            await db.users.update_one(
+                {"id": user_id},
+                {"$set": {
+                    "family_group_id": target_group["id"],
+                    "family_group_role": "member",
+                }},
+            )
+            doc["family_group_id"] = target_group["id"]
+            doc["family_group_role"] = "member"
+        else:
+            group = await fg.create_group_for_user(db, doc)
+            doc["family_group_id"] = group["id"]
+            doc["family_group_role"] = "owner"
+            await seed_demo_data(user_id, group["id"])
+        user = doc
+
+    if not user:
+        # purpose=login but the user doesn't exist (or signup race) —
+        # surface the same vague error as a bad code so we don't leak
+        # email-registration status.
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+
     await fg.ensure_family_group(db, user)
     return TokenResponse(
         access_token=create_access_token(user["id"]),
@@ -771,189 +987,49 @@ async def me(current=Depends(get_current_user)):
     return _user_response(current)
 
 
-# ========== Forgot / Reset password ==========
+# ============ Deprecated password endpoints — 410 Gone ============
 #
-# Self-serve password recovery. Generates a 6-digit reset code valid for
-# 15 minutes. The code is delivered via email (if SMTP env vars set) OR
-# is captured in backend logs for the operator to relay if SMTP isn't
-# configured yet. Charles can wire SMTP later by adding SMTP_HOST etc.
-#
-# All responses are intentionally vague (200 OK regardless) so attackers
-# can't enumerate registered emails.
-import secrets
-import smtplib
-from email.message import EmailMessage
+# Any user still running v6.10 or earlier will hit one of these on
+# the first auth interaction.  We return 410 Gone with a clear
+# upgrade message so the old client knows the endpoint is permanently
+# replaced (rather than 404, which would look like a network error
+# or temporary outage). The same body schema as a normal error is
+# preserved so existing clients can surface `detail` to the user.
+
+_PASSWORD_DEPRECATED_MSG = (
+    "Password sign-in has been replaced by email codes. "
+    "Please update Kinnship to the latest version to continue."
+)
 
 
-class ForgotPasswordRequest(BaseModel):
-    email: EmailStr
+@api_router.post("/auth/signup", include_in_schema=False)
+async def signup_deprecated(_: dict = None):
+    raise HTTPException(status_code=410, detail=_PASSWORD_DEPRECATED_MSG)
 
 
-class ResetPasswordRequest(BaseModel):
-    email: EmailStr
-    code: str
-    new_password: str
-
-    @field_validator("new_password")
-    @classmethod
-    def _v_pw(cls, v: str) -> str:
-        if len(v) < 6:
-            raise ValueError("Password must be at least 6 characters")
-        return v
+@api_router.post("/auth/login", include_in_schema=False)
+async def login_deprecated(_: dict = None):
+    raise HTTPException(status_code=410, detail=_PASSWORD_DEPRECATED_MSG)
 
 
-async def _send_reset_email(to_email: str, code: str) -> bool:
-    """Send password reset email. Returns True if SMTP delivered, False
-    if SMTP isn't configured (in which case the code is logged so an
-    operator can relay it).
-    """
-    host = os.environ.get("SMTP_HOST")
-    port = int(os.environ.get("SMTP_PORT", "587"))
-    user = os.environ.get("SMTP_USER")
-    pwd = os.environ.get("SMTP_PASSWORD")
-    sender = os.environ.get("SMTP_FROM", user or "noreply@kinnship.app")
-    if not (host and user and pwd):
-        # No SMTP configured — log so operator can relay.
-        logger.warning(
-            f"[PASSWORD-RESET] SMTP not configured. Code for {to_email}: {code}"
-        )
-        return False
-    try:
-        msg = EmailMessage()
-        msg["Subject"] = "Your Kinnship password reset code"
-        msg["From"] = sender
-        msg["To"] = to_email
-        msg.set_content(
-            f"Hi,\n\nYour Kinnship password reset code is: {code}\n\n"
-            "This code expires in 60 minutes. If you didn't request this, "
-            "you can safely ignore this email.\n\n— Kinnship Safety"
-        )
-        with smtplib.SMTP(host, port) as s:
-            s.starttls()
-            s.login(user, pwd)
-            s.send_message(msg)
-        return True
-    except Exception as e:
-        logger.warning(f"SMTP send failed: {e}. Code for {to_email}: {code}")
-        return False
+@api_router.post("/auth/forgot-password", include_in_schema=False)
+async def forgot_password_deprecated(_: dict = None):
+    raise HTTPException(status_code=410, detail=_PASSWORD_DEPRECATED_MSG)
 
 
-# Reset-code TTL.  Increased from 15 → 60 minutes per user feedback —
-# elderly users routinely need more than 15min to find the email, open it,
-# switch back to the app, and complete the reset flow.  60 min is the
-# industry-standard window (Google / Microsoft both use ~1 hour).
-PASSWORD_RESET_TTL_MINUTES = 60
+@api_router.post("/auth/reset-password", include_in_schema=False)
+async def reset_password_deprecated(_: dict = None):
+    raise HTTPException(status_code=410, detail=_PASSWORD_DEPRECATED_MSG)
 
 
-@api_router.post("/auth/forgot-password")
-async def forgot_password(data: ForgotPasswordRequest):
-    """Generate a reset code, store with expiry, deliver via email."""
-    email = data.email.lower()
-    user = await db.users.find_one({"email": email}, {"_id": 0, "id": 1})
-    # Generate code regardless to avoid timing-side-channel email enumeration.
-    code = f"{secrets.randbelow(900000) + 100000:06d}"  # 6-digit
-    if user:
-        # Hash the code before storing — never store raw codes.
-        code_hash = hash_password(code)
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_TTL_MINUTES)
-        await db.password_resets.update_one(
-            {"user_id": user["id"]},
-            {
-                "$set": {
-                    "user_id": user["id"],
-                    "email": email,
-                    "code_hash": code_hash,
-                    "expires_at": expires_at,
-                    "created_at": datetime.now(timezone.utc),
-                    "attempts": 0,
-                }
-            },
-            upsert=True,
-        )
-        await _send_reset_email(email, code)
-    # Intentionally vague — never confirm whether the email is registered.
-    return {
-        "ok": True,
-        "message": (
-            "If an account exists for that email, we've sent a reset code. "
-            "Check your inbox (and spam) in the next 1-2 minutes. "
-            f"The code is valid for {PASSWORD_RESET_TTL_MINUTES} minutes."
-        ),
-    }
-
-
-@api_router.post("/auth/reset-password", response_model=TokenResponse)
-async def reset_password(data: ResetPasswordRequest):
-    email = data.email.lower().strip()
-    rec = await db.password_resets.find_one({"email": email})
-    if not rec:
-        raise HTTPException(status_code=400, detail="Invalid or expired code")
-    # Expiry check.
-    exp = rec.get("expires_at")
-    if exp:
-        if exp.tzinfo is None:
-            exp = exp.replace(tzinfo=timezone.utc)
-        if exp < datetime.now(timezone.utc):
-            raise HTTPException(status_code=400, detail="Invalid or expired code")
-    # Attempts throttle (5 max).
-    attempts = int(rec.get("attempts", 0))
-    if attempts >= 5:
-        raise HTTPException(status_code=429, detail="Too many attempts. Request a new code.")
-    # Verify code (trim defensively — the user may have pasted with spaces).
-    code = (data.code or "").strip()
-    if not verify_password(code, rec.get("code_hash", "")):
-        await db.password_resets.update_one(
-            {"_id": rec["_id"]}, {"$inc": {"attempts": 1}}
-        )
-        raise HTTPException(status_code=400, detail="Invalid or expired code")
-    # OK — reset the password and consume the code.
-    user = await db.users.find_one({"email": email})
-    if not user:
-        raise HTTPException(status_code=400, detail="Invalid or expired code")
-    # Always store a trimmed password so future logins (which also trim)
-    # match exactly. This is the SAME normalization the login endpoint
-    # applies, which permanently eliminates the "saved password has
-    # whitespace" recurring-401 issue.
-    new_password = (data.new_password or "").strip()
-    new_hash = hash_password(new_password)
-    await db.users.update_one({"id": user["id"]}, {"$set": {"hashed_password": new_hash}})
-    await db.password_resets.delete_one({"_id": rec["_id"]})
-    user["hashed_password"] = new_hash
-    return TokenResponse(
-        access_token=create_access_token(user["id"]),
-        user=_user_response(user),
-    )
-
-
-class ChangePasswordRequest(BaseModel):
-    current_password: str
-    new_password: str
-
-    @field_validator("new_password")
-    @classmethod
-    def _v_pw(cls, v: str) -> str:
-        if len(v) < 6:
-            raise ValueError("Password must be at least 6 characters")
-        return v
-
-
-@api_router.post("/auth/change-password")
-async def change_password(
-    data: ChangePasswordRequest, current=Depends(get_current_user)
+@api_router.post("/auth/change-password", include_in_schema=False)
+async def change_password_deprecated(
+    _: dict = None, current=Depends(get_current_user)
 ):
-    # Trim both inputs — same normalization as /auth/login so we never
-    # reject a valid password change because of a stray autosuggest space.
-    current_raw = (data.current_password or "")
-    current_trimmed = current_raw.strip()
-    new_password = (data.new_password or "").strip()
-    if not (verify_password(current_trimmed, current.get("hashed_password", "")) or
-            verify_password(current_raw, current.get("hashed_password", ""))):
-        raise HTTPException(status_code=401, detail="Current password is incorrect")
-    new_hash = hash_password(new_password)
-    await db.users.update_one(
-        {"id": current["id"]}, {"$set": {"hashed_password": new_hash}}
-    )
-    return {"ok": True, "message": "Password updated successfully"}
+    # The current=… dependency keeps the auth surface consistent (so
+    # an unauth'd 401 still beats this 410) but the endpoint itself
+    # is gone forever.
+    raise HTTPException(status_code=410, detail=_PASSWORD_DEPRECATED_MSG)
 
 
 @api_router.put("/auth/timezone", response_model=UserResponse)

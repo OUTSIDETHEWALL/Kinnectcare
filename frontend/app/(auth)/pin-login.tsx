@@ -17,7 +17,7 @@
  *     phrased as a normal alternative.
  */
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
@@ -38,7 +38,7 @@ function formatLockMs(ms: number): string {
 
 export default function PinLogin() {
   const router = useRouter();
-  const { user, loading, logout } = useAuth();
+  const { user, loading, logout, requestOtp } = useAuth();
   const padRef = useRef<PinPadHandle>(null);
   const [busy, setBusy] = useState(false);
   const [hint, setHint] = useState<string>('');
@@ -86,7 +86,7 @@ export default function PinLogin() {
         setHintTone('normal');
         return;
       }
-      setHint(`Too many wrong PINs. Try again in ${formatLockMs(remainingMs)} — or sign in with email & password below.`);
+      setHint(`Too many wrong PINs. Try again in ${formatLockMs(remainingMs)} — or tap "Email me a code" below.`);
       setHintTone('error');
     };
     tick();
@@ -140,10 +140,28 @@ export default function PinLogin() {
   };
 
   const goToEmailLogin = async () => {
-    // Sign out the existing token so the email-login screen starts clean.
-    // After successful email login they can re-set their PIN.
+    // Master-key fallback: send a 6-digit code to the user's email
+    // so they can sign in even if they forgot their PIN. We log out
+    // the existing token first so AuthContext starts from a clean
+    // slate after verification. After they verify, RootNav will
+    // route them through pin-setup so they can pick a new PIN.
+    const email = user?.email;
+    if (!email) {
+      await logout();
+      router.replace('/(auth)/login');
+      return;
+    }
+    try {
+      await requestOtp({ email, purpose: 'login' });
+    } catch (_e) {
+      // Even if the request silently fails (network, etc.), still
+      // route to the verify screen — the user can press Resend.
+    }
     await logout();
-    router.replace('/(auth)/login');
+    router.push({
+      pathname: '/(auth)/otp-verify',
+      params: { email, purpose: 'login' },
+    } as any);
   };
 
   // LAST-RESORT RECOVERY: wipe ALL local app state. Used when the
@@ -204,7 +222,7 @@ export default function PinLogin() {
           style={styles.fallbackBtn}
           activeOpacity={0.6}
         >
-          <Text style={styles.fallbackText}>Use email & password instead</Text>
+          <Text style={styles.fallbackText}>Email me a code instead</Text>
         </TouchableOpacity>
         <TouchableOpacity
           testID="pin-login-forgot"

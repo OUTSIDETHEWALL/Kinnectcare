@@ -2,14 +2,14 @@ import { Stack, useRouter, useSegments } from 'expo-router';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from '../src/AuthContext';
-import { useEffect, useState, useRef } from 'react';
-import { View, ActivityIndicator, AppState, AppStateStatus } from 'react-native';
+import { useEffect, useState } from 'react';
+import { View, ActivityIndicator } from 'react-native';
 import { Colors } from '../src/theme';
 import { registerForPushNotifications, useNotificationListeners } from '../src/push';
 import { setAppReadyForDeepLink } from '../src/push';
 import { isOnboardingDone } from '../src/onboardingStore';
 import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
-import { hasPinForUser, isUnlockedNow, forgetSessionUnlock } from '../src/pinAuth';
+import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
 import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
 
 function RootNav() {
@@ -74,51 +74,20 @@ function RootNav() {
     })();
   }, [user?.id]);
 
-  // ----- Re-lock the PIN on app foreground/background transitions -----
+  // ----- PIN re-prompt cadence: COLD START ONLY -----
   //
-  // React Native does NOT kill the JS process on background→foreground
-  // transitions — the in-memory `unlockedSessions` Set inside pinAuth
-  // persists across these transitions, so without explicit handling
-  // the PIN gate would only re-trigger after a true cold start (where
-  // the OS reclaimed the process). That's almost never observable by
-  // a user — they get a "PIN-free" experience after their first
-  // unlock-per-process which is wrong for a senior-safety app and
-  // also a security regression.
+  // v6.10 re-locked the PIN on every background/foreground transition
+  // (banking-app pattern). v6.11 switches to the "every cold start
+  // only" pattern per user feedback — elderly users found the
+  // every-resume re-prompt annoying when they briefly switched to a
+  // calendar / SMS / phone call and came back. The PIN unlock now
+  // sticks until the JS process actually dies (which happens on a
+  // true app kill or an OS process-reclaim under memory pressure).
   //
-  // Fix: subscribe to AppState. When the app moves to background or
-  // becomes inactive, drop the in-memory unlock flag AND mark the
-  // gate as needing unlock so the routing effect redirects to
-  // /(auth)/pin-login the moment the app returns to foreground.
+  // If the user wants tighter re-lock cadence later they can opt in
+  // via Settings — for now we ship the friendlier default.
   //
-  // We don't add a grace period — banking / 1Password / Authy all
-  // re-lock on every background transition, and senior-safety
-  // similarly wants the screen lock to be a real lock.
-  //
-  // The pin-setup and pin-login screens themselves are exempt — if
-  // the user is mid-setup or mid-unlock, we don't want to thrash
-  // the state on a quick app-switch.
-  const lastAppStateRef = useRef<AppStateStatus>(AppState.currentState);
-  useEffect(() => {
-    if (!user?.id) return;
-    const uid = user.id;
-    const onChange = async (state: AppStateStatus) => {
-      const prev = lastAppStateRef.current;
-      lastAppStateRef.current = state;
-      if ((state === 'background' || state === 'inactive') && prev === 'active') {
-        // Going background. If the user has a PIN, drop the unlock
-        // flag so re-foregrounding triggers pin-login.
-        try {
-          const hasPin = await hasPinForUser(uid);
-          if (hasPin) {
-            forgetSessionUnlock(uid);
-            setNeedsPinUnlock(true);
-          }
-        } catch (_e) {}
-      }
-    };
-    const sub = AppState.addEventListener('change', onChange);
-    return () => sub.remove();
-  }, [user?.id]);
+  // NOTE: previous AppState listener has been intentionally removed.
 
   useNotificationListeners((data) => {
     // Deep-link by notification type. Uses router.replace (not push)

@@ -306,12 +306,7 @@ export default function SettingsScreen() {
             <Divider />
             <Row label="Time zone" value={user?.timezone || 'UTC'} />
             <Divider />
-            <NavRow
-              testID="settings-change-password"
-              icon="🔒"
-              label="Change Password"
-              onPress={() => router.push('/change-password')}
-            />
+            <Row label="Sign-in method" value="Email code (no password)" />
             <Divider />
             {pinOn ? (
               <NavRow
@@ -322,7 +317,7 @@ export default function SettingsScreen() {
                   if (!user?.id) return;
                   Alert.alert(
                     'Remove PIN?',
-                    "You'll go back to signing in with your email and password each time.",
+                    "You'll sign in with an emailed 6-digit code each time you open the app.",
                     [
                       { text: 'Cancel', style: 'cancel' },
                       {
