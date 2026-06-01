@@ -127,9 +127,17 @@ export default function ChangePassword() {
                 secureTextEntry={!showCurrent}
                 autoCapitalize="none"
                 autoCorrect={false}
-                textContentType="password"
-                autoComplete="current-password"
-                importantForAutofill="yes"
+                spellCheck={false}
+                // ROOT-CAUSE FIX (v6.9): disable OS autofill on
+                // password fields entirely — stale Keychain /
+                // Google Password Manager entries from previous
+                // resets were silently substituting wrong
+                // passwords and locking the user out. Matches
+                // the login.tsx fix.
+                textContentType="oneTimeCode"
+                autoComplete="off"
+                importantForAutofill="no"
+                passwordRules=""
                 returnKeyType="next"
               />
               <TouchableOpacity

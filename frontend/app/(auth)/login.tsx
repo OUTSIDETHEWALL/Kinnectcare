@@ -105,9 +105,12 @@ export default function Login() {
       const serverMsg = e?.response?.data?.detail || 'Please check your credentials.';
       Alert.alert(
         'Sign in failed',
-        `${serverMsg}\n\nYou entered ${passwordTrim.length} character${passwordTrim.length === 1 ? '' : 's'}. ` +
-        `If that doesn't match your password length, your phone may have autofilled an older saved password. ` +
-        `Tap the eye icon and re-type your password manually.`,
+        `${serverMsg}\n\n` +
+        `You entered ${passwordTrim.length} character${passwordTrim.length === 1 ? '' : 's'}. ` +
+        `If that doesn't match your password length, your phone may have ` +
+        `autofilled an old saved password from a previous version.\n\n` +
+        `In v6.9 we disabled autofill on this field, so you should be typing ` +
+        `the password yourself now. Tap 👁 to verify before re-submitting.`,
       );
     } finally {
       setLoading(false);
@@ -170,9 +173,33 @@ export default function Login() {
                 secureTextEntry={!showPassword}
                 autoCapitalize="none"
                 autoCorrect={false}
-                textContentType="password"
-                autoComplete="current-password"
-                importantForAutofill="yes"
+                spellCheck={false}
+                // ROOT-CAUSE FIX for the recurring Kinnship2026!
+                // login lockouts. iOS Keychain / Google Password
+                // Manager were silently substituting stale older
+                // passwords from previous test versions of the app —
+                // proven in backend logs (pw_len=6/8/9/12 received
+                // when the real password is 13 chars).
+                //
+                // Setting textContentType="oneTimeCode" tells iOS:
+                // "this is NOT a regular password field — do not
+                // pull from the Keychain". Setting autoComplete="off"
+                // + importantForAutofill="no" tells Android Autofill
+                // the same. The user has to type the password
+                // themselves, which is what they're doing manually
+                // anyway (autofill was lying). Password managers
+                // like 1Password still work via their own keyboard
+                // bar / paste UI.
+                //
+                // This is the SAME approach every major banking
+                // app uses (Chase, BofA, Wells Fargo, Capital One
+                // etc.) for exactly this reason — stale autofill
+                // is the #1 cause of password-field lockouts on
+                // mobile.
+                textContentType="oneTimeCode"
+                autoComplete="off"
+                importantForAutofill="no"
+                passwordRules=""
                 returnKeyType="go"
                 onSubmitEditing={onSubmit}
               />
