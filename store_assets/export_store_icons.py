@@ -1,62 +1,233 @@
 """
-Export Kinnship store icons from the OFFICIAL brand logo files.
+v2 — Kinnship store graphics, GREEN-background only.
 
-Sources (existing 512x512 brand artwork, already finished design):
-  • /app/frontend/assets/images/kinnship-logo-white.png  (white bg, shield+check+wordmark)
-  • /app/frontend/assets/images/kinnship-logo-dark.png   (green bg, shield+check+wordmark)
+The white-background master (kinnship-logo-white.png) ships with an
+intentionally-asymmetric shield render — the left half is outlined
+with a chalk/textured fill while the right half is solid. That looks
+"corrupted/half-missing" when blown up to icon size at 512/1024.
+The green-background master (kinnship-logo-dark.png) renders the
+shield symmetrically and ships at the same 512×512 source size, so
+we drop the white path entirely and use the green master for both
+the Google Play and Apple App Store icon slots — sized 512 and 1024.
 
-NOT used (these are the adaptive-icon foreground with safe-zone
-padding — wrong proportions for App Store listings):
-  • kinnship-adaptive-foreground-1024.png
+The feature graphic (1024×500) is re-composited so the LEFT side
+now embeds the actual green-background brand logo (with its
+built-in shield + check + "Kinnship" wordmark) instead of the
+synthetic shield I had drawn earlier. The right-side phone mockup
+and the supporting tagline are kept.
 
-Three flat-PNG outputs, all RGB (no alpha, no transparency, no
-rounded corners — perfect squares only), suitable for direct upload:
-
-  1. store_icon_white_512.png   — 512 ×  512  white bg   (Play Store)
-  2. store_icon_white_1024.png  — 1024 × 1024 white bg   (Apple App Store)
-  3. store_icon_green_512.png   — 512 ×  512 green bg    (alternate)
-
-The Apple-store 1024×1024 is produced by LANCZOS up-sampling the
-512×512 brand master.  The brand artwork is vector-style with sharp
-edges + flat fills, so a 2× LANCZOS produces effectively crisp
-output — distinguishable from a true 1024 native only under pixel-
-peeping. If a higher-res vector master surfaces later, swap the
-source path and re-run; everything else is the same.
+Outputs:
+  • store_icon_green_512.png        — Google Play  (512x512  RGB)
+  • store_icon_green_1024.png       — Apple App Store (1024x1024 RGB)
+  • store_feature_1024x500.png      — Play Store feature graphic
 """
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 import os
 
-SRC_WHITE = "/app/frontend/assets/images/kinnship-logo-white.png"
-SRC_DARK  = "/app/frontend/assets/images/kinnship-logo-dark.png"
-OUT_DIR   = "/app/store_assets"
+SRC_DARK = "/app/frontend/assets/images/kinnship-logo-dark.png"  # 512x512 RGBA, fully opaque
+OUT_DIR  = "/app/store_assets"
 os.makedirs(OUT_DIR, exist_ok=True)
 
+# Sampled from the corner of kinnship-logo-dark.png → (7,40,21)
+# We use a slightly lighter forest-green for the feature-graphic
+# canvas so the embedded green logo reads as a clean "logo plate"
+# rather than blending into the background. Easy on the eyes
+# at any zoom.
+BG_DEEP = (10, 50, 27)
+WHITE = (255, 255, 255)
+INK = (15, 30, 22)
 
-def export(src_path: str, out_size: int, out_path: str):
-    """Open a brand master, ensure no alpha, resize if needed, save
-    as flat RGB PNG with maximum quality. Both source files are
-    already fully opaque RGBA, so .convert('RGB') just drops the
-    redundant alpha channel — no transparency artefacts."""
-    im = Image.open(src_path).convert("RGB")
+BOLD = "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"
+REG  = "/usr/share/fonts/truetype/freefont/FreeSans.ttf"
+
+
+# ===============================================================
+# ICON EXPORTS (green logo, flat RGB, no alpha, no rounded corners)
+# ===============================================================
+def export_icon(out_size: int, out_path: str):
+    im = Image.open(SRC_DARK).convert("RGB")
     if im.size != (out_size, out_size):
-        # LANCZOS — best resampling kernel for our flat-fill vector-
-        # style brand artwork.  Up-sample (512→1024) and down-sample
-        # (no-op for 512→512) both look clean.
         im = im.resize((out_size, out_size), Image.LANCZOS)
     im.save(out_path, "PNG", optimize=True)
     saved = Image.open(out_path)
-    has_alpha = saved.mode in ("RGBA", "LA") or "transparency" in saved.info
     print(f"✓ {os.path.basename(out_path):32s}  "
           f"{saved.size[0]}×{saved.size[1]}  {saved.mode}  "
-          f"{'has-alpha' if has_alpha else 'no-alpha'}  "
+          f"{os.path.getsize(out_path)//1024} KB")
+
+
+# ===============================================================
+# FEATURE GRAPHIC — left = real brand logo, right = phone mockup
+# ===============================================================
+def export_feature(out_path: str):
+    # Render at 2x (2048x1000) then downscale for crisp output.
+    W, H = 2048, 1000
+    img = Image.new("RGB", (W, H), BG_DEEP)
+    d = ImageDraw.Draw(img)
+
+    # Subtle radial highlight at top-left, same as v1.
+    radial = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    rd = ImageDraw.Draw(radial)
+    rd.ellipse([-300, -300, 1100, 1100], fill=(48, 110, 70, 70))
+    radial = radial.filter(ImageFilter.GaussianBlur(radius=130))
+    img.paste(radial, (0, 0), radial)
+
+    # ----- LEFT: real brand logo (kinnship-logo-dark.png) -----
+    # Render at ~78% of canvas height for prominence.
+    logo_size = int(H * 0.78)
+    logo = Image.open(SRC_DARK).convert("RGB").resize(
+        (logo_size, logo_size), Image.LANCZOS
+    )
+    # Drop a soft shadow under the logo plate.
+    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shadow)
+    logo_x = int(W * 0.05)
+    logo_y = (H - logo_size) // 2
+    sd.rounded_rectangle(
+        [logo_x - 6, logo_y + 14,
+         logo_x + logo_size + 6, logo_y + logo_size + 26],
+        radius=28, fill=(0, 0, 0, 140),
+    )
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=22))
+    img.paste(shadow, (0, 0), shadow)
+    img.paste(logo, (logo_x, logo_y))
+
+    # ----- CENTER: tagline (since the logo already says "Kinnship") -----
+    try:
+        font_tag_big = ImageFont.truetype(BOLD, size=76)
+        font_tag_sml = ImageFont.truetype(REG,  size=44)
+    except Exception:
+        font_tag_big = font_tag_sml = ImageFont.load_default()
+
+    tag_x = logo_x + logo_size + 70
+    tag_y = int(H * 0.34)
+    d.text((tag_x, tag_y),
+           "Always There.",
+           font=font_tag_big, fill=WHITE)
+    d.text((tag_x, tag_y + 90),
+           "Even When You Can't Be.",
+           font=font_tag_big, fill=WHITE)
+    d.text((tag_x, tag_y + 200),
+           "Family safety · Senior wellness",
+           font=font_tag_sml, fill=(190, 220, 200))
+
+    # ----- RIGHT: phone mockup -----
+    phone_w = int(W * 0.22)
+    phone_h = int(phone_w * 2.05)
+    phone_x = int(W * 0.76)
+    phone_y = (H - phone_h) // 2
+
+    pshadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    psd = ImageDraw.Draw(pshadow)
+    psd.rounded_rectangle(
+        [phone_x - 6, phone_y + 18,
+         phone_x + phone_w + 6, phone_y + phone_h + 30],
+        radius=72, fill=(0, 0, 0, 150),
+    )
+    pshadow = pshadow.filter(ImageFilter.GaussianBlur(radius=28))
+    img.paste(pshadow, (0, 0), pshadow)
+
+    # Phone body
+    d.rounded_rectangle(
+        [phone_x, phone_y, phone_x + phone_w, phone_y + phone_h],
+        radius=72, fill=(20, 32, 26),
+    )
+    bezel = 18
+    d.rounded_rectangle(
+        [phone_x + bezel, phone_y + bezel,
+         phone_x + phone_w - bezel, phone_y + phone_h - bezel],
+        radius=54, fill=(245, 248, 246),
+    )
+    # Top notch
+    nw = phone_w // 3
+    nh = 26
+    nx = phone_x + (phone_w - nw) // 2
+    ny = phone_y + 22
+    d.rounded_rectangle([nx, ny, nx + nw, ny + nh],
+                        radius=14, fill=(20, 32, 26))
+
+    # Screen content — mini family dashboard
+    hx0 = phone_x + bezel + 22
+    hx1 = phone_x + phone_w - bezel - 22
+    hy  = phone_y + 110
+
+    try:
+        font_header = ImageFont.truetype(BOLD, size=52)
+        font_pill   = ImageFont.truetype(BOLD, size=22)
+        font_name   = ImageFont.truetype(BOLD, size=34)
+        font_sub    = ImageFont.truetype(REG,  size=24)
+        font_init   = ImageFont.truetype(BOLD, size=32)
+        font_sos    = ImageFont.truetype(BOLD, size=46)
+    except Exception:
+        font_header = font_pill = font_name = font_sub = font_init = font_sos = ImageFont.load_default()
+
+    d.text((hx0, hy), "Family", font=font_header, fill=(20, 70, 42))
+
+    # All-safe pill
+    pw, ph = 130, 44
+    px = hx1 - pw
+    py = hy + 8
+    d.rounded_rectangle([px, py, px + pw, py + ph],
+                        radius=22, fill=(220, 245, 230))
+    d.ellipse([px + 14, py + 14, px + 30, py + 30], fill=(34, 139, 87))
+    d.text((px + 38, py + 10), "All Safe", font=font_pill, fill=(20, 80, 50))
+
+    # Member rows
+    rows_y = phone_y + 220
+    row_h = 130
+    avatars = [
+        ("Mom",     "Home · 2 min ago",   (255, 198, 88)),
+        ("Dad",     "Walking · 8 min ago", (88, 165, 255)),
+        ("Grandma", "Home · just now",     (255, 130, 165)),
+    ]
+    for i, (name, sub, av_color) in enumerate(avatars):
+        ry = rows_y + i * row_h
+        d.rounded_rectangle(
+            [hx0 - 10, ry, hx1 + 10, ry + row_h - 18],
+            radius=24, fill=WHITE,
+        )
+        av_r = 38
+        av_cx = hx0 + av_r + 8
+        av_cy = ry + (row_h - 18) // 2
+        d.ellipse([av_cx - av_r, av_cy - av_r,
+                   av_cx + av_r, av_cy + av_r],
+                  fill=av_color)
+        ib = d.textbbox((0, 0), name[0], font=font_init)
+        d.text(
+            (av_cx - (ib[2] - ib[0]) // 2 - ib[0],
+             av_cy - (ib[3] - ib[1]) // 2 - ib[1]),
+            name[0], font=font_init, fill=WHITE,
+        )
+        text_x = av_cx + av_r + 22
+        d.text((text_x, ry + 24), name, font=font_name, fill=INK)
+        d.text((text_x, ry + 64), sub, font=font_sub, fill=(110, 130, 120))
+        sdx, sdy, sr = hx1 - 18, av_cy, 12
+        d.ellipse([sdx - sr, sdy - sr, sdx + sr, sdy + sr],
+                  fill=(34, 139, 87))
+
+    # SOS button
+    sos_y  = phone_y + phone_h - bezel - 130
+    sos_x0 = phone_x + bezel + 28
+    sos_x1 = phone_x + phone_w - bezel - 28
+    d.rounded_rectangle([sos_x0, sos_y, sos_x1, sos_y + 96],
+                        radius=48, fill=(220, 38, 38))
+    sbb = d.textbbox((0, 0), "SOS", font=font_sos)
+    d.text(
+        ((sos_x0 + sos_x1) // 2 - (sbb[2] - sbb[0]) // 2 - sbb[0],
+         sos_y + 48 - (sbb[3] - sbb[1]) // 2 - sbb[1]),
+        "SOS", font=font_sos, fill=WHITE,
+    )
+
+    # Final downscale 2048×1000 → 1024×500
+    img = img.resize((1024, 500), Image.LANCZOS)
+    img.save(out_path, "PNG", optimize=True)
+    saved = Image.open(out_path)
+    print(f"✓ {os.path.basename(out_path):32s}  "
+          f"{saved.size[0]}×{saved.size[1]}  {saved.mode}  "
           f"{os.path.getsize(out_path)//1024} KB")
 
 
 if __name__ == "__main__":
-    # 1. Google Play Store — white background, 512×512
-    export(SRC_WHITE, 512,  os.path.join(OUT_DIR, "store_icon_white_512.png"))
-    # 2. Apple App Store — white background, 1024×1024
-    export(SRC_WHITE, 1024, os.path.join(OUT_DIR, "store_icon_white_1024.png"))
-    # 3. Alternate — green background, 512×512
-    export(SRC_DARK,  512,  os.path.join(OUT_DIR, "store_icon_green_512.png"))
-    print("\nAll exports written to:", OUT_DIR)
+    export_icon(512,  os.path.join(OUT_DIR, "store_icon_green_512.png"))
+    export_icon(1024, os.path.join(OUT_DIR, "store_icon_green_1024.png"))
+    export_feature(os.path.join(OUT_DIR, "store_feature_1024x500.png"))
+    print("\nDone:", OUT_DIR)
