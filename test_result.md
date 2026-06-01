@@ -6765,3 +6765,109 @@ agent_communication:
       Main agent: endpoint is working correctly and family-group-scoped. Please
       summarize and finish.
 
+
+# =====================================================================
+# v6.9 ADDITIONS — PIN-flash on login + Clear All for Alerts
+# (CODE PREPARED — NOT YET BUILT, bundled with all earlier v6.9 fixes)
+# =====================================================================
+frontend:
+  - task: "PIN screen flash on login eliminated"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/AuthContext.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            ROOT CAUSE: Different race than the AppState reopen one.
+            login.tsx flow was:
+              1. await login() — AuthContext.setUser fires → re-render
+              2. RootNav's [user?.id] useEffect runs (~10ms) →
+                 hasPinForUser true, isUnlockedNow FALSE because
+                 login.tsx hadn't yet called markUnlocked (still
+                 waiting on the /auth/me round-trip ~150-300ms
+                 later) → setNeedsPinUnlock(true)
+              3. RootNav routing-effect redirects to /pin-login
+                 → USER SEES BRIEF PIN SCREEN FLASH
+              4. login.tsx finally calls markUnlocked + router.replace
+              5. Routing-effect re-runs → async re-verify →
+                 isUnlockedNow=true → no redirect → dashboard
+
+            FIX: Moved the markUnlocked call INTO AuthContext.login
+            itself, BEFORE setUser fires. So by the time RootNav's
+            useEffect runs, isUnlockedNow already returns true →
+            needsPinUnlock stays false → no flash. Synchronous
+            ordering eliminates the race entirely.
+
+  - task: "Clear All button in Alerts tab"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/alerts.tsx, /app/backend/server.py (new DELETE /api/alerts)"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            Added DELETE /api/alerts backend endpoint (family-group-
+            scoped, so one user can't wipe another family's alerts).
+            Backend testing 12/12 PASS.
+            Frontend: pill-shaped "Clear All" button in red top-right
+            of Alerts header, only shown when alerts exist. Tapping
+            shows a destructive confirmation Alert.alert ("This will
+            permanently delete all N alerts… cannot be undone")
+            before issuing the DELETE. On success, local state is
+            cleared immediately so the empty state appears
+            instantly.
+
+backend:
+  - task: "DELETE /api/alerts — Clear All endpoint"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            12/12 checks PASS. Login → create 2 SOS alerts → GET shows
+            258 alerts → DELETE returns {"ok": true, "deleted": 258}
+            → GET returns 0 of the deleted IDs (3 fresh missed_checkin
+            alerts appear because detect_missed_checkins runs on
+            every GET — expected behaviour). Unauthenticated DELETE
+            returns 403 (FastAPI HTTPBearer default). Family-group-
+            scoped so no cross-family wipe possible.
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Two additions to v6.9 PRE-BUILD bundle:
+
+        1. PIN flash on login — fixed at the source: AuthContext.login
+           now markUnlocked()s BEFORE setUser, eliminating the
+           [user?.id] effect race. Different race than the AppState
+           reopen one (which is also fixed in v6.9).
+
+        2. Clear All button for Alerts — new red pill button in the
+           Alerts header. Backend DELETE /api/alerts endpoint shipped
+           and tested (12/12 PASS). Family-group scoped.
+
+        v6.9 final manifest (versionCode 19):
+          • Permanent password autofill stop (login.tsx, change-password.tsx)
+          • PIN re-lock on app background/foreground (AppState listener)
+          • PIN flash on login fix (AuthContext markUnlocked ordering)
+          • Fall detection diagnostic page + relaxed couch-compat thresholds
+          • Settings → "Set up / Remove 4-digit PIN" rows
+          • Clear All button for Alerts tab + DELETE /api/alerts backend
+
+        Awaiting fresh EXPO_TOKEN to queue v6.9 build:
+          eas build --profile preview --platform android \
+            --non-interactive --no-wait \
+            --message "v6.9 - autofill stop + PIN re-lock + flash fix + fall test + Clear All (vc 19)"
+
