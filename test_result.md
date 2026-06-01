@@ -6871,3 +6871,11 @@ agent_communication:
             --non-interactive --no-wait \
             --message "v6.9 - autofill stop + PIN re-lock + flash fix + fall test + Clear All (vc 19)"
 
+
+## v6.10 Critical PIN-Lockout Fix (Build a5304ef7-4eab-4bde-ab99-79e9560758d5)
+- Layer 1: freshInstallGuard.ts auto-wipes stale Keychain tokens on fresh installs (root-cause fix for iOS Keychain-survives-uninstall)
+- Layer 2: Hard guards on pin-setup.tsx + pin-login.tsx — redirect to / if user==null
+- Layer 3: RootNav defensive redirect — never on a PIN screen without a user
+- Recovery: 'Having trouble? Reset app' link on both PIN screens (last-resort wipe)
+- Android versionCode 19 → 20
+
