@@ -287,6 +287,13 @@ export default function SettingsScreen() {
                 thumbColor={Colors.surface}
               />
             </View>
+            <Divider />
+            <NavRow
+              testID="settings-fall-test"
+              icon="🧪"
+              label="Test Fall Detection"
+              onPress={() => router.push('/fall-detection-test')}
+            />
           </View>
         </View>
 

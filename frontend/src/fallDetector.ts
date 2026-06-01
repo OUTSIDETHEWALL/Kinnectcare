@@ -36,9 +36,20 @@ const FREEFALL_G = 0.6;                // require sub-0.6g for freefall
 const FREEFALL_REQUIRED_MS = 120;      // ~120ms of freefall = ~7cm minimum drop
 const FREEFALL_LOOKBACK_MS = 600;      // look back this far for the freefall
 const IMPACT_G = 2.2;                  // lowered 2.6 → 2.2 (couch-impact falls)
-const STILLNESS_BAND_G = 0.25;         // slightly tighter
-const STILLNESS_REQUIRED_MS = 1200;    // longer stillness — falls settle for >1s
-const POST_IMPACT_WINDOW_MS = 3500;
+// v6.8.3 — Charles reported couch drops still not triggering even
+// after the max-streak freefall fix. Hypothesis: a soft surface
+// (couch / mattress / cushion) bounces the device for ~200-500ms
+// after impact, violating the original 0.25g stillness band. Hard
+// floors are NOT bouncy so they passed; couch tests failed silently.
+// Widened band 0.25 → 0.35 (1.0 ± 0.35g = [0.65, 1.35]) and
+// shortened required stillness 1200 → 1000ms. False-positive risk
+// stays low because the freefall pre-check (sub-0.6g for ≥120ms)
+// already filters phone-handling spikes — the stillness check is
+// just a confirmatory "did the device come to rest" signal, which
+// 1s of damped oscillation amply satisfies.
+const STILLNESS_BAND_G = 0.35;
+const STILLNESS_REQUIRED_MS = 1000;
+const POST_IMPACT_WINDOW_MS = 4000;    // also bumped 3500 → 4000ms for soft-surface settle
 const COOLDOWN_MS = 12000;             // longer cooldown so the user has time to react
 
 export type FallDetectorOptions = {

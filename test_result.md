@@ -6601,3 +6601,107 @@ agent_communication:
         versionCode 14 — unchanged (still pre-build). Awaiting fresh
         EXPO_TOKEN to queue v6.8 EAS Android Preview build.
 
+
+# =====================================================================
+# v6.9 — PIN re-lock on app reopen + Fall Detection diagnostic page
+# (CODE PREPARED — NOT YET BUILT, awaiting tomorrow's build window)
+# =====================================================================
+frontend:
+  - task: "PIN re-lock on app background/foreground transition"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/_layout.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            ROOT CAUSE: React Native does NOT kill the JS process on
+            background/foreground transitions — the in-memory
+            unlockedSessions Set inside pinAuth.ts persisted across
+            those transitions. So the PIN gate only fired on a true
+            cold start (OS reclaiming the process), which almost
+            never happens. Charles correctly identified this as
+            "PIN not showing on reopen."
+
+            FIX: Subscribe to AppState in RootNav. On
+            active → (background | inactive) transition, look up
+            hasPinForUser(user.id); if true, call forgetSessionUnlock
+            AND setNeedsPinUnlock(true). The routing-effect's
+            async-recheck then redirects to /(auth)/pin-login the
+            instant the app returns to foreground. No grace period
+            (matches banking / 1Password UX, appropriate for senior-
+            safety lock screen).
+
+            pin-setup and pin-login screens are exempt — we don't
+            thrash mid-flow if the user briefly switches apps.
+
+  - task: "Fall Detection diagnostic test page + relaxed couch-compat thresholds"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/fall-detection-test.tsx, /app/frontend/src/fallDetector.ts, /app/frontend/app/settings.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            CONTEXT: v6.8.1 max-streak freefall fix did NOT resolve
+            couch-drop triggering. Reported by Charles after real-
+            device testing. The most likely remaining failure mode:
+            couch bounces violate the 0.25g stillness band. Hard
+            floors are non-bouncy so they passed; couches don't.
+
+            TWO-PART FIX:
+              (a) Relaxed couch-compat thresholds:
+                  STILLNESS_BAND_G   0.25 → 0.35  (1.0 ± 0.35g)
+                  STILLNESS_REQUIRED 1200 → 1000ms
+                  POST_IMPACT_WINDOW 3500 → 4000ms
+                  IMPACT_G + FREEFALL untouched (still 2.2g / 0.6g
+                  / 120ms). False-positive risk stays low because
+                  the freefall pre-check already rejects phone-
+                  handling spikes; stillness is just confirmatory.
+              (b) Diagnostic test page: /fall-detection-test
+                  Subscribes directly to the raw accelerometer and
+                  shows: live magnitude (g), peak g of last impact,
+                  longest pre-impact freefall streak, longest post-
+                  impact stillness streak, and a verdict
+                  ("Would trigger? YES/NO"). Plus a scrolling
+                  event log showing each phase decision
+                  ("IMPACT 2.45g — pre-impact freefall 145ms",
+                   "→ freefall window OK, watching for stillness",
+                   "stillness broken at 1.42g — restart",
+                   "✗ post-impact window expired — best stillness
+                   650ms / need 1000ms"). Charles can now drop the
+                   phone on his actual couch and SEE which phase
+                   fails — informs further tuning instead of blind
+                   threshold guesses.
+
+              The test page is accessible from Settings → Safety →
+              "Test Fall Detection". Same algorithm as the
+              production detector so the verdict is honest.
+
+agent_communication:
+    - agent: "main"
+      message: |
+        v6.9 code is PREPARED but NOT BUILT per user instruction —
+        ready to queue tomorrow. versionCode 17 → 18.
+
+        Two diagnosed bugs fixed:
+          1. PIN re-lock on app reopen (AppState listener)
+          2. Fall detection: relaxed stillness band for couch compat
+             + new diagnostic test page in Settings → Safety so
+             Charles can finally see live telemetry from his real
+             device.
+
+        Files touched: _layout.tsx, fallDetector.ts, settings.tsx,
+        + new app/fall-detection-test.tsx. Backend untouched.
+
+        When user provides a fresh EXPO_TOKEN tomorrow, run:
+          eas build --profile preview --platform android
+            --non-interactive --no-wait
+            --message "v6.9 - PIN re-lock on reopen + Fall test page (vc 18)"
+
