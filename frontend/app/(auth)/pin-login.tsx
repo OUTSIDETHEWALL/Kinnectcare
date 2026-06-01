@@ -26,6 +26,7 @@ import PinPad, { PinPadHandle } from '../../src/PinPad';
 import {
   verifyPin, getAttemptState, MAX_PIN_ATTEMPTS, PIN_LENGTH,
 } from '../../src/pinAuth';
+import { performFullAppReset } from '../../src/appReset';
 
 function formatLockMs(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -145,6 +146,31 @@ export default function PinLogin() {
     router.replace('/(auth)/login');
   };
 
+  // LAST-RESORT RECOVERY: wipe ALL local app state. Used when the
+  // user is stuck (e.g. forgot PIN, can't recall email password
+  // either, app got into a bad state). Server-side account is
+  // untouched — they can sign back in.
+  const onResetApp = () => {
+    Alert.alert(
+      'Reset Kinnship?',
+      "This will sign you out of this device and clear all locally-saved settings (including your PIN). Your account, family group, and medications on the server are NOT affected — you can sign back in immediately.\n\nUse this if you're stuck and can't get past this screen.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await performFullAppReset();
+            } catch (_e) {}
+            try { await logout(); } catch (_e) {}
+            router.replace('/');
+          },
+        },
+      ],
+    );
+  };
+
   const locked = lockUntilMs > Date.now();
 
   return (
@@ -187,6 +213,15 @@ export default function PinLogin() {
           activeOpacity={0.6}
         >
           <Text style={styles.forgotText}>Forgot PIN?</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          testID="pin-login-reset-app"
+          onPress={onResetApp}
+          style={styles.resetLink}
+          activeOpacity={0.6}
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+        >
+          <Text style={styles.resetLinkText}>Having trouble? Reset app</Text>
         </TouchableOpacity>
       </View>
     </SafeAreaView>
@@ -241,5 +276,16 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: Colors.textTertiary,
     fontWeight: '600',
+  },
+  resetLink: {
+    paddingVertical: 8,
+    paddingHorizontal: 22,
+    marginTop: 4,
+  },
+  resetLinkText: {
+    fontSize: 12,
+    color: Colors.textTertiary,
+    fontWeight: '500',
+    textDecorationLine: 'underline',
   },
 });

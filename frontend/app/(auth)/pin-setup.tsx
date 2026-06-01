@@ -22,10 +22,11 @@ import { useAuth } from '../../src/AuthContext';
 import PinPad, { PinPadHandle } from '../../src/PinPad';
 import { setPin, markUnlocked, PIN_LENGTH } from '../../src/pinAuth';
 import { markPinSetupDismissed } from '../../src/pinSetupPrompt';
+import { performFullAppReset } from '../../src/appReset';
 
 export default function PinSetup() {
   const router = useRouter();
-  const { user, loading } = useAuth();
+  const { user, loading, logout } = useAuth();
   const params = useLocalSearchParams<{ required?: string }>();
   // When `required=1` we hide the "Not now" button — used after a forced
   // PIN reset where the user MUST set a new one before continuing.
@@ -116,6 +117,38 @@ export default function PinSetup() {
     );
   };
 
+  // ============================================================
+  // LAST-RESORT RECOVERY: Reset App
+  // ============================================================
+  // Wipes all local state — auth token, install sentinel, all
+  // AsyncStorage. After confirmation the user is logged out and
+  // bounced to welcome with a perfectly clean slate.
+  //
+  // Surfaced as a tiny "Having trouble? Reset app" link at the
+  // bottom of the PIN screens so any future stuck-state bug has
+  // a one-tap escape hatch. Also useful for support: "tap Reset
+  // app at the bottom of the PIN screen" is a 1-step fix.
+  const onResetApp = () => {
+    Alert.alert(
+      'Reset Kinnship?',
+      "This will sign you out of this device and clear all locally-saved settings (including your PIN). Your account, family group, and medications on the server are NOT affected — you can sign back in immediately.\n\nUse this if you're stuck and can't get past this screen.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await performFullAppReset();
+            } catch (_e) {}
+            try { await logout(); } catch (_e) {}
+            router.replace('/');
+          },
+        },
+      ],
+    );
+  };
+
   const label = step === 'enter'
     ? 'Choose a 4-digit PIN'
     : 'Confirm your PIN';
@@ -148,6 +181,15 @@ export default function PinSetup() {
           <Text style={styles.skipText}>Not now</Text>
         </TouchableOpacity>
       )}
+
+      <TouchableOpacity
+        testID="pin-setup-reset-app"
+        onPress={onResetApp}
+        style={styles.resetLink}
+        hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+      >
+        <Text style={styles.resetLinkText}>Having trouble? Reset app</Text>
+      </TouchableOpacity>
     </SafeAreaView>
   );
 }
@@ -188,5 +230,16 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: Colors.textSecondary,
     fontWeight: '600',
+  },
+  resetLink: {
+    alignItems: 'center',
+    paddingVertical: 10,
+    marginBottom: 14,
+  },
+  resetLinkText: {
+    fontSize: 12,
+    color: Colors.textTertiary,
+    fontWeight: '500',
+    textDecorationLine: 'underline',
   },
 });
