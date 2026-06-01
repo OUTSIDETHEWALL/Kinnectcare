@@ -163,20 +163,56 @@ function RootNav() {
       return;
     }
     // PIN GATE — authenticated user with a saved PIN must enter it
-    // before anything else. Allow them to remain on the pin-login or
-    // pin-setup screens; redirect from anywhere else.
+    // before anything else. Same async-recheck pattern as the PIN
+    // setup branch below: the cached `needsPinUnlock` state only
+    // refreshes when user.id changes, but pin-login mutates the
+    // in-memory unlocked-session flag (via markUnlocked) WITHOUT
+    // changing user.id. Without this re-verify, a successful PIN
+    // entry → router.replace('/dashboard') → segments change →
+    // cached needsPinUnlock still true → bounced back to pin-login
+    // → infinite loop. Identical class of bug to the setup-loop
+    // the user reported; fixing both up front.
     if (user && needsPinUnlock && !onPinScreen) {
-      router.replace('/(auth)/pin-login');
+      (async () => {
+        const hasPin = await hasPinForUser(user.id);
+        if (hasPin && !isUnlockedNow(user.id)) {
+          router.replace('/(auth)/pin-login');
+        } else {
+          // Unlocked-this-session (or PIN cleared) — drop the stale
+          // gate flag so subsequent renders fall through.
+          setNeedsPinUnlock(false);
+        }
+      })();
       return;
     }
     // PIN SETUP — authenticated user with NO PIN yet (and who hasn't
-    // dismissed the prompt) must be routed to the setup screen. This
-    // is the SINGLE source of truth for the post-login PIN setup
-    // prompt — login.tsx used to attempt this navigation itself, but
-    // the older code below ("inAuthGroup → dashboard") would
-    // overwrite that nav. Now we own it here.
+    // dismissed the prompt) must be routed to the setup screen.
+    //
+    // We RE-VERIFY the verdict inside the effect (rather than blindly
+    // trusting the cached `needsPinSetup` state) because the cached
+    // value is only refreshed when user.id changes — and pin-setup
+    // mutates SecureStore (saves a PIN) without changing user.id.
+    // Without this re-verify the screen got stuck in an infinite
+    // loop: save PIN → route to /dashboard → segments change →
+    // cached needsPinSetup still true → bounced back to pin-setup
+    // → fresh mount with empty firstPin → user re-enters → save →
+    // loop. Same async-recheck pattern that needsOnboarding uses
+    // above for the analogous AsyncStorage-mutates-without-user.id-
+    // change case.
     if (user && needsPinSetup && !onPinScreen) {
-      router.replace('/(auth)/pin-setup');
+      (async () => {
+        const hasPin = await hasPinForUser(user.id);
+        const dismissed = await wasPinSetupDismissed(user.id);
+        const stillNeeds = !hasPin && !dismissed;
+        if (stillNeeds) {
+          router.replace('/(auth)/pin-setup');
+        } else {
+          // PIN was just saved (or prompt dismissed) — clear the
+          // cached flag so subsequent renders fall through to the
+          // dashboard branch below.
+          setNeedsPinSetup(false);
+        }
+      })();
       return;
     }
     if (user && !needsPinUnlock && !needsPinSetup && !onPinScreen && (inAuthGroup || isWelcome || isOnboarding)) {
