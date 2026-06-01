@@ -17,7 +17,10 @@
  *     phrased as a normal alternative.
  */
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
+import {
+  View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert,
+  ScrollView,
+} from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
@@ -193,65 +196,78 @@ export default function PinLogin() {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Welcome back</Text>
-        <Text style={styles.subtitle}>
-          {user?.full_name ? `${user.full_name.split(' ')[0]}, enter your PIN` : 'Enter your PIN'}
-        </Text>
-      </View>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.header}>
+          <Text style={styles.title}>Welcome back</Text>
+          <Text style={styles.subtitle}>
+            {user?.full_name ? `${user.full_name.split(' ')[0]}, enter your PIN` : 'Enter your PIN'}
+          </Text>
+        </View>
 
-      <View style={styles.padArea}>
-        {busy && (
-          <ActivityIndicator color={Colors.primary} style={{ marginBottom: 8 }} />
-        )}
-        <PinPad
-          ref={padRef}
-          length={PIN_LENGTH}
-          onComplete={onComplete}
-          errorState={errorState}
-          hint={hint || (locked ? '' : `${MAX_PIN_ATTEMPTS} attempts allowed`)}
-          hintTone={hintTone}
-          disabled={locked || busy}
-        />
-      </View>
+        <View style={styles.padArea}>
+          {busy && (
+            <ActivityIndicator color={Colors.primary} style={{ marginBottom: 8 }} />
+          )}
+          <PinPad
+            ref={padRef}
+            length={PIN_LENGTH}
+            onComplete={onComplete}
+            errorState={errorState}
+            hint={hint || (locked ? '' : `${MAX_PIN_ATTEMPTS} attempts allowed`)}
+            hintTone={hintTone}
+            disabled={locked || busy}
+          />
+        </View>
 
-      <View style={styles.footer}>
-        <TouchableOpacity
-          testID="pin-login-fallback"
-          onPress={goToEmailLogin}
-          style={styles.fallbackBtn}
-          activeOpacity={0.6}
-        >
-          <Text style={styles.fallbackText}>Email me a code instead</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          testID="pin-login-forgot"
-          onPress={goToEmailLogin}
-          style={styles.forgotBtn}
-          activeOpacity={0.6}
-        >
-          <Text style={styles.forgotText}>Forgot PIN?</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          testID="pin-login-reset-app"
-          onPress={onResetApp}
-          style={styles.resetLink}
-          activeOpacity={0.6}
-          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-        >
-          <Text style={styles.resetLinkText}>Having trouble? Reset app</Text>
-        </TouchableOpacity>
-      </View>
+        <View style={styles.footer}>
+          <TouchableOpacity
+            testID="pin-login-fallback"
+            onPress={goToEmailLogin}
+            style={styles.fallbackBtn}
+            activeOpacity={0.6}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Text style={styles.fallbackText}>Email me a code instead</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            testID="pin-login-forgot"
+            onPress={goToEmailLogin}
+            style={styles.forgotBtn}
+            activeOpacity={0.6}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Text style={styles.forgotText}>Forgot PIN?</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            testID="pin-login-reset-app"
+            onPress={onResetApp}
+            style={styles.resetLink}
+            activeOpacity={0.6}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            <Text style={styles.resetLinkText}>Having trouble? Reset app</Text>
+          </TouchableOpacity>
+        </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
+  scroll: {
+    paddingBottom: 24,
+    alignItems: 'center',
+  },
   header: {
     paddingTop: 16,
     paddingHorizontal: 24,
     alignItems: 'center',
+    width: '100%',
   },
   title: {
     fontSize: 28,
@@ -266,19 +282,19 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   padArea: {
-    flex: 1,
-    paddingTop: 12,
+    marginTop: 18,
     paddingHorizontal: 12,
-    justifyContent: 'center',
     alignItems: 'center',
+    width: '100%',
   },
   footer: {
-    paddingBottom: 12,
+    marginTop: 24,
     paddingHorizontal: 24,
     alignItems: 'center',
+    width: '100%',
   },
   fallbackBtn: {
-    paddingVertical: 14,
+    paddingVertical: 12,
     paddingHorizontal: 22,
   },
   fallbackText: {
@@ -287,7 +303,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   forgotBtn: {
-    paddingVertical: 10,
+    paddingVertical: 8,
     paddingHorizontal: 22,
   },
   forgotText: {
@@ -298,7 +314,7 @@ const styles = StyleSheet.create({
   resetLink: {
     paddingVertical: 8,
     paddingHorizontal: 22,
-    marginTop: 4,
+    marginTop: 2,
   },
   resetLinkText: {
     fontSize: 12,

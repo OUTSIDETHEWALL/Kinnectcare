@@ -14,7 +14,7 @@
  * logging in with email/password until they decide to set one later.
  */
 import { useRef, useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
@@ -149,57 +149,71 @@ export default function PinSetup() {
     );
   };
 
-  const label = step === 'enter'
-    ? 'Choose a 4-digit PIN'
+  // The screen title doubles as the per-step instruction so we don't
+  // need a separate PinPad `label` prop colliding with it. Same fix
+  // pattern as otp-verify.tsx — one clear instruction line, never
+  // two stacked on top of each other.
+  const stepTitle = step === 'enter'
+    ? (isRequired ? 'Set up a new PIN' : 'Choose a 4-digit PIN')
     : 'Confirm your PIN';
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-      <View style={styles.header}>
-        <Text style={styles.title}>
-          {isRequired ? 'Set up a new PIN' : 'Set up a 4-digit PIN'}
-        </Text>
-        <Text style={styles.subtitle}>
-          Faster sign-in next time — no typing your password.
-        </Text>
-      </View>
-
-      <View style={styles.padArea}>
-        <PinPad
-          ref={padRef}
-          length={PIN_LENGTH}
-          onComplete={onPinComplete}
-          errorState={errorState}
-          label={label}
-          hint={hint || (step === 'enter' ? 'Pick something easy to remember' : '')}
-          hintTone={hintTone}
-        />
-      </View>
-
-      {!isRequired && (
-        <TouchableOpacity testID="pin-setup-skip" onPress={onSkip} style={styles.skip}>
-          <Text style={styles.skipText}>Not now</Text>
-        </TouchableOpacity>
-      )}
-
-      <TouchableOpacity
-        testID="pin-setup-reset-app"
-        onPress={onResetApp}
-        style={styles.resetLink}
-        hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       >
-        <Text style={styles.resetLinkText}>Having trouble? Reset app</Text>
-      </TouchableOpacity>
+        <View style={styles.header}>
+          <Text style={styles.title}>{stepTitle}</Text>
+          <Text style={styles.subtitle}>
+            {step === 'enter'
+              ? "We'll use this for daily sign-in — no email code needed."
+              : 'Type the same 4 digits again to confirm.'}
+          </Text>
+        </View>
+
+        <View style={styles.padArea}>
+          <PinPad
+            ref={padRef}
+            length={PIN_LENGTH}
+            onComplete={onPinComplete}
+            errorState={errorState}
+            hint={hint || (step === 'enter' ? 'Pick something easy to remember' : '')}
+            hintTone={hintTone}
+          />
+        </View>
+
+        {!isRequired && (
+          <TouchableOpacity testID="pin-setup-skip" onPress={onSkip} style={styles.skip}>
+            <Text style={styles.skipText}>Not now</Text>
+          </TouchableOpacity>
+        )}
+
+        <TouchableOpacity
+          testID="pin-setup-reset-app"
+          onPress={onResetApp}
+          style={styles.resetLink}
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+        >
+          <Text style={styles.resetLinkText}>Having trouble? Reset app</Text>
+        </TouchableOpacity>
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
+  scroll: {
+    paddingBottom: 24,
+    alignItems: 'center',
+  },
   header: {
     paddingTop: 16,
     paddingHorizontal: 24,
     alignItems: 'center',
+    width: '100%',
   },
   title: {
     fontSize: 26,
@@ -208,7 +222,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   subtitle: {
-    marginTop: 6,
+    marginTop: 8,
     fontSize: 15,
     color: Colors.textSecondary,
     textAlign: 'center',
@@ -216,15 +230,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   padArea: {
-    flex: 1,
-    paddingTop: 12,
+    marginTop: 18,
     paddingHorizontal: 12,
-    justifyContent: 'center',
+    alignItems: 'center',
+    width: '100%',
   },
   skip: {
     alignItems: 'center',
-    paddingVertical: 16,
-    marginBottom: 8,
+    paddingVertical: 14,
+    marginTop: 8,
   },
   skipText: {
     fontSize: 15,
@@ -234,7 +248,7 @@ const styles = StyleSheet.create({
   resetLink: {
     alignItems: 'center',
     paddingVertical: 10,
-    marginBottom: 14,
+    marginTop: 2,
   },
   resetLinkText: {
     fontSize: 12,
