@@ -57,12 +57,23 @@ export default function Signup() {
     } catch (e: any) {
       const status = e?.response?.status;
       const detail = e?.response?.data?.detail || '';
+      const code = e?.code || '';
       if (status === 410) {
         Alert.alert('Update required', detail);
       } else if (status === 429) {
         Alert.alert('Please wait', detail || 'You requested a code recently. Try again in a few seconds.');
+      } else if (code === 'ECONNABORTED' || /timeout/i.test(String(e?.message || ''))) {
+        Alert.alert(
+          'Network timeout',
+          "We couldn't reach the Kinnship servers. Please check your Wi-Fi or cellular signal and try again.",
+        );
+      } else if (!status) {
+        Alert.alert(
+          'No connection',
+          `We couldn't reach the Kinnship servers (${e?.message || 'unknown error'}). Please check your connection and try again.`,
+        );
       } else {
-        Alert.alert('Could not create account', detail || 'Please check your connection and try again.');
+        Alert.alert('Could not create account', detail || `Server returned ${status}. Please try again.`);
       }
     } finally {
       setLoading(false);

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -755,6 +755,13 @@ def _otp_email_body(code: str, purpose: str) -> tuple[str, str]:
 async def _deliver_otp_email(to_email: str, code: str, purpose: str) -> bool:
     """Send the OTP via SMTP. Falls back to logging-only if SMTP isn't
     configured (dev environments). Returns True if delivery succeeded.
+
+    NOTE: this is meant to be invoked via BackgroundTasks so a slow
+    Gmail handshake (sometimes 5-15s during outages) doesn't block
+    the API response and trigger client-side timeouts. The mongo
+    OTP record is written BEFORE this fires, so even if SMTP is
+    momentarily slow the user can still verify whatever code is in
+    flight — they'll just receive the email a few seconds later.
     """
     host = os.environ.get("SMTP_HOST")
     port = int(os.environ.get("SMTP_PORT", "587"))
@@ -771,10 +778,13 @@ async def _deliver_otp_email(to_email: str, code: str, purpose: str) -> bool:
         msg["From"] = sender
         msg["To"] = to_email
         msg.set_content(body)
-        with smtplib.SMTP(host, port) as s:
+        # Explicit 30s timeout so we fail fast under SMTP outages
+        # rather than tying up worker threads indefinitely.
+        with smtplib.SMTP(host, port, timeout=30) as s:
             s.starttls()
             s.login(user, pwd)
             s.send_message(msg)
+        logger.info(f"[OTP] Delivered code to {to_email} (purpose={purpose})")
         return True
     except Exception as e:
         # Log the actual error AND the code so an operator can relay it
@@ -783,16 +793,57 @@ async def _deliver_otp_email(to_email: str, code: str, purpose: str) -> bool:
         return False
 
 
+def _deliver_otp_email_sync(to_email: str, code: str, purpose: str) -> None:
+    """Synchronous wrapper around _deliver_otp_email — required because
+    FastAPI's BackgroundTasks runs in a threadpool, not the asyncio
+    loop, so we can't directly schedule the async coroutine there.
+    The wrapper does its own blocking SMTP call (same logic as the
+    async version) so it integrates cleanly with BackgroundTasks.
+    """
+    host = os.environ.get("SMTP_HOST")
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    user = os.environ.get("SMTP_USER")
+    pwd = os.environ.get("SMTP_PASSWORD")
+    sender = os.environ.get("SMTP_FROM", user or "noreply@kinnship.app")
+    subject, body = _otp_email_body(code, purpose)
+    if not (host and user and pwd):
+        logger.warning(f"[OTP] SMTP not configured. Code for {to_email}: {code}")
+        return
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = sender
+        msg["To"] = to_email
+        msg.set_content(body)
+        with smtplib.SMTP(host, port, timeout=30) as s:
+            s.starttls()
+            s.login(user, pwd)
+            s.send_message(msg)
+        logger.info(f"[OTP] Delivered code to {to_email} (purpose={purpose})")
+    except Exception as e:
+        logger.warning(f"[OTP] SMTP send failed: {e}. Code for {to_email}: {code}")
+
+
 @api_router.post("/auth/request-otp")
-async def request_otp(data: OtpRequest):
+async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, request: Request):
     """Generate a 6-digit OTP, persist (hashed), email it to the user.
 
     Always returns 200 OK with a vague message regardless of whether
     the email is registered — this prevents an attacker from probing
     which addresses have Kinnship accounts.
+
+    PERFORMANCE NOTE: the SMTP send is deferred to BackgroundTasks so
+    a slow Gmail handshake (sometimes 5-15s under load) doesn't tie
+    up the request handler. Before this fix, an SMTP latency spike
+    longer than the client's 20s axios timeout was surfacing as
+    "Could not send code" alerts on the device — even though the
+    email DID eventually deliver. With BackgroundTasks the API
+    returns in <100ms regardless of Gmail's mood.
     """
     email = data.email.lower().strip()
     purpose = (data.purpose or "").strip().lower()
+    client_host = request.client.host if request.client else "?"
+    logger.info(f"[OTP] request-otp from {client_host} email={email} purpose={purpose}")
     if purpose not in ("login", "signup"):
         raise HTTPException(status_code=400, detail="Invalid purpose")
 
@@ -856,7 +907,12 @@ async def request_otp(data: OtpRequest):
             rec["invite_code"] = data.invite_code.strip().upper()
 
     await db.otp_codes.update_one({"email": email}, {"$set": rec}, upsert=True)
-    await _deliver_otp_email(email, code, purpose)
+    # Fire-and-forget SMTP send so we return to the client immediately.
+    # The mongo record is already written above, so the user CAN
+    # already verify their code as soon as the email arrives —
+    # whether that's 200ms or 8 seconds later. The HTTP response
+    # is no longer gated on Gmail's mood.
+    background_tasks.add_task(_deliver_otp_email_sync, email, code, purpose)
     return {
         "ok": True,
         "message": (
@@ -868,12 +924,12 @@ async def request_otp(data: OtpRequest):
 
 
 @api_router.post("/auth/resend-otp")
-async def resend_otp(data: OtpRequest):
+async def resend_otp(data: OtpRequest, background_tasks: BackgroundTasks, request: Request):
     """Re-issue an OTP for the same email. Identical semantics to
     request-otp — the only reason this lives as a separate endpoint is
     to make the client intent explicit and to surface clearer 429s.
     """
-    return await request_otp(data)
+    return await request_otp(data, background_tasks, request)
 
 
 @api_router.post("/auth/verify-otp", response_model=TokenResponse)
