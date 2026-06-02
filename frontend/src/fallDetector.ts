@@ -24,33 +24,36 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
 const KEY = 'kc.fall.enabled';
-// v6.6 retuning — Charles reported "throwing phone at couch" no longer
-// triggered. Lowered impact threshold 2.6g → 2.2g to catch couch-impact
-// falls (which produce lower peak G than hard-floor falls).  The
-// freefall PRE-CHECK is what kills false positives now — we still
-// require ~120ms of sub-0.6g BEFORE the impact spike, which no everyday
-// phone handling motion produces. Net effect: catches more real falls
-// without re-introducing the v6.4 over-sensitivity.
+// v6.11.5 RECALIBRATION — user feedback: fall detection not triggering
+// at all on real-world tests. Per user direction: "lower the threshold
+// significantly — err toward too sensitive rather than not sensitive
+// enough." The 30-second cancel-countdown handles false positives.
+//
+// Changes vs v6.8.3:
+//   IMPACT_G        2.2  → 1.7   (catches softer impacts, mattress / couch falls)
+//   FREEFALL_G      0.6  → 0.75  (looser pre-impact band — phone often rotates
+//                                  during a fall and doesn't hit a clean <0.6g
+//                                  trough for 120ms straight)
+//   FREEFALL_REQ_MS 120  → 60    (sharp downward motion from standing height
+//                                  only has ~60-100ms of freefall before impact)
+//   STILLNESS_BAND  0.35 → 0.5   (very loose — any soft-surface bounce ok)
+//   STILLNESS_REQ   1000 → 600   (don't make user wait — confirm fast)
+//
+// Net effect: a sharp downward motion from standing height should
+// trigger every time. A gentle set-down still won't qualify because:
+//   • There's no freefall window in a controlled set-down (the hand
+//     supports the phone the whole way, magnitude never drops <0.75g).
+//   • Peak impact G of a gentle set-down is typically <1.4g, well
+//     under the 1.7g impact threshold.
 const SAMPLE_RATE_MS = 50;             // ~20 Hz
-const FREEFALL_G = 0.6;                // require sub-0.6g for freefall
-const FREEFALL_REQUIRED_MS = 120;      // ~120ms of freefall = ~7cm minimum drop
-const FREEFALL_LOOKBACK_MS = 600;      // look back this far for the freefall
-const IMPACT_G = 2.2;                  // lowered 2.6 → 2.2 (couch-impact falls)
-// v6.8.3 — Charles reported couch drops still not triggering even
-// after the max-streak freefall fix. Hypothesis: a soft surface
-// (couch / mattress / cushion) bounces the device for ~200-500ms
-// after impact, violating the original 0.25g stillness band. Hard
-// floors are NOT bouncy so they passed; couch tests failed silently.
-// Widened band 0.25 → 0.35 (1.0 ± 0.35g = [0.65, 1.35]) and
-// shortened required stillness 1200 → 1000ms. False-positive risk
-// stays low because the freefall pre-check (sub-0.6g for ≥120ms)
-// already filters phone-handling spikes — the stillness check is
-// just a confirmatory "did the device come to rest" signal, which
-// 1s of damped oscillation amply satisfies.
-const STILLNESS_BAND_G = 0.35;
-const STILLNESS_REQUIRED_MS = 1000;
-const POST_IMPACT_WINDOW_MS = 4000;    // also bumped 3500 → 4000ms for soft-surface settle
-const COOLDOWN_MS = 12000;             // longer cooldown so the user has time to react
+const FREEFALL_G = 0.75;               // loosened — phone rotation during real falls
+const FREEFALL_REQUIRED_MS = 60;       // ~60ms of freefall = a real drop, not a set-down
+const FREEFALL_LOOKBACK_MS = 600;
+const IMPACT_G = 1.7;                  // significantly more sensitive
+const STILLNESS_BAND_G = 0.5;          // very loose for soft-surface bounce
+const STILLNESS_REQUIRED_MS = 600;     // confirm fast — 30s cancel handles false positives
+const POST_IMPACT_WINDOW_MS = 4000;
+const COOLDOWN_MS = 12000;
 
 export type FallDetectorOptions = {
   onFallDetected: () => void;

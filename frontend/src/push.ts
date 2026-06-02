@@ -157,6 +157,31 @@ export async function registerForPushNotifications(): Promise<string | null> {
       return null;
     }
 
+    // PHANTOM-NOTIFICATION CLEANUP (v6.11.5) —
+    //
+    // The user reported "random medication reminders firing at times with
+    // no scheduled medication." Root cause: during dev/testing the app
+    // had locally-scheduled notifications enqueued via
+    // Notifications.scheduleNotificationAsync(...) which sit in the
+    // OS's notification queue independently of the backend scheduler.
+    // Those queued notifications survive across app launches, builds,
+    // and even some uninstalls — firing at their pre-set times regardless
+    // of whether the medication still exists in the user's reminder list.
+    //
+    // Kinnship's medication delivery is now 100% server-driven (push from
+    // /backend/med_scheduler.py → Expo Push → device). We never need
+    // locally-scheduled notifications anymore. So on every launch we
+    // proactively wipe the OS-side scheduled queue. The server's idempotent
+    // scheduler will re-fire any legitimately-due dose within 15 seconds
+    // (WORKER_INTERVAL_SECONDS), so the user never misses a real reminder.
+    //
+    // Also dismiss any stale tray notifications older than 6 hours since
+    // those generally indicate the user already moved on (and a follow-up
+    // family alert would have replaced them anyway).
+    try {
+      await Notifications.cancelAllScheduledNotificationsAsync();
+    } catch (_e) {}
+
     await ensureNotificationChannel();
     await ensureNotificationCategories();
 

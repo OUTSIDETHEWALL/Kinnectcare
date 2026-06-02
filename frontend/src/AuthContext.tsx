@@ -78,8 +78,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               setUser(updated.data);
             }
           } catch (_e) {}
-        } catch (_e) {
-          await clearToken();
+        } catch (e: any) {
+          // CRITICAL — only clear the token if the server explicitly
+          // says the token is invalid (401). Network errors, timeouts,
+          // 5xx outages, and DNS hiccups MUST NOT log the user out —
+          // we just leave the loading state and they keep their
+          // session for the next launch.
+          //
+          // Why this matters: when the app is cold-started from a
+          // notification tap (medication acknowledge etc.), there's
+          // a brief window where the network stack isn't ready yet.
+          // The first /auth/me request can transiently fail. The
+          // PREVIOUS implementation cleared the token on ANY failure,
+          // which then bounced the user to /(auth)/login — that was
+          // the "notification deep link drops me at login" bug. With
+          // this guard, transient failures are silently retried via
+          // the user's next authenticated request (which axios will
+          // automatically attach the still-valid token to).
+          const status = e?.response?.status;
+          if (status === 401) {
+            await clearToken();
+          }
+          // else: keep token, leave user=null for this session — the
+          // next authenticated request will retry. With rolling
+          // 1-year tokens (see /auth/me on the backend) the token
+          // is virtually always still valid.
         }
       }
       setLoading(false);
