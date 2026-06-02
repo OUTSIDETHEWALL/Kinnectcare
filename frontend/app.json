@@ -2,7 +2,16 @@
   "expo": {
     "name": "Kinnship",
     "slug": "kinnship",
-    "version": "1.1.6",
+    "version": "1.1.7",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/11cb65a8-eab0-4745-9b4a-7b8964805381",
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0
+    },
     "orientation": "portrait",
     "icon": "./assets/images/kinnship-icon-1024.png",
     "scheme": "kinnship",
@@ -21,7 +30,7 @@
     },
     "android": {
       "package": "app.kinnship.client",
-      "versionCode": 29,
+      "versionCode": 30,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/kinnship-adaptive-foreground-1024.png",
