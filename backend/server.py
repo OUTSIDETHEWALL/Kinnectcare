@@ -513,6 +513,25 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
 
     GRACE_MIN = 15  # minutes of leeway before raising a missed alert
 
+    # NEW-MEMBER GRACE WINDOW (v6.11.6):
+    #
+    # When a caregiver adds a brand-new family member, the moment they
+    # save a `daily_checkin_time` or `checkin_interval_hours` we should
+    # NOT immediately fire missed-checkin alerts — there's been no time
+    # for the senior to check in yet, and the alert is obviously a
+    # false positive that erodes trust in the system. Industry-standard
+    # practice (Apple Health, Google Fit, every "habit" app) is to
+    # silently start tracking the next full cycle and only escalate if
+    # they miss that one.
+    #
+    # We give every newly-added member a 24-hour grace window after
+    # creation during which missed-checkin alerts are suppressed.
+    # That covers every fixed-time schedule (next-day-at-09:00 etc.)
+    # AND every interval schedule up to 24h. Intervals shorter than
+    # 24h still get their full first cycle of leeway.
+    NEW_MEMBER_GRACE_HOURS = 24
+    new_member_grace = timedelta(hours=NEW_MEMBER_GRACE_HOURS)
+
     members = await db.members.find(
         {
             "family_group_id": family_group_id,
@@ -525,6 +544,22 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
     ).to_list(500)
 
     for m in members:
+        # Honor the new-member grace window FIRST, before any mode-specific
+        # logic. A member created less than 24h ago is "fresh" — we don't
+        # know their normal rhythm yet, and any "missed" alert here is
+        # noise.
+        m_created = m.get("created_at")
+        if m_created:
+            if isinstance(m_created, str):
+                try:
+                    m_created = datetime.fromisoformat(m_created.replace("Z", "+00:00"))
+                except Exception:
+                    m_created = None
+            if m_created and m_created.tzinfo is None:
+                m_created = m_created.replace(tzinfo=timezone.utc)
+            if m_created and (now_utc - m_created) < new_member_grace:
+                continue
+
         interval = m.get("checkin_interval_hours")
         fixed = m.get("daily_checkin_time")
 
