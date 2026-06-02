@@ -2187,6 +2187,17 @@ async def root():
     return {"message": "Kinnship API", "status": "ok"}
 
 
+@api_router.get("/health")
+async def health():
+    """Lightweight liveness probe. Returns immediately without
+    touching the database — useful as a precondition check from the
+    client BEFORE attempting an OTP request, so we never blame the
+    user for a "Could not send code" alert when the backend was
+    actually mid-restart or unreachable.
+    """
+    return {"ok": True, "service": "kinnship-api"}
+
+
 # ========== Medication scheduler (self-alerts + family escalation) ==========
 # Single shared scheduler instance; started on app.startup, stopped on shutdown.
 _med_scheduler: Optional[med_scheduler.MedicationScheduler] = None

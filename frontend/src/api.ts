@@ -23,7 +23,11 @@ export async function clearToken() {
 
 export const api = axios.create({
   baseURL: `${BASE}/api`,
-  timeout: 20000,
+  // 45s — generous on purpose. The OTP backend now returns in ~250ms
+  // (SMTP is fire-and-forget in BackgroundTasks), but we leave a wide
+  // margin to absorb mobile carrier latency spikes that previously
+  // surfaced as the "Could not send code" alert.
+  timeout: 45000,
 });
 
 api.interceptors.request.use(async (config) => {
@@ -32,22 +36,52 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
-// ROLLING-REFRESH HOOK — the backend mints a fresh 1-year JWT
-// whenever the current token has less than 90 days of life left,
-// and surfaces it via the `X-Refresh-Token` response header (and
-// also the `refreshed_token` field on /auth/me's JSON body). We
-// transparently swap the new token into SecureStore so subsequent
-// requests use it, never showing the user a sign-in screen.
+// ----- ROBUST AUTH-ENDPOINT RETRY (v6.11.4) -----
 //
-// Net effect: a user who opens Kinnship at least once every 90
-// days keeps their session indefinitely — only an explicit
-// "Sign out" tap, or going more than 1 year without opening the
-// app, will force re-authentication. Critical for our senior /
-// caregiver audience where unprompted logouts are a major UX
-// failure (and often a support call).
+// Why this exists, in plain English:
+//   For a week we kept hitting intermittent "Could not send code"
+//   alerts. The root causes turned out to be:
+//     1. The backend ran with uvicorn `--reload` enabled, so every
+//        code edit triggered a 2-5s restart window where requests
+//        got connection-refused. (Fixed in supervisor config now.)
+//     2. SMTP was awaited inside the request handler, so Gmail
+//        latency spikes blew past axios's 20s timeout. (Fixed by
+//        moving SMTP to FastAPI BackgroundTasks.)
+//     3. Carrier-side TCP blips that nobody can fix from a server.
+//
+//   This retry helper neutralizes case #3 (and provides belt-and-
+//   suspenders coverage for any future #1/#2-style regressions).
+//
+// Policy:
+//   • Only retries the explicitly listed auth endpoints (OTP send /
+//     verify). NEVER retries on a 4xx — the user typed the wrong
+//     code, no point hammering the server.
+//   • Retries on: 0/no-response, 5xx, ECONNABORTED (timeout), or
+//     network errors. Up to 3 attempts total with 600ms / 1500ms
+//     backoff.
+//   • Returns the eventual success response, OR the LAST error
+//     unchanged (so existing error-handling code is unaffected).
+const RETRY_PATHS = [
+  '/auth/request-otp',
+  '/auth/resend-otp',
+  '/auth/verify-otp',
+];
+
+const RETRY_BACKOFFS_MS = [600, 1500]; // 2 retries → 3 total attempts
+
+function _shouldRetry(error: any): boolean {
+  if (!error) return false;
+  const status = error?.response?.status;
+  if (status && status >= 400 && status < 500) return false; // 4xx = don't retry
+  // No response (network failure), timeout, or 5xx → retry
+  return true;
+}
+
 api.interceptors.response.use(
   async (res) => {
     try {
+      // Rolling-refresh hook — see comment block on the backend
+      // /auth/me endpoint for the full backstory.
       const headerTok =
         res.headers?.['x-refresh-token'] ||
         (res.headers as any)?.['X-Refresh-Token'];
@@ -61,7 +95,26 @@ api.interceptors.response.use(
     } catch (_e) {}
     return res;
   },
-  (err) => Promise.reject(err),
+  async (error) => {
+    const cfg = error?.config;
+    if (!cfg) return Promise.reject(error);
+    const url = String(cfg.url || '');
+    const onRetryPath = RETRY_PATHS.some((p) => url.includes(p));
+    if (!onRetryPath) return Promise.reject(error);
+
+    cfg.__retryCount = cfg.__retryCount || 0;
+    if (cfg.__retryCount >= RETRY_BACKOFFS_MS.length) {
+      return Promise.reject(error);
+    }
+    if (!_shouldRetry(error)) {
+      return Promise.reject(error);
+    }
+
+    const delay = RETRY_BACKOFFS_MS[cfg.__retryCount];
+    cfg.__retryCount += 1;
+    await new Promise((r) => setTimeout(r, delay));
+    return api.request(cfg);
+  },
 );
 
 export type User = {
