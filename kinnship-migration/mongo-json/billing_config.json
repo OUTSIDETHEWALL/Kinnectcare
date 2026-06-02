@@ -1,0 +1,2 @@
+{"_id":{"$oid":"6a18c11ce6e7ea81fced2280"},"key":"price_month","amount_cents":999,"created_at":{"$date":"2026-05-28T22:26:36.495Z"},"currency":"usd","interval":"month","price_id":"price_1TcCNsK7iLfToZYfQyegt4A6","product_id":"prod_UbPC1Erv6097Cw"}
+{"_id":{"$oid":"6a18c13de6e7ea81fced26df"},"key":"price_year","amount_cents":9999,"created_at":{"$date":"2026-05-28T22:27:09.978Z"},"currency":"usd","interval":"year","price_id":"price_1TcCOPK7iLfToZYfO22mcjtv","product_id":"prod_UbPC1Erv6097Cw"}

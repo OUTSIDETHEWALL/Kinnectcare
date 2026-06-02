@@ -1,0 +1,1 @@
+{"indexes":[{"v":{"$numberInt":"2"},"key":{"_id":{"$numberInt":"1"}},"name":"_id_"},{"v":{"$numberInt":"2"},"key":{"reminder_id":{"$numberInt":"1"},"last_refill_at":{"$numberInt":"1"}},"name":"uniq_reminder_refill_cycle","unique":true}],"uuid":"004e9f9013d14f23a276dafd8ba669c6","collectionName":"refill_notifications","type":"collection"}
