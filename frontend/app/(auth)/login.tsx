@@ -52,23 +52,28 @@ export default function Login() {
         Alert.alert('Update required', detail);
       } else if (status === 429) {
         Alert.alert('Please wait', detail || 'You requested a code recently. Try again in a few seconds.');
+      } else if (status === 404) {
+        // A 404 on /auth/request-otp specifically means the Kubernetes
+        // ingress couldn't reach the backend pod (we know the endpoint
+        // EXISTS — we ship a build that depends on it). Axios already
+        // retried 3x with exponential backoff before surfacing this,
+        // so the outage is real and not transient. Give the user
+        // honest, actionable wording.
+        Alert.alert(
+          'Service temporarily unavailable',
+          "Kinnship's servers are briefly unreachable. Please try again in a minute.",
+        );
       } else if (code === 'ECONNABORTED' || /timeout/i.test(String(e?.message || ''))) {
-        // The OTP endpoint now returns in <300ms (SMTP runs in the
-        // background) so a timeout here generally means a real network
-        // issue, not a slow Gmail handshake.
         Alert.alert(
           'Network timeout',
           "We couldn't reach the Kinnship servers. Please check your Wi-Fi or cellular signal and try again.",
         );
       } else if (!status) {
-        // No response at all → network/DNS/TLS failure.
         Alert.alert(
           'No connection',
           `We couldn't reach the Kinnship servers (${e?.message || 'unknown error'}). Please check your connection and try again.`,
         );
       } else {
-        // Backend responded with an unexpected status — surface it
-        // verbatim so support can diagnose at a glance.
         Alert.alert('Could not send code', detail || `Server returned ${status}. Please try again.`);
       }
     } finally {

@@ -72,7 +72,20 @@ const RETRY_BACKOFFS_MS = [600, 1500]; // 2 retries → 3 total attempts
 function _shouldRetry(error: any): boolean {
   if (!error) return false;
   const status = error?.response?.status;
-  if (status && status >= 400 && status < 500) return false; // 4xx = don't retry
+  // 404 special-case: on the explicitly-allowlisted auth paths we KNOW
+  // the endpoint exists on the backend (we've shipped a build that
+  // depends on it). A 404 there is almost always the Kubernetes
+  // ingress responding while the upstream backend pod is briefly
+  // unreachable (during a restart, container swap, or proxy refresh).
+  // Treat it like a transient outage — retry. Worst case: we retry
+  // against a still-down backend and still surface the error after
+  // the backoff window.
+  //
+  // We DO still skip retry on 4xx for /verify-otp (wrong code is a
+  // genuine 400, the user shouldn't keep hammering). Only 5xx /
+  // network / timeout / 404 trigger retries elsewhere.
+  if (status === 404) return true;
+  if (status && status >= 400 && status < 500) return false; // other 4xx = don't retry
   // No response (network failure), timeout, or 5xx → retry
   return true;
 }
