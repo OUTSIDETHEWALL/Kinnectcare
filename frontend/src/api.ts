@@ -32,6 +32,38 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
+// ROLLING-REFRESH HOOK — the backend mints a fresh 1-year JWT
+// whenever the current token has less than 90 days of life left,
+// and surfaces it via the `X-Refresh-Token` response header (and
+// also the `refreshed_token` field on /auth/me's JSON body). We
+// transparently swap the new token into SecureStore so subsequent
+// requests use it, never showing the user a sign-in screen.
+//
+// Net effect: a user who opens Kinnship at least once every 90
+// days keeps their session indefinitely — only an explicit
+// "Sign out" tap, or going more than 1 year without opening the
+// app, will force re-authentication. Critical for our senior /
+// caregiver audience where unprompted logouts are a major UX
+// failure (and often a support call).
+api.interceptors.response.use(
+  async (res) => {
+    try {
+      const headerTok =
+        res.headers?.['x-refresh-token'] ||
+        (res.headers as any)?.['X-Refresh-Token'];
+      const bodyTok =
+        (res.data && typeof res.data === 'object' && (res.data as any).refreshed_token) ||
+        null;
+      const fresh = headerTok || bodyTok;
+      if (fresh && typeof fresh === 'string' && fresh.length > 20) {
+        await saveToken(fresh);
+      }
+    } catch (_e) {}
+    return res;
+  },
+  (err) => Promise.reject(err),
+);
+
 export type User = {
   id: string;
   email: string;

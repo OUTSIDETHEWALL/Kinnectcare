@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, BackgroundTasks
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, BackgroundTasks, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -52,7 +52,21 @@ db = client[os.environ['DB_NAME']]
 
 SECRET_KEY = os.environ.get("JWT_SECRET", "kinnship-dev-secret-change-in-prod")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
+# JWT lifetime — 1 year. We target a senior + family-caregiver
+# audience for whom any unprompted "your session has expired, please
+# sign in again" is a major UX failure (and often a support call).
+# Combined with the rolling refresh on /auth/me (see below), an
+# active user effectively NEVER gets auto-logged-out — only an
+# intentional "Sign out" tap clears the session.
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 365  # 365 days
+
+# Rolling-refresh threshold. When /auth/me is called and the
+# current token has less than this many days of life remaining,
+# we issue a fresh 1-year token in the response. The frontend
+# detects the new token and silently swaps it into SecureStore.
+# Net effect: any user who opens the app at least once every 90
+# days keeps their session indefinitely.
+TOKEN_REFRESH_THRESHOLD_DAYS = 90
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
@@ -126,6 +140,12 @@ class UserResponse(BaseModel):
     timezone: Optional[str] = "UTC"
     family_group_id: Optional[str] = None
     family_group_role: Optional[str] = None
+    # Optional: when /auth/me decides to refresh the session (rolling-
+    # refresh — see comment block on that endpoint), the new JWT is
+    # surfaced here so the client can quietly swap it into SecureStore
+    # without ever showing the user a sign-in screen. Absent on every
+    # other response.
+    refreshed_token: Optional[str] = None
 
 
 class TokenResponse(BaseModel):
@@ -1039,7 +1059,43 @@ async def verify_otp(data: OtpVerify):
 
 @api_router.post("/auth/me", response_model=UserResponse, include_in_schema=False)
 @api_router.get("/auth/me", response_model=UserResponse)
-async def me(current=Depends(get_current_user)):
+async def me(
+    response: Response,
+    creds: HTTPAuthorizationCredentials = Depends(security),
+    current=Depends(get_current_user),
+):
+    """Return the current user.
+
+    Side-effect: ROLLING SESSION REFRESH. If the bearer token has
+    less than TOKEN_REFRESH_THRESHOLD_DAYS (90) of lifetime left,
+    we mint a fresh 1-year token and surface it via:
+      • the `X-Refresh-Token` HTTP response header
+      • a `refreshed_token` field in the JSON body (added below)
+    The frontend AuthContext silently swaps the new token into
+    SecureStore. Net effect: any user who opens the app at least
+    once every 90 days keeps their session indefinitely. A user
+    who is locked out only if they go more than 1 year without
+    opening the app, or they tap "Sign out" intentionally.
+    """
+    try:
+        payload = jwt.decode(creds.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        exp_ts = int(payload.get("exp", 0))
+        remaining_s = exp_ts - int(datetime.now(timezone.utc).timestamp())
+        if remaining_s < TOKEN_REFRESH_THRESHOLD_DAYS * 86400:
+            fresh = create_access_token(current["id"])
+            # Header AND body field, so the client can pick either
+            # one up. Modern axios on RN exposes headers on every
+            # response so either works; we send both for safety.
+            response.headers["X-Refresh-Token"] = fresh
+            body = _user_response(current).model_dump()
+            body["refreshed_token"] = fresh
+            return body
+    except jwt.PyJWTError:
+        # If we can't even decode our own token, skip the refresh
+        # bookkeeping — get_current_user would have already 401'd
+        # if the token were invalid, so this branch is essentially
+        # unreachable. Belt-and-suspenders.
+        pass
     return _user_response(current)
 
 
