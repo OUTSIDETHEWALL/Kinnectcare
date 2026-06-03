@@ -691,6 +691,27 @@ async def push_to_family_group(family_group_id: str, title: str, body: str, data
 
 # ========== Seed ==========
 async def seed_demo_data(owner_id: str, family_group_id: Optional[str] = None):
+    """Seed minimal demo data for a brand-new user so the UI isn't empty
+    on first launch.
+
+    v6.11.7 — REDUCED to members only.
+    Previously this seeded 3 medications + 4 routines + 2 alerts for a demo
+    senior, which caused new users to receive up to 9 notifications per day
+    even though they "had no medications saved" from their perspective. The
+    seeded medication reminders were picked up by the medication scheduler
+    (med_scheduler.process_pending_notifications) and fired both self-pushes
+    and family-alert escalations on every slot, every day, forever.
+
+    We now seed ONLY the two demo family members so the Family tab has
+    content to show.  Critically:
+      • James no longer has a `daily_checkin_time` set — preventing the
+        09:00 missed-checkin alert from firing 24h after signup.
+      • No demo medication / routine reminders are created.
+      • No demo alerts are written.
+    A new user therefore receives ZERO automated notifications until they
+    explicitly add their own family members, reminders, and check-in
+    schedules.
+    """
     fgid = family_group_id
     gregory = FamilyMember(
         owner_id=owner_id, family_group_id=fgid, name="Gregory", age=35, phone="+1-555-0142", gender="Male",
@@ -699,50 +720,13 @@ async def seed_demo_data(owner_id: str, family_group_id: Optional[str] = None):
     )
     james = FamilyMember(
         owner_id=owner_id, family_group_id=fgid, name="James", age=78, phone="+1-555-0178", gender="Male",
-        role="senior", status="warning", location_name="Home",
-        daily_checkin_time="09:00",
+        role="senior", status="healthy", location_name="Home",
         avatar_url="https://images.unsplash.com/photo-1667312147803-4b2437b5485e?crop=entropy&cs=srgb&fm=jpg&w=400",
     )
     await db.members.insert_many([gregory.model_dump(), james.model_dump()])
 
-    meds = [
-        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
-                 category="medication", title="Metformin", dosage="500mg, 1 pill",
-                 times=[TimeSlot(time="08:00", label="Morning"), TimeSlot(time="20:00", label="Bedtime")], time="08:00"),
-        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
-                 category="medication", title="Lisinopril", dosage="10mg",
-                 times=[TimeSlot(time="13:00", label="Afternoon")], time="13:00"),
-        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
-                 category="medication", title="Aspirin", dosage="81mg",
-                 times=[TimeSlot(time="09:00", label="Morning")], time="09:00"),
-    ]
-    routines = [
-        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
-                 category="routine", title="Drink water",
-                 times=[TimeSlot(time="10:00"), TimeSlot(time="14:00"), TimeSlot(time="18:00")], time="10:00"),
-        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
-                 category="routine", title="Morning walk",
-                 times=[TimeSlot(time="07:30", label="Morning")], time="07:30"),
-        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
-                 category="routine", title="Breakfast",
-                 times=[TimeSlot(time="08:30", label="Morning")], time="08:30"),
-        Reminder(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
-                 category="routine", title="Dinner",
-                 times=[TimeSlot(time="19:00", label="Evening")], time="19:00"),
-    ]
-    await db.reminders.insert_many([r.model_dump() for r in meds + routines])
-
-    alerts = [
-        Alert(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
-              type="low_battery", severity="warning",
-              title="Low battery on James's device",
-              message="Battery level is 15%. Please remind him to charge."),
-        Alert(owner_id=owner_id, family_group_id=fgid, member_id=james.id, member_name=james.name,
-              type="medication", severity="warning",
-              title="Medication missed",
-              message="James missed his 8:00 AM Metformin."),
-    ]
-    await db.alerts.insert_many([a.model_dump() for a in alerts])
+    # NOTE: medication reminders, routine reminders, and demo alerts are
+    # NO LONGER SEEDED. See the docstring above for the v6.11.7 rationale.
 
 
 # ========== Auth Routes ==========
