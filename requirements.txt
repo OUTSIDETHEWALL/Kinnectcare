@@ -10,6 +10,10 @@
 # =============================================================================
 
 # --- Web framework ---
+# force-rebuild-jun4: invalidate Railway/Nixpacks pip wheel cache so
+# the bcrypt==4.0.1 pin below is actually re-resolved.  Without a
+# requirements.txt edit Railway will keep serving the previously
+# built image which still has bcrypt 4.1.3.
 fastapi==0.110.1
 uvicorn[standard]==0.25.0
 python-multipart==0.0.28
