@@ -30,7 +30,7 @@
     },
     "android": {
       "package": "app.kinnship.client",
-      "versionCode": 31,
+      "versionCode": 32,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/kinnship-adaptive-foreground-1024.png",
