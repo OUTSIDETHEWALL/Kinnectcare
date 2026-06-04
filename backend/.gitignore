@@ -36,7 +36,11 @@ MANIFEST
 venv/
 env/
 ENV/
-.python-version
+# NOTE: .python-version is INTENTIONALLY NOT ignored — it pins the
+# runtime Python version for Railway/Railpack's auto-detection.  If
+# this file is missing from the repo, Railpack defaults to the latest
+# Python (currently 3.13) and bcrypt 4.0.1 has no 3.13 wheel, breaking
+# the build.  Do not add `.python-version` back to .gitignore.
 
 # --- Backups & temp files ---
 *.bak
