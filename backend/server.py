@@ -743,6 +743,7 @@ def _user_response(u: dict) -> UserResponse:
 
 import secrets
 import smtplib
+import requests
 from email.message import EmailMessage
 
 
@@ -773,76 +774,139 @@ def _otp_email_body(code: str, purpose: str) -> tuple[str, str]:
     return subject, body
 
 
-async def _deliver_otp_email(to_email: str, code: str, purpose: str) -> bool:
-    """Send the OTP via SMTP. Falls back to logging-only if SMTP isn't
-    configured (dev environments). Returns True if delivery succeeded.
+def _send_otp_via_resend(to_email: str, code: str, purpose: str) -> bool:
+    """Send the OTP via Resend's HTTPS API (port 443).
 
-    NOTE: this is meant to be invoked via BackgroundTasks so a slow
-    Gmail handshake (sometimes 5-15s during outages) doesn't block
-    the API response and trigger client-side timeouts. The mongo
-    OTP record is written BEFORE this fires, so even if SMTP is
-    momentarily slow the user can still verify whatever code is in
-    flight — they'll just receive the email a few seconds later.
+    Railway blocks outbound port 587 (SMTP submission) — `Network is
+    unreachable` — so we deliver via HTTPS to https://api.resend.com.
+    This works on any cloud host that allows outbound HTTPS, which is
+    universal.
+
+    Env vars:
+      • RESEND_API_KEY  — required.  Get from https://resend.com (free tier).
+      • RESEND_FROM     — required.  Must be a verified sender in your Resend
+                          account.  Format: "Kinnship <noreply@your-domain>" or
+                          plain "noreply@your-domain".  For initial testing
+                          you can use "onboarding@resend.dev" with no domain
+                          verification.
+
+    Returns True on 2xx response from Resend, False on any failure (the
+    OTP code is then logged for operator visibility).
+    """
+    api_key = os.environ.get("RESEND_API_KEY")
+    sender = os.environ.get("RESEND_FROM")
+    if not (api_key and sender):
+        return False
+    subject, body = _otp_email_body(code, purpose)
+    try:
+        r = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": sender,
+                "to": [to_email],
+                "subject": subject,
+                "text": body,
+            },
+            timeout=15,
+        )
+        if 200 <= r.status_code < 300:
+            logger.info(
+                f"[OTP] Delivered code to {to_email} via Resend (purpose={purpose})"
+            )
+            return True
+        # Log the response body so operators can debug 4xx (invalid
+        # sender domain, missing verification, etc.).
+        logger.warning(
+            f"[OTP] Resend rejected request: HTTP {r.status_code} "
+            f"body={r.text[:300]!r}.  Code for {to_email}: {code}"
+        )
+        return False
+    except Exception as e:
+        logger.warning(
+            f"[OTP] Resend HTTP send failed: {e}.  Code for {to_email}: {code}"
+        )
+        return False
+
+
+def _send_otp_via_smtp(to_email: str, code: str, purpose: str) -> bool:
+    """Fallback path: legacy SMTP delivery (Gmail, Mailgun, etc.).
+
+    Kept so local dev and self-hosted environments that allow outbound
+    port 587 keep working.  On Railway this WILL fail because port 587
+    is firewalled — _deliver_otp_email_sync tries Resend FIRST and only
+    falls through here if Resend isn't configured.
     """
     host = os.environ.get("SMTP_HOST")
     port = int(os.environ.get("SMTP_PORT", "587"))
     user = os.environ.get("SMTP_USER")
     pwd = os.environ.get("SMTP_PASSWORD")
     sender = os.environ.get("SMTP_FROM", user or "noreply@kinnship.app")
-    subject, body = _otp_email_body(code, purpose)
     if not (host and user and pwd):
-        logger.warning(f"[OTP] SMTP not configured. Code for {to_email}: {code}")
         return False
+    subject, body = _otp_email_body(code, purpose)
     try:
         msg = EmailMessage()
         msg["Subject"] = subject
         msg["From"] = sender
         msg["To"] = to_email
         msg.set_content(body)
-        # Explicit 30s timeout so we fail fast under SMTP outages
-        # rather than tying up worker threads indefinitely.
         with smtplib.SMTP(host, port, timeout=30) as s:
             s.starttls()
             s.login(user, pwd)
             s.send_message(msg)
-        logger.info(f"[OTP] Delivered code to {to_email} (purpose={purpose})")
+        logger.info(
+            f"[OTP] Delivered code to {to_email} via SMTP (purpose={purpose})"
+        )
         return True
     except Exception as e:
-        # Log the actual error AND the code so an operator can relay it
-        # manually if Gmail rate-limits or rejects.
-        logger.warning(f"[OTP] SMTP send failed: {e}. Code for {to_email}: {code}")
+        logger.warning(
+            f"[OTP] SMTP send failed: {e}.  Code for {to_email}: {code}"
+        )
         return False
+
+
+async def _deliver_otp_email(to_email: str, code: str, purpose: str) -> bool:
+    """Deliver an OTP email via the first available transport.
+
+    Order of preference:
+      1. Resend (HTTPS, port 443)        — Railway-friendly, recommended.
+      2. SMTP   (port 587 with STARTTLS) — local dev / self-hosted fallback.
+      3. Log-only                        — if neither is configured.
+
+    NOTE: this is meant to be invoked via BackgroundTasks so a slow
+    handshake (e.g. an upstream provider hiccup) doesn't block the API
+    response and trigger client-side timeouts.  The mongo OTP record is
+    written BEFORE this fires, so even if delivery is momentarily slow
+    the user can still verify whatever code is in flight.
+    """
+    if _send_otp_via_resend(to_email, code, purpose):
+        return True
+    if _send_otp_via_smtp(to_email, code, purpose):
+        return True
+    logger.warning(
+        f"[OTP] No email transport configured.  Code for {to_email}: {code}"
+    )
+    return False
 
 
 def _deliver_otp_email_sync(to_email: str, code: str, purpose: str) -> None:
-    """Synchronous wrapper around _deliver_otp_email — required because
-    FastAPI's BackgroundTasks runs in a threadpool, not the asyncio
-    loop, so we can't directly schedule the async coroutine there.
-    The wrapper does its own blocking SMTP call (same logic as the
-    async version) so it integrates cleanly with BackgroundTasks.
+    """Synchronous wrapper — required because FastAPI's BackgroundTasks
+    runs in a threadpool, not the asyncio loop, so we can't directly
+    schedule the async coroutine there.
+
+    Same preference order as _deliver_otp_email above.
     """
-    host = os.environ.get("SMTP_HOST")
-    port = int(os.environ.get("SMTP_PORT", "587"))
-    user = os.environ.get("SMTP_USER")
-    pwd = os.environ.get("SMTP_PASSWORD")
-    sender = os.environ.get("SMTP_FROM", user or "noreply@kinnship.app")
-    subject, body = _otp_email_body(code, purpose)
-    if not (host and user and pwd):
-        logger.warning(f"[OTP] SMTP not configured. Code for {to_email}: {code}")
+    if _send_otp_via_resend(to_email, code, purpose):
         return
-    try:
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = sender
-        msg["To"] = to_email
-        msg.set_content(body)
-        with smtplib.SMTP(host, port, timeout=30) as s:
-            s.starttls()
-            s.login(user, pwd)
-            s.send_message(msg)
-        logger.info(f"[OTP] Delivered code to {to_email} (purpose={purpose})")
-    except Exception as e:
-        logger.warning(f"[OTP] SMTP send failed: {e}. Code for {to_email}: {code}")
+    if _send_otp_via_smtp(to_email, code, purpose):
+        return
+    logger.warning(
+        f"[OTP] No email transport configured.  Code for {to_email}: {code}"
+    )
 
 
 @api_router.post("/auth/request-otp")
