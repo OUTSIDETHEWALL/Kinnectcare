@@ -11,6 +11,8 @@ import { isOnboardingDone } from '../src/onboardingStore';
 import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
 import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
 import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { DISCLAIMER_ACK_KEY } from './disclaimer';
 
 function RootNav() {
   const { user, loading } = useAuth();
@@ -32,6 +34,11 @@ function RootNav() {
   // with /(tabs)/dashboard since both runs were redirecting at the
   // same time).
   const [needsPinSetup, setNeedsPinSetup] = useState(false);
+  // Health disclaimer gate — first-launch only.  Acknowledgment stored in
+  // AsyncStorage under DISCLAIMER_ACK_KEY.  Required for Google Play
+  // medical-disclaimer compliance (v1.1.7).
+  const [disclaimerChecked, setDisclaimerChecked] = useState(false);
+  const [needsDisclaimer, setNeedsDisclaimer] = useState(false);
 
   useEffect(() => {
     (async () => {
