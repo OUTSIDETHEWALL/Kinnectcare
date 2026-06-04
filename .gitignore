@@ -1,0 +1,91 @@
+# =============================================================================
+# Kinnship Backend - .gitignore for Railway deployment
+# =============================================================================
+
+# --- Secrets (NEVER commit) ---
+.env
+.env.*
+*.env
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+MANIFEST
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# --- Backups & temp files ---
+*.bak
+*.backup
+*.tmp
+*.swp
+*.swo
+*~
+requirements.local-full.txt.bak
+
+# --- Testing & coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+*.iml
+.project
+.pydevproject
+.settings/
+
+# --- OS ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Local data dumps ---
+mongodump/
+*.bson
+*.tar.gz
+
+# --- Service account keys (if any get added later) ---
+*-service-account.json
+*-credentials.json
+firebase-adminsdk-*.json
