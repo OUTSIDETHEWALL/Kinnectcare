@@ -408,6 +408,9 @@ export default function SettingsScreen() {
         <Text style={styles.footer}>
           {APP_NAME} · © {new Date().getFullYear()} {COMPANY_NAME}
         </Text>
+        <Text style={styles.versionFooter} testID="settings-version">
+          Kinnship v1.1.7
+        </Text>
       </ScrollView>
 
       <Modal
@@ -526,6 +529,14 @@ const styles = StyleSheet.create({
   navLabel: { flex: 1, fontSize: 15, fontWeight: '700', color: Colors.textPrimary },
   chevron: { fontSize: 22, color: Colors.textTertiary },
   footer: { fontSize: 12, color: Colors.textTertiary, textAlign: 'center', marginTop: 18 },
+  versionFooter: {
+    fontSize: 11,
+    color: Colors.textTertiary,
+    textAlign: 'center',
+    marginTop: 4,
+    marginBottom: 8,
+    opacity: 0.7,
+  },
   planCard: {
     backgroundColor: Colors.surface, borderRadius: 14, padding: 16,
     borderWidth: 1, borderColor: Colors.border,

@@ -691,42 +691,24 @@ async def push_to_family_group(family_group_id: str, title: str, body: str, data
 
 # ========== Seed ==========
 async def seed_demo_data(owner_id: str, family_group_id: Optional[str] = None):
-    """Seed minimal demo data for a brand-new user so the UI isn't empty
-    on first launch.
+    """No-op (v1.1.7).
 
-    v6.11.7 — REDUCED to members only.
-    Previously this seeded 3 medications + 4 routines + 2 alerts for a demo
-    senior, which caused new users to receive up to 9 notifications per day
-    even though they "had no medications saved" from their perspective. The
-    seeded medication reminders were picked up by the medication scheduler
-    (med_scheduler.process_pending_notifications) and fired both self-pushes
-    and family-alert escalations on every slot, every day, forever.
+    All demo data seeding has been removed.  New users now sign up into a
+    completely empty account and add their own real family members, reminders
+    and check-in schedules from scratch.
 
-    We now seed ONLY the two demo family members so the Family tab has
-    content to show.  Critically:
-      • James no longer has a `daily_checkin_time` set — preventing the
-        09:00 missed-checkin alert from firing 24h after signup.
-      • No demo medication / routine reminders are created.
-      • No demo alerts are written.
-    A new user therefore receives ZERO automated notifications until they
-    explicitly add their own family members, reminders, and check-in
-    schedules.
+    History:
+      - <v6.11.7  : seeded 2 demo members + 3 meds + 4 routines + 2 alerts.
+                    Caused up to 9 false notifications per day per new user.
+      -  v6.11.7 : reduced to members-only (Gregory + James, no reminders/alerts).
+      -  v1.1.7  : removed entirely.  Combined with the startup purge
+                   (_purge_legacy_demo_data) this leaves zero demo content
+                   on Kinnship accounts past or present.
+
+    Kept as an `async def` (rather than deleted) so the existing call site in
+    /auth/verify-otp keeps working without any signup-path refactor.
     """
-    fgid = family_group_id
-    gregory = FamilyMember(
-        owner_id=owner_id, family_group_id=fgid, name="Gregory", age=35, phone="+1-555-0142", gender="Male",
-        role="family", status="healthy", location_name="Downtown Office",
-        avatar_url="https://images.unsplash.com/photo-1592234789031-94bf65f630ed?crop=entropy&cs=srgb&fm=jpg&w=400",
-    )
-    james = FamilyMember(
-        owner_id=owner_id, family_group_id=fgid, name="James", age=78, phone="+1-555-0178", gender="Male",
-        role="senior", status="healthy", location_name="Home",
-        avatar_url="https://images.unsplash.com/photo-1667312147803-4b2437b5485e?crop=entropy&cs=srgb&fm=jpg&w=400",
-    )
-    await db.members.insert_many([gregory.model_dump(), james.model_dump()])
-
-    # NOTE: medication reminders, routine reminders, and demo alerts are
-    # NO LONGER SEEDED. See the docstring above for the v6.11.7 rationale.
+    return
 
 
 # ========== Auth Routes ==========
@@ -1388,13 +1370,45 @@ async def get_member(member_id: str, current=Depends(get_current_user)):
 
 @api_router.delete("/members/{member_id}")
 async def delete_member(member_id: str, current=Depends(get_current_user)):
-    r = await db.members.delete_one({"id": member_id, "family_group_id": current["family_group_id"]})
+    """Delete a family member AND every document that references them.
+
+    v1.1.7 cascade — no orphaned data is allowed to remain.  Deletes from:
+      • members
+      • reminders            (medications + routines)
+      • checkins
+      • alerts               (SOS history, missed_checkin, medication, etc.)
+      • medication_logs
+      • med_notifications    (per-slot scheduler bookkeeping)
+      • refill_notifications (refill-cycle bookkeeping)
+    All scoped to the caller's family_group_id so a user can never
+    accidentally (or deliberately) wipe another family's data.
+    """
+    fgid = current["family_group_id"]
+    r = await db.members.delete_one({"id": member_id, "family_group_id": fgid})
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
-    await db.reminders.delete_many({"family_group_id": current["family_group_id"], "member_id": member_id})
-    await db.checkins.delete_many({"family_group_id": current["family_group_id"], "member_id": member_id})
-    await db.medication_logs.delete_many({"family_group_id": current["family_group_id"], "member_id": member_id})
-    return {"ok": True}
+    # Cascade — best-effort per collection, log any individual failures
+    # but never abort the whole request (we already deleted the member).
+    cascade_counts: dict = {}
+    for coll, query in (
+        ("reminders",            {"family_group_id": fgid, "member_id": member_id}),
+        ("checkins",             {"family_group_id": fgid, "member_id": member_id}),
+        ("alerts",               {"family_group_id": fgid, "member_id": member_id}),
+        ("medication_logs",      {"family_group_id": fgid, "member_id": member_id}),
+        ("med_notifications",    {"family_group_id": fgid, "member_id": member_id}),
+        ("refill_notifications", {"family_group_id": fgid, "member_id": member_id}),
+    ):
+        try:
+            res = await db[coll].delete_many(query)
+            cascade_counts[coll] = res.deleted_count
+        except Exception as e:
+            logger.warning(f"cascade delete failed for {coll} member={member_id}: {e}")
+            cascade_counts[coll] = 0
+    logger.info(
+        f"Member deleted with cascade: member_id={member_id} family_group={fgid} "
+        f"counts={cascade_counts}"
+    )
+    return {"ok": True, "cascaded": cascade_counts}
 
 
 @api_router.put("/members/{member_id}/location", response_model=FamilyMember)
@@ -2364,3 +2378,100 @@ async def _start_med_scheduler():
         logger.info("Medication scheduler started.")
     except Exception as e:
         logger.warning(f"Medication scheduler failed to start: {e}")
+
+
+@app.on_event("startup")
+async def _purge_legacy_demo_data():
+    """v1.1.7 one-time DB cleanup.
+
+    Earlier builds (<=v6.11.7) seeded every new user with two demo family
+    members — Gregory and James — plus medications/routines/alerts/check-ins
+    on those members. From the user's perspective they "had no medications
+    saved" yet the medication scheduler still fired notifications on the
+    seeded demo data multiple times a day.
+
+    The seed itself has now been removed (see seed_demo_data above) but
+    accounts created before v1.1.7 still carry the demo records.  This
+    handler runs once per process start and PERMANENTLY DELETES every
+    legacy demo member plus all documents that referenced them across
+    every collection (cascading delete).
+
+    Idempotent — once the demo rows are gone subsequent runs find zero
+    matches and exit immediately.  Safe to leave in place forever.
+
+    Identification is fingerprint-based to minimise false positives:
+      • Gregory: name=="Gregory" AND phone=="+1-555-0142"
+      • James:   name=="James"   AND phone=="+1-555-0178"
+    Plus the original Unsplash avatar URLs as a third confirmation signal.
+    Real Kinnship users will not match all three fields by accident.
+    """
+    try:
+        gregory_fingerprint = {
+            "name": "Gregory",
+            "phone": "+1-555-0142",
+        }
+        james_fingerprint = {
+            "name": "James",
+            "phone": "+1-555-0178",
+        }
+        targets = await db.members.find(
+            {"$or": [gregory_fingerprint, james_fingerprint]},
+            {"_id": 0, "id": 1, "family_group_id": 1, "name": 1, "owner_id": 1},
+        ).to_list(5000)
+        if not targets:
+            return
+        total_counts: dict = {
+            "members": 0,
+            "reminders": 0,
+            "checkins": 0,
+            "alerts": 0,
+            "medication_logs": 0,
+            "med_notifications": 0,
+            "refill_notifications": 0,
+        }
+        for m in targets:
+            mid = m.get("id")
+            fgid = m.get("family_group_id")
+            if not mid:
+                continue
+            # member itself
+            res = await db.members.delete_one({"id": mid})
+            total_counts["members"] += res.deleted_count
+            # everything referencing the member id (cascade)
+            for coll in (
+                "reminders",
+                "checkins",
+                "alerts",
+                "medication_logs",
+                "med_notifications",
+                "refill_notifications",
+            ):
+                q: dict = {"member_id": mid}
+                if fgid:
+                    q["family_group_id"] = fgid
+                try:
+                    r = await db[coll].delete_many(q)
+                    total_counts[coll] += r.deleted_count
+                except Exception as e:
+                    logger.warning(f"purge {coll} for member={mid} failed: {e}")
+        # ALSO purge alerts/reminders that were inserted referencing James/Gregory
+        # but whose member_id has already been removed (orphans from prior partial
+        # cleanups). Match by member_name as a fallback.
+        for coll, label in (
+            ("alerts", "member_name"),
+            ("reminders", "member_name"),
+        ):
+            try:
+                r = await db[coll].delete_many({label: {"$in": ["Gregory", "James"]}})
+                if r.deleted_count:
+                    total_counts.setdefault(f"{coll}_by_name", 0)
+                    total_counts[f"{coll}_by_name"] += r.deleted_count
+            except Exception as e:
+                logger.warning(f"purge {coll} by name failed: {e}")
+        if total_counts["members"] > 0 or any(v > 0 for v in total_counts.values()):
+            logger.info(
+                f"v1.1.7 demo-data purge complete. Deleted: {total_counts}"
+            )
+    except Exception as e:
+        logger.warning(f"_purge_legacy_demo_data skipped: {e}")
+

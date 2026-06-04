@@ -35,6 +35,20 @@ function RootNav() {
 
   useEffect(() => {
     (async () => {
+      try {
+        const ack = await AsyncStorage.getItem(DISCLAIMER_ACK_KEY);
+        setNeedsDisclaimer(!ack);
+      } catch (_e) {
+        // If we can't read AsyncStorage, fall through as if no ack —
+        // showing the disclaimer is the safer default.
+        setNeedsDisclaimer(true);
+      }
+      setDisclaimerChecked(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
       const done = await isOnboardingDone();
       setNeedsOnboarding(!done);
       setOnboardingChecked(true);
@@ -149,12 +163,23 @@ function RootNav() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (loading || !onboardingChecked || !pinChecked) return;
+    if (loading || !onboardingChecked || !pinChecked || !disclaimerChecked) return;
     const inAuthGroup = segments[0] === '(auth)';
     const isWelcome = !segments[0] || segments[0] === ('index' as any);
     const isOnboarding = segments[0] === 'onboarding';
+    const isDisclaimer = segments[0] === 'disclaimer';
     const isPublic =
       segments[0] === 'privacy-policy' || segments[0] === 'terms-of-service';
+
+    // ===== FIRST-LAUNCH HEALTH DISCLAIMER GATE (v1.1.7) =====
+    // Must run BEFORE the onboarding / auth checks below so the very
+    // first thing a brand-new install sees is the medical disclaimer.
+    // Once acknowledged (AsyncStorage flag), this branch never fires
+    // again on this device.
+    if (needsDisclaimer && !isDisclaimer && !isPublic) {
+      router.replace('/disclaimer');
+      return;
+    }
     // Which (auth) sub-route we're on, so we can let pin-login &
     // pin-setup live "inside" the authenticated session without
     // bouncing the user back to the dashboard.
@@ -262,9 +287,9 @@ function RootNav() {
     // where no further redirect is needed, so taps from any state are
     // honoured once routing has settled.
     setAppReadyForDeepLink(true);
-  }, [user, loading, segments, onboardingChecked, needsOnboarding, pinChecked, needsPinUnlock, needsPinSetup]);
+  }, [user, loading, segments, onboardingChecked, needsOnboarding, pinChecked, needsPinUnlock, needsPinSetup, disclaimerChecked, needsDisclaimer]);
 
-  if (loading || !onboardingChecked || (user && !pinChecked)) {
+  if (loading || !onboardingChecked || !disclaimerChecked || (user && !pinChecked)) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: Colors.background }}>
         <ActivityIndicator size="large" color={Colors.primary} />
@@ -287,6 +312,7 @@ function RootNav() {
       <Stack.Screen name="privacy-policy" />
       <Stack.Screen name="terms-of-service" />
       <Stack.Screen name="onboarding" />
+      <Stack.Screen name="disclaimer" />
       <Stack.Screen name="upgrade" />
       <Stack.Screen name="sos-confirmation" />
       <Stack.Screen name="fall-detection-test" />
