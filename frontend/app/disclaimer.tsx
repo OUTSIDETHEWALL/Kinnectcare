@@ -1,8 +1,13 @@
-import { View, Text, StyleSheet, TouchableOpacity, Image } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useState } from 'react';
+import { useRouter } from 'expo-router';
+import { View, Text, StyleSheet, TouchableOpacity, Image } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { DISCLAIMER_ACK_KEY, setDisclaimerAck } from '../src/disclaimerStore';
+
+// Re-export for legacy imports that still pull DISCLAIMER_ACK_KEY
+// from this module (kept until all call-sites are migrated).
+export { DISCLAIMER_ACK_KEY };
 
 /**
  * Health Disclaimer Screen — first launch only.
@@ -15,8 +20,11 @@ import { useState } from 'react';
  *   • White background, Kinnship logo top, "Important Notice" bold title,
  *     centered body ≥18pt dark gray, single full-width green button.
  *   • No checkboxes, no scrolling, no extra steps.
+ *
+ * v1.1.8 — ack now flows through src/disclaimerStore so RootNav can
+ * react synchronously and avoid the strobe-loop where the disclaimer
+ * and onboarding screens fought each other at startup.
  */
-export const DISCLAIMER_ACK_KEY = 'disclaimer_accepted';
 
 export default function DisclaimerScreen() {
   const router = useRouter();
@@ -25,13 +33,13 @@ export default function DisclaimerScreen() {
   const accept = async () => {
     if (submitting) return;
     setSubmitting(true);
-    try {
-      await AsyncStorage.setItem(DISCLAIMER_ACK_KEY, '1');
-    } catch (_e) {
-      // Even if storage fails we want the user to be able to proceed —
-      // they'll just be re-prompted on next launch, which is acceptable
-      // (better than getting locked out of the app entirely).
-    }
+    // setDisclaimerAck() updates AsyncStorage AND synchronously
+    // notifies RootNav's subscriber so the gate flips
+    // `needsDisclaimer` to false in the same tick.  Without the
+    // synchronous notify, the router.replace('/') below would
+    // bounce us straight back to /disclaimer because RootNav still
+    // believed the flag was unread.
+    await setDisclaimerAck();
     // Send them to the welcome screen — the existing RootNav gate in
     // _layout.tsx will take them onward (to /onboarding for first-time
     // users, or straight to /(tabs)/dashboard for already-authed users).

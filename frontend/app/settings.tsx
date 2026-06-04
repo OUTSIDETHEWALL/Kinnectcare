@@ -409,7 +409,7 @@ export default function SettingsScreen() {
           {APP_NAME} · © {new Date().getFullYear()} {COMPANY_NAME}
         </Text>
         <Text style={styles.versionFooter} testID="settings-version">
-          Kinnship v1.1.8
+          Kinnship v1.1.9
         </Text>
       </ScrollView>
 

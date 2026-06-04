@@ -11,8 +11,11 @@ import { isOnboardingDone } from '../src/onboardingStore';
 import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
 import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
 import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { DISCLAIMER_ACK_KEY } from './disclaimer';
+import {
+  loadDisclaimerAck,
+  subscribeDisclaimerAck,
+  getDisclaimerAckSync,
+} from '../src/disclaimerStore';
 
 function RootNav() {
   const { user, loading } = useAuth();
@@ -41,17 +44,28 @@ function RootNav() {
   const [needsDisclaimer, setNeedsDisclaimer] = useState(false);
 
   useEffect(() => {
+    // Cold-start load + subscribe-for-future-changes.  Runs ONCE on
+    // mount.  The subscriber fires when the disclaimer screen calls
+    // setDisclaimerAck() so we flip needsDisclaimer to false in the
+    // same tick the user taps "I Understand" — preventing the bounce-
+    // back-to-disclaimer loop that v1.1.7 hit.
+    let mounted = true;
     (async () => {
-      try {
-        const ack = await AsyncStorage.getItem(DISCLAIMER_ACK_KEY);
-        setNeedsDisclaimer(!ack);
-      } catch (_e) {
-        // If we can't read AsyncStorage, fall through as if no ack —
-        // showing the disclaimer is the safer default.
-        setNeedsDisclaimer(true);
+      const acked = await loadDisclaimerAck();
+      if (mounted) {
+        setNeedsDisclaimer(!acked);
+        setDisclaimerChecked(true);
       }
-      setDisclaimerChecked(true);
     })();
+    const unsubscribe = subscribeDisclaimerAck(() => {
+      if (!mounted) return;
+      const acked = getDisclaimerAckSync();
+      setNeedsDisclaimer(!acked);
+    });
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -185,6 +199,20 @@ function RootNav() {
     // again on this device.
     if (needsDisclaimer && !isDisclaimer && !isPublic) {
       router.replace('/disclaimer');
+      return;
+    }
+    // While ON the disclaimer screen, short-circuit the rest of the
+    // gate.  This is the v1.1.8 fix for the strobe-loop: v1.1.7's
+    // later branches (onboarding redirect, welcome redirect, etc.)
+    // would fire one after another while we were on /disclaimer,
+    // each kicking us off the disclaimer to another screen, which
+    // then re-triggered the first branch above to put us back on
+    // /disclaimer — visible to the user as rapid flashing between
+    // screens.  Halting here keeps the user on /disclaimer until
+    // setDisclaimerAck() flips needsDisclaimer to false, at which
+    // point the gate falls through cleanly to onboarding/auth.
+    if (isDisclaimer) {
+      setAppReadyForDeepLink(true);
       return;
     }
     // Which (auth) sub-route we're on, so we can let pin-login &
