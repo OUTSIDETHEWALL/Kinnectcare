@@ -45,6 +45,7 @@ without affecting other pending invites.
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -185,33 +186,132 @@ async def accept_invite(db, invite_id: str, accepted_by_user_id: str) -> None:
 def _invite_email_body(
     *, inviter_name: str, group_name: str, token: str, invitee_name: str,
     expires_at: datetime,
-) -> Tuple[str, str]:
-    """Build (subject, plain-text body) for the invite email."""
-    subject = f"{inviter_name} invited you to join their family on Kinnship"
-    # Format expiry as a friendly local-ish date (UTC is fine for MVP).
-    exp_str = expires_at.strftime("%b %d, %Y")
-    body = (
+) -> Tuple[str, str, str]:
+    """Build (subject, plain-text body, HTML body) for the invite email.
+
+    Modern mail clients (Gmail, Apple Mail, Outlook) render the HTML
+    version; plain-text clients and screen readers fall back to text.
+    Both versions carry the same content so accessibility doesn't
+    suffer.
+
+    The possessive form always appends `'s` (e.g. "Charles" → "Charles's",
+    "Bob" → "Bob's") — modern Chicago Manual of Style.
+    """
+    inviter_possessive = f"{inviter_name}'s"
+    subject = f"You're invited to join {inviter_possessive} Family on Kinnship"
+    exp_str = expires_at.strftime("%B %d, %Y")
+
+    # ---- Plain-text version (fallback) ----
+    text_body = (
         f"Hi {invitee_name},\n\n"
-        f"{inviter_name} has invited you to join \"{group_name}\" on "
-        f"Kinnship — the family safety & wellness app for keeping loved "
-        f"ones connected and protected.\n\n"
-        f"Your personal invite code is:\n\n"
+        f"{inviter_name} has invited you to join {inviter_possessive} Family "
+        f"on Kinnship — the family safety and senior wellness app that keeps "
+        f"loved ones connected and protected.\n\n"
+        f"WHAT KINNSHIP DOES\n"
+        f"  • One-tap SOS alerts that notify your whole family\n"
+        f"  • Daily check-ins so loved ones know you're okay\n"
+        f"  • Automatic fall detection on your phone\n"
+        f"  • Medication reminders with family follow-up\n"
+        f"  • Location sharing during emergencies only\n\n"
+        f"YOUR PERSONAL INVITE CODE\n\n"
         f"    {token}\n\n"
-        f"To accept:\n"
-        f"  1. Download Kinnship from the Play Store / App Store (or "
-        f"open it if you already have it installed).\n"
-        f"  2. Tap \"Sign Up\".\n"
-        f"  3. Paste the invite code above into the \"Family invite code\" "
-        f"field on the sign-up screen.\n"
-        f"  4. Complete the email verification.\n\n"
-        f"Once you sign in you'll be linked to {inviter_name}'s family group "
-        f"automatically. From there your SOS button, check-ins, and fall-"
-        f"detection alerts will notify everyone in the family.\n\n"
-        f"This invite expires on {exp_str}.  If you didn't expect this "
-        f"email you can safely ignore it.\n\n"
+        f"HOW TO JOIN (about 3 minutes)\n"
+        f"  1. Download Kinnship\n"
+        f"     • iPhone: search 'Kinnship' on the App Store\n"
+        f"     • Android: search 'Kinnship' on Google Play\n"
+        f"  2. Open the app and tap Sign Up\n"
+        f"  3. Enter your email and verify with the 6-digit code we send\n"
+        f"  4. On the \"Family invite code\" field, enter: {token}\n"
+        f"  5. You're in — you'll join {inviter_possessive} family automatically.\n\n"
+        f"This invite expires on {exp_str}.  If you didn't expect this email, "
+        f"you can safely ignore it — no account will be created.\n\n"
+        f"Welcome to the Kinnship family,\n"
         f"— The Kinnship team"
     )
-    return subject, body
+
+    # ---- HTML version (primary, used by modern clients) ----
+    # Table-based layout for max email-client compatibility (Outlook
+    # especially).  Inline styles only — no external stylesheets.
+    html_body = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>{subject}</title></head>
+<body style="margin:0;padding:0;background-color:#f4f6f4;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;line-height:1.5;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color:#f4f6f4;padding:32px 12px;">
+  <tr><td align="center">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="560" style="max-width:560px;background-color:#ffffff;border-radius:14px;box-shadow:0 2px 8px rgba(27,94,53,0.08);overflow:hidden;">
+
+      <!-- Header band -->
+      <tr><td style="background-color:#1B5E35;padding:32px 32px 26px 32px;text-align:center;">
+        <div style="color:#ffffff;font-size:28px;font-weight:700;letter-spacing:-0.5px;line-height:1;">Kinnship</div>
+        <div style="color:#a5d6a7;font-size:13px;margin-top:6px;letter-spacing:0.8px;text-transform:uppercase;">Family safety · Senior wellness</div>
+      </td></tr>
+
+      <!-- Greeting + intro -->
+      <tr><td style="padding:32px 32px 8px 32px;">
+        <p style="margin:0 0 18px 0;font-size:17px;color:#1a1a1a;">Hi {invitee_name},</p>
+        <p style="margin:0 0 24px 0;font-size:16px;color:#333;">
+          <strong>{inviter_name}</strong> has invited you to join
+          <strong>{inviter_possessive} Family</strong> on Kinnship — the family
+          safety and senior wellness app that keeps loved ones connected and protected.
+        </p>
+      </td></tr>
+
+      <!-- Invite code box (most visually prominent element) -->
+      <tr><td style="padding:0 32px 24px 32px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+          <tr><td style="background-color:#f1f8e9;border:2px solid #1B5E35;border-radius:12px;padding:24px 16px;text-align:center;">
+            <div style="font-size:11px;color:#558b2f;font-weight:700;letter-spacing:1.5px;margin-bottom:10px;text-transform:uppercase;">Your personal invite code</div>
+            <div style="font-family:'SFMono-Regular',Consolas,Menlo,'Courier New',monospace;font-size:30px;font-weight:700;color:#1B5E35;letter-spacing:4px;">{token}</div>
+            <div style="font-size:11px;color:#777;margin-top:10px;">Single-use · Expires {exp_str}</div>
+          </td></tr>
+        </table>
+      </td></tr>
+
+      <!-- What Kinnship does -->
+      <tr><td style="padding:0 32px 8px 32px;">
+        <h3 style="margin:0 0 14px 0;font-size:15px;color:#1B5E35;font-weight:700;letter-spacing:0.3px;">WHAT YOU'LL GET</h3>
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="font-size:15px;color:#333;line-height:1.7;">
+          <tr><td style="padding:3px 0;"><strong>🆘 One-tap SOS</strong> — alerts your whole family in seconds</td></tr>
+          <tr><td style="padding:3px 0;"><strong>✅ Daily check-ins</strong> — peace of mind for everyone</td></tr>
+          <tr><td style="padding:3px 0;"><strong>🏥 Fall detection</strong> — automatic alerts if you slip</td></tr>
+          <tr><td style="padding:3px 0;"><strong>💊 Medication reminders</strong> — never miss a dose</td></tr>
+          <tr><td style="padding:3px 0;"><strong>📍 Location sharing</strong> — only during emergencies</td></tr>
+        </table>
+      </td></tr>
+
+      <!-- How to join -->
+      <tr><td style="padding:24px 32px 8px 32px;">
+        <h3 style="margin:0 0 14px 0;font-size:15px;color:#1B5E35;font-weight:700;letter-spacing:0.3px;">HOW TO JOIN (3 MINUTES)</h3>
+        <ol style="margin:0;padding-left:22px;font-size:15px;color:#333;line-height:1.8;">
+          <li>Download <strong>Kinnship</strong> from the App Store (iPhone) or Google Play (Android).</li>
+          <li>Open the app and tap <strong>Sign Up</strong>.</li>
+          <li>Enter your email and verify with the 6-digit code we send.</li>
+          <li>On the <strong>Family invite code</strong> field, enter:
+            <span style="display:inline-block;background-color:#f1f8e9;color:#1B5E35;font-family:'SFMono-Regular',Consolas,Menlo,monospace;font-weight:700;padding:2px 8px;border-radius:5px;letter-spacing:1px;">{token}</span></li>
+          <li>You're in! You'll join {inviter_possessive} family automatically.</li>
+        </ol>
+      </td></tr>
+
+      <!-- Expiry/ignore note -->
+      <tr><td style="padding:24px 32px 28px 32px;">
+        <p style="margin:0;font-size:13px;color:#666;border-top:1px solid #e8eae8;padding-top:18px;line-height:1.6;">
+          This invite expires on <strong>{exp_str}</strong>. If you didn't expect this email
+          you can safely ignore it — no account will be created.
+        </p>
+      </td></tr>
+
+      <!-- Footer -->
+      <tr><td style="background-color:#fafbfa;padding:20px 32px;text-align:center;border-top:1px solid #e8eae8;">
+        <p style="margin:0;font-size:12px;color:#999;">Welcome to the Kinnship family,</p>
+        <p style="margin:4px 0 0 0;font-size:12px;color:#999;">— The Kinnship team</p>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"""
+
+    return subject, text_body, html_body
 
 
 def _default_group_name(user: dict) -> str:
@@ -597,17 +697,29 @@ def build_router(
         # Send the email out-of-band.  Don't fail the request if the
         # transport is misconfigured — the invite row is persisted and
         # the inviter can copy the token to share manually as fallback.
+        #
+        # `RESEND_INVITE_FROM` lets the operator use a different verified
+        # sender for invites than for OTPs (e.g. `Kinnship <hello@kinnship.app>`
+        # for invites, `Kinnship <noreply@resend.dev>` for OTPs).  Falls
+        # back to `RESEND_FROM` if not configured.
         delivered = False
         if send_email is not None:
             try:
-                subject, body = _invite_email_body(
+                subject, text_body, html_body = _invite_email_body(
                     inviter_name=inviter_name,
                     group_name=group_name,
                     token=token,
                     invitee_name=name,
                     expires_at=expires,
                 )
-                delivered = bool(await send_email(email, subject, body))
+                invite_from = (
+                    os.environ.get("RESEND_INVITE_FROM")
+                    or os.environ.get("RESEND_FROM")
+                )
+                delivered = bool(await send_email(
+                    email, subject, text_body,
+                    html=html_body, from_override=invite_from,
+                ))
             except Exception as e:
                 logger.warning(f"family invite email send failed: {e}")
                 delivered = False
