@@ -346,7 +346,7 @@ async def process_pending_notifications(
                                 "title": rem.get("title"),
                                 "dosage": rem.get("dosage"),
                                 "categoryIdentifier": cat_id,
-                                "channelId": "meds" if not is_routine else "routines",
+                                "channelId": "meds_v2" if not is_routine else "routines",
                             },
                         )
                     except Exception as e:
@@ -411,7 +411,7 @@ async def process_pending_notifications(
                                 "slot_time": slot_time,
                                 "title": rem.get("title"),
                                 "dosage": rem.get("dosage"),
-                                "channelId": "meds",
+                                "channelId": "meds_v2",
                             },
                             exclude_user_id=None,
                         )
@@ -523,7 +523,7 @@ async def process_refill_notifications(
                     "member_id": rem.get("member_id"),
                     "stage": STAGE_REFILL,
                     "days_until_runout": days_left,
-                    "channelId": "meds",
+                    "channelId": "meds_v2",
                 },
             )
         except Exception as e:
