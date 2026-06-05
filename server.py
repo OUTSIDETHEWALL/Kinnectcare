@@ -774,32 +774,25 @@ def _otp_email_body(code: str, purpose: str) -> tuple[str, str]:
     return subject, body
 
 
-def _send_otp_via_resend(to_email: str, code: str, purpose: str) -> bool:
-    """Send the OTP via Resend's HTTPS API (port 443).
+def _send_email_via_resend(to_email: str, subject: str, body: str) -> bool:
+    """Generic Resend HTTPS email sender.  Returns True on 2xx.
 
-    Railway blocks outbound port 587 (SMTP submission) — `Network is
-    unreachable` — so we deliver via HTTPS to https://api.resend.com.
-    This works on any cloud host that allows outbound HTTPS, which is
-    universal.
-
-    Env vars:
-      • RESEND_API_KEY  — required.  Get from https://resend.com (free tier).
-      • RESEND_FROM     — required.  Must be a verified sender in your Resend
-                          account.  Format: "Kinnship <noreply@your-domain>" or
-                          plain "noreply@your-domain".  For initial testing
-                          you can use "onboarding@resend.dev" with no domain
-                          verification.
-
-    Returns True on 2xx response from Resend, False on any failure (the
-    OTP code is then logged for operator visibility).
+    Used by both the OTP flow and the family-invite flow.  Reads the
+    same `RESEND_API_KEY` + `RESEND_FROM` env vars; logs verbosely
+    when either is missing so operators can diagnose Railway
+    misconfiguration.
     """
     api_key = os.environ.get("RESEND_API_KEY")
     sender = os.environ.get("RESEND_FROM")
     if not (api_key and sender):
-        return False   
-    
-
-    subject, body = _otp_email_body(code, purpose)
+        resend_keys = [k for k in os.environ if "RESEND" in k.upper()]
+        logger.warning(
+            f"[email] Resend skipped — vars missing/empty: "
+            f"RESEND_API_KEY={'set(len=%d)' % len(api_key) if api_key else 'MISSING'} "
+            f"RESEND_FROM={'set(%r)' % sender if sender else 'MISSING'} "
+            f"env_keys_matching_RESEND={resend_keys}"
+        )
+        return False
     try:
         r = requests.post(
             "https://api.resend.com/emails",
@@ -816,22 +809,38 @@ def _send_otp_via_resend(to_email: str, code: str, purpose: str) -> bool:
             timeout=15,
         )
         if 200 <= r.status_code < 300:
-            logger.info(
-                f"[OTP] Delivered code to {to_email} via Resend (purpose={purpose})"
-            )
             return True
-        # Log the response body so operators can debug 4xx (invalid
-        # sender domain, missing verification, etc.).
         logger.warning(
-            f"[OTP] Resend rejected request: HTTP {r.status_code} "
-            f"body={r.text[:300]!r}.  Code for {to_email}: {code}"
+            f"[email] Resend rejected: HTTP {r.status_code} body={r.text[:300]!r} to={to_email}"
         )
         return False
     except Exception as e:
-        logger.warning(
-            f"[OTP] Resend HTTP send failed: {e}.  Code for {to_email}: {code}"
-        )
+        logger.warning(f"[email] Resend HTTP send failed to={to_email}: {e}")
         return False
+
+
+async def send_email_via_resend_async(to_email: str, subject: str, body: str) -> bool:
+    """Async wrapper used as `send_email` callback for the family-group
+    router.  Runs the sync HTTP call in a threadpool so we don't block
+    the event loop while Resend's API responds."""
+    import asyncio
+    return await asyncio.to_thread(_send_email_via_resend, to_email, subject, body)
+
+
+def _send_otp_via_resend(to_email: str, code: str, purpose: str) -> bool:
+    """OTP-specific Resend sender. Wraps the generic helper with
+    OTP-shaped subject/body + logging."""
+    subject, body = _otp_email_body(code, purpose)
+    ok = _send_email_via_resend(to_email, subject, body)
+    if ok:
+        logger.info(
+            f"[OTP] Delivered code to {to_email} via Resend (purpose={purpose})"
+        )
+    else:
+        logger.warning(
+            f"[OTP] Resend send failed.  Code for {to_email}: {code}"
+        )
+    return ok
 
 
 def _send_otp_via_smtp(to_email: str, code: str, purpose: str) -> bool:
@@ -1074,10 +1083,16 @@ async def verify_otp(data: OtpVerify):
             tz = "UTC"
 
         # Resolve invite code (if any) BEFORE creating the user.
+        # Accepts EITHER a per-recipient INV-XXXXXX token (single-use,
+        # 7-day expiry, tracked in db.family_invites) OR the legacy
+        # family-wide KINN-XXXXXX wall code.  The resolver returns the
+        # matched group plus the invite row (for INV- tokens only) so
+        # we can mark it accepted after the user is created.
         target_group = None
+        accepted_invite = None
         invite_code = rec.get("invite_code")
         if invite_code:
-            target_group = await fg.get_group_by_code(db, invite_code)
+            target_group, accepted_invite = await fg.resolve_invite_code(db, invite_code)
             if not target_group:
                 raise HTTPException(status_code=404, detail="Invite code not found")
 
@@ -1104,6 +1119,29 @@ async def verify_otp(data: OtpVerify):
             )
             doc["family_group_id"] = target_group["id"]
             doc["family_group_role"] = "member"
+            # If they used a per-recipient INV- token, mark it accepted
+            # and notify the inviter via push.  Best-effort — never fail
+            # signup just because the bookkeeping push misfires.
+            if accepted_invite:
+                try:
+                    await fg.accept_invite(db, accepted_invite["id"], user_id)
+                except Exception as e:
+                    logger.warning(f"accept_invite bookkeeping failed: {e}")
+                inviter_id = accepted_invite.get("invited_by_user_id")
+                if inviter_id and inviter_id != user_id:
+                    try:
+                        await push_to_user(
+                            inviter_id,
+                            "✅ Family invite accepted",
+                            f"{doc['full_name']} just joined your Kinnship family.",
+                            {
+                                "type": "family_join",
+                                "user_id": user_id,
+                                "invite_id": accepted_invite["id"],
+                            },
+                        )
+                    except Exception as e:
+                        logger.warning(f"inviter push failed: {e}")
         else:
             group = await fg.create_group_for_user(db, doc)
             doc["family_group_id"] = group["id"]
@@ -1812,7 +1850,20 @@ async def delete_reminder(reminder_id: str, current=Depends(get_current_user)):
     r = await db.reminders.delete_one({"id": reminder_id, "family_group_id": current["family_group_id"]})
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Reminder not found")
-    return {"ok": True}
+    # Cascade: remove all scheduler bookkeeping rows tied to this reminder.
+    # Without this, med_notifications for the deleted reminder linger forever
+    # and (a) waste storage, (b) confuse the per-slot dedupe logic if a
+    # reminder with the same id is somehow recreated, and (c) make the
+    # /medications/_stages/{reminder_id} endpoint return stale data.
+    # Scoped by family_group_id too as belt-and-suspenders tenant isolation.
+    n = await db.med_notifications.delete_many({
+        "reminder_id": reminder_id,
+        "family_group_id": current["family_group_id"],
+    })
+    logger.info(
+        f"[reminder] deleted {reminder_id}; cleaned {n.deleted_count} med_notifications row(s)"
+    )
+    return {"ok": True, "med_notifications_deleted": n.deleted_count}
 
 
 # ========== Medication history / weekly compliance ==========
@@ -2341,7 +2392,7 @@ async def medications_stages(reminder_id: str, current=Depends(get_current_user)
 
 
 # Register family group routes (multi-user family invite & membership)
-api_router.include_router(fg.build_router(db, get_current_user, push_to_user=push_to_user))
+api_router.include_router(fg.build_router(db, get_current_user, push_to_user=push_to_user, send_email=send_email_via_resend_async))
 
 
 app.include_router(api_router)

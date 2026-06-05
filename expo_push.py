@@ -51,7 +51,7 @@ async def send_expo_push(
 
     Optional fields read from `data`:
         categoryIdentifier — iOS/Android notification category (for action buttons)
-        channelId          — Android notification channel id (e.g. 'meds', 'sos')
+        channelId          — Android notification channel id (e.g. 'meds_v2', 'sos')
     """
     valid = [t for t in (tokens or []) if is_valid_expo_token(t)]
     if not valid:
