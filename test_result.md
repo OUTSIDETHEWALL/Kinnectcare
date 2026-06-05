@@ -6879,3 +6879,334 @@ agent_communication:
 - Recovery: 'Having trouble? Reset app' link on both PIN screens (last-resort wipe)
 - Android versionCode 19 → 20
 
+
+
+## Family Invite-by-Email Feature (per-recipient INV-XXXXXX tokens)
+
+backend:
+  - task: "POST /api/family-group/invite — create per-recipient invite + send email"
+    implemented: true
+    working: true
+    file: "/app/backend/family_group.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Implemented Flavor B per user spec (email-only, no SMS, no magic
+          link, per-invite tokens for security/revocability).  New
+          db.family_invites collection.  Endpoint validates name + email,
+          creates a unique INV-XXXXXX token (different prefix from the
+          family-wide KINN- code so backend dispatch is unambiguous),
+          persists with 7-day expiry, and fires the email via Resend.
+          Returns delivered=true|false so the client can fall back to
+          showing the code for manual share.  Soft cap of 50 pending
+          invites per group.
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — POST /api/family-group/invite is fully functional via
+          /app/backend_test.py against http://localhost:8001/api.
+            • Happy path: POST {name:"Bob", email:"…"} → 200 with body
+              {ok:true, delivered:false, invite:{token:"INV-XXXXXX",
+              status:"pending", expires_at:<ISO ~7 days out>, id, …}}.
+              Token correctly uses INV- prefix (distinct from KINN-).
+            • Validation:
+                - empty name → 400 "Name must be 1-80 characters"
+                - empty email → 422 (FastAPI EmailStr)
+                - invalid email "not-an-email" → 422
+                - no Authorization header → 403
+            • Email fallback: with Resend env vars unset, endpoint
+              returns delivered=false but still 200 and the invite row
+              is persisted in db.family_invites (verified via direct
+              Mongo read).  No 500.
+            • Soft cap: created 50 pending invites in 0.2s, the 51st
+              returned 429 with detail "Too many pending invites.
+              Revoke old ones first."
+            • DB-level tenant isolation: invites are partitioned by
+              family_group_id correctly.
+          No issues found on this endpoint specifically.
+
+  - task: "GET /api/family-group/invites — list current invites with auto-expire"
+    implemented: true
+    working: false
+    file: "/app/backend/family_group.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Returns all invites for the caller's family group, sorted by
+          created_at desc.  Auto-transitions any obviously-stale pending
+          rows to status='expired' on read so we don't need a cron job
+          for MVP.
+      - working: false
+        agent: "testing"
+        comment: |
+          FAIL — CRITICAL BUG.  GET /api/family-group/invites returns
+          HTTP 500 (Internal Server Error) whenever the caller's family
+          group has at least one pending invite.  Backend traceback:
+
+              File "/app/backend/family_group.py", line 633, in list_invites
+                and now > exp
+                    ^^^^^^^^^
+              TypeError: can't compare offset-naive and offset-aware datetimes
+
+          Root cause: when an invite is read back from MongoDB via Motor,
+          its `expires_at` field comes back as a naive datetime (no
+          tzinfo) even though it was written with timezone.utc.  The
+          auto-expire pass in list_invites then does
+
+              now = datetime.now(timezone.utc)        # aware
+              ... and isinstance(exp, datetime) and now > exp ...
+
+          which raises immediately on the first pending row.  This
+          endpoint therefore NEVER returns 200 in normal use — the only
+          way the test could ever see an empty 200 is on a brand-new
+          group with zero invites.
+
+          Suggested fix (do NOT applied by testing agent):
+              if isinstance(exp, datetime) and exp.tzinfo is None:
+                  exp = exp.replace(tzinfo=timezone.utc)
+          immediately before the `now > exp` comparison.  Same fix
+          should be applied to resolve_invite_code() at family_group.py:
+          149 (see related task below).
+
+          Cascading impact: this break also kills the "GET shows Bob's
+          invite as accepted after Bob joins" assertion in Scenario A,
+          the tenant-isolation assertions in Scenario H, and the
+          fallback-visible-in-GET assertion in Scenario F (though the
+          underlying invite IS persisted in MongoDB — verified via
+          direct DB read).
+
+  - task: "DELETE /api/family-group/invites/{id} — revoke a pending invite"
+    implemented: true
+    working: true
+    file: "/app/backend/family_group.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Marks status='revoked'.  Idempotent (no-op if already
+          accepted/expired/revoked).  Scoped by family_group_id so users
+          can only revoke their own group's invites.
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — Scenario D fully green via /app/backend_test.py.
+            • DELETE /api/family-group/invites/{id} on a pending invite
+              → 200 {ok:true, status:"revoked"}.
+            • Re-DELETE the same id → 200 {ok:true, status:"revoked"}
+              (idempotent — confirmed not a 404 on second call because
+              the row is still found, just no longer pending).
+            • DELETE with an unknown UUID → 404 "Invite not found".
+            • Cross-tenant: Erin (in a separate solo family group)
+              trying to DELETE Alice's invite id → 404 (tenant scoped
+              by family_group_id, no leak).
+            • Subsequent signup with the revoked INV- token → 404
+              "Invite code not found" (the resolver only matches
+              status='pending').
+
+  - task: "OTP verify accepts INV-XXXXXX tokens + marks invite accepted"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py, /app/backend/family_group.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Modified the signup branch of /api/auth/verify-otp to use the
+          new fg.resolve_invite_code() helper, which transparently
+          accepts BOTH the legacy family-wide KINN-XXXXXX code AND the
+          new per-recipient INV-XXXXXX tokens.  On INV- acceptance the
+          invite row is marked status='accepted' and a push notification
+          is sent to the inviter ("✅ Family invite accepted").
+      - working: false
+        agent: "testing"
+        comment: |
+          FAIL — CRITICAL BUG.  POST /api/auth/verify-otp with an
+          INV-XXXXXX invite_code always returns HTTP 500.  Backend
+          traceback:
+
+              File "/app/backend/server.py", line 1095, in verify_otp
+                target_group, accepted_invite = await fg.resolve_invite_code(db, invite_code)
+              File "/app/backend/family_group.py", line 149, in resolve_invite_code
+                if isinstance(exp, datetime) and datetime.now(timezone.utc) > exp:
+                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+              TypeError: can't compare offset-naive and offset-aware datetimes
+
+          Root cause is the same naive-vs-aware datetime issue as the
+          /family-group/invites listing endpoint: the `expires_at` field
+          comes back from MongoDB without tzinfo, and the comparison
+          against `datetime.now(timezone.utc)` raises immediately.  As a
+          result NO INV- token can ever be redeemed in signup; the
+          entire per-recipient invite acceptance flow is unreachable
+          until this is patched.
+
+          Suggested fix: same one-liner as for list_invites — promote
+          exp to UTC-aware before comparing:
+
+              if isinstance(exp, datetime):
+                  if exp.tzinfo is None:
+                      exp = exp.replace(tzinfo=timezone.utc)
+                  if datetime.now(timezone.utc) > exp:
+                      ...
+
+          IMPORTANT: the legacy KINN-XXXXXX code path is NOT affected —
+          Charlie successfully signed up via signup OTP using Alice's
+          KINN- family-wide code and was correctly attached to her
+          family group (verified Charlie.family_group_id == Alice.family_group_id).
+          Only the INV- branch of resolve_invite_code() crashes.
+
+          Cascading impact: this break also kills Scenarios A (Bob
+          can't accept the invite) and B (since Bob's invite never
+          flips to status='accepted', we can't test the "single use"
+          guarantee end-to-end — though the resolver logic itself
+          would correctly reject already-accepted invites because the
+          query is `{"token":code, "status":"pending"}`).
+
+frontend:
+  - task: "Family Group screen — Invite-by-email card + modal + pending list"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/family-group.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Added a new card titled "INVITE BY EMAIL" between the existing
+          Members card and the Actions card on /family-group.  Single
+          "✉ Invite a family member" CTA opens a modal that takes name
+          + email and POSTs to /api/family-group/invite.  Success alert
+          shows the generated INV-XXXXXX token.  Pending invites list
+          appears below the CTA with a Revoke button per row.  The
+          existing KINN-XXXXXX family-wide code box is unchanged.
+
+
+test_plan:
+  current_focus:
+    - "GET /api/family-group/invites — list current invites with auto-expire"
+    - "OTP verify accepts INV-XXXXXX tokens + marks invite accepted"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "stuck_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Family Invite-by-Email backend testing COMPLETE — 22/29 scenario
+      assertions PASS, 7 FAIL.  All failures share ONE root cause:
+      naive-vs-aware datetime comparison when reading `expires_at` back
+      from MongoDB (Motor returns datetimes without tzinfo, but the code
+      compares against `datetime.now(timezone.utc)`).
+
+      Per-scenario tally (from /app/backend_test.py against
+      http://localhost:8001/api):
+        A) Happy path             : 5/9   FAIL — Bob can't accept INV-
+                                            token (verify-otp 500); GET
+                                            /invites also 500's so we
+                                            can't see status='accepted'.
+        B) INV- token single-use  : 0/1   FAIL — same 500 prevents the
+                                            test from reaching the
+                                            "already-accepted → 404"
+                                            branch. The query logic
+                                            ({"token":code,"status":"pending"})
+                                            is correct on inspection.
+        C) Legacy KINN- code      : 2/2   PASS — Charlie joined Alice's
+                                            family via KINN-XXXXXX. No
+                                            regression on the family-wide
+                                            code path.
+        D) Revoke flow            : 4/4   PASS — DELETE returns 200
+                                            status="revoked"; idempotent
+                                            on re-delete; revoked INV-
+                                            token rejected on signup with
+                                            404 "Invite code not found";
+                                            unknown id → 404; tenant
+                                            scoping works.
+        E) Validation / 4xx       : 6/6   PASS — empty name → 400;
+                                            empty/invalid email → 422
+                                            (FastAPI EmailStr); no auth
+                                            → 403; unknown id → 404;
+                                            cross-tenant DELETE → 404.
+        F) Email fallback         : 2/3   2 PASS / 1 FAIL — POST /invite
+                                            with Resend env unset
+                                            returns 200 delivered:false
+                                            and persists the row in
+                                            db.family_invites (verified
+                                            via direct Mongo read).
+                                            The GET /invites visibility
+                                            assertion fails ONLY because
+                                            of the same 500 bug.
+        G) Soft cap (51st → 429)  : 1/1   PASS — created 50 pending
+                                            invites in 0.2s; 51st
+                                            returned 429 with detail
+                                            "Too many pending invites.
+                                            Revoke old ones first."
+        H) Tenant isolation       : 2/4   2 PASS / 2 FAIL via API (500),
+                                            but DB-level partition is
+                                            verified correct: alice's
+                                            family_invites and erin's
+                                            family_invites have zero
+                                            overlap by family_group_id.
+
+      ==== CRITICAL BUGS (both same root cause) ====
+
+      1) /app/backend/family_group.py:149  (resolve_invite_code)
+         When an INV-XXXXXX token is presented, the function does
+
+             exp = invite.get("expires_at")
+             if isinstance(exp, datetime) and datetime.now(timezone.utc) > exp:
+
+         `exp` is naive (Motor strips tzinfo on read).  This raises
+         TypeError → 500.  Effect: NO INV- token can EVER be redeemed
+         in /api/auth/verify-otp.  The entire per-recipient invite
+         feature is unreachable.
+
+      2) /app/backend/family_group.py:633  (list_invites)
+         Same comparison in the auto-expire loop:
+
+             now = datetime.now(timezone.utc)
+             ...
+             if r.get("status") == "pending" and isinstance(exp, datetime) and now > exp:
+
+         GET /api/family-group/invites → 500 whenever the caller's
+         family group has ≥1 pending invite.  Effect: the pending-
+         invites list is permanently invisible to the client.
+
+      ==== SUGGESTED FIX (do not applied by testing agent) ====
+      Promote naive `exp` to UTC-aware before comparing.  At both
+      sites:
+
+          if isinstance(exp, datetime):
+              if exp.tzinfo is None:
+                  exp = exp.replace(tzinfo=timezone.utc)
+              if datetime.now(timezone.utc) > exp:
+                  ...
+
+      Alternative: rely on Motor's `tz_aware=True` AsyncIOMotorClient
+      kwarg in server.py to globally fix all reads.  Either approach
+      will unblock the entire feature in a one-line patch.
+
+      ==== Frontend testing intentionally skipped ====
+      Frontend invite-by-email card was not exercised per the protocol
+      (backend-only test).  Recommend re-testing both backend
+      endpoints listed in `current_focus` once the datetime fix is
+      applied; everything else (POST /invite, DELETE /invite/{id},
+      KINN- legacy code path, soft cap, validation) is already green
+      and does not need to be retested.
+
+      Test artifact: /app/backend_test.py (re-runnable; respects
+      SKIP_SOFT_CAP=1 to skip the 50-invite bulk create).

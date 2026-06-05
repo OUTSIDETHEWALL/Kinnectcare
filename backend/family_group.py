@@ -21,24 +21,46 @@ User document gets two fields:
 
 All data collections (members, reminders, alerts, checkins, medication_logs)
 get a `family_group_id` field for fast group-scoped queries.
+
+Schema (db.family_invites) — per-recipient invites sent by email.  Distinct
+from `family_groups.invite_code` (which is the group's shareable wall code).
+A per-invite token is single-use, expires after 7 days, and can be revoked
+without affecting other pending invites.
+
+    {
+        id: str (uuid),
+        token: str (e.g. "INV-X3K9P2", unique),
+        family_group_id: str,
+        invited_by_user_id: str,
+        inviter_name: str,         # cached for display in the email
+        invitee_name: str,
+        invitee_email: str,        # lower-cased
+        status: "pending"|"accepted"|"expired"|"revoked",
+        created_at: datetime,
+        expires_at: datetime,      # created_at + 7 days
+        accepted_by_user_id: Optional[str],
+        accepted_at: Optional[datetime],
+    }
 """
 from __future__ import annotations
 
 import logging
 import secrets
 import uuid
-from datetime import datetime, timezone
-from typing import List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Awaitable, Callable, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 logger = logging.getLogger(__name__)
 
 INVITE_CODE_PREFIX = "KINN"
+PER_INVITE_PREFIX = "INV"
 # Avoid visually ambiguous chars (0/O, 1/I/L)
 INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 INVITE_LEN = 6
+INVITE_TTL_DAYS = 7
 
 DATA_COLLECTIONS = (
     "members",
@@ -62,6 +84,11 @@ class FamilyGroupMemberRemove(BaseModel):
     user_id: str
 
 
+class FamilyInviteCreate(BaseModel):
+    name: str
+    email: EmailStr
+
+
 # ---------- Helpers ----------
 def generate_invite_code() -> str:
     code = "".join(secrets.choice(INVITE_ALPHABET) for _ in range(INVITE_LEN))
@@ -83,6 +110,106 @@ async def _generate_unique_invite_code(db) -> str:
     return f"{INVITE_CODE_PREFIX}-{uuid.uuid4().hex[:8].upper()}"
 
 
+def generate_invite_token() -> str:
+    code = "".join(secrets.choice(INVITE_ALPHABET) for _ in range(INVITE_LEN))
+    return f"{PER_INVITE_PREFIX}-{code}"
+
+
+async def _generate_unique_invite_token(db) -> str:
+    for _ in range(8):
+        c = generate_invite_token()
+        if not await db.family_invites.find_one({"token": c}):
+            return c
+    return f"{PER_INVITE_PREFIX}-{uuid.uuid4().hex[:8].upper()}"
+
+
+async def resolve_invite_code(
+    db, code: str
+) -> Tuple[Optional[dict], Optional[dict]]:
+    """Resolve any invite code (family-wide OR per-recipient token).
+
+    Returns (group, invite) where exactly one path is taken:
+      • per-invite token (`INV-XXXXXX`) → returns (group, invite_doc)
+      • family-wide code (`KINN-XXXXXX`) → returns (group, None)
+      • unknown / expired / revoked / accepted → returns (None, None)
+
+    Expired pending invites are auto-transitioned to `expired` on read so
+    they never come back from the dead even if expires_at is later bumped.
+    """
+    code = normalize_invite_code(code)
+    if not code:
+        return None, None
+
+    if code.startswith(PER_INVITE_PREFIX + "-"):
+        invite = await db.family_invites.find_one({"token": code}, {"_id": 0})
+        if not invite or invite.get("status") != "pending":
+            return None, None
+        # Expiry check
+        exp = invite.get("expires_at")
+        if isinstance(exp, datetime) and datetime.now(timezone.utc) > exp:
+            try:
+                await db.family_invites.update_one(
+                    {"id": invite["id"]}, {"$set": {"status": "expired"}}
+                )
+            except Exception:
+                pass
+            return None, None
+        group = await db.family_groups.find_one(
+            {"id": invite["family_group_id"]}, {"_id": 0}
+        )
+        if not group:
+            return None, None
+        return group, invite
+
+    # Fall back to family-wide code lookup.
+    group = await get_group_by_code(db, code)
+    return group, None
+
+
+async def accept_invite(db, invite_id: str, accepted_by_user_id: str) -> None:
+    """Mark a pending invite as accepted. Idempotent."""
+    await db.family_invites.update_one(
+        {"id": invite_id, "status": "pending"},
+        {"$set": {
+            "status": "accepted",
+            "accepted_by_user_id": accepted_by_user_id,
+            "accepted_at": datetime.now(timezone.utc),
+        }},
+    )
+
+
+def _invite_email_body(
+    *, inviter_name: str, group_name: str, token: str, invitee_name: str,
+    expires_at: datetime,
+) -> Tuple[str, str]:
+    """Build (subject, plain-text body) for the invite email."""
+    subject = f"{inviter_name} invited you to join their family on Kinnship"
+    # Format expiry as a friendly local-ish date (UTC is fine for MVP).
+    exp_str = expires_at.strftime("%b %d, %Y")
+    body = (
+        f"Hi {invitee_name},\n\n"
+        f"{inviter_name} has invited you to join \"{group_name}\" on "
+        f"Kinnship — the family safety & wellness app for keeping loved "
+        f"ones connected and protected.\n\n"
+        f"Your personal invite code is:\n\n"
+        f"    {token}\n\n"
+        f"To accept:\n"
+        f"  1. Download Kinnship from the Play Store / App Store (or "
+        f"open it if you already have it installed).\n"
+        f"  2. Tap \"Sign Up\".\n"
+        f"  3. Paste the invite code above into the \"Family invite code\" "
+        f"field on the sign-up screen.\n"
+        f"  4. Complete the email verification.\n\n"
+        f"Once you sign in you'll be linked to {inviter_name}'s family group "
+        f"automatically. From there your SOS button, check-ins, and fall-"
+        f"detection alerts will notify everyone in the family.\n\n"
+        f"This invite expires on {exp_str}.  If you didn't expect this "
+        f"email you can safely ignore it.\n\n"
+        f"— The Kinnship team"
+    )
+    return subject, body
+
+
 def _default_group_name(user: dict) -> str:
     name = (user.get("full_name") or "Family").strip()
     first = name.split()[0] if name else "Family"
@@ -100,6 +227,10 @@ async def create_group_for_user(db, user: dict) -> dict:
         "created_at": datetime.now(timezone.utc),
     }
     await db.family_groups.insert_one(group)
+    # `insert_one` mutates `group` to add a Mongo `_id` (ObjectId).  Strip
+    # it before returning so callers that pass the dict straight into a
+    # JSON response don't hit ObjectId-serialisation crashes.
+    group.pop("_id", None)
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {
@@ -211,8 +342,20 @@ def public_member_row(u: dict, owner_user_id: Optional[str]) -> dict:
 
 
 # ---------- Routes (registered on /api/family-group) ----------
-def build_router(db, get_current_user, push_to_user=None):
-    """Build the family-group APIRouter wired against the provided db and auth dep."""
+def build_router(
+    db,
+    get_current_user,
+    push_to_user=None,
+    send_email: Optional[Callable[[str, str, str], Awaitable[bool]]] = None,
+):
+    """Build the family-group APIRouter wired against the provided db and auth dep.
+
+    `send_email(to_email, subject, body) -> bool` is an OPTIONAL coroutine that
+    delivers an outgoing email (e.g. via Resend).  When provided, the
+    /invite endpoint will call it after creating the invite record; when
+    None the invite is still recorded (useful in tests) but no email goes
+    out.
+    """
     router = APIRouter(prefix="/family-group", tags=["family-group"])
 
     @router.get("")
@@ -389,4 +532,152 @@ def build_router(db, get_current_user, push_to_user=None):
         await transfer_data_to_group(db, target_user["id"], solo["id"])
         return {"ok": True, "removed_user_id": data.user_id}
 
+    # ----- Email invitations (per-recipient tokens) -----
+    @router.post("/invite")
+    async def send_invite(
+        data: FamilyInviteCreate,
+        current=Depends(get_current_user),
+    ):
+        """Email a single-use invite token to a prospective family member.
+
+        Any group member (owner or member) can send invites — staying
+        consistent with how /family-group/regenerate-code is owner-only
+        but viewing+sharing the wall code is open to all.  Keep this
+        open so e.g. a sibling caregiver can invite their parent without
+        needing the household owner's account.
+        """
+        gid = await ensure_family_group(db, current)
+        group = await get_group(db, gid)
+        if not group:
+            raise HTTPException(404, "Family group not found")
+
+        name = (data.name or "").strip()
+        email = (data.email or "").strip().lower()
+        if not name or len(name) > 80:
+            raise HTTPException(400, "Name must be 1-80 characters")
+        if not email or "@" not in email:
+            raise HTTPException(400, "Valid email required")
+
+        # Soft cap: refuse if there are already 50 pending invites for
+        # this group (abuse-prevention; tweak later if needed).
+        pending = await db.family_invites.count_documents(
+            {"family_group_id": gid, "status": "pending"}
+        )
+        if pending >= 50:
+            raise HTTPException(
+                429, "Too many pending invites. Revoke old ones first."
+            )
+
+        token = await _generate_unique_invite_token(db)
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(days=INVITE_TTL_DAYS)
+        inviter_name = (current.get("full_name") or "A Kinnship user").strip()
+        group_name = group.get("name") or "Family"
+
+        invite_doc = {
+            "id": str(uuid.uuid4()),
+            "token": token,
+            "family_group_id": gid,
+            "invited_by_user_id": current["id"],
+            "inviter_name": inviter_name,
+            "invitee_name": name,
+            "invitee_email": email,
+            "status": "pending",
+            "created_at": now,
+            "expires_at": expires,
+            "accepted_by_user_id": None,
+            "accepted_at": None,
+        }
+        await db.family_invites.insert_one(invite_doc)
+
+        # Send the email out-of-band.  Don't fail the request if the
+        # transport is misconfigured — the invite row is persisted and
+        # the inviter can copy the token to share manually as fallback.
+        delivered = False
+        if send_email is not None:
+            try:
+                subject, body = _invite_email_body(
+                    inviter_name=inviter_name,
+                    group_name=group_name,
+                    token=token,
+                    invitee_name=name,
+                    expires_at=expires,
+                )
+                delivered = bool(await send_email(email, subject, body))
+            except Exception as e:
+                logger.warning(f"family invite email send failed: {e}")
+                delivered = False
+        return {
+            "ok": True,
+            "delivered": delivered,
+            "invite": _public_invite(invite_doc),
+        }
+
+    @router.get("/invites")
+    async def list_invites(current=Depends(get_current_user)):
+        """List all invites for the current user's family group."""
+        gid = await ensure_family_group(db, current)
+        cursor = db.family_invites.find(
+            {"family_group_id": gid}, {"_id": 0}
+        ).sort("created_at", -1)
+        rows = await cursor.to_list(200)
+        # Auto-transition any obviously-stale pending rows to `expired`
+        # on read so the client sees consistent state without a cron.
+        now = datetime.now(timezone.utc)
+        cleaned = []
+        for r in rows:
+            exp = r.get("expires_at")
+            if (
+                r.get("status") == "pending"
+                and isinstance(exp, datetime)
+                and now > exp
+            ):
+                try:
+                    await db.family_invites.update_one(
+                        {"id": r["id"]}, {"$set": {"status": "expired"}}
+                    )
+                except Exception:
+                    pass
+                r["status"] = "expired"
+            cleaned.append(_public_invite(r))
+        return {"invites": cleaned, "count": len(cleaned)}
+
+    @router.delete("/invites/{invite_id}")
+    async def revoke_invite(
+        invite_id: str,
+        current=Depends(get_current_user),
+    ):
+        """Revoke a still-pending invite. No-op if already
+        accepted/expired/revoked."""
+        gid = await ensure_family_group(db, current)
+        inv = await db.family_invites.find_one(
+            {"id": invite_id, "family_group_id": gid}, {"_id": 0}
+        )
+        if not inv:
+            raise HTTPException(404, "Invite not found")
+        if inv.get("status") != "pending":
+            return {"ok": True, "status": inv.get("status")}
+        await db.family_invites.update_one(
+            {"id": invite_id}, {"$set": {"status": "revoked"}}
+        )
+        return {"ok": True, "status": "revoked"}
+
     return router
+
+
+def _public_invite(inv: dict) -> dict:
+    """Serialise an invite row for API consumers (no internal ObjectIDs,
+    safe ISO datetimes)."""
+    def _iso(v):
+        return v.isoformat() if isinstance(v, datetime) else v
+    return {
+        "id": inv.get("id"),
+        "token": inv.get("token"),
+        "invitee_name": inv.get("invitee_name"),
+        "invitee_email": inv.get("invitee_email"),
+        "inviter_name": inv.get("inviter_name"),
+        "status": inv.get("status"),
+        "created_at": _iso(inv.get("created_at")),
+        "expires_at": _iso(inv.get("expires_at")),
+        "accepted_at": _iso(inv.get("accepted_at")),
+    }

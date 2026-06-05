@@ -24,7 +24,11 @@ import {
   joinFamilyGroup,
   leaveFamilyGroup,
   removeFamilyMember,
+  sendFamilyInvite,
+  listFamilyInvites,
+  revokeFamilyInvite,
   FamilyGroupResponse,
+  FamilyInvite,
 } from '../src/api';
 import { useAuth } from '../src/AuthContext';
 import { APP_NAME } from '../src/legal';
@@ -44,17 +48,36 @@ export default function FamilyGroupScreen() {
   const [joinCode, setJoinCode] = useState('');
   const [joinError, setJoinError] = useState<string | null>(null);
 
+  // Per-recipient email invites
+  const [invites, setInvites] = useState<FamilyInvite[]>([]);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteName, setInviteName] = useState('');
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+
+  const loadInvites = useCallback(async () => {
+    try {
+      const r = await listFamilyInvites();
+      setInvites(r.invites || []);
+    } catch {
+      // Non-fatal — invite list is a polish feature, the rest of the
+      // screen works without it.
+    }
+  }, []);
+
   const load = useCallback(async () => {
     try {
       setError(null);
       const r = await getFamilyGroup();
       setData(r);
+      loadInvites();
     } catch (e: any) {
       setError(e?.response?.data?.detail || e?.message || 'Failed to load family');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [loadInvites]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -79,6 +102,59 @@ export default function FamilyGroupScreen() {
     } catch {
       onCopyCode();
     }
+  };
+
+  const onSendInvite = async () => {
+    const name = inviteName.trim();
+    const email = inviteEmail.trim().toLowerCase();
+    if (!name) { setInviteError('Please enter their name.'); return; }
+    if (!email || !email.includes('@')) { setInviteError('Please enter a valid email.'); return; }
+    setInviteBusy(true);
+    setInviteError(null);
+    try {
+      const r = await sendFamilyInvite({ name, email });
+      setInviteOpen(false);
+      setInviteName('');
+      setInviteEmail('');
+      await loadInvites();
+      if (r.delivered) {
+        Alert.alert(
+          'Invite sent ✉',
+          `${name} will receive an email with their invite code:\n\n${r.invite.token}\n\nThis code expires in 7 days.`,
+        );
+      } else {
+        Alert.alert(
+          'Invite saved — email not delivered',
+          `Email transport unavailable right now. Share this code with ${name} manually:\n\n${r.invite.token}`,
+        );
+      }
+    } catch (e: any) {
+      setInviteError(e?.response?.data?.detail || e?.message || 'Failed to send invite');
+    } finally {
+      setInviteBusy(false);
+    }
+  };
+
+  const onRevokeInvite = (inv: FamilyInvite) => {
+    Alert.alert(
+      'Revoke invite?',
+      `Revoke the invite for ${inv.invitee_name} (${inv.invitee_email})?\n\nThey won't be able to use the code anymore.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Revoke',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await revokeFamilyInvite(inv.id);
+              await loadInvites();
+            } catch (e: any) {
+              Alert.alert('Error', e?.response?.data?.detail || 'Could not revoke invite');
+            }
+          },
+        },
+      ],
+    );
   };
 
   const onRegenerate = async () => {
@@ -326,6 +402,62 @@ export default function FamilyGroupScreen() {
             })}
           </View>
 
+          {/* Email invitations (per-recipient) */}
+          <View style={styles.card}>
+            <Text style={styles.sectionLabel}>INVITE BY EMAIL</Text>
+            <Text style={styles.sectionHelp}>
+              Send a unique invite code by email. They'll join your family
+              automatically when they sign up — so their SOS button, check-ins,
+              and fall-detection alerts notify everyone here.
+            </Text>
+            <TouchableOpacity
+              style={styles.inviteBtn}
+              onPress={() => {
+                setInviteError(null);
+                setInviteName('');
+                setInviteEmail('');
+                setInviteOpen(true);
+              }}
+              testID="fg-open-invite"
+            >
+              <Text style={styles.inviteBtnTxt}>✉ Invite a family member</Text>
+            </TouchableOpacity>
+
+            {invites.filter(i => i.status === 'pending').length > 0 ? (
+              <>
+                <Text style={[styles.sectionLabel, { marginTop: 16 }]}>PENDING INVITES</Text>
+                {invites
+                  .filter(i => i.status === 'pending')
+                  .slice(0, 10)
+                  .map((inv, i) => (
+                    <View key={inv.id}>
+                      {i > 0 ? <View style={styles.divider} /> : null}
+                      <View style={styles.inviteRow} testID={`fg-invite-${inv.id}`}>
+                        <View style={{ flex: 1, paddingRight: 8 }}>
+                          <Text style={styles.memberName} numberOfLines={1}>
+                            {inv.invitee_name}
+                          </Text>
+                          <Text style={styles.memberEmail} numberOfLines={1}>
+                            {inv.invitee_email}
+                          </Text>
+                          <Text style={styles.inviteTokenTxt} selectable numberOfLines={1}>
+                            {inv.token}
+                          </Text>
+                        </View>
+                        <TouchableOpacity
+                          onPress={() => onRevokeInvite(inv)}
+                          testID={`fg-revoke-${inv.id}`}
+                          hitSlop={10}
+                        >
+                          <Text style={styles.removeTxt}>Revoke</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ))}
+              </>
+            ) : null}
+          </View>
+
           {/* Actions */}
           <View style={styles.card}>
             <TouchableOpacity
@@ -443,6 +575,67 @@ export default function FamilyGroupScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Invite by email modal */}
+      <Modal
+        visible={inviteOpen}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setInviteOpen(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Invite a family member</Text>
+            <Text style={styles.modalBody}>
+              We'll email them a unique invite code. They can use it on the
+              Kinnship sign-up screen and will auto-join your family.
+            </Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Their name"
+              placeholderTextColor={Colors.textTertiary}
+              value={inviteName}
+              onChangeText={setInviteName}
+              autoCapitalize="words"
+              autoCorrect={false}
+              maxLength={80}
+              testID="fg-invite-name"
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="Their email"
+              placeholderTextColor={Colors.textTertiary}
+              value={inviteEmail}
+              onChangeText={setInviteEmail}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="email-address"
+              maxLength={120}
+              testID="fg-invite-email"
+            />
+            {inviteError ? <Text style={styles.errorTxt}>{inviteError}</Text> : null}
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalBtnCancel]}
+                onPress={() => setInviteOpen(false)}
+                disabled={inviteBusy}
+              >
+                <Text style={styles.modalBtnCancelTxt}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalBtnPrimary]}
+                onPress={onSendInvite}
+                disabled={inviteBusy}
+                testID="fg-invite-submit"
+              >
+                <Text style={styles.modalBtnPrimaryTxt}>
+                  {inviteBusy ? 'Sending…' : 'Send invite'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -536,6 +729,25 @@ const styles = StyleSheet.create({
   },
   ownerPillTxt: { fontSize: 11, fontWeight: '700', color: Colors.success },
   removeTxt: { fontSize: 13, color: Colors.error, fontWeight: '600' },
+
+  // Email-invite UI
+  inviteBtn: {
+    backgroundColor: Colors.tertiary,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: Colors.primary,
+  },
+  inviteBtnTxt: { color: Colors.primary, fontSize: 15, fontWeight: '700' },
+  inviteRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10 },
+  inviteTokenTxt: {
+    fontSize: 13,
+    color: Colors.textSecondary,
+    marginTop: 4,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+    letterSpacing: 1,
+  },
 
   actionPrimary: {
     backgroundColor: Colors.primary,

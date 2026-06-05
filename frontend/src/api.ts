@@ -356,3 +356,35 @@ export async function removeFamilyMember(user_id: string): Promise<{ ok: boolean
   const r = await api.post('/family-group/remove-member', { user_id });
   return r.data;
 }
+
+// ---------- Email invitations (per-recipient INV-XXXXXX tokens) ----------
+
+export type FamilyInvite = {
+  id: string;
+  token: string;
+  invitee_name: string;
+  invitee_email: string;
+  inviter_name: string;
+  status: 'pending' | 'accepted' | 'expired' | 'revoked';
+  created_at?: string;
+  expires_at?: string;
+  accepted_at?: string | null;
+};
+
+export async function sendFamilyInvite(payload: {
+  name: string;
+  email: string;
+}): Promise<{ ok: boolean; delivered: boolean; invite: FamilyInvite }> {
+  const r = await api.post('/family-group/invite', payload);
+  return r.data;
+}
+
+export async function listFamilyInvites(): Promise<{ invites: FamilyInvite[]; count: number }> {
+  const r = await api.get('/family-group/invites');
+  return r.data;
+}
+
+export async function revokeFamilyInvite(id: string): Promise<{ ok: boolean; status: string }> {
+  const r = await api.delete(`/family-group/invites/${id}`);
+  return r.data;
+}
