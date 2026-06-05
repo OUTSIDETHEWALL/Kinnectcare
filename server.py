@@ -794,16 +794,9 @@ def _send_otp_via_resend(to_email: str, code: str, purpose: str) -> bool:
     OTP code is then logged for operator visibility).
     """
     api_key = os.environ.get("RESEND_API_KEY")
-    sender  = os.environ.get("RESEND_FROM")
-if not (api_key and sender):
-    resend_keys = [k for k in os.environ if "RESEND" in k.upper()]
-    logger.warning(
-        f"[OTP] Resend skipped — vars missing/empty: "
-        f"RESEND_API_KEY={'set(len=%d)' % len(api_key) if api_key else 'MISSING'} "
-        f"RESEND_FROM={'set(%r)' % sender if sender else 'MISSING'} "
-        f"env_keys_matching_RESEND={resend_keys}"
-    ) 
-    return False
+    sender = os.environ.get("RESEND_FROM")
+    if not (api_key and sender):
+        return False   
     
 
     subject, body = _otp_email_body(code, purpose)
