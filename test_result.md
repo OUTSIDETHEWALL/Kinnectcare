@@ -7332,3 +7332,89 @@ agent_communication:
 
       Test artifact: /app/backend_test.py (re-runnable; respects
       SKIP_SOFT_CAP=1 to skip the 50-invite bulk create).
+
+frontend:
+  - task: "Family Group screen — Invite-by-email card + modal + pending list"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/family-group.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "testing"
+        comment: |
+          BLOCKED — could not reach the /family-group screen through the Expo web preview
+          within the allotted browser-automation budget (3 invocations) due to two onboarding
+          gates that the task brief did not document. Backend is healthy (per the live logs
+          captured during the final run: GET /api/auth/me 200, GET /api/family-group 200,
+          GET /api/family-group/invites 200), so the failure is a test-harness/auth-gating
+          problem, NOT a feature regression.
+
+          What I confirmed worked:
+            * OTP signup flow: POST /api/auth/request-otp + grep err.log + POST /api/auth/verify-otp
+              returns a valid JWT. (Disposable user `frontend-test-alice-f003e9d8@example.com`
+              created; token stored in /app/memory/test_credentials.md.)
+            * On second attempt the JWT was correctly recognised by the app
+              — backend logs show /api/family-group calls succeeding once the right key
+              was used.
+
+          Documentation correction needed in the task brief:
+            * The Expo web build stores the JWT under localStorage key **`kc_token`**, not
+              `kinnship_token` (verified in `src/api.ts` and `src/AuthContext.tsx`,
+              `const TOKEN_KEY = 'kc_token'`). The same key name is used by SecureStore on
+              native.
+
+          Blockers that need a bypass for headless UI testing:
+            1. First-launch health disclaimer modal — set `localStorage.disclaimer_accepted='1'`
+               (key from `src/disclaimerStore.ts`, `DISCLAIMER_ACK_KEY`). Without it the
+               "Important Notice / I Understand" overlay sits in front of every screen.
+            2. **PIN-setup gate** (`/pin-setup`) — after a successful OTP login, `_layout.tsx`
+               routes the user into the "Choose a 4-digit PIN" screen which occludes
+               /family-group. A "Not now" link exists but I burned my browser budget on
+               steps 1–2 before discovering it. A persistent bypass flag from
+               `src/pinSetupPrompt.ts` (the prompt-deferred AsyncStorage key) needs to be
+               pre-seeded for headless runs.
+
+          Items 1–9 from the request — none could be exercised end-to-end this round.
+
+          Files touched only:
+            - /app/memory/test_credentials.md updated with disposable user + JWT + the
+              two correction notes above (token key + onboarding bypass flags).
+
+          Suggested next steps for main agent (no source-code change required to test, just
+          test-harness setup):
+            * In the next testing run, after injecting `localStorage.kc_token` and
+              `localStorage.disclaimer_accepted='1'`, navigate to `/family-group`, and
+              if the URL ends up at `/pin-setup`, click the "Not now" link (text exact
+              match) before asserting on `fg-open-invite`. OR pre-set the pin-setup
+              prompt-deferred key documented in `src/pinSetupPrompt.ts`.
+            * Once the screen is reachable, items 1–9 should run as scripted — the
+              code in family-group.tsx looks correct on review (validation strings,
+              inviteBusy guard, delivered/not-delivered alert branches, revoke
+              confirmation, modal state-reset on open all wired).
+
+test_plan:
+  current_focus:
+    - "Family Group screen — Invite-by-email card + modal + pending list"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Family Invite-by-Email UI testing is BLOCKED on Expo web preview by the
+      /pin-setup onboarding gate that sits between login and /family-group.
+      Token key in localStorage is `kc_token` (NOT `kinnship_token` as in brief).
+      Disclaimer key is `disclaimer_accepted`. Once both are set the app
+      authenticates and /api/family-group/* calls succeed (confirmed in backend
+      logs), but the PIN-setup screen still occludes the target route. Used my
+      3-invocation browser-automation budget; the very last run captured the
+      app correctly auth'd through to /pin-setup. Need either (a) a documented
+      "skip PIN" localStorage flag, or (b) the testing-agent should click the
+      "Not now" link on /pin-setup before asserting on fg-open-invite. Code in
+      family-group.tsx looks correct on review; no source modifications made.
+      Disposable test creds + correction notes saved to
+      /app/memory/test_credentials.md.
