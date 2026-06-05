@@ -107,7 +107,14 @@ export async function ensureNotificationChannel() {
       showBadge: true,
     });
     // Medications — heads-up, persistent, with action buttons.
-    await Notifications.setNotificationChannelAsync('meds', {
+    // Channel ID is 'meds_v2' (not 'meds') to force Android to register a
+    // fresh channel with the MAX importance + default sound settings below.
+    // Android caches channel settings at first-creation time and ignores
+    // later code-side changes; bumping the ID is the standard escape hatch.
+    // Best-effort: delete the legacy 'meds' channel so users don't see a
+    // dead entry in the system app-notification settings.
+    try { await Notifications.deleteNotificationChannelAsync('meds'); } catch (_e) {}
+    await Notifications.setNotificationChannelAsync('meds_v2', {
       name: 'Medication reminders',
       description: 'Time-to-take, family alerts, and refill reminders',
       importance: Notifications.AndroidImportance.MAX,
@@ -280,7 +287,7 @@ async function rePresentSticky(n: Notifications.Notification) {
 
   const channelId =
     data.channelId ||
-    (t === 'sos' || t === 'fall_detected' ? 'sos' : t === 'routine' ? 'routines' : 'meds');
+    (t === 'sos' || t === 'fall_detected' ? 'sos' : t === 'routine' ? 'routines' : 'meds_v2');
   const cat = data.categoryIdentifier;
   const stableId = stableNotificationId(data);
 
@@ -492,7 +499,7 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
               sticky: true,
               autoDismiss: false,
             } as any,
-            trigger: { seconds: 600, channelId: 'meds' } as any,
+            trigger: { seconds: 600, channelId: 'meds_v2' } as any,
           });
         } catch (_e) {}
         try {

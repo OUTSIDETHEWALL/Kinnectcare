@@ -1810,7 +1810,20 @@ async def delete_reminder(reminder_id: str, current=Depends(get_current_user)):
     r = await db.reminders.delete_one({"id": reminder_id, "family_group_id": current["family_group_id"]})
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Reminder not found")
-    return {"ok": True}
+    # Cascade: remove all scheduler bookkeeping rows tied to this reminder.
+    # Without this, med_notifications for the deleted reminder linger forever
+    # and (a) waste storage, (b) confuse the per-slot dedupe logic if a
+    # reminder with the same id is somehow recreated, and (c) make the
+    # /medications/_stages/{reminder_id} endpoint return stale data.
+    # Scoped by family_group_id too as belt-and-suspenders tenant isolation.
+    n = await db.med_notifications.delete_many({
+        "reminder_id": reminder_id,
+        "family_group_id": current["family_group_id"],
+    })
+    logger.info(
+        f"[reminder] deleted {reminder_id}; cleaned {n.deleted_count} med_notifications row(s)"
+    )
+    return {"ok": True, "med_notifications_deleted": n.deleted_count}
 
 
 # ========== Medication history / weekly compliance ==========
