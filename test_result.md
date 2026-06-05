@@ -6931,11 +6931,11 @@ backend:
 
   - task: "GET /api/family-group/invites — list current invites with auto-expire"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/family_group.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
       - working: "NA"
         agent: "main"
@@ -6982,6 +6982,41 @@ backend:
           fallback-visible-in-GET assertion in Scenario F (though the
           underlying invite IS persisted in MongoDB — verified via
           direct DB read).
+      - working: true
+        agent: "testing"
+        comment: |
+          RE-TEST AFTER FIX — PASS. Fix verified at family_group.py
+          list_invites (~L634): naive `expires_at` is now promoted to
+          UTC-aware before the `now > exp` comparison. Tested via
+          /app/backend_test_invite_retest.py against http://localhost:8001/api:
+            • Created fresh Alice (kinn-invite-retest-alice-<rand>@example.com)
+              as owner of a new family group via signup OTP.
+            • Alice POST /api/family-group/invite for Bob → 200 with
+              INV-QVQ4FK token.
+            • GET /api/family-group/invites (>=1 pending) → 200 (NOT 500)
+              with shape {"invites":[...], "count":1}. Sample row:
+              {"id":"...","token":"INV-QVQ4FK","invitee_name":"Bob QA",
+               "invitee_email":"...","inviter_name":"Alice QA",
+               "status":"pending",
+               "created_at":"2026-06-05T20:03:36.781000",
+               "expires_at":"2026-06-12T20:03:36.781000",
+               "accepted_at":null}.
+            • expires_at and created_at are valid ISO-8601 strings
+              (parseable via datetime.fromisoformat).
+            • backend.err.log delta for the call: no traceback, no
+              "can't compare offset-naive and offset-aware datetimes".
+              All HTTP entries in backend.out.log show 200 OK.
+            • Post-accept GET /family-group/invites correctly shows
+              Bob's row with status="accepted" and accepted_at set.
+          Minor: the `_public_invite()` serializer at
+          family_group.py:678 does NOT expose `accepted_by_user_id` in
+          the response payload (the field IS persisted in
+          db.family_invites — verified via direct Mongo read: Bob's id
+          is stored as accepted_by_user_id on the accepted invite row).
+          This is a serializer omission, not a data integrity issue.
+          Recommend adding `"accepted_by_user_id":
+          inv.get("accepted_by_user_id")` to _public_invite for client
+          parity. Does not block any flow.
 
   - task: "DELETE /api/family-group/invites/{id} — revoke a pending invite"
     implemented: true
@@ -7016,11 +7051,11 @@ backend:
 
   - task: "OTP verify accepts INV-XXXXXX tokens + marks invite accepted"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/server.py, /app/backend/family_group.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
       - working: "NA"
         agent: "main"
@@ -7074,6 +7109,54 @@ backend:
           guarantee end-to-end — though the resolver logic itself
           would correctly reject already-accepted invites because the
           query is `{"token":code, "status":"pending"}`).
+      - working: true
+        agent: "testing"
+        comment: |
+          RE-TEST AFTER FIX — PASS. Fix verified at family_group.py
+          resolve_invite_code (~L149): naive `expires_at` is now
+          promoted to UTC-aware before the comparison. Scenarios A
+          (happy path) and B (single-use) both green end-to-end via
+          /app/backend_test_invite_retest.py against localhost:8001.
+
+          Scenario A (end-to-end):
+            a) Alice (kinn-invite-retest-alice-<rand>@example.com)
+               signed up via /auth/request-otp + /auth/verify-otp →
+               200 with JWT, family_group_role='owner', fresh
+               family_group_id 'b506e02f-...'.
+            b) Alice POST /api/family-group/invite {name:"Bob QA",
+               email:"kinn-invite-retest-bob-<rand>@example.com"} →
+               200, invite.token='INV-QVQ4FK'.
+            c) Bob /auth/request-otp purpose=signup with
+               invite_code='INV-QVQ4FK', then /auth/verify-otp →
+               200 with access_token, user.family_group_id matches
+               Alice's, user.family_group_role='member'. NO MORE 500.
+            d) Bob.family_group_id == Alice.family_group_id ✓
+               ('b506e02f-...' on both).
+            e) Alice GET /family-group/invites now shows Bob's row
+               with status='accepted', accepted_at set. The bookkeeping
+               in family_invites is correct (verified via direct Mongo
+               read: accepted_by_user_id == Bob's id
+               'f609488b-35de-4dce-b8f3-e5d023a2f192').
+
+          Scenario B (single-use):
+            f) Charlie (kinn-invite-retest-charlie-<rand>@example.com)
+               tried /auth/request-otp + /auth/verify-otp with the
+               SAME (now accepted) INV-QVQ4FK → 404 with detail
+               'Invite code not found'. Charlie's user record was NOT
+               created in db.users — verify-otp short-circuited on the
+               resolver before any insert. Single-use guarantee works.
+
+          backend.err.log delta: ZERO occurrences of "can't compare
+          offset-naive and offset-aware datetimes" or "resolve_invite_code"
+          tracebacks during the run.
+
+          Minor (does NOT affect this task working=true): the GET
+          /family-group/invites response does NOT expose
+          `accepted_by_user_id` because `_public_invite()` at
+          family_group.py:678 omits the field. The data IS persisted
+          correctly in db.family_invites — it's only a serializer
+          gap. Recommend adding the field to the public payload for
+          client parity. Logged on the GET /invites task as well.
 
 frontend:
   - task: "Family Group screen — Invite-by-email card + modal + pending list"
@@ -7097,12 +7180,51 @@ frontend:
 
 
 test_plan:
-  current_focus:
-    - "GET /api/family-group/invites — list current invites with auto-expire"
-    - "OTP verify accepts INV-XXXXXX tokens + marks invite accepted"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "stuck_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      RE-TEST AFTER NAIVE-VS-AWARE DATETIME FIX — BOTH PREVIOUSLY-FAILING
+      SCENARIOS ARE GREEN. Ran /app/backend_test_invite_retest.py against
+      http://localhost:8001/api. 17/18 assertions PASS, 1 minor serializer
+      gap (does not block any flow).
+
+      Scenario 1 — GET /api/family-group/invites with >=1 pending invite:
+        ✅ 200 (was 500). Body shape {"invites":[...], "count":1}.
+        ✅ expires_at and created_at are valid ISO-8601 strings.
+        ✅ backend.err.log delta during call: ZERO tracebacks, no
+           "can't compare offset-naive and offset-aware datetimes".
+
+      Scenario 2 (A end-to-end + B single-use) — verify-otp w/ INV- token:
+        ✅ Alice signed up as owner (fresh family group).
+        ✅ Alice POST /family-group/invite → INV-QVQ4FK.
+        ✅ Bob /auth/verify-otp with invite_code=INV-QVQ4FK → 200 + JWT.
+        ✅ Bob.family_group_id == Alice.family_group_id (member role).
+        ✅ Post-accept GET /family-group/invites shows status='accepted'
+           and accepted_at populated.
+        ✅ Charlie reusing the same accepted INV- token → 404
+           "Invite code not found". Charlie's user NOT created.
+        ✅ Direct Mongo read confirms accepted_by_user_id is correctly
+           persisted on the invite row (== Bob's id).
+
+      MINOR ISSUE (does not block):
+        The `_public_invite()` serializer at family_group.py:678 does
+        NOT include `accepted_by_user_id` in the GET /family-group/invites
+        response payload. The data IS persisted correctly in
+        db.family_invites; it's just absent from the API response.
+        Recommendation: add `"accepted_by_user_id": inv.get("accepted_by_user_id")`
+        to the dict returned by _public_invite() so clients can render
+        "joined by <name>" without an extra DB lookup. The 4 affected
+        YAML rows are now all marked working=true.
+
+      Main agent: please summarize and finish. The datetime fix at both
+      sites (resolve_invite_code + list_invites) is solid; no further
+      backend work needed for the invite-by-email feature unless you
+      want to plug the minor accepted_by_user_id serializer omission.
 
 agent_communication:
   - agent: "testing"

@@ -144,16 +144,20 @@ async def resolve_invite_code(
         invite = await db.family_invites.find_one({"token": code}, {"_id": 0})
         if not invite or invite.get("status") != "pending":
             return None, None
-        # Expiry check
+        # Expiry check — Motor returns datetimes from MongoDB as TZ-naive
+        # (BSON has no timezone), so coerce to UTC-aware before comparing.
         exp = invite.get("expires_at")
-        if isinstance(exp, datetime) and datetime.now(timezone.utc) > exp:
-            try:
-                await db.family_invites.update_one(
-                    {"id": invite["id"]}, {"$set": {"status": "expired"}}
-                )
-            except Exception:
-                pass
-            return None, None
+        if isinstance(exp, datetime):
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) > exp:
+                try:
+                    await db.family_invites.update_one(
+                        {"id": invite["id"]}, {"$set": {"status": "expired"}}
+                    )
+                except Exception:
+                    pass
+                return None, None
         group = await db.family_groups.find_one(
             {"id": invite["family_group_id"]}, {"_id": 0}
         )
@@ -623,10 +627,16 @@ def build_router(
         rows = await cursor.to_list(200)
         # Auto-transition any obviously-stale pending rows to `expired`
         # on read so the client sees consistent state without a cron.
+        # Mongo returns datetimes as TZ-naive (BSON has no tzinfo) so we
+        # promote them to UTC-aware before comparing — otherwise this
+        # crashes with "can't compare offset-naive and offset-aware
+        # datetimes".
         now = datetime.now(timezone.utc)
         cleaned = []
         for r in rows:
             exp = r.get("expires_at")
+            if isinstance(exp, datetime) and exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
             if (
                 r.get("status") == "pending"
                 and isinstance(exp, datetime)
