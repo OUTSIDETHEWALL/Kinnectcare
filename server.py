@@ -802,8 +802,9 @@ if not (api_key and sender):
         f"RESEND_API_KEY={'set(len=%d)' % len(api_key) if api_key else 'MISSING'} "
         f"RESEND_FROM={'set(%r)' % sender if sender else 'MISSING'} "
         f"env_keys_matching_RESEND={resend_keys}"
-    ) return False
+    ) 
     return False
+    
 
     subject, body = _otp_email_body(code, purpose)
     try:
