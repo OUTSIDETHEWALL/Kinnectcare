@@ -690,4 +690,5 @@ def _public_invite(inv: dict) -> dict:
         "created_at": _iso(inv.get("created_at")),
         "expires_at": _iso(inv.get("expires_at")),
         "accepted_at": _iso(inv.get("accepted_at")),
+        "accepted_by_user_id": inv.get("accepted_by_user_id"),
     }

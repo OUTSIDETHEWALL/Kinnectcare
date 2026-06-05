@@ -369,6 +369,7 @@ export type FamilyInvite = {
   created_at?: string;
   expires_at?: string;
   accepted_at?: string | null;
+  accepted_by_user_id?: string | null;
 };
 
 export async function sendFamilyInvite(payload: {
