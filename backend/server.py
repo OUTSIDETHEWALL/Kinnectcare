@@ -774,25 +774,42 @@ def _otp_email_body(code: str, purpose: str) -> tuple[str, str]:
     return subject, body
 
 
-def _send_email_via_resend(to_email: str, subject: str, body: str) -> bool:
+def _send_email_via_resend(
+    to_email: str,
+    subject: str,
+    body: str,
+    *,
+    html: Optional[str] = None,
+    from_override: Optional[str] = None,
+) -> bool:
     """Generic Resend HTTPS email sender.  Returns True on 2xx.
 
-    Used by both the OTP flow and the family-invite flow.  Reads the
-    same `RESEND_API_KEY` + `RESEND_FROM` env vars; logs verbosely
-    when either is missing so operators can diagnose Railway
-    misconfiguration.
+    Used by the OTP flow (plain text, default sender) and the family-
+    invite flow (HTML + custom sender per RESEND_INVITE_FROM).  Reads
+    the shared `RESEND_API_KEY` env var; uses `from_override` if given,
+    otherwise falls back to `RESEND_FROM`.  When `html` is provided it
+    is sent alongside `text` so modern mail clients render the HTML
+    version while plain-text clients / screen readers see `text`.
     """
     api_key = os.environ.get("RESEND_API_KEY")
-    sender = os.environ.get("RESEND_FROM")
+    sender = from_override or os.environ.get("RESEND_FROM")
     if not (api_key and sender):
         resend_keys = [k for k in os.environ if "RESEND" in k.upper()]
         logger.warning(
             f"[email] Resend skipped — vars missing/empty: "
             f"RESEND_API_KEY={'set(len=%d)' % len(api_key) if api_key else 'MISSING'} "
-            f"RESEND_FROM={'set(%r)' % sender if sender else 'MISSING'} "
-            f"env_keys_matching_RESEND={resend_keys}"
+            f"sender={'set(%r)' % sender if sender else 'MISSING'} "
+            f"(env_keys_matching_RESEND={resend_keys})"
         )
         return False
+    payload = {
+        "from": sender,
+        "to": [to_email],
+        "subject": subject,
+        "text": body,
+    }
+    if html:
+        payload["html"] = html
     try:
         r = requests.post(
             "https://api.resend.com/emails",
@@ -800,18 +817,14 @@ def _send_email_via_resend(to_email: str, subject: str, body: str) -> bool:
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "from": sender,
-                "to": [to_email],
-                "subject": subject,
-                "text": body,
-            },
+            json=payload,
             timeout=15,
         )
         if 200 <= r.status_code < 300:
             return True
         logger.warning(
-            f"[email] Resend rejected: HTTP {r.status_code} body={r.text[:300]!r} to={to_email}"
+            f"[email] Resend rejected: HTTP {r.status_code} "
+            f"body={r.text[:300]!r} to={to_email} from={sender!r}"
         )
         return False
     except Exception as e:
@@ -819,12 +832,22 @@ def _send_email_via_resend(to_email: str, subject: str, body: str) -> bool:
         return False
 
 
-async def send_email_via_resend_async(to_email: str, subject: str, body: str) -> bool:
-    """Async wrapper used as `send_email` callback for the family-group
-    router.  Runs the sync HTTP call in a threadpool so we don't block
-    the event loop while Resend's API responds."""
+async def send_email_via_resend_async(
+    to_email: str,
+    subject: str,
+    body: str,
+    *,
+    html: Optional[str] = None,
+    from_override: Optional[str] = None,
+) -> bool:
+    """Async wrapper used as the `send_email` callback for the
+    family-group router.  Runs the sync HTTP call in a threadpool so
+    we don't block the event loop while Resend's API responds."""
     import asyncio
-    return await asyncio.to_thread(_send_email_via_resend, to_email, subject, body)
+    return await asyncio.to_thread(
+        _send_email_via_resend, to_email, subject, body,
+        html=html, from_override=from_override,
+    )
 
 
 def _send_otp_via_resend(to_email: str, code: str, purpose: str) -> bool:
