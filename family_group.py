@@ -526,7 +526,14 @@ def build_router(
             target group so the family sees a merged dashboard immediately.
         """
         code = normalize_invite_code(data.invite_code)
-        target = await get_group_by_code(db, code)
+        # Accept BOTH the family-wide KINN- code AND a per-recipient
+        # INV- token (issued via POST /family-group/invite).  The
+        # resolver returns (group, invite_doc) — invite_doc is None
+        # for family-wide codes.  Without this fork, existing
+        # signed-in users typing an INV- token from their email got
+        # "Invite code not found" because the original implementation
+        # only checked db.family_groups.invite_code.
+        target, accepted_invite = await resolve_invite_code(db, code)
         if not target:
             raise HTTPException(404, "Invite code not found")
         old_gid = current.get("family_group_id")
@@ -581,6 +588,33 @@ def build_router(
                     )
             except Exception as e:
                 logger.warning(f"join push notify failed: {e}")
+
+        # If this join consumed a per-recipient INV- token, mark it
+        # accepted (locks the token from re-use) and send a targeted
+        # "your invite was accepted" push to whoever sent the invite.
+        # Best-effort — never fail the join just because the
+        # bookkeeping push misfires.
+        if accepted_invite:
+            try:
+                await accept_invite(db, accepted_invite["id"], current["id"])
+            except Exception as e:
+                logger.warning(f"accept_invite bookkeeping failed: {e}")
+            inviter_id = accepted_invite.get("invited_by_user_id")
+            if push_to_user is not None and inviter_id and inviter_id != current["id"]:
+                try:
+                    joiner_name = current.get("full_name") or "Your invited family member"
+                    await push_to_user(
+                        inviter_id,
+                        "✅ Family invite accepted",
+                        f"{joiner_name} just joined your Kinnship family.",
+                        {
+                            "type": "family_join",
+                            "user_id": current["id"],
+                            "invite_id": accepted_invite["id"],
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"inviter push failed: {e}")
 
         return {"ok": True, "group": public_group(target)}
 
