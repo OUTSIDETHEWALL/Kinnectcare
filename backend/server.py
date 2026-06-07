@@ -3,6 +3,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 import os
 import json
 import logging
@@ -601,17 +602,16 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
             )
             if has_ci:
                 continue
-            existing = await db.alerts.find_one(
-                {
-                    "family_group_id": family_group_id,
-                    "member_id": m["id"],
-                    "type": "missed_checkin",
-                    "created_at": {"$gte": previous_slot_utc},
-                }
-            )
-            if existing:
-                continue
+            # RACE-SAFE INSERT: relies on the unique partial index
+            # `uniq_alert_slot` on (family_group_id, member_id, type, slot_key)
+            # ensured at startup.  Multiple concurrent callers all see no
+            # alert at find_one time, race to insert, and exactly ONE wins
+            # — the rest get DuplicateKeyError and are skipped.  Without
+            # this guard, every poll of /api/alerts or /api/summary from
+            # every device in the family group fired its own duplicate
+            # push (see "Joyce missed check-in" 15× duplicate report).
             label = f"every {interval} hours"
+            slot_key = f"interval_{last_due_utc.replace(microsecond=0).isoformat()}"
             a = Alert(
                 owner_id=user["id"],
                 family_group_id=family_group_id,
@@ -625,7 +625,14 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
                     f"passed without a check-in."
                 ),
             )
-            await db.alerts.insert_one(a.model_dump())
+            doc = a.model_dump()
+            doc["slot_key"] = slot_key
+            try:
+                await db.alerts.insert_one(doc)
+            except DuplicateKeyError:
+                # Another concurrent request already inserted + pushed for
+                # this slot.  Do NOT fan out a duplicate push.
+                continue
             await db.members.update_one({"id": m["id"]}, {"$set": {"status": "warning"}})
             await push_to_family_group(
                 family_group_id,
@@ -646,12 +653,10 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
         )
         if has_ci:
             continue
-        existing = await db.alerts.find_one({
-            "family_group_id": family_group_id, "member_id": m["id"], "type": "missed_checkin",
-            "created_at": {"$gte": day_start_utc},
-        })
-        if existing:
-            continue
+        # RACE-SAFE INSERT — see explanation in interval branch above.
+        # slot_key combines the local date and the expected HH:MM so the
+        # same alert never fires twice in the same day for the same slot.
+        slot_key = f"fixed_{now_local.date().isoformat()}_{fixed}"
         a = Alert(
             owner_id=user["id"], family_group_id=family_group_id,
             member_id=m["id"], member_name=m["name"],
@@ -659,7 +664,13 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
             title=f"{m['name']} missed daily check-in",
             message=f"Expected by {fixed} ({user.get('timezone') or 'UTC'}) today. They haven't checked in yet.",
         )
-        await db.alerts.insert_one(a.model_dump())
+        doc = a.model_dump()
+        doc["slot_key"] = slot_key
+        try:
+            await db.alerts.insert_one(doc)
+        except DuplicateKeyError:
+            # Another concurrent request already inserted + pushed.
+            continue
         await db.members.update_one({"id": m["id"]}, {"$set": {"status": "warning"}})
         await push_to_family_group(
             family_group_id,
@@ -2518,6 +2529,39 @@ async def _start_med_scheduler():
         logger.info("Medication scheduler started.")
     except Exception as e:
         logger.warning(f"Medication scheduler failed to start: {e}")
+
+
+@app.on_event("startup")
+async def _ensure_alert_dedup_index():
+    """Create the unique partial index that makes alert generation race-safe.
+
+    Without this index, concurrent polls of /api/alerts and /api/summary
+    from every device in a family group (caregivers + senior + others)
+    can ALL win the find-then-insert race against `detect_missed_checkins`
+    and create N duplicate alerts, each of which fans out a push to every
+    family member.  Result: "Joyce missed check-in" appears 15+ times in
+    the same minute.
+
+    The index is PARTIAL — only enforced on documents that carry a
+    `slot_key` field (i.e. missed_checkin alerts created by the new
+    race-safe path).  Legacy alert docs without `slot_key` are left
+    alone, so the index creation is safe to deploy on a populated DB.
+    """
+    try:
+        await db.alerts.create_index(
+            [
+                ("family_group_id", 1),
+                ("member_id", 1),
+                ("type", 1),
+                ("slot_key", 1),
+            ],
+            unique=True,
+            partialFilterExpression={"slot_key": {"$exists": True}},
+            name="uniq_alert_slot",
+        )
+        logger.info("alerts uniq_alert_slot index ensured.")
+    except Exception as e:
+        logger.warning(f"alerts uniq_alert_slot index ensure skipped: {e}")
 
 
 @app.on_event("startup")
