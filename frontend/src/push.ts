@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import { api } from './api';
 
 // Hardcoded fallback in case Constants.expoConfig is unavailable (this happens
@@ -153,6 +153,42 @@ export async function ensureNotificationChannel() {
   }
 }
 
+// ---------- Public: OS-side setup that runs BEFORE auth ----------
+//
+// Channels, categories, and stale-queue cleanup must exist on the
+// device BEFORE any push notification can arrive — otherwise FCM
+// payloads carrying `channelId: "meds_v2"` (or any other modern
+// channel) silently route to the low-importance fallback channel
+// and the user either sees nothing or hears nothing.
+//
+// The legacy `registerForPushNotifications()` only ran AFTER the
+// user authenticated (it needs an auth token to POST the push
+// token to /auth/push-token).  That left a window — first launch
+// before login, app killed for a long time then woken by a push —
+// where the channels didn't exist.  Result: SOS still worked
+// because the `'sos'` channel has been on every install since v1,
+// but medication / check-in / fall-detected pushes were silently
+// dropped.  This was the #1 pre-launch safety bug.
+//
+// Call this function from RootNav's outermost mount effect, before
+// the auth gate runs.  It's idempotent (channel + category
+// creation are upsert-style) so calling it multiple times is safe.
+export async function setupNotificationsForOS(): Promise<void> {
+  try {
+    if (Platform.OS === 'web' || !Device.isDevice) return;
+    // Phantom-queue cleanup (v6.11.5 — see notes in
+    // registerForPushNotifications below for full context).
+    try {
+      await Notifications.cancelAllScheduledNotificationsAsync();
+    } catch (_e) {}
+    await ensureNotificationChannel();
+    await ensureNotificationCategories();
+  } catch (_e) {
+    // Never crash the app on startup setup errors.
+  }
+}
+
+
 export async function registerForPushNotifications(): Promise<string | null> {
   try {
     if (Platform.OS === 'web') {
@@ -164,33 +200,10 @@ export async function registerForPushNotifications(): Promise<string | null> {
       return null;
     }
 
-    // PHANTOM-NOTIFICATION CLEANUP (v6.11.5) —
-    //
-    // The user reported "random medication reminders firing at times with
-    // no scheduled medication." Root cause: during dev/testing the app
-    // had locally-scheduled notifications enqueued via
-    // Notifications.scheduleNotificationAsync(...) which sit in the
-    // OS's notification queue independently of the backend scheduler.
-    // Those queued notifications survive across app launches, builds,
-    // and even some uninstalls — firing at their pre-set times regardless
-    // of whether the medication still exists in the user's reminder list.
-    //
-    // Kinnship's medication delivery is now 100% server-driven (push from
-    // /backend/med_scheduler.py → Expo Push → device). We never need
-    // locally-scheduled notifications anymore. So on every launch we
-    // proactively wipe the OS-side scheduled queue. The server's idempotent
-    // scheduler will re-fire any legitimately-due dose within 15 seconds
-    // (WORKER_INTERVAL_SECONDS), so the user never misses a real reminder.
-    //
-    // Also dismiss any stale tray notifications older than 6 hours since
-    // those generally indicate the user already moved on (and a follow-up
-    // family alert would have replaced them anyway).
-    try {
-      await Notifications.cancelAllScheduledNotificationsAsync();
-    } catch (_e) {}
-
-    await ensureNotificationChannel();
-    await ensureNotificationCategories();
+    // OS-side setup is now also called pre-auth from RootNav, but call
+    // it again here for callers that invoke registerForPushNotifications
+    // directly (e.g. Settings → "Retry push registration").  Idempotent.
+    await setupNotificationsForOS();
 
     const { status: existing } = await Notifications.getPermissionsAsync();
     let finalStatus = existing;
@@ -284,6 +297,50 @@ async function rePresentSticky(n: Notifications.Notification) {
   const data: any = content.data || {};
   const t = data.type;
   if (!t || !['medication', 'routine', 'sos', 'fall_detected'].includes(t)) return;
+
+  // ============================================================
+  //  CRITICAL: ONLY re-present when the app is in FOREGROUND.
+  // ============================================================
+  //
+  // `addNotificationReceivedListener` fires when a notification is
+  // received while the app's JS context is alive — that includes both
+  // FOREGROUND and BACKGROUND states on Android.
+  //
+  // When the app is BACKGROUNDED (user pressed Home, screen off, etc.),
+  // Android throttles the JS thread.  Any `dismissNotificationAsync()` +
+  // `scheduleNotificationAsync()` calls we make in this throttled state
+  // get QUEUED in the JS event loop — they do not execute until the OS
+  // wakes JS back up (which only happens when the user re-opens the app).
+  //
+  // Result: the OS-displayed notification gets immediately removed by the
+  // dismiss call (which IS synchronous to the OS via the native bridge),
+  // BUT the replacement schedule is held until JS resumes.  The user sees
+  // NOTHING in the tray, even though the push arrived.  Then when they
+  // open the app, every queued scheduleNotificationAsync from every
+  // missed push fires at once → "notifications flood in after login".
+  //
+  // SOS doesn't hit this because caregivers/recipients are typically
+  // already in-app when an SOS arrives.  Meds/check-ins/family alerts
+  // fire on autonomous schedules and overwhelmingly arrive when the app
+  // is backgrounded — exactly the broken case.
+  //
+  // Fix: skip rePresentSticky unless the app is truly foreground-active.
+  // In background, we trust the OS-displayed notification (delivered
+  // automatically by FCM via the channel's MAX importance) and DO NOT
+  // dismiss it.  The user sees the heads-up immediately, as expected.
+  //
+  // Defense-in-depth: also bail on notifications older than 30s — those
+  // are queued replays surfaced by the OS during cold-start, not live
+  // pushes that need foreground sticky treatment.
+  try {
+    if (AppState.currentState !== 'active') return;
+    const receivedAtMs = (n as any)?.date ? Number((n as any).date) : Date.now();
+    if (Number.isFinite(receivedAtMs) && Date.now() - receivedAtMs > 30000) return;
+  } catch (_e) {
+    // If AppState/date introspection fails, default to NOT touching the
+    // OS-displayed notification — same conservative path as background.
+    return;
+  }
 
   const channelId =
     data.channelId ||

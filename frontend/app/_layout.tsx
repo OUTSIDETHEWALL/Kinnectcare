@@ -5,8 +5,7 @@ import { AuthProvider, useAuth } from '../src/AuthContext';
 import { useEffect, useState } from 'react';
 import { View, ActivityIndicator } from 'react-native';
 import { Colors } from '../src/theme';
-import { registerForPushNotifications, useNotificationListeners } from '../src/push';
-import { setAppReadyForDeepLink } from '../src/push';
+import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink } from '../src/push';
 import { isOnboardingDone } from '../src/onboardingStore';
 import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
 import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
@@ -176,6 +175,18 @@ function RootNav() {
       router.replace('/(tabs)/alerts');
     }
   });
+
+  useEffect(() => {
+    // OS-side notification setup runs on EVERY launch, BEFORE auth.
+    // This guarantees the notification channels (meds_v2, routines,
+    // sos, ...) and categories (action buttons) exist on the device
+    // before any push can arrive — fixing the #1 pre-launch safety
+    // bug where medication / check-in / fall-detected pushes were
+    // silently dropped when the app was killed or the user was
+    // logged out, because the channels were only created
+    // post-authentication.
+    setupNotificationsForOS().catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (user) {

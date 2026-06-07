@@ -70,7 +70,17 @@ async def send_expo_push(
             "priority": "high",
             "channelId": channel_id,
             "data": data,
-            "ttl": 0,
+            # NOTE: TTL intentionally OMITTED so Expo/FCM/APNs use their
+            # default redelivery window (~28 days for FCM, 4 weeks for APNs
+            # tokens).  An earlier version of this file set ttl=0 which
+            # told FCM "drop if device not immediately reachable" — that
+            # silently dropped medication/check-in/family-alert pushes
+            # whenever the recipient phone was in Doze, on a poor cell
+            # connection, or had screen off long enough to throttle the
+            # FCM socket. SOS happened to work because caregivers were
+            # typically active when SOS fired.  We now let FCM hold the
+            # push until the device wakes up — same behavior as any
+            # production messaging app.
         }
         if cat_id:
             msg["categoryId"] = cat_id
