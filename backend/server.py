@@ -1153,6 +1153,53 @@ async def verify_otp(data: OtpVerify):
             )
             doc["family_group_id"] = target_group["id"]
             doc["family_group_role"] = "member"
+            # === Member-record auto-linkage ===
+            # When a caregiver pre-created a member row (e.g. "Joyce, 78")
+            # and later invited that person by email, the freshly-signed-up
+            # user account is still NOT linked to the member row — the
+            # `members.user_id` field stays null, blocking self-targeted
+            # pushes (e.g. "you have a med to take in 5 min" landing on
+            # the SENIOR's phone, not the caregiver's).
+            #
+            # Heuristic: within the family_group, find an UNLINKED member
+            # (user_id is null/missing) whose `name` matches the joining
+            # user's full_name (case-insensitive, trimmed).  If exactly
+            # one matches, bind them.  Multiple matches → leave unlinked
+            # and log (manual intervention needed; safer than guessing).
+            try:
+                name_target = (doc.get("full_name") or "").strip().lower()
+                if name_target:
+                    matches = await db.members.find(
+                        {
+                            "family_group_id": target_group["id"],
+                            "$or": [
+                                {"user_id": None},
+                                {"user_id": {"$exists": False}},
+                            ],
+                        },
+                        {"_id": 0, "id": 1, "name": 1},
+                    ).to_list(50)
+                    candidates = [
+                        m for m in matches
+                        if (m.get("name") or "").strip().lower() == name_target
+                    ]
+                    if len(candidates) == 1:
+                        await db.members.update_one(
+                            {"id": candidates[0]["id"]},
+                            {"$set": {"user_id": user_id}},
+                        )
+                        logger.info(
+                            f"member-link: bound member={candidates[0]['id']} "
+                            f"({candidates[0].get('name')}) → user={user_id}"
+                        )
+                    elif len(candidates) > 1:
+                        logger.warning(
+                            f"member-link: AMBIGUOUS — {len(candidates)} unlinked "
+                            f"members named {doc.get('full_name')!r} in group "
+                            f"{target_group['id']}; left unlinked for manual review"
+                        )
+            except Exception as e:
+                logger.warning(f"member-link auto-bind skipped: {e}")
             # If they used a per-recipient INV- token, mark it accepted
             # and notify the inviter via push.  Best-effort — never fail
             # signup just because the bookkeeping push misfires.
@@ -1305,9 +1352,19 @@ async def register_push_token(data: PushTokenRegister, current=Depends(get_curre
     else's family group landing on this device.
 
     To prevent that, we FIRST pull the token from EVERY OTHER user's
-    push_tokens array, THEN add it to the current user.  One token can
-    only belong to one user at a time.  This is the v6.6+ fix for
-    cross-account notification leakage.
+    push_tokens array, THEN set the current user's array to JUST this
+    one token.  One token = one user, and one user = one active device.
+
+    ── Why wholesale replace (not $addToSet)? ──
+    Expo ROTATES tokens whenever the app is reinstalled, the dev/prod
+    signature changes, or certain Android FCM-registration events fire.
+    Over time `$addToSet` accumulated DIFFERENT tokens (Charles had 28,
+    Joyce had 5) — each one a "ghost" install that FCM still happily
+    delivered to.  Result: a single push fanned out 28×, causing the
+    notification floods.  Replacing the array with [token] on every
+    registration is the v6.7+ fix.  Side effect: only ONE device per
+    user account at a time; second-device login boots the first.  This
+    is the intended product behavior for Kinnship today.
     """
     if not data.token or not data.token.startswith("ExponentPushToken["):
         return {"ok": False, "reason": "invalid token format"}
@@ -1322,11 +1379,27 @@ async def register_push_token(data: PushTokenRegister, current=Depends(get_curre
             f"push-token: detached token from {detached.modified_count} prior owner(s) "
             f"new_owner={current['id']} token={token[:25]}..."
         )
-    # 2) Idempotently add to current user.
-    await db.users.update_one(
-        {"id": current["id"]}, {"$addToSet": {"push_tokens": token}}
+    # 2) WIPE-AND-SET — current user gets exactly [token].  Idempotent
+    # when already correct; collapses N-ghost arrays to single token
+    # when the user's been accumulating stale entries.
+    prev = await db.users.find_one(
+        {"id": current["id"]}, {"_id": 0, "push_tokens": 1}
     )
-    return {"ok": True, "detached_from": detached.modified_count}
+    prev_count = len(prev.get("push_tokens") or []) if prev else 0
+    await db.users.update_one(
+        {"id": current["id"]}, {"$set": {"push_tokens": [token]}}
+    )
+    pruned = max(0, prev_count - 1)
+    if pruned:
+        logger.info(
+            f"push-token: pruned {pruned} stale ghost token(s) for user={current['id']} "
+            f"(kept the one just registered)"
+        )
+    return {
+        "ok": True,
+        "detached_from": detached.modified_count,
+        "pruned_ghost_tokens": pruned,
+    }
 
 
 class DeleteAccountRequest(BaseModel):
@@ -2562,6 +2635,64 @@ async def _ensure_alert_dedup_index():
         logger.info("alerts uniq_alert_slot index ensured.")
     except Exception as e:
         logger.warning(f"alerts uniq_alert_slot index ensure skipped: {e}")
+
+
+@app.on_event("startup")
+async def _migrate_dedupe_push_tokens():
+    """One-time migration: collapse accumulated ghost push tokens.
+
+    Background: an earlier `$addToSet`-based registration path accumulated
+    DIFFERENT-VALUED tokens whenever Expo rotated the token (which it does
+    on app reinstall, dev/prod signature flip, or certain FCM events).
+    Real-world impact: Charles had 28 tokens, Joyce had 5 — every push
+    fanned out to N ghosts, causing notification floods.
+
+    This migration is conservative — it only DEDUPES exact duplicates
+    inside each user's push_tokens array (in case any slipped in around
+    $addToSet semantics) AND removes empty / null entries.  It does NOT
+    decide which of several DIFFERENT tokens is "current" — that's
+    impossible without device fingerprinting.  Real ghost cleanup
+    happens organically via the new `register_push_token` (which now
+    wipes-and-sets to [token] on every login), and the existing
+    `push_to_user` prune-on-DeviceNotRegistered path.
+
+    Idempotent — running it multiple times is a no-op once cleaned.
+    """
+    try:
+        # MongoDB 4.4+ aggregation pipeline update — collapses each
+        # user.push_tokens to its set of non-empty unique values.
+        result = await db.users.update_many(
+            {"push_tokens": {"$exists": True, "$type": "array"}},
+            [
+                {
+                    "$set": {
+                        "push_tokens": {
+                            "$setUnion": [
+                                {
+                                    "$filter": {
+                                        "input": {"$ifNull": ["$push_tokens", []]},
+                                        "as": "t",
+                                        "cond": {
+                                            "$and": [
+                                                {"$ne": ["$$t", None]},
+                                                {"$ne": ["$$t", ""]},
+                                            ]
+                                        },
+                                    }
+                                },
+                                [],
+                            ]
+                        }
+                    }
+                }
+            ],
+        )
+        if result.modified_count:
+            logger.info(
+                f"push_tokens dedupe migration: cleaned {result.modified_count} user(s)"
+            )
+    except Exception as e:
+        logger.warning(f"push_tokens dedupe migration skipped: {e}")
 
 
 @app.on_event("startup")
