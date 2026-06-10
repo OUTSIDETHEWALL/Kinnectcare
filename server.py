@@ -1624,6 +1624,42 @@ async def delete_member(member_id: str, current=Depends(get_current_user)):
 
 @api_router.put("/members/{member_id}/location", response_model=FamilyMember)
 async def update_member_location(member_id: str, data: LocationUpdate, current=Depends(get_current_user)):
+    # ============================================================
+    #  Defense-in-depth: only the member's OWNER device can write
+    #  its location.  A stale or buggy client (e.g. v6.7 ↓ which
+    #  blindly PUT to members[0]) cannot silently corrupt another
+    #  family member's coordinates anymore — the server rejects
+    #  with 403 instead of mutating the wrong row.
+    #
+    #  Allowed callers:
+    #    1. The member itself  (current.id == target.user_id)
+    #    2. The family-group OWNER (caregiver acting on behalf —
+    #       e.g. correcting a senior's location manually). Owners
+    #       are a small, trusted population by design.
+    #
+    #  Targets whose user_id is not yet populated (legacy member
+    #  rows from before commit bef9f37 + retro-link script) fall
+    #  through to the owner-only path — which is the safer default
+    #  until linkage is run.
+    # ============================================================
+    target = await db.members.find_one(
+        {"id": member_id, "family_group_id": current["family_group_id"]},
+        {"_id": 0, "id": 1, "user_id": 1},
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+    is_self = bool(target.get("user_id")) and target["user_id"] == current["id"]
+    is_owner = current.get("family_group_role") == "owner"
+    if not (is_self or is_owner):
+        logger.warning(
+            f"location-update REJECTED: user={current['id']} tried to write "
+            f"member={member_id} (target.user_id={target.get('user_id')!r}); "
+            f"role={current.get('family_group_role')!r}"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="You can only update your own member location.",
+        )
     update = {"latitude": data.latitude, "longitude": data.longitude, "last_seen": datetime.now(timezone.utc)}
     if data.location_name:
         update["location_name"] = data.location_name
