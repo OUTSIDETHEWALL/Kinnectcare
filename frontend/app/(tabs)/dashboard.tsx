@@ -62,15 +62,52 @@ export default function Dashboard() {
     (async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status === 'granted' && members.length > 0) {
-          const pos = await Location.getCurrentPositionAsync({});
-          await api.put(`/members/${members[0].id}/location`, {
-            latitude: pos.coords.latitude, longitude: pos.coords.longitude,
-          }).catch(() => {});
+        if (status !== 'granted' || members.length === 0 || !user?.id) return;
+
+        // ============================================================
+        //  CRITICAL: send the GPS to MY OWN member record, not members[0]
+        // ============================================================
+        //
+        // Earlier code did: api.put(`/members/${members[0].id}/location`)
+        //
+        // That blindly wrote THIS device's coordinates onto whichever
+        // member happened to be first in the family-group list.  Two
+        // problems:
+        //
+        //   1. Caregivers (who don't have a member record of their own)
+        //      were overwriting the senior's coordinates.
+        //   2. With multiple seniors in one group (e.g. Charles + Joyce),
+        //      whoever opened the app would overwrite the other's
+        //      location — symptom Charles reported: "Joyce's location
+        //      shows Charles's stale coords; Joyce has moved 10mi but
+        //      her dot never updates."
+        //
+        // Correct match: members[].user_id === current user.id.  This
+        // requires the backend's member↔user linkage (commit bef9f37)
+        // to be populated.  If no match is found (e.g. caregiver, or
+        // pre-linkage account), we DO NOT send — silently no-op rather
+        // than corrupt someone else's record.
+        const me = members.find((m) => m.user_id === user.id);
+        if (!me) {
+          // Caregiver, unlinked senior, or stale token.  Logging only
+          // in __DEV__ to keep production console clean.
+          if (__DEV__) {
+            console.log(
+              '[dashboard] skipping location update — no member row ' +
+              'with user_id matching current user.id'
+            );
+          }
+          return;
         }
+
+        const pos = await Location.getCurrentPositionAsync({});
+        await api.put(`/members/${me.id}/location`, {
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+        }).catch(() => {});
       } catch (_e) {}
     })();
-  }, [members.length]);
+  }, [members.length, user?.id]);
 
   const onRefresh = async () => {
     setRefreshing(true);

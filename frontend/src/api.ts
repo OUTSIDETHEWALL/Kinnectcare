@@ -141,6 +141,7 @@ export type User = {
 
 export type Member = {
   id: string;
+  user_id?: string | null;
   name: string;
   age: number;
   phone: string;
