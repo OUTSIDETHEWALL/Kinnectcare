@@ -11,6 +11,41 @@ import {
 } from './freshInstallGuard';
 
 const TOKEN_KEY = 'kc_token';
+// v1.2 beta — cache the user object alongside the token so we can
+// rehydrate the session OFFLINE on cold-start (e.g. after a device
+// reboot when the network hasn't reconnected yet).  Without this
+// cache, /auth/me on cold-start was the only path to know who the
+// user IS, and any transient network failure (Samsung's slow Wi-Fi
+// re-handshake post-reboot) caused user=null → PIN gate skipped →
+// RootNav fell through to the welcome / OTP path.  With the cache,
+// PIN gate fires immediately and /auth/me retries silently in the
+// background.
+const USER_CACHE_KEY = 'kc_user_cache_v1';
+
+async function readUserCache(): Promise<User | null> {
+  try {
+    const raw = Platform.OS === 'web'
+      ? await AsyncStorage.getItem(USER_CACHE_KEY)
+      : await SecureStore.getItemAsync(USER_CACHE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as User;
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function writeUserCache(u: User | null): Promise<void> {
+  try {
+    if (!u) {
+      if (Platform.OS === 'web') await AsyncStorage.removeItem(USER_CACHE_KEY);
+      else await SecureStore.deleteItemAsync(USER_CACHE_KEY);
+      return;
+    }
+    const raw = JSON.stringify(u);
+    if (Platform.OS === 'web') await AsyncStorage.setItem(USER_CACHE_KEY, raw);
+    else await SecureStore.setItemAsync(USER_CACHE_KEY, raw);
+  } catch (_e) {}
+}
 
 /**
  * AuthContext — passwordless email-OTP auth.
@@ -68,14 +103,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch (_e) {}
       const token = await readToken();
       if (token) {
+        // OFFLINE-FIRST: if we have a cached user object, restore the
+        // session immediately so the PIN gate (which runs against
+        // SecureStore, no network needed) can fire.  /auth/me then
+        // validates in the background — if it fails transiently the
+        // user is already past the lock screen; if it returns 401 we
+        // clear the cache and route to welcome.
+        //
+        // This is the critical fix for the "notification tap →
+        // OTP instead of PIN after device reboot" bug.  Pre-fix:
+        // bootstrap was strictly serial — token → /auth/me → set
+        // user.  When network was slow (post-reboot Samsung Wi-Fi
+        // reconnect), /auth/me would either fail or take many
+        // seconds, leaving user=null long enough for RootNav to
+        // route to welcome → OTP.
+        const cachedUser = await readUserCache();
+        if (cachedUser) {
+          setUser(cachedUser);
+          // From here, even if /auth/me fails, RootNav can run the
+          // PIN gate.  Loading is also flipped below so the spinner
+          // dismisses immediately.
+        }
         try {
           const res = await api.get('/auth/me');
           setUser(res.data);
+          await writeUserCache(res.data);
           try {
             const tz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
             if (tz && tz !== res.data.timezone) {
               const updated = await api.put('/auth/timezone', { timezone: tz });
               setUser(updated.data);
+              await writeUserCache(updated.data);
             }
           } catch (_e) {}
         } catch (e: any) {
@@ -98,11 +156,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const status = e?.response?.status;
           if (status === 401) {
             await clearToken();
+            await writeUserCache(null);
+            setUser(null);
           }
-          // else: keep token, leave user=null for this session — the
-          // next authenticated request will retry. With rolling
-          // 1-year tokens (see /auth/me on the backend) the token
-          // is virtually always still valid.
+          // else: keep token AND keep cached user.  PIN gate has
+          // already fired off the cached user above, so the user is
+          // properly locked behind their PIN even though the
+          // network was flaky.  Next authenticated request will
+          // retry /auth/me automatically.
         }
       }
       setLoading(false);
@@ -199,6 +260,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     await saveToken(res.data.access_token);
     setUser(u);
+    // Cache the fresh user object so a subsequent cold-start (e.g.
+    // device reboot, then notification tap) can rehydrate the
+    // session OFFLINE and fire the PIN gate without waiting on
+    // /auth/me.  Fixes "Notification → OTP instead of PIN".
+    await writeUserCache(u);
 
     // Sync timezone if it doesn't match device tz
     try {
@@ -213,6 +279,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = async () => {
     forgetSessionUnlock(user?.id);
     await clearToken();
+    await writeUserCache(null);
     setUser(null);
   };
 
@@ -220,6 +287,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const res = await api.get('/auth/me');
       setUser(res.data);
+      await writeUserCache(res.data);
     } catch (_e) {}
   };
 
