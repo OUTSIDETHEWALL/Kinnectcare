@@ -23,10 +23,20 @@ const TOKEN_KEY = 'kc_token';
 const USER_CACHE_KEY = 'kc_user_cache_v1';
 
 async function readUserCache(): Promise<User | null> {
+  // v1.2-hotfix2: switched from SecureStore to AsyncStorage because
+  // expo-secure-store on Android enforces a ~2 KB per-value limit and
+  // the full User object (with timezone, emergency contacts, family
+  // group metadata, etc.) was occasionally exceeding that — causing
+  // setItemAsync() to throw silently inside the try/catch in
+  // writeUserCache().  Net effect: cache appeared to write but the
+  // bytes never landed → next cold-start read returned null → user
+  // bounced to welcome screen.  AsyncStorage has no such limit and
+  // is already used elsewhere for non-secret state (disclaimer ack,
+  // onboarding flag, install sentinel).  The User object isn't a
+  // secret — the BEARER TOKEN (still in SecureStore) is the
+  // sensitive credential.
   try {
-    const raw = Platform.OS === 'web'
-      ? await AsyncStorage.getItem(USER_CACHE_KEY)
-      : await SecureStore.getItemAsync(USER_CACHE_KEY);
+    const raw = await AsyncStorage.getItem(USER_CACHE_KEY);
     if (!raw) return null;
     return JSON.parse(raw) as User;
   } catch (_e) {
@@ -37,13 +47,10 @@ async function readUserCache(): Promise<User | null> {
 async function writeUserCache(u: User | null): Promise<void> {
   try {
     if (!u) {
-      if (Platform.OS === 'web') await AsyncStorage.removeItem(USER_CACHE_KEY);
-      else await SecureStore.deleteItemAsync(USER_CACHE_KEY);
+      await AsyncStorage.removeItem(USER_CACHE_KEY);
       return;
     }
-    const raw = JSON.stringify(u);
-    if (Platform.OS === 'web') await AsyncStorage.setItem(USER_CACHE_KEY, raw);
-    else await SecureStore.setItemAsync(USER_CACHE_KEY, raw);
+    await AsyncStorage.setItem(USER_CACHE_KEY, JSON.stringify(u));
   } catch (_e) {}
 }
 
@@ -102,66 +109,52 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await maybeClearStaleSecureStoreOnFreshInstall();
       } catch (_e) {}
       const token = await readToken();
-      if (token) {
-        // OFFLINE-FIRST: if we have a cached user object, restore the
-        // session immediately so the PIN gate (which runs against
-        // SecureStore, no network needed) can fire.  /auth/me then
-        // validates in the background — if it fails transiently the
-        // user is already past the lock screen; if it returns 401 we
-        // clear the cache and route to welcome.
-        //
-        // This is the critical fix for the "notification tap →
-        // OTP instead of PIN after device reboot" bug.  Pre-fix:
-        // bootstrap was strictly serial — token → /auth/me → set
-        // user.  When network was slow (post-reboot Samsung Wi-Fi
-        // reconnect), /auth/me would either fail or take many
-        // seconds, leaving user=null long enough for RootNav to
-        // route to welcome → OTP.
-        const cachedUser = await readUserCache();
-        if (cachedUser) {
-          setUser(cachedUser);
-          // CRITICAL: dismiss the loading spinner the moment the
-          // cache restores.  /auth/me continues in the background.
-          // Without this, the spinner stayed up until /auth/me
-          // settled — which on a post-reboot Samsung with cold Wi-Fi
-          // could take 20+ seconds, after which the catch branch
-          // below would set loading=false and the routing effect
-          // would race with the PIN check (the race itself fixed
-          // separately in RootNav via pinChecked reset).  By
-          // dismissing loading here, RootNav sees user=cached AND
-          // pinChecked=false (the fresh reset) → keeps the spinner
-          // up until PIN gate evaluates → routes to pin-login.
-          setLoading(false);
-        }
-        try {
-          const res = await api.get('/auth/me');
-          setUser(res.data);
-          await writeUserCache(res.data);
-          try {
-            const tz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
-            if (tz && tz !== res.data.timezone) {
-              const updated = await api.put('/auth/timezone', { timezone: tz });
-              setUser(updated.data);
-              await writeUserCache(updated.data);
-            }
-          } catch (_e) {}
-        } catch (e: any) {
-          const status = e?.response?.status;
-          if (status === 401) {
-            await clearToken();
-            await writeUserCache(null);
-            setUser(null);
-          }
-          // else: keep token AND keep cached user.  PIN gate has
-          // already fired off the cached user above, so the user is
-          // properly locked behind their PIN even though the
-          // network was flaky.  Next authenticated request will
-          // retry /auth/me automatically.
-        }
-        // Only flip loading from here if we DIDN'T already dismiss
-        // it above when the cache restored (e.g. token exists but
-        // no cache yet — first-time install before this fix landed).
+      if (!token) {
+        // No token at all — definitely not signed in.  Dismiss loading
+        // immediately so the user reaches the welcome screen.
+        setLoading(false);
+        return;
       }
+      // We have a token.  From here we MUST NOT dismiss loading until
+      // we have either:
+      //   (a) restored a cached user (offline path), OR
+      //   (b) successfully called /auth/me (online path), OR
+      //   (c) confirmed the token is invalid via a 401 from /auth/me.
+      // Any earlier loading=false would flash the welcome screen
+      // through to the user — the exact bug Joyce + Charles saw on
+      // notification tap.
+      const cachedUser = await readUserCache();
+      if (cachedUser) {
+        // OFFLINE-FIRST: cache hit → restore the session immediately
+        // and dismiss loading.  /auth/me continues in the background.
+        setUser(cachedUser);
+        setLoading(false);
+      }
+      try {
+        const res = await api.get('/auth/me');
+        setUser(res.data);
+        await writeUserCache(res.data);
+        try {
+          const tz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
+          if (tz && tz !== res.data.timezone) {
+            const updated = await api.put('/auth/timezone', { timezone: tz });
+            setUser(updated.data);
+            await writeUserCache(updated.data);
+          }
+        } catch (_e) {}
+      } catch (e: any) {
+        const status = e?.response?.status;
+        if (status === 401) {
+          // Server-confirmed bad token → log them out.
+          await clearToken();
+          await writeUserCache(null);
+          setUser(null);
+        }
+        // else: keep token, keep cached user (if any).  No state
+        // change; user can stay where they are.
+      }
+      // Catch-all flip in case the cache hit branch above didn't
+      // already do it (cache miss + /auth/me success path lands here).
       setLoading(false);
     })();
   }, []);
