@@ -489,6 +489,20 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
     // Register the live alert callback so the pending-deep-link queue
     // can fire it whenever RootNav signals app-ready.
     liveOnAlert = onAlert || null;
+    // RACE FIX: if the queue is ALREADY ready AND there's pending
+    // data, attempt the flush right now.  Previously the only
+    // triggers for tryFlush were setAppReadyForDeepLink(true) and
+    // enqueueDeepLink(...) — but both can race with this effect's
+    // cleanup→remount cycle, where the cleanup sets liveOnAlert=null
+    // and the very next setAppReadyForDeepLink(true) tryFlush bails
+    // out because liveOnAlert was momentarily null.  With nothing
+    // later to retrigger, the deep-link data sat queued forever.
+    // Net effect: user passed the PIN gate but landed on the
+    // dashboard instead of the specific /alert/[id].  By calling
+    // tryFlush() here whenever liveOnAlert is freshly attached,
+    // we close that race — any data queued during the null window
+    // gets flushed on the next mount.
+    tryFlush();
 
     // COLD-START RECOVERY: if the OS launched the app via a notification
     // intent BEFORE our JS listener was attached, the response will be
