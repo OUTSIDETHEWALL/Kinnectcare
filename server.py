@@ -638,7 +638,7 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
                 family_group_id,
                 f"⚠️ {m['name']} missed check-in",
                 f"Expected {label}. Tap to call or check on them.",
-                {"type": "missed_checkin", "member_id": m["id"]},
+                {"type": "missed_checkin", "member_id": m["id"], "alert_id": a.id},
             )
             continue
 
@@ -676,7 +676,7 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
             family_group_id,
             f"⚠️ {m['name']} missed check-in",
             f"Expected by {fixed}. Tap to call or check on them.",
-            {"type": "missed_checkin", "member_id": m["id"]},
+            {"type": "missed_checkin", "member_id": m["id"], "alert_id": a.id},
         )
 
 
