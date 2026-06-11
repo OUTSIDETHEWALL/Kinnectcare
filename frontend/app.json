@@ -23,9 +23,12 @@
       "buildNumber": "1",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Share your location with family during check-ins and SOS.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Keep your family updated on your location for safety.",
+        "NSLocationAlwaysUsageDescription": "Keep your family updated on your location for safety.",
         "NSCameraUsageDescription": "Add profile photos for family members.",
         "NSContactsUsageDescription": "Pick an emergency contact from your phone.",
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": ["location", "fetch", "remote-notification"]
       }
     },
     "android": {
@@ -40,8 +43,12 @@
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
         "POST_NOTIFICATIONS",
-        "READ_CONTACTS"
+        "READ_CONTACTS",
+        "WAKE_LOCK"
       ]
     },
     "web": {
@@ -52,6 +59,18 @@
     "plugins": [
       "expo-router",
       "./plugins/withAndroidTelQueries",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Kinnship keeps your family updated on your location so we can reach you in an emergency.",
+          "locationAlwaysPermission": "Kinnship keeps your family updated on your location so we can reach you in an emergency.",
+          "locationWhenInUsePermission": "Share your location with family during check-ins and SOS.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
+        }
+      ],
+      "expo-task-manager",
       [
         "expo-splash-screen",
         {

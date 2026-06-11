@@ -12,7 +12,7 @@ import {
   View, Text, StyleSheet, TextInput, TouchableOpacity, KeyboardAvoidingView,
   Platform, ScrollView, ActivityIndicator, Alert,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
@@ -21,9 +21,15 @@ import { useAuth } from '../../src/AuthContext';
 export default function Signup() {
   const router = useRouter();
   const { requestOtp } = useAuth();
+  // Pre-fill from join-family.tsx pre-account invite flow (Fix #2 v1.2).
+  // The user has already validated their INV-/KINN- code against the
+  // public /verify-invite endpoint by the time they land here, so we
+  // bake the code into the form (and pre-fill the email for per-invite
+  // INV codes that carry the address they were issued to).
+  const params = useLocalSearchParams<{ invite_token?: string; email?: string }>();
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [inviteCode, setInviteCode] = useState('');
+  const [email, setEmail] = useState(String(params?.email || ''));
+  const [inviteCode, setInviteCode] = useState(String(params?.invite_token || ''));
   const [loading, setLoading] = useState(false);
 
   const onSubmit = async () => {

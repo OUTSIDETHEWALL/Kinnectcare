@@ -10,6 +10,8 @@ import { isOnboardingDone } from '../src/onboardingStore';
 import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
 import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
 import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
+import { startBackgroundLocation, stopBackgroundLocation } from '../src/backgroundLocation';
+import { api } from '../src/api';
 import {
   loadDisclaimerAck,
   subscribeDisclaimerAck,
@@ -172,7 +174,18 @@ function RootNav() {
       return;
     }
     if (t === 'sos' || t === 'missed_checkin' || t === 'fall_detected') {
-      router.replace('/(tabs)/alerts');
+      // Fix #3 (v1.2 beta): deep-link straight to the SPECIFIC alert
+      // (not the generic alerts list).  This preserves the user's
+      // intent — they tapped the notification because THAT alert
+      // needed their attention.  If the push didn't carry an
+      // alert_id (legacy build, or the rare missing-id race), fall
+      // back to the alerts list so the user isn't dead-ended.
+      const aid = data?.alert_id;
+      if (aid) {
+        router.replace({ pathname: '/alert/[id]', params: { id: aid } } as any);
+      } else {
+        router.replace('/(tabs)/alerts');
+      }
     }
   });
 
@@ -192,6 +205,57 @@ function RootNav() {
     if (user) {
       registerForPushNotifications().catch(() => {});
     }
+  }, [user?.id]);
+
+  // ============================================================
+  //  Background location foreground service (Fix #1 of v1.2 beta)
+  // ============================================================
+  //
+  // Once the user is authenticated AND we've identified their own
+  // member record (the row whose `user_id` matches their user.id),
+  // start the OS-owned foreground service that posts location to
+  // the backend every ~5 min (and every ~10 sec while SOS is
+  // active — Fix #4).  The service surfaces a persistent
+  // notification "🛡️ Kinnship is protecting your family" so users
+  // can see at a glance that monitoring is on.
+  //
+  // We gate on member.user_id linkage because the bg task POSTs to
+  // /api/members/{memberId}/location — without a member_id we have
+  // nowhere to write to.  Caregivers (who own the group but have no
+  // member row of their own) intentionally don't run the service —
+  // they're tracking, not being tracked.
+  //
+  // Stops on logout (user becomes null).  Permission UI is handled
+  // contextually by startBackgroundLocation() per
+  // handle_permissions_contract.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!user?.id) {
+        await stopBackgroundLocation();
+        return;
+      }
+      try {
+        const res = await api.get('/members');
+        if (cancelled) return;
+        const me = (res.data || []).find((m: any) => m.user_id === user.id);
+        if (!me) {
+          // User is a caregiver-only — no member row tied to them yet.
+          // Do NOT start the service.  When they're linked later
+          // (via INV-invite auto-bind or retro-link script), the
+          // next /members fetch will pick it up.
+          await stopBackgroundLocation();
+          return;
+        }
+        await startBackgroundLocation(me.id);
+      } catch (_e) {
+        // Silent — without an authenticated /members fetch we can't
+        // start anyway, and the next session will retry.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [user?.id]);
 
   useEffect(() => {
@@ -362,6 +426,7 @@ function RootNav() {
       <Stack.Screen name="upgrade" />
       <Stack.Screen name="sos-confirmation" />
       <Stack.Screen name="fall-detection-test" />
+      <Stack.Screen name="alert/[id]" />
     </Stack>
   );
 }

@@ -498,7 +498,58 @@ def build_router(
         group["name"] = new_name
         return {"ok": True, "group": public_group(group)}
 
-    @router.post("/regenerate-code")
+    @router.get("/verify-invite/{code}")
+    async def verify_invite_public(code: str):
+        """Public (NO AUTH) preview of an invite code.
+
+        Powers the pre-account "Join a Family" onboarding flow — a brand
+        new user types in their INV-XXXXXX (or KINN-XXXXXX) code BEFORE
+        creating an account, so we need to validate without a JWT.
+
+        Returns ONLY the public metadata required to render the
+        "you're joining the SMITH family — looks good?" confirmation
+        screen.  We DO NOT leak member emails, phones, or alerts.
+
+        Response shape:
+            {
+              "valid": true,
+              "family_name": "Smith Family",
+              "inviter_name": "Joyce",        # null for KINN- codes
+              "invitee_email": "char@x.com",  # null for KINN- codes
+              "code_type": "per-invite" | "family-wide",
+            }
+        Or {"valid": false, "reason": "..."} on miss/expired/revoked.
+        """
+        normalized = normalize_invite_code(code)
+        if not normalized:
+            return {"valid": False, "reason": "Invalid code format"}
+        group, invite = await resolve_invite_code(db, normalized)
+        if not group:
+            return {
+                "valid": False,
+                "reason": "Code not found, expired, or already used",
+            }
+        # Look up inviter's display name for the friendly confirmation
+        # screen.  Best-effort — if the inviter has been removed, fall
+        # back to a generic label.
+        inviter_name: Optional[str] = None
+        if invite and invite.get("invited_by_user_id"):
+            try:
+                inviter = await db.users.find_one(
+                    {"id": invite["invited_by_user_id"]},
+                    {"_id": 0, "full_name": 1},
+                )
+                if inviter:
+                    inviter_name = inviter.get("full_name")
+            except Exception:
+                pass
+        return {
+            "valid": True,
+            "family_name": group.get("name") or "Family",
+            "inviter_name": inviter_name,
+            "invitee_email": invite.get("invitee_email") if invite else None,
+            "code_type": "per-invite" if invite else "family-wide",
+        }
     async def regenerate_invite_code(current=Depends(get_current_user)):
         gid = await ensure_family_group(db, current)
         group = await get_group(db, gid)

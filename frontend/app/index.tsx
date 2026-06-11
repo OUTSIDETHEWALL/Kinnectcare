@@ -35,13 +35,22 @@ export default function Welcome() {
 
         <View style={styles.bottom}>
           <TouchableOpacity
-            testID="get-started-btn"
+            testID="welcome-join-family-btn"
             style={styles.cta}
+            activeOpacity={0.85}
+            onPress={() => router.push('/(auth)/join-family')}
+          >
+            <Icon name="enter-outline" size={20} color={Colors.surface} />
+            <Text style={styles.ctaText}>Join a Family</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            testID="welcome-create-family-btn"
+            style={styles.ctaSecondary}
             activeOpacity={0.85}
             onPress={() => router.push('/(auth)/signup')}
           >
-            <Text style={styles.ctaText}>Get Started</Text>
-            <Icon name="arrow-forward" size={20} color={Colors.surface} />
+            <Icon name="add-circle-outline" size={20} color={Colors.primary} />
+            <Text style={styles.ctaSecondaryText}>Create a New Family</Text>
           </TouchableOpacity>
           <TouchableOpacity
             testID="welcome-login-link"
@@ -109,6 +118,13 @@ const styles = StyleSheet.create({
     boxShadow: '0px 8px 14px rgba(27,94,53,0.25)', elevation: 6,
   },
   ctaText: { color: Colors.surface, fontSize: 18, fontWeight: '700' },
+  ctaSecondary: {
+    marginTop: 12,
+    height: 60, backgroundColor: Colors.surface, borderRadius: 18,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
+    borderWidth: 2, borderColor: Colors.primary,
+  },
+  ctaSecondaryText: { color: Colors.primary, fontSize: 18, fontWeight: '700' },
   loginLink: { marginTop: 18, alignItems: 'center' },
   loginLinkText: { fontSize: 15, color: Colors.textSecondary },
 });

@@ -72,6 +72,11 @@ export function FallDetectionOverlay() {
           longitude: lon,
           fall_detected: true,
         });
+        // Fix #4: GPS-frequency boost for the duration of the SOS.
+        try {
+          const bg = await import('./backgroundLocation');
+          await bg.beginSosBoost();
+        } catch (_e) {}
       } catch (_e) {}
     })();
     // Show the follow-up "family notified" screen with explicit 911 dial CTA.

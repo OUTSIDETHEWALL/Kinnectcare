@@ -204,6 +204,14 @@ export default function Dashboard() {
           }
         } catch (_e) {}
         await api.post('/sos', { latitude: lat, longitude: lon });
+        // Fix #4 of v1.2 beta: bump the background location service
+        // to 10-second cadence for the next 30 min (or until the SOS
+        // is resolved, whichever comes first) so the caregiver sees
+        // a moving dot in real-time during the emergency.
+        try {
+          const bg = await import('../../src/backgroundLocation');
+          await bg.beginSosBoost();
+        } catch (_e) {}
         load().catch(() => {});
         try {
           (globalThis as any).__kinnshipAlertsBump = Date.now();
