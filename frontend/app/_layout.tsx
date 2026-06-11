@@ -83,14 +83,36 @@ function RootNav() {
   // saved AND they haven't dismissed the setup prompt yet, we route
   // them to /(auth)/pin-setup.
   useEffect(() => {
+    // CRITICAL RACE FIX (v1.2-hotfix): reset pinChecked to false at
+    // the START of every re-run.  Previously the effect only set
+    // pinChecked=TRUE at the end — when the cached-user restore on
+    // cold-start changed user.id from null → set, this effect kicked
+    // off a fresh async hasPinForUser() check, but during that ~30ms
+    // await the routing effect would fire with the STALE
+    // pinChecked=true (from the prior user=null run, where we'd set
+    // needsPinUnlock=false).  RootNav saw a logged-in user with
+    // "PIN already checked, no unlock needed" and routed straight to
+    // the dashboard (OR back to welcome, depending on segment
+    // alignment) — skipping the PIN entirely.  Symptom: "notification
+    // tap routes to OTP/welcome instead of PIN after device reboot".
+    //
+    // By resetting pinChecked=false at the top, the routing effect's
+    // `if (loading || !pinChecked) return;` guard keeps the spinner
+    // visible until we've recomputed needsPinUnlock against the new
+    // user.  The spinner is invisible-to-fast for most users (<50ms)
+    // and is the correct UX in the genuine "we don't know yet" state.
+    let cancelled = false;
+    setPinChecked(false);
     (async () => {
       if (!user?.id) {
+        if (cancelled) return;
         setNeedsPinUnlock(false);
         setNeedsPinSetup(false);
         setPinChecked(true);
         return;
       }
       const hasPin = await hasPinForUser(user.id);
+      if (cancelled) return;
       if (hasPin) {
         // Existing PIN — gate behind unlock unless we've already
         // unlocked-this-session (e.g. after a fresh email login,
@@ -104,10 +126,14 @@ function RootNav() {
         // different account re-prompts that account.
         setNeedsPinUnlock(false);
         const dismissed = await wasPinSetupDismissed(user.id);
+        if (cancelled) return;
         setNeedsPinSetup(!dismissed);
       }
       setPinChecked(true);
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [user?.id]);
 
   // ----- PIN re-prompt cadence: COLD START ONLY -----

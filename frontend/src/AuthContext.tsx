@@ -120,9 +120,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const cachedUser = await readUserCache();
         if (cachedUser) {
           setUser(cachedUser);
-          // From here, even if /auth/me fails, RootNav can run the
-          // PIN gate.  Loading is also flipped below so the spinner
-          // dismisses immediately.
+          // CRITICAL: dismiss the loading spinner the moment the
+          // cache restores.  /auth/me continues in the background.
+          // Without this, the spinner stayed up until /auth/me
+          // settled — which on a post-reboot Samsung with cold Wi-Fi
+          // could take 20+ seconds, after which the catch branch
+          // below would set loading=false and the routing effect
+          // would race with the PIN check (the race itself fixed
+          // separately in RootNav via pinChecked reset).  By
+          // dismissing loading here, RootNav sees user=cached AND
+          // pinChecked=false (the fresh reset) → keeps the spinner
+          // up until PIN gate evaluates → routes to pin-login.
+          setLoading(false);
         }
         try {
           const res = await api.get('/auth/me');
@@ -137,22 +146,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
           } catch (_e) {}
         } catch (e: any) {
-          // CRITICAL — only clear the token if the server explicitly
-          // says the token is invalid (401). Network errors, timeouts,
-          // 5xx outages, and DNS hiccups MUST NOT log the user out —
-          // we just leave the loading state and they keep their
-          // session for the next launch.
-          //
-          // Why this matters: when the app is cold-started from a
-          // notification tap (medication acknowledge etc.), there's
-          // a brief window where the network stack isn't ready yet.
-          // The first /auth/me request can transiently fail. The
-          // PREVIOUS implementation cleared the token on ANY failure,
-          // which then bounced the user to /(auth)/login — that was
-          // the "notification deep link drops me at login" bug. With
-          // this guard, transient failures are silently retried via
-          // the user's next authenticated request (which axios will
-          // automatically attach the still-valid token to).
           const status = e?.response?.status;
           if (status === 401) {
             await clearToken();
@@ -165,6 +158,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // network was flaky.  Next authenticated request will
           // retry /auth/me automatically.
         }
+        // Only flip loading from here if we DIDN'T already dismiss
+        // it above when the cache restored (e.g. token exists but
+        // no cache yet — first-time install before this fix landed).
       }
       setLoading(false);
     })();
