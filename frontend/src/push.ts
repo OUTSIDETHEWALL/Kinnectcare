@@ -489,20 +489,23 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
     // Register the live alert callback so the pending-deep-link queue
     // can fire it whenever RootNav signals app-ready.
     liveOnAlert = onAlert || null;
-    // RACE FIX: if the queue is ALREADY ready AND there's pending
-    // data, attempt the flush right now.  Previously the only
-    // triggers for tryFlush were setAppReadyForDeepLink(true) and
-    // enqueueDeepLink(...) — but both can race with this effect's
-    // cleanup→remount cycle, where the cleanup sets liveOnAlert=null
-    // and the very next setAppReadyForDeepLink(true) tryFlush bails
-    // out because liveOnAlert was momentarily null.  With nothing
-    // later to retrigger, the deep-link data sat queued forever.
-    // Net effect: user passed the PIN gate but landed on the
-    // dashboard instead of the specific /alert/[id].  By calling
-    // tryFlush() here whenever liveOnAlert is freshly attached,
-    // we close that race — any data queued during the null window
-    // gets flushed on the next mount.
-    tryFlush();
+    // CONDITIONAL RETRY (v1.2-hotfix3): only attempt a flush at mount
+    // if there is ACTUAL pending data AND the app is already ready.
+    // The previous unconditional tryFlush() at every effect re-run
+    // (this hook re-mounts on every RootNav render because onAlert
+    // is an inline arrow) caused a stale `getLastNotificationResponseAsync`
+    // response from prior testing sessions to be re-fired on plain
+    // app opens — routing the user into /alert/[id] (which then
+    // bounced back through alerts → dashboard).  The repeated
+    // unmount/remount of the dashboard caused TouchableOpacity press
+    // events to be lost, which presented as "SOS button does
+    // nothing".  By gating on `appReadyForDeepLink && pendingDeepLinkData`
+    // we only re-attempt the flush in the narrow case it was
+    // designed for: a genuine notification tap that arrived during
+    // the cleanup/remount window of this hook.
+    if (appReadyForDeepLink && pendingDeepLinkData) {
+      tryFlush();
+    }
 
     // COLD-START RECOVERY: if the OS launched the app via a notification
     // intent BEFORE our JS listener was attached, the response will be
@@ -517,12 +520,41 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
     // same notification would get deep-linked again and again, bouncing
     // the user back to /(modals)/acknowledge after they already
     // dismissed it. (See "medication acknowledge loop" bug.)
+    //
+    // FRESHNESS GUARD (v1.2-hotfix3): `getLastNotificationResponseAsync`
+    // persistently returns the LAST tap response across JS-process
+    // restarts.  So if the user tapped a notification yesterday and
+    // opens the app today via the launcher icon, that day-old response
+    // would be re-enqueued — routing them straight into /alert/[id]
+    // instead of the dashboard.  In OTA v8 this surfaced as "SOS
+    // button does nothing" because the unconditional tryFlush() was
+    // now reliably firing those stale responses, causing the
+    // dashboard to unmount/remount in rapid succession and dropping
+    // TouchableOpacity press events on the floor.
+    //
+    // We guard with the notification's `date` field — if the tap is
+    // older than 60 seconds we treat it as stale and skip enqueueing.
+    // 60s is generous enough that legitimate "tap then reopen the
+    // app while the system is launching it" flows still fire, but
+    // tight enough that next-day reopens never accidentally deep-link.
     (async () => {
       try {
         const cold = await Notifications.getLastNotificationResponseAsync();
         if (cold && cold.actionIdentifier === Notifications.DEFAULT_ACTION_IDENTIFIER) {
           const reqId = cold.notification?.request?.identifier;
           if (isNotificationConsumed(reqId)) return;
+          // Freshness gate — see doc-block above.
+          const notifDate = (cold.notification as any)?.date;
+          const ageMs = typeof notifDate === 'number'
+            ? Date.now() - notifDate
+            : Number.POSITIVE_INFINITY;
+          if (ageMs > 60 * 1000) {
+            // Stale launch response — mark consumed so we don't keep
+            // checking it on every effect re-mount, but DO NOT
+            // enqueue.
+            markNotificationConsumed(reqId);
+            return;
+          }
           const data: any = cold.notification?.request?.content?.data || {};
           if (data && data.type) {
             markNotificationConsumed(reqId);
