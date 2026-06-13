@@ -7,9 +7,13 @@
  * read-only screen of the log entries.
  *
  * ─────────────────────────────────────────────────────────────
- *  // TODO: REMOVE AFTER BETA STABILIZATION COMPLETES
- *    Look for `routeDiagnostics` imports + this file.
- *    Search for the long-press handler in app/index.tsx as well.
+ *  // KEEP THROUGH BETA WAVE 1 — DO NOT REMOVE YET
+ *    Per user direction: routing data across different devices /
+ *    Android versions is valuable.  Re-evaluate removal after the
+ *    first beta wave completes and we have a corpus of logs to
+ *    learn from.  When removing: drop this file, the import in
+ *    app/_layout.tsx, and the planned Settings → Diagnostics →
+ *    Copy Log button (TBD).
  * ─────────────────────────────────────────────────────────────
  *
  * Format of each entry (JSON-stringified, line per event):
