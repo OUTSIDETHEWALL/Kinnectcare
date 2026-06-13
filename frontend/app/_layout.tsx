@@ -161,8 +161,29 @@ function RootNav() {
     const t = data?.type;
     const subtype = data?.subtype;
     const stage = data?.stage;
+    // P6 BETA DIAGNOSTICS — capture routing decision pre-navigation.
+    // TODO: remove this block + the routeDiagnostics import once
+    // stabilization sprint completes.  Logs to AsyncStorage only
+    // (no network, no PII), bounded at 50 entries.
+    const __logRoute = (toRoute: string) => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const diag = require('../src/routeDiagnostics');
+        void diag.logRouteDecision({
+          type: typeof t === 'string' ? t : 'unknown',
+          loggedIn: !!user?.id,
+          hasPin: pinChecked ? !needsPinUnlock || !needsPinSetup : null,
+          pinUnlocked: !needsPinUnlock,
+          fromSegment: (segments && (segments as string[]).join('/')) || 'unknown',
+          toRoute,
+          reason: 'tap',
+          alertId: typeof data?.alert_id === 'string' ? (data.alert_id as string) : null,
+        });
+      } catch (_e) {}
+    };
     if ((t === 'medication' && (subtype === 'self_due' || !subtype)) ||
         (t === 'routine')) {
+      __logRoute('/(modals)/acknowledge');
       try {
         router.replace({
           pathname: '/(modals)/acknowledge',
@@ -208,8 +229,10 @@ function RootNav() {
       // back to the alerts list so the user isn't dead-ended.
       const aid = data?.alert_id;
       if (aid) {
+        __logRoute(`/alert/${aid}`);
         router.replace({ pathname: '/alert/[id]', params: { id: aid } } as any);
       } else {
+        __logRoute('/(tabs)/alerts');
         router.replace('/(tabs)/alerts');
       }
     }

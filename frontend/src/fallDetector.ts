@@ -45,15 +45,57 @@ const KEY = 'kc.fall.enabled';
 //     supports the phone the whole way, magnitude never drops <0.75g).
 //   • Peak impact G of a gentle set-down is typically <1.4g, well
 //     under the 1.7g impact threshold.
-const SAMPLE_RATE_MS = 50;             // ~20 Hz
-const FREEFALL_G = 0.75;               // loosened — phone rotation during real falls
-const FREEFALL_REQUIRED_MS = 60;       // ~60ms of freefall = a real drop, not a set-down
-const FREEFALL_LOOKBACK_MS = 600;
-const IMPACT_G = 1.7;                  // significantly more sensitive
-const STILLNESS_BAND_G = 0.5;          // very loose for soft-surface bounce
-const STILLNESS_REQUIRED_MS = 600;     // confirm fast — 30s cancel handles false positives
-const POST_IMPACT_WINDOW_MS = 4000;
-const COOLDOWN_MS = 12000;
+// ============================================================
+//  FALL DETECTION TUNING CONSTANTS — SINGLE SOURCE OF TRUTH
+// ============================================================
+//
+// Modify ONLY this block to tune sensitivity.  All thresholds are
+// referenced by name below — no magic numbers elsewhere in the file.
+// Ship tuning changes via OTA without touching detection logic.
+//
+// Beta v1.3 settings (controlled-test repro: waist-height arm-drop,
+// phone-on-chest-lying-down).  Both must trigger reliably without
+// firing on normal walking / set-down.
+//
+// Detection algorithm:
+//   1. FREEFALL window OR SEVERE_IMPACT bypass
+//   2. IMPACT spike > IMPACT_G_THRESHOLD
+//   3. STILLNESS for STILLNESS_REQUIRED_MS after impact
+//   4. 30s user-cancellable countdown
+//
+// v1.3 changes vs v6.11.5:
+//   FREEFALL_REQUIRED_MS  60   → 40   (arm-supported drops have very
+//                                      short freefall — 40ms is the
+//                                      shortest measurable window)
+//   IMPACT_G_THRESHOLD    1.7  → 1.5  (catches softer carpet/chest impacts)
+//   SEVERE_IMPACT_G       —    → 2.5  (NEW: bypass freefall requirement
+//                                      entirely on hard impacts — phones
+//                                      flying off a counter often miss
+//                                      the freefall pre-condition)
+//   STILLNESS_REQUIRED_MS 600  → 500  (faster confirmation)
+export const FALL_THRESHOLDS = {
+  SAMPLE_RATE_MS: 50,                // ~20 Hz accelerometer polling
+  FREEFALL_G: 0.75,                  // upper bound of freefall band
+  FREEFALL_REQUIRED_MS: 40,          // total time in band needed
+  FREEFALL_LOOKBACK_MS: 600,         // search-back window for freefall
+  IMPACT_G_THRESHOLD: 1.5,           // minimum impact spike to qualify
+  SEVERE_IMPACT_G: 2.5,              // bypass freefall pre-req above this
+  STILLNESS_BAND_G: 0.5,             // ±band around 1.0g during stillness
+  STILLNESS_REQUIRED_MS: 500,        // dwell-time in stillness band
+  POST_IMPACT_WINDOW_MS: 4000,       // how long to wait for stillness
+  COOLDOWN_MS: 12000,                // dead-time after any detection
+};
+
+const SAMPLE_RATE_MS = FALL_THRESHOLDS.SAMPLE_RATE_MS;
+const FREEFALL_G = FALL_THRESHOLDS.FREEFALL_G;
+const FREEFALL_REQUIRED_MS = FALL_THRESHOLDS.FREEFALL_REQUIRED_MS;
+const FREEFALL_LOOKBACK_MS = FALL_THRESHOLDS.FREEFALL_LOOKBACK_MS;
+const IMPACT_G = FALL_THRESHOLDS.IMPACT_G_THRESHOLD;
+const SEVERE_IMPACT_G = FALL_THRESHOLDS.SEVERE_IMPACT_G;
+const STILLNESS_BAND_G = FALL_THRESHOLDS.STILLNESS_BAND_G;
+const STILLNESS_REQUIRED_MS = FALL_THRESHOLDS.STILLNESS_REQUIRED_MS;
+const POST_IMPACT_WINDOW_MS = FALL_THRESHOLDS.POST_IMPACT_WINDOW_MS;
+const COOLDOWN_MS = FALL_THRESHOLDS.COOLDOWN_MS;
 
 export type FallDetectorOptions = {
   onFallDetected: () => void;
@@ -179,9 +221,20 @@ export function useFallDetector({ onFallDetected }: FallDetectorOptions) {
             // eslint-disable-next-line no-console
             console.log('[fall] impact', mag.toFixed(2), 'g — maxFreefall', maxFreefallMs, 'ms');
           }
-          if (maxFreefallMs < FREEFALL_REQUIRED_MS) {
-            // No qualifying freefall window → likely a phone-handling
-            // spike. Ignore.
+          // SEVERE-IMPACT BYPASS (v1.3 beta stab):
+          // Real-world report from controlled testing — drops from
+          // waist height with an arm-following motion often have NO
+          // measurable freefall window because the arm decelerates the
+          // phone all the way down.  But the impact itself is still
+          // very real (~2.5g+ when the arm flings the phone).  Skip
+          // the freefall pre-check on any impact above SEVERE_IMPACT_G
+          // so these still trigger.  Normal walking/set-down rarely
+          // crosses 2.5g — confirmed by accelerometer logging in
+          // controlled tests — so this doesn't increase false-positive
+          // rate meaningfully.
+          if (mag < SEVERE_IMPACT_G && maxFreefallMs < FREEFALL_REQUIRED_MS) {
+            // Soft impact AND no qualifying freefall window → likely
+            // a phone-handling spike. Ignore.
             return;
           }
           if (__DEV__) {
