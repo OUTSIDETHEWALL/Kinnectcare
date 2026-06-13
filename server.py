@@ -2091,6 +2091,24 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
          "type": "missed_checkin", "created_at": {"$gte": day_start_utc}},
         {"$set": {"acknowledged": True}}
     )
+    # Fan out check-in confirmation to the rest of the family (P1 of
+    # the beta stabilization sprint).  Previously the endpoint saved
+    # the row + acked outstanding missed-checkin alerts but never
+    # surfaced the success to anyone but the senior — caregivers
+    # were left wondering whether the check-in went through.  The
+    # push is non-blocking (best-effort); a failure here MUST NOT
+    # roll back the saved check-in.
+    try:
+        await push_to_family_group(
+            current["family_group_id"],
+            f"✅ {member['name']} checked in",
+            (member["name"] + " is safe — just checked in"
+                + (f" from {data.location_name}" if data.location_name else "")),
+            {"type": "checkin", "member_id": data.member_id, "checkin_id": ci.id},
+            exclude_user_id=current["id"],  # don't ping the senior themselves
+        )
+    except Exception as e:
+        logger.warning(f"checkin push fanout failed (non-fatal): {e}")
     return ci
 
 
@@ -2671,6 +2689,48 @@ async def _ensure_alert_dedup_index():
         logger.info("alerts uniq_alert_slot index ensured.")
     except Exception as e:
         logger.warning(f"alerts uniq_alert_slot index ensure skipped: {e}")
+
+    # ============================================================
+    #  P5 of beta stabilization sprint: AUTOMATIC DATA RETENTION
+    # ============================================================
+    #
+    # Four MongoDB TTL indexes keep collection growth bounded
+    # without requiring scheduled jobs.  Mongo's background TTL
+    # monitor sweeps every ~60s and deletes documents whose
+    # indexed datetime field is older than expireAfterSeconds.
+    # All four are idempotent — re-running on a populated DB is
+    # safe.  Partial indexes are used where we only want SOME
+    # documents to expire (e.g. only RESOLVED alerts, not active
+    # ones).
+    #
+    # Tuning rationale:
+    #   otp_codes:           10 min   — short-lived secrets
+    #   checkins:            90 days  — long enough for trend UI
+    #   resolved alerts:     30 days  — audit trail + ack history
+    #   med_notifications:   30 days  — escalation history
+    ttl_indexes = [
+        # OTP codes — expire from their own expires_at field
+        # (already populated server-side at issuance).  Using
+        # expireAfterSeconds=0 makes Mongo delete the doc the
+        # moment expires_at is in the past.
+        ("otp_codes",          "expires_at", 0,             None),
+        # Check-ins — 90 days after creation
+        ("checkins",           "created_at", 90 * 86400,    None),
+        # Alerts — 30 days after RESOLUTION (resolved_at must
+        # exist, so partial-filter on that)
+        ("alerts",             "resolved_at", 30 * 86400,   {"resolved_at": {"$exists": True}}),
+        # Medication notifications — 30 days after creation
+        ("med_notifications",  "created_at", 30 * 86400,    None),
+    ]
+    for coll_name, field, ttl_seconds, partial_filter in ttl_indexes:
+        try:
+            kwargs = {"expireAfterSeconds": ttl_seconds, "name": f"ttl_{field}"}
+            if partial_filter:
+                kwargs["partialFilterExpression"] = partial_filter
+            await db[coll_name].create_index([(field, 1)], **kwargs)
+            logger.info(f"TTL index ensured: {coll_name}.{field} expireAfterSeconds={ttl_seconds}")
+        except Exception as e:
+            logger.warning(f"TTL index skipped for {coll_name}.{field}: {e}")
 
 
 @app.on_event("startup")
