@@ -49,6 +49,7 @@ type PushRefreshEntry = {
   t: number;
   reason?: string;
   rotated?: boolean;
+  wrote?: boolean;
   tokenSuffix?: string;
 };
 
@@ -255,9 +256,9 @@ export default function DiagnosticsScreen() {
             <Text style={styles.sectionCount}>{pushLog.length}</Text>
           </View>
           <Text style={styles.sectionHint}>
-            Each entry = one successful re-sync of the device's push token to the backend.
-            Auto-fires on app foreground (throttled to once per 30 min). A non-empty list
-            confirms the auto-refresh is keeping the token fresh.
+            Each entry = one foreground refresh attempt. Auto-fires on app foreground
+            (throttled to once per 30 min). `wrote: false` = token unchanged, no backend
+            write needed. `rotated: true` = Expo issued a new token and we synced it.
           </Text>
           <View style={styles.card}>
             {loading ? (
@@ -275,6 +276,8 @@ export default function DiagnosticsScreen() {
                       <Text style={styles.entryK}>reason: </Text>{e.reason || '—'}
                       {'  '}
                       <Text style={styles.entryK}>rotated: </Text>{String(!!e.rotated)}
+                      {'  '}
+                      <Text style={styles.entryK}>wrote: </Text>{String(!!e.wrote)}
                     </Text>
                     <Text style={styles.entryLine}>
                       <Text style={styles.entryK}>token: </Text>…{e.tokenSuffix || '—'}

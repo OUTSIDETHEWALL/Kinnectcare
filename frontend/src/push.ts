@@ -62,51 +62,105 @@ export function getLastPushTokenSyncAt(): number {
 }
 
 /**
- * Conservative refresh wrapper around registerForPushNotifications().
- * - Skips when last successful sync was less than 30 min ago.
- * - Skips on web / simulator (early return inside register…).
- * - Always silent (errors swallowed; UI status is updated via setStatus).
- * - Persists a rolling diagnostic record so we can confirm refreshes
- *   are firing on Joyce's device.
+ * Conservative refresh wrapper. Self-throttled to once per 30 min.
  *
- * Safe to call from any AppState/useEffect handler without throttling
- * yourself — the function self-throttles.
+ * Flow (v1.2.1+):
+ *   1. Throttle: bail if last attempt was < 30 min ago.
+ *   2. Permission check (no prompt — silent).
+ *   3. Fetch current device push token from Expo.
+ *   4. COMPARE against the in-memory cached token.
+ *      - Same → record a no-op diagnostic entry (rotated=false,
+ *        wrote=false) and bail. NO backend write.
+ *      - Different (or no cache) → POST to /auth/push-token,
+ *        update lastStatus, record diagnostic entry with
+ *        rotated=true, wrote=true.
+ *
+ * This means a healthy device whose Expo token is stable across
+ * days will generate ZERO backend writes from foreground refreshes
+ * after the initial registration. We still update the throttle
+ * timestamp on every attempt so the next attempt waits another
+ * 30 min — burst-foregrounding does not hammer Expo's token
+ * service either.
+ *
+ * Errors are swallowed and recorded so a flaky Expo lookup never
+ * breaks the foreground transition.
  */
 export async function refreshPushTokenIfStale(reason: string): Promise<void> {
   try {
+    if (Platform.OS === 'web' || !Device.isDevice) return;
+
     const now = Date.now();
-    // Throttle: skip if we have a healthy registration AND it's fresh.
-    if (
-      lastStatus.state === 'registered' &&
-      lastPushTokenSyncAt > 0 &&
-      now - lastPushTokenSyncAt < PUSH_TOKEN_REFRESH_INTERVAL_MS
-    ) {
+    // Throttle attempts (regardless of outcome) to once per 30 min.
+    if (lastPushTokenSyncAt > 0 && now - lastPushTokenSyncAt < PUSH_TOKEN_REFRESH_INTERVAL_MS) {
       return;
     }
-    const prevToken = lastStatus.state === 'registered' ? lastStatus.token : null;
-    const newToken = await registerForPushNotifications();
-    if (newToken) {
-      lastPushTokenSyncAt = Date.now();
-      try {
-        // Rolling diagnostic log (last 30 entries) — read by the
-        // Diagnostics screen so support / the user can confirm push
-        // refreshes are landing without needing device logs.
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const AsyncStorage = require('@react-native-async-storage/async-storage').default;
-        const raw = await AsyncStorage.getItem('kc_push_refresh_log');
-        const arr: any[] = raw ? JSON.parse(raw) : [];
-        arr.push({
-          t: lastPushTokenSyncAt,
-          reason,
-          rotated: !!(prevToken && prevToken !== newToken),
-          // Truncate token for log compactness; never log the full token
-          // to avoid leaking it through the Copy Log payload.
-          tokenSuffix: newToken.slice(-6),
-        });
-        while (arr.length > 30) arr.shift();
-        await AsyncStorage.setItem('kc_push_refresh_log', JSON.stringify(arr));
-      } catch (_e) {}
+
+    // Permission must already be granted — never prompt from a
+    // foreground transition. If revoked, the existing
+    // `registerForPushNotifications` path on next user.id change
+    // (or the Settings retry button) will surface the state.
+    const { status } = await Notifications.getPermissionsAsync();
+    if (status !== 'granted') return;
+
+    const projectId =
+      process.env.EXPO_PUBLIC_EAS_PROJECT_ID ||
+      Constants?.expoConfig?.extra?.eas?.projectId ||
+      (Constants as any)?.easConfig?.projectId ||
+      HARDCODED_EAS_PROJECT_ID;
+    if (!projectId || projectId === 'REPLACE_WITH_EAS_PROJECT_ID') return;
+
+    let currentToken: string;
+    try {
+      const r = await Notifications.getExpoPushTokenAsync({ projectId });
+      currentToken = r.data;
+    } catch (_e) {
+      // Network or Expo-side failure — leave existing state alone,
+      // try again next foreground.
+      lastPushTokenSyncAt = now; // honour throttle so we don't retry-loop
+      return;
     }
+    if (!currentToken) return;
+
+    const cachedToken = lastStatus.state === 'registered' ? lastStatus.token : null;
+    const rotated = !!cachedToken && cachedToken !== currentToken;
+    const isFirst = !cachedToken;
+
+    let wrote = false;
+    if (rotated || isFirst) {
+      // Token genuinely changed (or we never had one cached) — write.
+      try {
+        await api.post('/auth/push-token', { token: currentToken, platform: Platform.OS });
+        setStatus({ state: 'registered', token: currentToken });
+        wrote = true;
+      } catch (_e) {
+        // Backend write failed — keep old cached state. Next attempt
+        // will retry after the throttle window.
+        lastPushTokenSyncAt = now;
+        return;
+      }
+    }
+    // No-op or success: in either case the throttle clock resets.
+    lastPushTokenSyncAt = now;
+
+    // Diagnostic log — capture every attempt (including no-ops) so
+    // we can confirm the refresh is firing on Joyce's device even
+    // when nothing rotated.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+      const raw = await AsyncStorage.getItem('kc_push_refresh_log');
+      const arr: any[] = raw ? JSON.parse(raw) : [];
+      arr.push({
+        t: now,
+        reason,
+        rotated,
+        wrote,
+        // Token suffix only — never log the full token.
+        tokenSuffix: currentToken.slice(-6),
+      });
+      while (arr.length > 30) arr.shift();
+      await AsyncStorage.setItem('kc_push_refresh_log', JSON.stringify(arr));
+    } catch (_e) {}
   } catch (_e) {
     // Never let a refresh failure crash the foreground transition.
   }
