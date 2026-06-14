@@ -34,6 +34,7 @@ import { readRouteLog, clearRouteLog, RouteDiagEntry } from '../src/routeDiagnos
 import { useAuth } from '../src/AuthContext';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
+const PUSH_REFRESH_KEY = 'kc_push_refresh_log';
 
 type AuthClearEntry = {
   t: number;
@@ -42,6 +43,13 @@ type AuthClearEntry = {
   body?: string | null;
   url?: string | null;
   cachedUserId?: string | null;
+};
+
+type PushRefreshEntry = {
+  t: number;
+  reason?: string;
+  rotated?: boolean;
+  tokenSuffix?: string;
 };
 
 async function readAuthClearLog(): Promise<AuthClearEntry[]> {
@@ -55,6 +63,19 @@ async function readAuthClearLog(): Promise<AuthClearEntry[]> {
 
 async function clearAuthClearLog(): Promise<void> {
   try { await AsyncStorage.removeItem(AUTH_CLEAR_KEY); } catch (_e) {}
+}
+
+async function readPushRefreshLog(): Promise<PushRefreshEntry[]> {
+  try {
+    const raw = await AsyncStorage.getItem(PUSH_REFRESH_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (_e) {
+    return [];
+  }
+}
+
+async function clearPushRefreshLog(): Promise<void> {
+  try { await AsyncStorage.removeItem(PUSH_REFRESH_KEY); } catch (_e) {}
 }
 
 function fmt(ts: number): string {
@@ -71,13 +92,15 @@ export default function DiagnosticsScreen() {
   const { user } = useAuth();
   const [routeLog, setRouteLog] = useState<RouteDiagEntry[]>([]);
   const [authLog, setAuthLog] = useState<AuthClearEntry[]>([]);
+  const [pushLog, setPushLog] = useState<PushRefreshEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [r, a] = await Promise.all([readRouteLog(), readAuthClearLog()]);
+    const [r, a, p] = await Promise.all([readRouteLog(), readAuthClearLog(), readPushRefreshLog()]);
     setRouteLog(r);
     setAuthLog(a);
+    setPushLog(p);
     setLoading(false);
   }, []);
 
@@ -99,12 +122,14 @@ export default function DiagnosticsScreen() {
       user: user ? { id: user.id, email: user.email } : null,
       authClearLog: authLog,
       routeLog,
+      pushRefreshLog: pushLog,
       counts: {
         authClear: authLog.length,
         route: routeLog.length,
+        pushRefresh: pushLog.length,
       },
     };
-  }, [authLog, routeLog, user]);
+  }, [authLog, routeLog, pushLog, user]);
 
   const onCopy = async () => {
     try {
@@ -113,7 +138,7 @@ export default function DiagnosticsScreen() {
       await Clipboard.setStringAsync(json);
       Alert.alert(
         'Copied',
-        `Diagnostic log copied to clipboard (${authLog.length} auth, ${routeLog.length} route entries). Paste it into your support email.`,
+        `Diagnostic log copied to clipboard (${authLog.length} auth, ${routeLog.length} route, ${pushLog.length} push entries). Paste it into your support email.`,
       );
     } catch (e: any) {
       Alert.alert('Could not copy', e?.message || 'Try again.');
@@ -130,7 +155,7 @@ export default function DiagnosticsScreen() {
           text: 'Clear',
           style: 'destructive',
           onPress: async () => {
-            await Promise.all([clearAuthClearLog(), clearRouteLog()]);
+            await Promise.all([clearAuthClearLog(), clearRouteLog(), clearPushRefreshLog()]);
             await reload();
           },
         },
@@ -218,6 +243,42 @@ export default function DiagnosticsScreen() {
                     {e.body ? (
                       <Text style={styles.entryBody}>{e.body}</Text>
                     ) : null}
+                  </View>
+                ))
+            )}
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Push token refresh</Text>
+            <Text style={styles.sectionCount}>{pushLog.length}</Text>
+          </View>
+          <Text style={styles.sectionHint}>
+            Each entry = one successful re-sync of the device's push token to the backend.
+            Auto-fires on app foreground (throttled to once per 30 min). A non-empty list
+            confirms the auto-refresh is keeping the token fresh.
+          </Text>
+          <View style={styles.card}>
+            {loading ? (
+              <Text style={styles.muted}>Loading…</Text>
+            ) : pushLog.length === 0 ? (
+              <Text style={styles.muted}>No refreshes yet on this session. The next foreground transition will populate.</Text>
+            ) : (
+              pushLog
+                .slice()
+                .reverse()
+                .map((e, i) => (
+                  <View key={`p-${e.t}-${i}`} style={styles.entry}>
+                    <Text style={styles.entryTime}>{fmt(e.t)}</Text>
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>reason: </Text>{e.reason || '—'}
+                      {'  '}
+                      <Text style={styles.entryK}>rotated: </Text>{String(!!e.rotated)}
+                    </Text>
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>token: </Text>…{e.tokenSuffix || '—'}
+                    </Text>
                   </View>
                 ))
             )}

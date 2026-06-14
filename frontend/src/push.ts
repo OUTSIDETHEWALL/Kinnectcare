@@ -35,6 +35,83 @@ export function subscribePushStatus(cb: (s: PushStatus) => void): () => void {
   return () => listeners.delete(cb);
 }
 
+// ---------- Push-token freshness tracking ----------
+//
+// v1.2.1 fix: Joyce's SOS deliveries were silently failing after
+// extended idle periods (multi-day phone-on-charger overnight runs).
+// Root cause: Expo/FCM occasionally rotates the device push token,
+// AND the JS process can stay alive across days without any
+// useEffect re-running — so `registerForPushNotifications()` (which
+// is wired to user.id changes only) never re-fires. The backend
+// keeps a stale token, and our push.send to that token gets dropped
+// silently at the Expo relay.
+//
+// Mitigation: on every app-foreground transition (while signed in),
+// we silently re-register. Throttled to once every 30 minutes so a
+// user who background-foregrounds the app rapidly doesn't hammer
+// Expo + our /auth/push-token endpoint. A successful re-register
+// always replaces the server-side token via wipe-and-set logic
+// (already in place — see "Fixed Push Token accumulation"), so even
+// a no-op rotation is a net positive: it refreshes the server's
+// view of the token's last-seen timestamp.
+const PUSH_TOKEN_REFRESH_INTERVAL_MS = 30 * 60 * 1000; // 30 min
+let lastPushTokenSyncAt = 0;
+
+export function getLastPushTokenSyncAt(): number {
+  return lastPushTokenSyncAt;
+}
+
+/**
+ * Conservative refresh wrapper around registerForPushNotifications().
+ * - Skips when last successful sync was less than 30 min ago.
+ * - Skips on web / simulator (early return inside register…).
+ * - Always silent (errors swallowed; UI status is updated via setStatus).
+ * - Persists a rolling diagnostic record so we can confirm refreshes
+ *   are firing on Joyce's device.
+ *
+ * Safe to call from any AppState/useEffect handler without throttling
+ * yourself — the function self-throttles.
+ */
+export async function refreshPushTokenIfStale(reason: string): Promise<void> {
+  try {
+    const now = Date.now();
+    // Throttle: skip if we have a healthy registration AND it's fresh.
+    if (
+      lastStatus.state === 'registered' &&
+      lastPushTokenSyncAt > 0 &&
+      now - lastPushTokenSyncAt < PUSH_TOKEN_REFRESH_INTERVAL_MS
+    ) {
+      return;
+    }
+    const prevToken = lastStatus.state === 'registered' ? lastStatus.token : null;
+    const newToken = await registerForPushNotifications();
+    if (newToken) {
+      lastPushTokenSyncAt = Date.now();
+      try {
+        // Rolling diagnostic log (last 30 entries) — read by the
+        // Diagnostics screen so support / the user can confirm push
+        // refreshes are landing without needing device logs.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+        const raw = await AsyncStorage.getItem('kc_push_refresh_log');
+        const arr: any[] = raw ? JSON.parse(raw) : [];
+        arr.push({
+          t: lastPushTokenSyncAt,
+          reason,
+          rotated: !!(prevToken && prevToken !== newToken),
+          // Truncate token for log compactness; never log the full token
+          // to avoid leaking it through the Copy Log payload.
+          tokenSuffix: newToken.slice(-6),
+        });
+        while (arr.length > 30) arr.shift();
+        await AsyncStorage.setItem('kc_push_refresh_log', JSON.stringify(arr));
+      } catch (_e) {}
+    }
+  } catch (_e) {
+    // Never let a refresh failure crash the foreground transition.
+  }
+}
+
 // In-foreground notification display behavior. shouldShowBanner=true ensures
 // the heads-up appears even when the app is open in the foreground.
 Notifications.setNotificationHandler({
@@ -244,6 +321,7 @@ export async function registerForPushNotifications(): Promise<string | null> {
     try {
       await api.post('/auth/push-token', { token, platform: Platform.OS });
       setStatus({ state: 'registered', token });
+      lastPushTokenSyncAt = Date.now();
       return token;
     } catch (e: any) {
       setStatus({ state: 'api_error', error: e?.message || String(e) });

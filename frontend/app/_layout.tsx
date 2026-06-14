@@ -3,9 +3,9 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from '../src/AuthContext';
 import { useEffect, useState } from 'react';
-import { View, ActivityIndicator } from 'react-native';
+import { View, ActivityIndicator, AppState } from 'react-native';
 import { Colors } from '../src/theme';
-import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink } from '../src/push';
+import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink, refreshPushTokenIfStale } from '../src/push';
 import { isOnboardingDone } from '../src/onboardingStore';
 import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
 import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
@@ -254,6 +254,42 @@ function RootNav() {
     if (user) {
       registerForPushNotifications().catch(() => {});
     }
+  }, [user?.id]);
+
+  // ============================================================
+  //  Auto push-token refresh on app foreground (v1.2.1)
+  // ============================================================
+  //
+  // Joyce reported SOS deliveries silently failing after extended
+  // idle periods (multi-day on-charger). Root cause: Expo/FCM
+  // occasionally rotates the device push token AND the JS process
+  // can stay alive across days without any useEffect re-running —
+  // so the existing `useEffect([user?.id])` registration above
+  // never re-fires. The backend keeps a stale token, the push
+  // relay drops it silently.
+  //
+  // Fix: listen for AppState 'active' transitions and silently
+  // re-register. `refreshPushTokenIfStale` self-throttles to once
+  // per 30 minutes per successful sync (see push.ts), so rapid
+  // bg/fg flips don't hammer Expo or our /auth/push-token.
+  //
+  // We do NOT react to 'inactive' or 'background' — only fresh
+  // 'active' transitions. We also gate on a signed-in user (no
+  // token to authenticate the API call otherwise).
+  useEffect(() => {
+    if (!user?.id) return;
+    // Fire once on mount so the throttle is primed; the existing
+    // useEffect above already triggers an initial register, this
+    // is the no-op fallback for cases where AppState was already
+    // 'active' before the user signed in (e.g. cold-start via
+    // notification tap → OTP → returns to 'active').
+    refreshPushTokenIfStale('mount').catch(() => {});
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        refreshPushTokenIfStale('foreground').catch(() => {});
+      }
+    });
+    return () => sub.remove();
   }, [user?.id]);
 
   // ============================================================
