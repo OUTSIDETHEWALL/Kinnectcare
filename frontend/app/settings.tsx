@@ -377,6 +377,21 @@ export default function SettingsScreen() {
         </View>
 
         <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Beta</Text>
+          <View style={styles.card}>
+            <NavRow
+              testID="settings-diagnostics"
+              icon="🩺"
+              label="Diagnostics & Copy Log"
+              onPress={() => router.push('/diagnostics' as any)}
+            />
+          </View>
+          <Text style={styles.dangerHint}>
+            Capture on-device routing and session-clear logs to share with support.
+          </Text>
+        </View>
+
+        <View style={styles.section}>
           <Text style={styles.sectionLabel}>Session</Text>
           <View style={styles.card}>
             <NavRow
@@ -409,7 +424,7 @@ export default function SettingsScreen() {
           {APP_NAME} · © {new Date().getFullYear()} {COMPANY_NAME}
         </Text>
         <Text style={styles.versionFooter} testID="settings-version">
-          Kinnship v1.1.9
+          Kinnship v1.2.0
         </Text>
       </ScrollView>
 

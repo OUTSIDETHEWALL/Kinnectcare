@@ -143,15 +143,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
         } catch (_e) {}
       } catch (e: any) {
-        const status = e?.response?.status;
+        let status = e?.response?.status;
+        // RETRY-ONCE on 401: a single transient 401 (Mongo brief
+        // read failure, Railway edge restart, etc.) must NOT
+        // permanently log the user out.  Pause 2s and reissue.
         if (status === 401) {
-          // Server-confirmed bad token → log them out.
+          try {
+            await new Promise((r) => setTimeout(r, 2000));
+            const res2 = await api.get('/auth/me');
+            setUser(res2.data);
+            await writeUserCache(res2.data);
+            status = undefined; // recovered
+          } catch (e2: any) {
+            status = e2?.response?.status;
+            // Capture body+url for the diag below, replace e for that
+            e = e2;
+          }
+        }
+        if (status === 401) {
+          // Confirmed two consecutive 401s → token genuinely invalid.
+          // Write diagnostic record BEFORE clearing so we can
+          // post-mortem next session.
+          try {
+            const raw = await AsyncStorage.getItem('kc_auth_clear_diag');
+            const arr: any[] = raw ? JSON.parse(raw) : [];
+            let bodyStr: string | null = null;
+            try { bodyStr = JSON.stringify(e?.response?.data).slice(0, 500); } catch (_) {}
+            arr.push({
+              t: Date.now(),
+              source: 'bootstrap_two_401s',
+              status: 401,
+              body: bodyStr,
+              url: e?.config?.url || null,
+              cachedUserId: cachedUser?.id || null,
+            });
+            while (arr.length > 20) arr.shift();
+            await AsyncStorage.setItem('kc_auth_clear_diag', JSON.stringify(arr));
+          } catch (_e) {}
           await clearToken();
           await writeUserCache(null);
           setUser(null);
         }
-        // else: keep token, keep cached user (if any).  No state
-        // change; user can stay where they are.
+        // else: keep token AND cached user. PIN gate handles UX.
       }
       // Catch-all flip in case the cache hit branch above didn't
       // already do it (cache miss + /auth/me success path lands here).
