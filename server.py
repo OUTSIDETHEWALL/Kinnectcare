@@ -219,7 +219,7 @@ class FamilyMember(BaseModel):
     emergency_contact_name: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    @field_serializer("last_seen", "created_at", "checkin_interval_started_at")
+    @field_serializer("last_seen", "created_at", "checkin_interval_started_at", when_used='json')
     def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
         return _to_utc_iso(v)
 
@@ -263,7 +263,7 @@ class Reminder(BaseModel):
     run_out_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    @field_serializer("last_marked_at", "last_refill_at", "run_out_at", "created_at")
+    @field_serializer("last_marked_at", "last_refill_at", "run_out_at", "created_at", when_used='json')
     def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
         return _to_utc_iso(v)
 
@@ -332,7 +332,7 @@ class Alert(BaseModel):
     acknowledged: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    @field_serializer("created_at")
+    @field_serializer("created_at", when_used='json')
     def _ser_created_at(self, v: datetime) -> str:
         return _to_utc_iso(v)
 
@@ -348,7 +348,7 @@ class CheckIn(BaseModel):
     longitude: Optional[float] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    @field_serializer("created_at")
+    @field_serializer("created_at", when_used='json')
     def _ser_created_at(self, v: datetime) -> str:
         return _to_utc_iso(v)
 
@@ -2789,6 +2789,105 @@ async def _migrate_dedupe_push_tokens():
             )
     except Exception as e:
         logger.warning(f"push_tokens dedupe migration skipped: {e}")
+
+
+@app.on_event("startup")
+async def _migrate_iso_string_timestamps_to_date():
+    """One-time migration: convert string-typed `created_at` to BSON Date.
+
+    THE BUG WE'RE REPAIRING (P4 of beta stabilization sprint):
+      Pydantic v2 @field_serializer with the default `when_used='always'`
+      runs during model_dump() in BOTH Python and JSON modes.  Our
+      `_to_utc_iso` serializer was therefore converting `created_at` to
+      an ISO STRING before the dict reached MongoDB via insert_one(
+      model.model_dump()).  Every CheckIn / Alert / Reminder / Member
+      created via that path stored `created_at` as a String, not a
+      BSON Date.
+
+      Range queries like `{"created_at": {"$gte": day_start_utc}}`
+      compare a Date query against a String field.  In BSON's type
+      ordering Strings and Dates are non-comparable, so the query
+      silently returns zero documents.  Visible symptom: the
+      dashboard "Checked in N/M" counter stayed at 0/1 forever even
+      though POST /checkins succeeded and the push notification fanned
+      out (those code paths don't filter by created_at).  Collateral
+      damage: `detect_missed_checkins` fixed-time mode would fire
+      "missed check-in" alerts even after the senior had checked in;
+      missed-checkin alert ack-after-checkin silently no-op'd.
+
+      Fix at the model layer is the four `when_used='json'` edits on
+      the @field_serializer decorators (server.py:222, 266, 335, 351).
+      That repairs ALL NEW writes from this deploy forward.  But pre-
+      existing rows in Mongo still have String created_at and would
+      continue to be invisible to range queries.  This migration
+      converts those rows to BSON Date so the historical data lines
+      back up with the going-forward writes.
+
+    SCOPE:
+      - checkins.created_at       (P4 root cause)
+      - alerts.created_at         (collateral damage — see server.py:1954, 2091, 2129)
+      - reminders.created_at      (used by some compliance queries)
+      - reminders.last_marked_at  (medication scheduler reads this as a Date)
+      - members.last_seen         (used by location-staleness UI elsewhere)
+      - members.created_at        (less critical, but converted for consistency)
+
+    SAFETY:
+      - Idempotent.  Each pass converts only documents where the field
+        is currently a String (`$type: "string"`).  Subsequent runs
+        find zero matches and exit immediately.
+      - Per-doc try/except.  If a single doc has a malformed ISO string
+        we skip it and log the id, never crash startup.
+      - No collection scans without an index — every match-stage uses
+        `{$type: "string"}` which Mongo evaluates as a type-bracketed
+        scan, and the affected collections are bounded by TTL (90d for
+        checkins, 30d for alerts).  Beta-sized DB: completes in seconds.
+    """
+    targets = [
+        ("checkins",  "created_at"),
+        ("alerts",    "created_at"),
+        ("reminders", "created_at"),
+        ("reminders", "last_marked_at"),
+        ("members",   "last_seen"),
+        ("members",   "created_at"),
+    ]
+    for coll_name, field in targets:
+        try:
+            cursor = db[coll_name].find(
+                {field: {"$type": "string"}},
+                {"_id": 1, "id": 1, field: 1},
+            )
+            converted = 0
+            failed = 0
+            async for doc in cursor:
+                raw = doc.get(field)
+                if not isinstance(raw, str):
+                    continue
+                try:
+                    # Python's fromisoformat handles "+00:00" and naive
+                    # strings.  "Z" suffix needs a tiny patch since
+                    # only 3.11+ understands it natively — be defensive.
+                    s = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+                    parsed = datetime.fromisoformat(s)
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    parsed_utc = parsed.astimezone(timezone.utc)
+                    await db[coll_name].update_one(
+                        {"_id": doc["_id"]},
+                        {"$set": {field: parsed_utc}},
+                    )
+                    converted += 1
+                except Exception as e:
+                    failed += 1
+                    logger.warning(
+                        f"iso→date migration: failed to convert "
+                        f"{coll_name}/{doc.get('id') or doc.get('_id')}.{field}: {e}"
+                    )
+            if converted or failed:
+                logger.info(
+                    f"iso→date migration: {coll_name}.{field} converted={converted} failed={failed}"
+                )
+        except Exception as e:
+            logger.warning(f"iso→date migration skipped for {coll_name}.{field}: {e}")
 
 
 @app.on_event("startup")
