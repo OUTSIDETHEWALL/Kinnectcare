@@ -2,11 +2,13 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
   RefreshControl, Alert as RNAlert, Linking, ActivityIndicator, Modal, Platform,
+  AppState,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, MemberSummary, getBillingStatus, BillingStatus } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
@@ -55,6 +57,56 @@ export default function Dashboard() {
     // reported as a perceived perf regression.
     setLoading((prev) => members.length === 0 ? true : prev);
     load().finally(() => setLoading(false));
+
+    // ============================================================
+    //  v1.2.2 — Dashboard freshness improvements
+    // ============================================================
+    //
+    //  Until v1.2.1, the only triggers that refetched /members and
+    //  /summary were (a) tab focus, (b) pull-to-refresh, and (c) the
+    //  load() inside quickCheckIn.  Symptom: Charles could sit on
+    //  Dashboard for hours with Joyce's location going stale in
+    //  React state while the backend was being updated normally —
+    //  he'd only see fresh data after switching tabs or pull-down.
+    //
+    //  Three new triggers, all gated to this tab being focused so we
+    //  never refetch in the background or on screens that don't
+    //  care:
+    //
+    //   1. Visible-tab polling — every 60 s while focused.  Cheap;
+    //      /members and /summary are both small JSON payloads with
+    //      no DB indexes that would hot-spot.
+    //
+    //   2. AppState 'active' — refetch the instant the user brings
+    //      the app back to foreground (most common path for "I just
+    //      opened the app and Joyce's dot is wrong").
+    //
+    //   3. Notification arrival — refetch whenever ANY push lands
+    //      while focused (member checked in, fall, missed check-in,
+    //      etc.).  Uses Notifications.addNotificationReceivedListener
+    //      directly so it stacks with the global routing listener in
+    //      _layout.tsx without clobbering it.
+    //
+    //  All three handlers are torn down in the cleanup so leaving
+    //  Dashboard (tab switch, navigate to /settings, etc.) stops the
+    //  polling and unsubscribes the listeners — no background work.
+    const pollId = setInterval(() => {
+      load().catch(() => {});
+    }, 60_000);
+
+    const appStateSub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') load().catch(() => {});
+    });
+
+    const notifSub = Notifications.addNotificationReceivedListener(() => {
+      load().catch(() => {});
+    });
+
+    return () => {
+      clearInterval(pollId);
+      appStateSub.remove();
+      notifSub.remove();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [members.length]));
 

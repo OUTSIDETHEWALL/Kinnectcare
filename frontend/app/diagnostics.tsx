@@ -31,6 +31,7 @@ import { Platform } from 'react-native';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { readRouteLog, clearRouteLog, RouteDiagEntry } from '../src/routeDiagnostics';
+import { readLocationRefreshLog, clearLocationRefreshLog, LocationRefreshEntry } from '../src/locationRefresh';
 import { useAuth } from '../src/AuthContext';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
@@ -94,14 +95,21 @@ export default function DiagnosticsScreen() {
   const [routeLog, setRouteLog] = useState<RouteDiagEntry[]>([]);
   const [authLog, setAuthLog] = useState<AuthClearEntry[]>([]);
   const [pushLog, setPushLog] = useState<PushRefreshEntry[]>([]);
+  const [locLog, setLocLog] = useState<LocationRefreshEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [r, a, p] = await Promise.all([readRouteLog(), readAuthClearLog(), readPushRefreshLog()]);
+    const [r, a, p, l] = await Promise.all([
+      readRouteLog(),
+      readAuthClearLog(),
+      readPushRefreshLog(),
+      readLocationRefreshLog(),
+    ]);
     setRouteLog(r);
     setAuthLog(a);
     setPushLog(p);
+    setLocLog(l);
     setLoading(false);
   }, []);
 
@@ -124,13 +132,15 @@ export default function DiagnosticsScreen() {
       authClearLog: authLog,
       routeLog,
       pushRefreshLog: pushLog,
+      locationRefreshLog: locLog,
       counts: {
         authClear: authLog.length,
         route: routeLog.length,
         pushRefresh: pushLog.length,
+        locationRefresh: locLog.length,
       },
     };
-  }, [authLog, routeLog, pushLog, user]);
+  }, [authLog, routeLog, pushLog, locLog, user]);
 
   const onCopy = async () => {
     try {
@@ -139,7 +149,7 @@ export default function DiagnosticsScreen() {
       await Clipboard.setStringAsync(json);
       Alert.alert(
         'Copied',
-        `Diagnostic log copied to clipboard (${authLog.length} auth, ${routeLog.length} route, ${pushLog.length} push entries). Paste it into your support email.`,
+        `Diagnostic log copied to clipboard (${authLog.length} auth, ${routeLog.length} route, ${pushLog.length} push, ${locLog.length} location entries). Paste it into your support email.`,
       );
     } catch (e: any) {
       Alert.alert('Could not copy', e?.message || 'Try again.');
@@ -156,7 +166,7 @@ export default function DiagnosticsScreen() {
           text: 'Clear',
           style: 'destructive',
           onPress: async () => {
-            await Promise.all([clearAuthClearLog(), clearRouteLog(), clearPushRefreshLog()]);
+            await Promise.all([clearAuthClearLog(), clearRouteLog(), clearPushRefreshLog(), clearLocationRefreshLog()]);
             await reload();
           },
         },
@@ -243,6 +253,50 @@ export default function DiagnosticsScreen() {
                     ) : null}
                     {e.body ? (
                       <Text style={styles.entryBody}>{e.body}</Text>
+                    ) : null}
+                  </View>
+                ))
+            )}
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Location refresh</Text>
+            <Text style={styles.sectionCount}>{locLog.length}</Text>
+          </View>
+          <Text style={styles.sectionHint}>
+            Each entry = one foreground GPS upload to /members/{'{id}'}/location.
+            Auto-fires on app foreground (throttled to once per 60 s). `ok: true` =
+            backend accepted the write. Coords are coarse-rounded for privacy.
+          </Text>
+          <View style={styles.card}>
+            {loading ? (
+              <Text style={styles.muted}>Loading…</Text>
+            ) : locLog.length === 0 ? (
+              <Text style={styles.muted}>No location refreshes yet. The next foreground transition will populate.</Text>
+            ) : (
+              locLog
+                .slice()
+                .reverse()
+                .map((e, i) => (
+                  <View key={`l-${e.t}-${i}`} style={styles.entry}>
+                    <Text style={styles.entryTime}>{fmt(e.t)}</Text>
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>reason: </Text>{e.reason || '—'}
+                      {'  '}
+                      <Text style={styles.entryK}>ok: </Text>{String(!!e.ok)}
+                    </Text>
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>coord ~ </Text>
+                      {e.latApprox !== null && e.lonApprox !== null
+                        ? `${e.latApprox}, ${e.lonApprox}`
+                        : '—'}
+                    </Text>
+                    {e.err ? (
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>err: </Text>{e.err}
+                      </Text>
                     ) : null}
                   </View>
                 ))

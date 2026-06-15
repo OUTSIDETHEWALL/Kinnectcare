@@ -11,6 +11,7 @@ import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
 import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
 import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
 import { startBackgroundLocation, stopBackgroundLocation } from '../src/backgroundLocation';
+import { refreshLocationIfStale, setMyMemberId } from '../src/locationRefresh';
 import { api } from '../src/api';
 import {
   loadDisclaimerAck,
@@ -287,6 +288,60 @@ function RootNav() {
     const sub = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
         refreshPushTokenIfStale('foreground').catch(() => {});
+      }
+    });
+    return () => sub.remove();
+  }, [user?.id]);
+
+  // ============================================================
+  //  v1.2.2 — Cache "my member id" + foreground location refresh
+  // ============================================================
+  //
+  //  Joyce's location went stale on Charles's dashboard despite the
+  //  backend holding fresh data.  Adding (a) a 60-second visible-tab
+  //  poll, (b) an AppState 'active' refetch, and (c) a notification-
+  //  arrival refetch on Dashboard handles the read side.  This
+  //  effect handles the corresponding WRITE side — every foreground
+  //  transition (on Joyce's own phone) also uploads a fresh GPS fix
+  //  to /members/{id}/location, so even if the OS-owned background
+  //  task has been throttled into silence by Android App Standby,
+  //  the backend stays current.
+  //
+  //  We need a member_id to know whose row to update.  Fetch it once
+  //  after login by matching members[].user_id === current user.id
+  //  (same logic as dashboard.tsx) and cache it via
+  //  setMyMemberId() — refreshLocationIfStale reads from that
+  //  cache, so we don't hit /members on every foreground.
+  useEffect(() => {
+    if (!user?.id) {
+      setMyMemberId(null).catch(() => {});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.get('/members');
+        if (cancelled) return;
+        const me = (r.data as any[]).find((m) => m.user_id === user.id);
+        await setMyMemberId(me ? me.id : null);
+      } catch (_e) {
+        // Network failure here is OK — dashboard's mount effect is
+        // the safety net and the next /auth/me success will retry.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user?.id]);
+
+  // AppState 'active' → push refresh (existing) + location refresh (new).
+  // Same listener pattern as the push effect; same self-throttle
+  // approach (locationRefresh has its own 60-second floor).
+  useEffect(() => {
+    if (!user?.id) return;
+    // Prime once on mount.
+    refreshLocationIfStale('mount').catch(() => {});
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        refreshLocationIfStale('foreground').catch(() => {});
       }
     });
     return () => sub.remove();
