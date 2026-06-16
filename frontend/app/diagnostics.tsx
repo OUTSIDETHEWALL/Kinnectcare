@@ -32,6 +32,7 @@ import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { readRouteLog, clearRouteLog, RouteDiagEntry } from '../src/routeDiagnostics';
 import { readLocationRefreshLog, clearLocationRefreshLog, LocationRefreshEntry } from '../src/locationRefresh';
+import { readBgTaskLog, clearBgTaskLog, BgTaskLogEntry } from '../src/backgroundLocation';
 import { useAuth } from '../src/AuthContext';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
@@ -96,20 +97,23 @@ export default function DiagnosticsScreen() {
   const [authLog, setAuthLog] = useState<AuthClearEntry[]>([]);
   const [pushLog, setPushLog] = useState<PushRefreshEntry[]>([]);
   const [locLog, setLocLog] = useState<LocationRefreshEntry[]>([]);
+  const [bgLog, setBgLog] = useState<BgTaskLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [r, a, p, l] = await Promise.all([
+    const [r, a, p, l, b] = await Promise.all([
       readRouteLog(),
       readAuthClearLog(),
       readPushRefreshLog(),
       readLocationRefreshLog(),
+      readBgTaskLog(),
     ]);
     setRouteLog(r);
     setAuthLog(a);
     setPushLog(p);
     setLocLog(l);
+    setBgLog(b);
     setLoading(false);
   }, []);
 
@@ -133,14 +137,16 @@ export default function DiagnosticsScreen() {
       routeLog,
       pushRefreshLog: pushLog,
       locationRefreshLog: locLog,
+      backgroundLocationTaskLog: bgLog,
       counts: {
         authClear: authLog.length,
         route: routeLog.length,
         pushRefresh: pushLog.length,
         locationRefresh: locLog.length,
+        bgTask: bgLog.length,
       },
     };
-  }, [authLog, routeLog, pushLog, locLog, user]);
+  }, [authLog, routeLog, pushLog, locLog, bgLog, user]);
 
   const onCopy = async () => {
     try {
@@ -149,7 +155,7 @@ export default function DiagnosticsScreen() {
       await Clipboard.setStringAsync(json);
       Alert.alert(
         'Copied',
-        `Diagnostic log copied to clipboard (${authLog.length} auth, ${routeLog.length} route, ${pushLog.length} push, ${locLog.length} location entries). Paste it into your support email.`,
+        `Diagnostic log copied to clipboard (${authLog.length} auth, ${routeLog.length} route, ${pushLog.length} push, ${locLog.length} loc, ${bgLog.length} bg entries). Paste it into your support email.`,
       );
     } catch (e: any) {
       Alert.alert('Could not copy', e?.message || 'Try again.');
@@ -166,7 +172,7 @@ export default function DiagnosticsScreen() {
           text: 'Clear',
           style: 'destructive',
           onPress: async () => {
-            await Promise.all([clearAuthClearLog(), clearRouteLog(), clearPushRefreshLog(), clearLocationRefreshLog()]);
+            await Promise.all([clearAuthClearLog(), clearRouteLog(), clearPushRefreshLog(), clearLocationRefreshLog(), clearBgTaskLog()]);
             await reload();
           },
         },
@@ -293,6 +299,66 @@ export default function DiagnosticsScreen() {
                         ? `${e.latApprox}, ${e.lonApprox}`
                         : '—'}
                     </Text>
+                    {e.err ? (
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>err: </Text>{e.err}
+                      </Text>
+                    ) : null}
+                  </View>
+                ))
+            )}
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Background location task</Text>
+            <Text style={styles.sectionCount}>{bgLog.length}</Text>
+          </View>
+          <Text style={styles.sectionHint}>
+            Each entry = one OS wake of the background location task. Empty / sparse =
+            Android Doze or iOS deferred-update gating is suppressing wakeups. Frequent
+            `upload-fail` = network or auth issue. `lock-held` = previous upload hung.
+            `ageS` = how stale the GPS fix was when the OS handed it to us (large value
+            = OS batched many points before waking).
+          </Text>
+          <View style={styles.card}>
+            {loading ? (
+              <Text style={styles.muted}>Loading…</Text>
+            ) : bgLog.length === 0 ? (
+              <Text style={styles.muted}>
+                No background task wakes recorded yet. Either the task hasn't fired since
+                this OTA installed, or the OS is suppressing wakeups. Walk &gt;100 m or
+                wait 5+ min to test.
+              </Text>
+            ) : (
+              bgLog
+                .slice()
+                .reverse()
+                .map((e, i) => (
+                  <View key={`b-${e.t}-${i}`} style={styles.entry}>
+                    <Text style={styles.entryTime}>{fmt(e.t)}</Text>
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>phase: </Text>{e.phase}
+                      {typeof e.count === 'number' ? (
+                        <>
+                          {'  '}
+                          <Text style={styles.entryK}>locs: </Text>{e.count}
+                        </>
+                      ) : null}
+                      {typeof e.ageS === 'number' ? (
+                        <>
+                          {'  '}
+                          <Text style={styles.entryK}>ageS: </Text>{e.ageS}
+                        </>
+                      ) : null}
+                    </Text>
+                    {typeof e.latApprox === 'number' && typeof e.lonApprox === 'number' ? (
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>coord ~ </Text>
+                        {e.latApprox}, {e.lonApprox}
+                      </Text>
+                    ) : null}
                     {e.err ? (
                       <Text style={styles.entryLine}>
                         <Text style={styles.entryK}>err: </Text>{e.err}
