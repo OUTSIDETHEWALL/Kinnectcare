@@ -11,7 +11,7 @@ import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
 import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
 import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
 import { startBackgroundLocation, stopBackgroundLocation } from '../src/backgroundLocation';
-import { refreshLocationIfStale, setMyMemberId } from '../src/locationRefresh';
+import { refreshLocationIfStale, setMyMemberId, setMyUserId } from '../src/locationRefresh';
 import { api } from '../src/api';
 import {
   loadDisclaimerAck,
@@ -315,9 +315,14 @@ function RootNav() {
   useEffect(() => {
     if (!user?.id) {
       setMyMemberId(null).catch(() => {});
+      setMyUserId(null).catch(() => {});
       return;
     }
     let cancelled = false;
+    // Cache user_id immediately (synchronously usable on the next bg
+    // task tick) so a slow /members fetch doesn't leave the bg log
+    // without a writer identity field for the first few minutes.
+    setMyUserId(user.id).catch(() => {});
     (async () => {
       try {
         const r = await api.get('/members');

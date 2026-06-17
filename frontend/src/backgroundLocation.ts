@@ -89,6 +89,16 @@ type BgTaskLogEntry = {
   lonApprox?: number;
   ageS?: number; // seconds since the GPS fix was recorded (helps detect deferred batching)
   count?: number; // locations array length when the OS batches
+  // v1.2.5 fields — surface the writer identity AND any divergence
+  // between the BG key (which this task uses) and the FG key (which
+  // refreshLocationIfStale uses).  If they disagree, the bg task is
+  // writing to a different member row than the foreground refresh,
+  // which would perfectly explain the "background uploads succeed
+  // but displayed location stays stale until app foreground" report.
+  userId?: string | null;
+  memberId?: string | null;       // member_id this BG tick actually targeted
+  fgMemberId?: string | null;     // snapshot of foreground key for divergence detection
+  divergent?: boolean;            // true iff fgMemberId is set AND != memberId
 };
 
 async function appendBgLog(entry: BgTaskLogEntry): Promise<void> {
@@ -182,8 +192,27 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
   }
 
   const memberId = await readMemberId();
+  // v1.2.5 diagnostics: snapshot both the foreground key and the
+  // cached user_id so each bg entry carries the writer identity AND
+  // surfaces any divergence with the foreground member-id cache.
+  // The mirror keys are kept in lock-step with locationRefresh.ts
+  // (kc_my_user_id_v1 / kc_my_member_id_v1).
+  const [fgMemberId, userId] = await Promise.all([
+    AsyncStorage.getItem('kc_my_member_id_v1'),
+    AsyncStorage.getItem('kc_my_user_id_v1'),
+  ]);
+  const divergent = !!fgMemberId && !!memberId && fgMemberId !== memberId;
+
   if (!memberId) {
-    await appendBgLog({ t: now, phase: 'no-member-id', count: locs.length });
+    await appendBgLog({
+      t: now,
+      phase: 'no-member-id',
+      count: locs.length,
+      userId,
+      memberId: null,
+      fgMemberId,
+      divergent: false,
+    });
     return;
   }
 
@@ -191,7 +220,15 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
   // batches multiple historical points into a single callback.
   const fresh = locs[locs.length - 1];
   if (!fresh?.coords) {
-    await appendBgLog({ t: now, phase: 'no-locs', count: locs.length });
+    await appendBgLog({
+      t: now,
+      phase: 'no-locs',
+      count: locs.length,
+      userId,
+      memberId,
+      fgMemberId,
+      divergent,
+    });
     return;
   }
 
@@ -201,6 +238,10 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
       t: now,
       phase: 'lock-held',
       ageS: Math.round((now - uploadStartedAt) / 1000),
+      userId,
+      memberId,
+      fgMemberId,
+      divergent,
     });
     return;
   }
@@ -222,6 +263,10 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
       lonApprox: roundCoord(fresh.coords.longitude),
       ageS: gpsAgeS,
       count: locs.length,
+      userId,
+      memberId,
+      fgMemberId,
+      divergent,
     });
   } catch (e: any) {
     // Silent in terms of UI — but persist the failure so we can
@@ -234,6 +279,10 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
       err: status ? `http_${status}` : `network_${(e?.message || 'unknown').slice(0, 40)}`,
       ageS: gpsAgeS,
       count: locs.length,
+      userId,
+      memberId,
+      fgMemberId,
+      divergent,
     });
   } finally {
     uploadStartedAt = 0;

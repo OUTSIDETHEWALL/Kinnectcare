@@ -45,6 +45,18 @@ import { Platform } from 'react-native';
 import { api } from './api';
 
 const MY_MEMBER_ID_KEY = 'kc_my_member_id_v1';
+// v1.2.5 diagnostic: stash the user_id alongside the member_id so
+// the bg-task and foreground diagnostic logs can both surface it
+// without having to round-trip /auth/me from inside the OS-task
+// context.
+const MY_USER_ID_KEY = 'kc_my_user_id_v1';
+// v1.2.5 diagnostic: the background-location task writes to a
+// SEPARATE AsyncStorage key for historical reasons.  Exposed here
+// so locationRefresh can snapshot it on every foreground upload —
+// if the two keys hold different member_ids, that's the smoking
+// gun for the "background uploads silently going to wrong member"
+// hypothesis.
+const BG_LOCATION_MEMBER_ID_KEY_MIRROR = '@kinnship/bg_location_member_id_v1';
 const LOG_KEY = 'kc_location_refresh_log';
 
 // Throttle the foreground refresh — 60 s is the floor.  Background
@@ -67,6 +79,19 @@ export async function setMyMemberId(memberId: string | null): Promise<void> {
   } catch (_e) {}
 }
 
+/**
+ * Cache the current user's user_id alongside the member_id (v1.2.5).
+ * Lets the OS-detached background task log it without round-tripping
+ * /auth/me, and lets foreground diagnostic entries cross-reference
+ * the writer identity.  Pass null on logout.
+ */
+export async function setMyUserId(userId: string | null): Promise<void> {
+  try {
+    if (userId) await AsyncStorage.setItem(MY_USER_ID_KEY, userId);
+    else await AsyncStorage.removeItem(MY_USER_ID_KEY);
+  } catch (_e) {}
+}
+
 export async function getMyMemberId(): Promise<string | null> {
   try {
     return await AsyncStorage.getItem(MY_MEMBER_ID_KEY);
@@ -83,6 +108,12 @@ export type LocationRefreshEntry = {
   latApprox: number | null;
   lonApprox: number | null;
   err: string | null;
+  // v1.2.5 fields — surface the writer identity and any divergence
+  // between foreground / background member-id caches.
+  userId?: string | null;
+  memberId?: string | null;       // member_id the foreground PUT actually targeted
+  bgMemberId?: string | null;     // snapshot of the background key for divergence detection
+  divergent?: boolean;            // true iff bgMemberId is set AND != memberId
 };
 
 async function appendLog(entry: LocationRefreshEntry): Promise<void> {
@@ -127,7 +158,18 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
     const now = Date.now();
     if (now - lastRefreshAt < MIN_INTERVAL_MS) return;
 
-    const memberId = await getMyMemberId();
+    // Snapshot BOTH member-id caches at the start of this refresh so
+    // we can compare them in the log entry — divergence between the
+    // foreground key (MY_MEMBER_ID_KEY) and the background key
+    // (BG_LOCATION_MEMBER_ID_KEY_MIRROR) is the smoking gun for the
+    // "background uploads going to wrong member row" hypothesis.
+    const [memberId, userId, bgMemberId] = await Promise.all([
+      AsyncStorage.getItem(MY_MEMBER_ID_KEY),
+      AsyncStorage.getItem(MY_USER_ID_KEY),
+      AsyncStorage.getItem(BG_LOCATION_MEMBER_ID_KEY_MIRROR),
+    ]);
+    const divergent = !!bgMemberId && bgMemberId !== memberId;
+
     if (!memberId) {
       // No cached member id — RootNav probably hasn't run its post-auth
       // /members fetch yet.  Skip silently; the dashboard mount effect
@@ -155,6 +197,10 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
         latApprox: null,
         lonApprox: null,
         err: `permission_${fgStatus}`,
+        userId,
+        memberId,
+        bgMemberId,
+        divergent,
       });
       return;
     }
@@ -176,6 +222,10 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
         latApprox: null,
         lonApprox: null,
         err: `gps_${(e?.message || 'unknown').slice(0, 60)}`,
+        userId,
+        memberId,
+        bgMemberId,
+        divergent,
       });
       return;
     }
@@ -200,6 +250,10 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
       latApprox: roundCoord(lat),
       lonApprox: roundCoord(lon),
       err,
+      userId,
+      memberId,
+      bgMemberId,
+      divergent,
     });
   } catch (_e) {
     // Never let a refresh failure crash the foreground transition.

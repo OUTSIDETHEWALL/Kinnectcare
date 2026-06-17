@@ -299,6 +299,16 @@ export default function DiagnosticsScreen() {
                         ? `${e.latApprox}, ${e.lonApprox}`
                         : '—'}
                     </Text>
+                    {e.memberId || e.bgMemberId || e.userId ? (
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>uid: </Text>{e.userId ? e.userId.slice(-6) : '—'}
+                        {'  '}
+                        <Text style={styles.entryK}>fg.mid: </Text>{e.memberId ? e.memberId.slice(-6) : '—'}
+                        {'  '}
+                        <Text style={styles.entryK}>bg.mid: </Text>{e.bgMemberId ? e.bgMemberId.slice(-6) : '—'}
+                        {e.divergent ? <Text style={styles.divergent}>  ⚠ DIVERGENT</Text> : null}
+                      </Text>
+                    ) : null}
                     {e.err ? (
                       <Text style={styles.entryLine}>
                         <Text style={styles.entryK}>err: </Text>{e.err}
@@ -357,6 +367,16 @@ export default function DiagnosticsScreen() {
                       <Text style={styles.entryLine}>
                         <Text style={styles.entryK}>coord ~ </Text>
                         {e.latApprox}, {e.lonApprox}
+                      </Text>
+                    ) : null}
+                    {e.memberId || e.fgMemberId || e.userId ? (
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>uid: </Text>{e.userId ? e.userId.slice(-6) : '—'}
+                        {'  '}
+                        <Text style={styles.entryK}>bg.mid: </Text>{e.memberId ? e.memberId.slice(-6) : '—'}
+                        {'  '}
+                        <Text style={styles.entryK}>fg.mid: </Text>{e.fgMemberId ? e.fgMemberId.slice(-6) : '—'}
+                        {e.divergent ? <Text style={styles.divergent}>  ⚠ DIVERGENT</Text> : null}
                       </Text>
                     ) : null}
                     {e.err ? (
@@ -522,6 +542,7 @@ const styles = StyleSheet.create({
   entryTime: { fontSize: 12, fontWeight: '800', color: Colors.textPrimary, marginBottom: 4 },
   entryLine: { fontSize: 12.5, color: Colors.textSecondary, lineHeight: 17 },
   entryK: { color: Colors.textTertiary, fontWeight: '700' },
+  divergent: { color: Colors.error, fontWeight: '800' },
   entryBody: {
     fontSize: 11.5, color: Colors.textTertiary, marginTop: 4,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
