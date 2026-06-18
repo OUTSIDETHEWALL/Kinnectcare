@@ -1667,6 +1667,24 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
     doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+    # v1.2.6 diagnostic: every successful location write logs the
+    # write-vs-read shape so we can correlate Railway logs against
+    # the per-device kc_bg_task_log / kc_location_refresh_log
+    # entries.  Specifically — if the device reports an upload-ok
+    # with coords (X, Y) but Charles's dashboard still shows stale
+    # coords, this log line will tell us whether:
+    #   (a) the input we got matches the device's logged send,
+    #   (b) the post-write doc actually contains (X, Y), and
+    #   (c) which family_group_id and which member.id was touched
+    #       (catches "duplicate member doc" silent-drift bugs).
+    rd = doc or {}
+    logger.info(
+        f"loc-write member={member_id} fg={current['family_group_id']} "
+        f"user={current['id']} matched={r.matched_count} modified={r.modified_count} "
+        f"sent=({data.latitude:.5f},{data.longitude:.5f}) "
+        f"stored=({rd.get('latitude')},{rd.get('longitude')}) "
+        f"last_seen={rd.get('last_seen')}"
+    )
     return FamilyMember(**doc)
 
 
@@ -2496,6 +2514,65 @@ async def dashboard_summary(current=Depends(get_current_user)):
 @api_router.get("/")
 async def root():
     return {"message": "Kinnship API", "status": "ok"}
+
+
+# ========== Diagnostics ==========
+@api_router.get("/diagnostics/my-members")
+async def diagnostics_my_members(current=Depends(get_current_user)):
+    """v1.2.6 — surface every member document the calling user is
+    linked to, regardless of family_group, so the Kinnship Diagnostics
+    screen can detect:
+
+      1. Duplicate member rows (same user_id appearing in 2+ rows
+         within the SAME family_group) — would explain "writes go to
+         row A, dashboard renders row B with stale coords".
+      2. Cross-group ghost rows (user_id linked to a member in an
+         OLD family_group the user no longer participates in) —
+         less critical but useful context.
+      3. Coordinate-vs-last_seen skew (last_seen current, lat/lon
+         stale — would indicate a partial-update bug somewhere).
+
+    Returns the raw fields the dashboard read path consumes.  Output
+    is intentionally compact and JSON-only — the Copy Log flow on
+    the device will embed it verbatim in support payloads.
+    """
+    user_id = current["id"]
+    own_group_id = current.get("family_group_id")
+    docs = await db.members.find(
+        {"user_id": user_id},
+        {
+            "_id": 0,
+            "id": 1,
+            "user_id": 1,
+            "family_group_id": 1,
+            "name": 1,
+            "role": 1,
+            "status": 1,
+            "latitude": 1,
+            "longitude": 1,
+            "location_name": 1,
+            "last_seen": 1,
+            "created_at": 1,
+        },
+    ).to_list(50)
+    # Normalize datetimes for JSON transit (some came in as BSON
+    # Date post-migration, some still strings until they roll over).
+    out = []
+    for d in docs:
+        for k in ("last_seen", "created_at"):
+            v = d.get(k)
+            if hasattr(v, "isoformat"):
+                d[k] = v.isoformat()
+        out.append(d)
+    return {
+        "user_id": user_id,
+        "current_family_group_id": own_group_id,
+        "match_count": len(out),
+        "duplicates_in_current_group": sum(
+            1 for d in out if d.get("family_group_id") == own_group_id
+        ),
+        "members": out,
+    }
 
 
 @api_router.get("/health")
