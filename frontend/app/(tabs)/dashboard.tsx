@@ -11,6 +11,7 @@ import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, MemberSummary, getBillingStatus, BillingStatus } from '../../src/api';
+import { geocodeLabelForCoord } from '../../src/locationRefresh';
 import { useAuth } from '../../src/AuthContext';
 
 export default function Dashboard() {
@@ -153,10 +154,17 @@ export default function Dashboard() {
         }
 
         const pos = await Location.getCurrentPositionAsync({});
-        await api.put(`/members/${me.id}/location`, {
+        // v1.2.7 — reverse-geocode so the dashboard's
+        // `📍 {member.location_name}` label refreshes too, not just
+        // the lat/lon under the hood.  Best-effort; caller's PUT
+        // omits location_name if geocode failed.
+        const label = await geocodeLabelForCoord(pos.coords.latitude, pos.coords.longitude);
+        const body: any = {
           latitude: pos.coords.latitude,
           longitude: pos.coords.longitude,
-        }).catch(() => {});
+        };
+        if (label) body.location_name = label;
+        await api.put(`/members/${me.id}/location`, body).catch(() => {});
       } catch (_e) {}
     })();
   }, [members.length, user?.id]);
@@ -295,7 +303,10 @@ export default function Dashboard() {
             });
             lat = pos.coords.latitude;
             lon = pos.coords.longitude;
-            name = 'Current Location';
+            // v1.2.7 — was hardcoded 'Current Location' literal which
+            // made every member's dashboard label read identically
+            // and never actually changed.  Real reverse-geocode now.
+            name = (await geocodeLabelForCoord(lat, lon)) || undefined;
           }
         } catch (_e) {}
         await api.post('/checkins', { member_id: m.id, latitude: lat, longitude: lon, location_name: name });

@@ -151,6 +151,107 @@ function roundCoord(x: number): number {
   return Math.round(x * 100) / 100;
 }
 
+// ============================================================
+//  v1.2.7 — Reverse-geocode + location_name maintenance
+// ============================================================
+//
+// THE BUG THIS REPAIRS:
+//   The backend's PUT /members/{id}/location only updates the
+//   `location_name` field if the request body contains it.  Our
+//   auto refresh paths (foreground refresh, dashboard mount, bg
+//   task) historically only sent latitude/longitude — never the
+//   label.  Even the Check-In flow sent a hardcoded
+//   'Current Location' literal rather than a real place name.
+//   Result: `location_name` was frozen at whatever the original
+//   value happened to be ("Home" default from member creation,
+//   or "Current Location" from a past check-in).  The dashboard
+//   renders `📍 {member.location_name}` as a text label, so even
+//   though the BACKEND had Joyce's correct Walmart coordinates,
+//   Charles's dashboard read "📍 Home" — looking 5 miles stale.
+//
+// THE FIX:
+//   Reverse-geocode the GPS fix and include a short human label
+//   in every foreground PUT.  Cached aggressively — we only call
+//   Expo's reverseGeocodeAsync when the device has moved >50 m
+//   since the last successful geocode, so a phone sitting on a
+//   charger costs zero geocode calls regardless of how often the
+//   foreground refresh fires.
+//
+//   The background task does NOT reverse-geocode — Expo's geocode
+//   API requires the platform's geocoder service which has subtle
+//   reliability quirks from a detached OS-task JS context.  The
+//   label will refresh on the next foreground transition, which
+//   is the common path on Joyce's device anyway (v1.2.2's AppState
+//   wiring fires the foreground refresh on every app activation).
+//
+// LABEL FORMAT:
+//   Picked to be (a) short enough for one-line MemberCard rendering,
+//   (b) recognizable to elderly users, (c) free of literal address
+//   numbers (privacy / clutter).  Examples:
+//     "Phoenix, AZ"
+//     "Sky Harbor Airport, Phoenix"
+//     "Walmart Supercenter, Phoenix"     (when the geocoder returns a POI name)
+//   Falls back to lat,lon string if the geocoder fails.
+const GEOCODE_MIN_MOVE_M = 50;
+let lastGeocodedLat: number | null = null;
+let lastGeocodedLon: number | null = null;
+let lastGeocodedName: string | null = null;
+
+function haversineM(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  // Equirectangular approximation is plenty accurate at the 50 m scale
+  // and avoids trig — cheap enough to call on every refresh tick.
+  const dLat = (lat2 - lat1) * 111_320;
+  const dLon = (lon2 - lon1) * 111_320 * Math.cos(((lat1 + lat2) / 2) * (Math.PI / 180));
+  return Math.sqrt(dLat * dLat + dLon * dLon);
+}
+
+function formatGeocodeLabel(addr: any): string {
+  // Prefer POI / building name when the geocoder identifies one and
+  // it isn't a literal address (numbers + street).
+  const name = (addr?.name || '').trim();
+  const street = (addr?.street || '').trim();
+  const city = (addr?.city || addr?.subregion || '').trim();
+  const region = (addr?.region || '').trim();
+  const country = (addr?.isoCountryCode || '').trim();
+
+  const looksLikeAddress = !!name && /^\d/.test(name); // starts with a number
+  if (name && !looksLikeAddress && city) return `${name}, ${city}`;
+  if (city && region) return `${city}, ${region}`;
+  if (city) return city;
+  if (street && region) return `${street}, ${region}`;
+  if (region && country) return `${region}, ${country}`;
+  return '';
+}
+
+/**
+ * Reverse-geocode at most once per 50 m of movement.  Returns the
+ * cached name when the device hasn't moved.  Never throws —
+ * empty string on failure so callers can ?? past it.
+ */
+export async function geocodeLabelForCoord(lat: number, lon: number): Promise<string> {
+  try {
+    if (
+      lastGeocodedLat !== null &&
+      lastGeocodedLon !== null &&
+      lastGeocodedName !== null &&
+      haversineM(lastGeocodedLat, lastGeocodedLon, lat, lon) < GEOCODE_MIN_MOVE_M
+    ) {
+      return lastGeocodedName;
+    }
+    const results = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lon });
+    const label = results?.[0] ? formatGeocodeLabel(results[0]) : '';
+    if (label) {
+      lastGeocodedLat = lat;
+      lastGeocodedLon = lon;
+      lastGeocodedName = label;
+      return label;
+    }
+    return '';
+  } catch (_e) {
+    return '';
+  }
+}
+
 /**
  * Silently refresh the device's location to the backend.  Safe to call
  * from any AppState/useEffect handler without throttling yourself —
@@ -243,11 +344,16 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
     let respLat: number | null = null;
     let respLon: number | null = null;
     let writeMismatch = false;
+    // v1.2.7 — reverse-geocode the fix so the PUT carries an honest
+    // `location_name` for the dashboard label.  Best-effort: if the
+    // geocoder fails or returns nothing useful we still PUT the
+    // coords; the backend retains the previous label rather than
+    // overwriting with junk.
+    const locationName = await geocodeLabelForCoord(lat, lon);
     try {
-      const resp = await api.put(`/members/${memberId}/location`, {
-        latitude: lat,
-        longitude: lon,
-      });
+      const body: any = { latitude: lat, longitude: lon };
+      if (locationName) body.location_name = locationName;
+      const resp = await api.put(`/members/${memberId}/location`, body);
       // v1.2.6: capture the backend's post-write view of the row so we
       // can detect partial / wrong-doc writes.  PUT response body is
       // the FamilyMember model — see server.py:1670.

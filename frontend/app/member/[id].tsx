@@ -2,11 +2,13 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
   ActivityIndicator, Alert, Linking, Platform, RefreshControl, TextInput,
+  AppState,
 } from 'react-native';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, Reminder } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
@@ -52,6 +54,30 @@ export default function MemberDetail() {
     // Silent re-fetch on subsequent focuses so the UI (including the Check In button)
     // doesn't unmount/flash. Only the very first load shows the full-screen spinner.
     load().finally(() => setLoading(false));
+
+    // v1.2.7 — same freshness pattern as the Dashboard tab.  Until
+    // this OTA the Member detail screen only reloaded on focus.  If
+    // Charles opened Joyce's detail and stayed there for an hour
+    // while she drove, MemberMap would render her cold-start
+    // coordinates the whole time — no polling, no AppState refetch.
+    // Three triggers, all gated to this screen being focused so we
+    // never refetch in the background:
+    //   1. 60 s poll while visible
+    //   2. AppState 'active' transition
+    //   3. Any notification arrival (member check-in, fall, etc.)
+    const pollId = setInterval(() => { load().catch(() => {}); }, 60_000);
+    const appStateSub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') load().catch(() => {});
+    });
+    const notifSub = Notifications.addNotificationReceivedListener(() => {
+      load().catch(() => {});
+    });
+    return () => {
+      clearInterval(pollId);
+      appStateSub.remove();
+      notifSub.remove();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]));
 
   const onRefresh = async () => {
