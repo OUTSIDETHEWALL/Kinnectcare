@@ -114,6 +114,14 @@ export type LocationRefreshEntry = {
   memberId?: string | null;       // member_id the foreground PUT actually targeted
   bgMemberId?: string | null;     // snapshot of the background key for divergence detection
   divergent?: boolean;            // true iff bgMemberId is set AND != memberId
+  // v1.2.6 fields — capture the PUT response body's coords so we can
+  // verify the backend's post-write view matches what we just sent.
+  // If `writeMismatch: true` ever shows up, the backend rewrote our
+  // input OR the find_one after update_one returned a different doc
+  // (e.g. duplicate member row collision).
+  respLat?: number | null;
+  respLon?: number | null;
+  writeMismatch?: boolean;
 };
 
 async function appendLog(entry: LocationRefreshEntry): Promise<void> {
@@ -232,11 +240,27 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
 
     let ok = false;
     let err: string | null = null;
+    let respLat: number | null = null;
+    let respLon: number | null = null;
+    let writeMismatch = false;
     try {
-      await api.put(`/members/${memberId}/location`, {
+      const resp = await api.put(`/members/${memberId}/location`, {
         latitude: lat,
         longitude: lon,
       });
+      // v1.2.6: capture the backend's post-write view of the row so we
+      // can detect partial / wrong-doc writes.  PUT response body is
+      // the FamilyMember model — see server.py:1670.
+      const rd: any = resp?.data || {};
+      if (typeof rd.latitude === 'number') respLat = rd.latitude;
+      if (typeof rd.longitude === 'number') respLon = rd.longitude;
+      // Compare with ~5 m tolerance (5e-5 deg ~= 5.5 m at the
+      // equator).  Float-round artifacts from JSON serialization are
+      // well below this.
+      if (respLat !== null && respLon !== null) {
+        writeMismatch =
+          Math.abs(respLat - lat) > 5e-5 || Math.abs(respLon - lon) > 5e-5;
+      }
       ok = true;
     } catch (e: any) {
       const status = e?.response?.status;
@@ -254,6 +278,9 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
       memberId,
       bgMemberId,
       divergent,
+      respLat: respLat !== null ? roundCoord(respLat) : null,
+      respLon: respLon !== null ? roundCoord(respLon) : null,
+      writeMismatch,
     });
   } catch (_e) {
     // Never let a refresh failure crash the foreground transition.

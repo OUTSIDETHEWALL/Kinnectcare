@@ -99,6 +99,10 @@ type BgTaskLogEntry = {
   memberId?: string | null;       // member_id this BG tick actually targeted
   fgMemberId?: string | null;     // snapshot of foreground key for divergence detection
   divergent?: boolean;            // true iff fgMemberId is set AND != memberId
+  // v1.2.6: PUT response coords for write-vs-read verification.
+  respLat?: number;
+  respLon?: number;
+  writeMismatch?: boolean;
 };
 
 async function appendBgLog(entry: BgTaskLogEntry): Promise<void> {
@@ -252,10 +256,23 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
   const gpsAgeS = fresh.timestamp ? Math.round((now - fresh.timestamp) / 1000) : undefined;
 
   try {
-    await api.put(`/members/${memberId}/location`, {
+    const resp = await api.put(`/members/${memberId}/location`, {
       latitude: fresh.coords.latitude,
       longitude: fresh.coords.longitude,
     });
+    // v1.2.6: capture the backend's post-write view of the row to
+    // detect partial / wrong-doc writes from the OS-task context.
+    const rd: any = resp?.data || {};
+    let respLat: number | undefined;
+    let respLon: number | undefined;
+    let writeMismatch = false;
+    if (typeof rd.latitude === 'number') respLat = rd.latitude;
+    if (typeof rd.longitude === 'number') respLon = rd.longitude;
+    if (typeof respLat === 'number' && typeof respLon === 'number') {
+      writeMismatch =
+        Math.abs(respLat - fresh.coords.latitude) > 5e-5 ||
+        Math.abs(respLon - fresh.coords.longitude) > 5e-5;
+    }
     await appendBgLog({
       t: now,
       phase: 'upload-ok',
@@ -267,6 +284,9 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
       memberId,
       fgMemberId,
       divergent,
+      respLat: typeof respLat === 'number' ? roundCoord(respLat) : undefined,
+      respLon: typeof respLon === 'number' ? roundCoord(respLon) : undefined,
+      writeMismatch,
     });
   } catch (e: any) {
     // Silent in terms of UI — but persist the failure so we can

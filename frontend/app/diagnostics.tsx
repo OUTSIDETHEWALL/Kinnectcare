@@ -33,6 +33,7 @@ import { Colors } from '../src/theme';
 import { readRouteLog, clearRouteLog, RouteDiagEntry } from '../src/routeDiagnostics';
 import { readLocationRefreshLog, clearLocationRefreshLog, LocationRefreshEntry } from '../src/locationRefresh';
 import { readBgTaskLog, clearBgTaskLog, BgTaskLogEntry } from '../src/backgroundLocation';
+import { api } from '../src/api';
 import { useAuth } from '../src/AuthContext';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
@@ -90,6 +91,10 @@ function fmt(ts: number): string {
   }
 }
 
+function roundCoordDisp(x: number): number {
+  return Math.round(x * 100) / 100;
+}
+
 export default function DiagnosticsScreen() {
   const router = useRouter();
   const { user } = useAuth();
@@ -98,6 +103,8 @@ export default function DiagnosticsScreen() {
   const [pushLog, setPushLog] = useState<PushRefreshEntry[]>([]);
   const [locLog, setLocLog] = useState<LocationRefreshEntry[]>([]);
   const [bgLog, setBgLog] = useState<BgTaskLogEntry[]>([]);
+  const [serverState, setServerState] = useState<any>(null);
+  const [serverStateLoading, setServerStateLoading] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const reload = useCallback(async () => {
@@ -119,6 +126,22 @@ export default function DiagnosticsScreen() {
 
   useEffect(() => { reload(); }, [reload]);
 
+  const fetchServerState = useCallback(async () => {
+    setServerStateLoading(true);
+    try {
+      const r = await api.get('/diagnostics/my-members');
+      setServerState({ at: Date.now(), data: r.data, err: null });
+    } catch (e: any) {
+      setServerState({
+        at: Date.now(),
+        data: null,
+        err: e?.response?.status ? `http_${e.response.status}` : (e?.message || 'unknown'),
+      });
+    } finally {
+      setServerStateLoading(false);
+    }
+  }, []);
+
   const buildPayload = useCallback(() => {
     const appVersion =
       (Constants?.expoConfig?.version as string) ||
@@ -138,6 +161,7 @@ export default function DiagnosticsScreen() {
       pushRefreshLog: pushLog,
       locationRefreshLog: locLog,
       backgroundLocationTaskLog: bgLog,
+      serverState,
       counts: {
         authClear: authLog.length,
         route: routeLog.length,
@@ -146,7 +170,7 @@ export default function DiagnosticsScreen() {
         bgTask: bgLog.length,
       },
     };
-  }, [authLog, routeLog, pushLog, locLog, bgLog, user]);
+  }, [authLog, routeLog, pushLog, locLog, bgLog, serverState, user]);
 
   const onCopy = async () => {
     try {
@@ -218,6 +242,86 @@ export default function DiagnosticsScreen() {
           >
             <Text style={styles.secondaryBtnText}>Refresh</Text>
           </TouchableOpacity>
+        </View>
+
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Server state (my member rows)</Text>
+            <Text style={styles.sectionCount}>
+              {serverState?.data ? serverState.data.match_count ?? 0 : '—'}
+            </Text>
+          </View>
+          <Text style={styles.sectionHint}>
+            Fetches every member row where user_id = me, across ALL family_groups. Reveals
+            duplicate rows or cross-group ghosts that could explain write-vs-read drift.
+            More than 1 row in your current family group is a smoking gun.
+          </Text>
+          <TouchableOpacity
+            testID="diagnostics-server-state"
+            style={styles.secondaryBtn}
+            onPress={fetchServerState}
+            disabled={serverStateLoading}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.secondaryBtnText}>
+              {serverStateLoading ? 'Fetching…' : (serverState ? 'Refetch from server' : 'Fetch from server')}
+            </Text>
+          </TouchableOpacity>
+          {serverState ? (
+            <View style={[styles.card, { marginTop: 10 }]}>
+              {serverState.err ? (
+                <Text style={styles.muted}>err: {serverState.err}</Text>
+              ) : serverState.data ? (
+                <>
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>fetched at: </Text>{fmt(serverState.at)}
+                  </Text>
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>match_count: </Text>{serverState.data.match_count}
+                    {'  '}
+                    <Text style={styles.entryK}>dupes_in_group: </Text>
+                    <Text style={serverState.data.duplicates_in_current_group > 1 ? styles.divergent : undefined}>
+                      {serverState.data.duplicates_in_current_group}
+                      {serverState.data.duplicates_in_current_group > 1 ? '  ⚠' : ''}
+                    </Text>
+                  </Text>
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>current fg: </Text>
+                    {serverState.data.current_family_group_id?.slice(-6) || '—'}
+                  </Text>
+                  {(serverState.data.members || []).map((m: any, i: number) => (
+                    <View key={`srv-${m.id}-${i}`} style={styles.entry}>
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>id: </Text>{m.id?.slice(-6)}
+                        {'  '}
+                        <Text style={styles.entryK}>fg: </Text>{m.family_group_id?.slice(-6)}
+                        {m.family_group_id !== serverState.data.current_family_group_id
+                          ? <Text style={styles.divergent}>  ⚠ ghost</Text>
+                          : null}
+                      </Text>
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>name: </Text>{m.name || '—'}
+                        {'  '}
+                        <Text style={styles.entryK}>role: </Text>{m.role || '—'}
+                      </Text>
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>coord: </Text>
+                        {typeof m.latitude === 'number' ? roundCoordDisp(m.latitude) : '—'},
+                        {' '}
+                        {typeof m.longitude === 'number' ? roundCoordDisp(m.longitude) : '—'}
+                      </Text>
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>last_seen: </Text>
+                        {m.last_seen ? new Date(m.last_seen).toLocaleString() : '—'}
+                      </Text>
+                    </View>
+                  ))}
+                </>
+              ) : (
+                <Text style={styles.muted}>No data.</Text>
+              )}
+            </View>
+          ) : null}
         </View>
 
         <View style={styles.section}>
