@@ -16,9 +16,10 @@
  * map.
  */
 import { Platform, View, Text, StyleSheet } from 'react-native';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { WebView } from 'react-native-webview';
 import { Colors } from './theme';
+import { logScreenRender } from './screenRenderLog';
 
 const KEY = (process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || '').trim();
 
@@ -28,6 +29,11 @@ type Props = {
   memberName?: string;
   locationName?: string;
   height?: number;
+  // v1.2.8 instrumentation: pass the member id so the read-path log
+  // can correlate prop-change and render-complete events with the
+  // dashboard-fetch / member-fetch entries.  Optional — older
+  // call sites still work without it.
+  memberId?: string | null;
 };
 
 function escapeJs(s: string): string {
@@ -69,6 +75,22 @@ function buildHtml(lat: number, lng: number, label: string): string {
     fb.style.display='flex';
     document.getElementById('map').style.display='none';
   }
+  // v1.2.8 instrumentation: when the marker has been placed on the
+  // map DOM we post a message back to React Native so the read-path
+  // trace can show what the WebView ACTUALLY rendered (vs what
+  // React handed to it via props).  Roundtrip latency is captured
+  // on the RN side via the entry-creation timestamp.
+  function postRendered(lat, lng){
+    try {
+      if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'kinn-map-rendered',
+          lat: lat,
+          lng: lng,
+        }));
+      }
+    } catch (_e) {}
+  }
   window.__initKinnshipMap = function(){
     try {
       var pos = { lat: ${lat}, lng: ${lng} };
@@ -108,6 +130,7 @@ function buildHtml(lat: number, lng: number, label: string): string {
           strokeWeight: 3,
         },
       });
+      postRendered(${lat}, ${lng});
     } catch (e) {
       showFallback('Map error: ' + (e && e.message ? e.message : e));
     }
@@ -128,11 +151,29 @@ function buildHtml(lat: number, lng: number, label: string): string {
 
 export default function MemberMap({
   latitude, longitude, memberName, locationName, height = 220,
+  memberId,
 }: Props) {
   const hasCoords = (
     typeof latitude === 'number' && typeof longitude === 'number'
     && Number.isFinite(latitude) && Number.isFinite(longitude)
   );
+
+  // v1.2.8 instrumentation: log every prop-change that hands a fresh
+  // coord pair down to the WebView/iframe.  `propTsRef` records the
+  // wall-clock when these props arrived so the matching map-rendered
+  // postback can compute a render latency.
+  const propTsRef = useRef<number>(0);
+  useEffect(() => {
+    if (!hasCoords) return;
+    propTsRef.current = Date.now();
+    logScreenRender({
+      src: 'map-props',
+      memberId,
+      lat: latitude as number,
+      lon: longitude as number,
+      locationName: locationName ?? null,
+    });
+  }, [hasCoords, latitude, longitude, memberId, locationName]);
 
   const html = useMemo(() => {
     if (!hasCoords) return '';
@@ -192,6 +233,24 @@ export default function MemberMap({
         scalesPageToFit
         startInLoadingState
         scrollEnabled={false}
+        onMessage={(evt) => {
+          // v1.2.8 instrumentation: WebView confirms the marker has
+          // been painted with these coords.  Compare against the
+          // most-recent map-props entry to compute render latency.
+          try {
+            const m = JSON.parse(evt.nativeEvent.data || '{}');
+            if (m?.type === 'kinn-map-rendered') {
+              const dt = propTsRef.current ? Date.now() - propTsRef.current : undefined;
+              logScreenRender({
+                src: 'map-rendered',
+                memberId,
+                lat: typeof m.lat === 'number' ? m.lat : null,
+                lon: typeof m.lng === 'number' ? m.lng : null,
+                renderLatencyMs: dt,
+              });
+            }
+          } catch (_e) {}
+        }}
       />
     </View>
   );

@@ -9,6 +9,7 @@ import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
+import { logScreenRender } from '../../src/screenRenderLog';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, Reminder } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
@@ -44,6 +45,20 @@ export default function MemberDetail() {
         api.get(`/reminders/member/${id}`),
         api.get(`/history/member/${id}?days=7`).catch(() => ({ data: null })),
       ]);
+      // v1.2.8 instrumentation: log what the API returned BEFORE the
+      // setState below, so the entry is proof of the network result
+      // independent of whether React subsequently re-rendered.
+      try {
+        const md: any = m.data || {};
+        await logScreenRender({
+          src: 'member-fetch',
+          memberId: md.id,
+          lat: md.latitude,
+          lon: md.longitude,
+          lastSeen: md.last_seen ?? null,
+          locationName: md.location_name ?? null,
+        });
+      } catch (_e) {}
       setMember(m.data);
       setReminders(r.data);
       setHistory(h.data);
@@ -326,6 +341,7 @@ export default function MemberDetail() {
                 longitude={member.longitude}
                 memberName={member.name}
                 locationName={member.location_name || undefined}
+                memberId={member.id}
                 height={220}
               />
             </View>

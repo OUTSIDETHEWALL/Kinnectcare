@@ -12,6 +12,7 @@ import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, MemberSummary, getBillingStatus, BillingStatus } from '../../src/api';
 import { geocodeLabelForCoord } from '../../src/locationRefresh';
+import { logScreenRender } from '../../src/screenRenderLog';
 import { useAuth } from '../../src/AuthContext';
 
 export default function Dashboard() {
@@ -45,6 +46,28 @@ export default function Dashboard() {
         api.get('/summary'),
         getBillingStatus().catch(() => null),
       ]);
+      // v1.2.8 instrumentation: capture the raw API response BEFORE
+      // setState so the kc_screen_render_log entry is proof of what
+      // the network actually returned — separate from whether React
+      // ultimately re-rendered with that data.  One entry per
+      // member, plus a roll-up with memberCount.
+      try {
+        const list: any[] = Array.isArray(m.data) ? m.data : [];
+        await logScreenRender({
+          src: 'dashboard-fetch',
+          memberCount: list.length,
+        });
+        for (const mb of list) {
+          await logScreenRender({
+            src: 'dashboard-fetch',
+            memberId: mb?.id,
+            lat: mb?.latitude,
+            lon: mb?.longitude,
+            lastSeen: mb?.last_seen ?? null,
+            locationName: mb?.location_name ?? null,
+          });
+        }
+      } catch (_e) {}
       setMembers(m.data);
       setSummary(s.data.members || []);
       if (b) setBilling(b);

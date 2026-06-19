@@ -33,6 +33,7 @@ import { Colors } from '../src/theme';
 import { readRouteLog, clearRouteLog, RouteDiagEntry } from '../src/routeDiagnostics';
 import { readLocationRefreshLog, clearLocationRefreshLog, LocationRefreshEntry } from '../src/locationRefresh';
 import { readBgTaskLog, clearBgTaskLog, BgTaskLogEntry } from '../src/backgroundLocation';
+import { readScreenRenderLog, clearScreenRenderLog, ScreenRenderEntry } from '../src/screenRenderLog';
 import { api } from '../src/api';
 import { useAuth } from '../src/AuthContext';
 
@@ -103,24 +104,27 @@ export default function DiagnosticsScreen() {
   const [pushLog, setPushLog] = useState<PushRefreshEntry[]>([]);
   const [locLog, setLocLog] = useState<LocationRefreshEntry[]>([]);
   const [bgLog, setBgLog] = useState<BgTaskLogEntry[]>([]);
+  const [renderLog, setRenderLog] = useState<ScreenRenderEntry[]>([]);
   const [serverState, setServerState] = useState<any>(null);
   const [serverStateLoading, setServerStateLoading] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [r, a, p, l, b] = await Promise.all([
+    const [r, a, p, l, b, sr] = await Promise.all([
       readRouteLog(),
       readAuthClearLog(),
       readPushRefreshLog(),
       readLocationRefreshLog(),
       readBgTaskLog(),
+      readScreenRenderLog(),
     ]);
     setRouteLog(r);
     setAuthLog(a);
     setPushLog(p);
     setLocLog(l);
     setBgLog(b);
+    setRenderLog(sr);
     setLoading(false);
   }, []);
 
@@ -161,6 +165,7 @@ export default function DiagnosticsScreen() {
       pushRefreshLog: pushLog,
       locationRefreshLog: locLog,
       backgroundLocationTaskLog: bgLog,
+      screenRenderLog: renderLog,
       serverState,
       counts: {
         authClear: authLog.length,
@@ -168,9 +173,10 @@ export default function DiagnosticsScreen() {
         pushRefresh: pushLog.length,
         locationRefresh: locLog.length,
         bgTask: bgLog.length,
+        screenRender: renderLog.length,
       },
     };
-  }, [authLog, routeLog, pushLog, locLog, bgLog, serverState, user]);
+  }, [authLog, routeLog, pushLog, locLog, bgLog, renderLog, serverState, user]);
 
   const onCopy = async () => {
     try {
@@ -179,7 +185,7 @@ export default function DiagnosticsScreen() {
       await Clipboard.setStringAsync(json);
       Alert.alert(
         'Copied',
-        `Diagnostic log copied to clipboard (${authLog.length} auth, ${routeLog.length} route, ${pushLog.length} push, ${locLog.length} loc, ${bgLog.length} bg entries). Paste it into your support email.`,
+        `Diagnostic log copied (${authLog.length} auth, ${routeLog.length} route, ${pushLog.length} push, ${locLog.length} loc, ${bgLog.length} bg, ${renderLog.length} render entries).`,
       );
     } catch (e: any) {
       Alert.alert('Could not copy', e?.message || 'Try again.');
@@ -196,7 +202,7 @@ export default function DiagnosticsScreen() {
           text: 'Clear',
           style: 'destructive',
           onPress: async () => {
-            await Promise.all([clearAuthClearLog(), clearRouteLog(), clearPushRefreshLog(), clearLocationRefreshLog(), clearBgTaskLog()]);
+            await Promise.all([clearAuthClearLog(), clearRouteLog(), clearPushRefreshLog(), clearLocationRefreshLog(), clearBgTaskLog(), clearScreenRenderLog()]);
             await reload();
           },
         },
@@ -416,6 +422,72 @@ export default function DiagnosticsScreen() {
                     {e.err ? (
                       <Text style={styles.entryLine}>
                         <Text style={styles.entryK}>err: </Text>{e.err}
+                      </Text>
+                    ) : null}
+                  </View>
+                ))
+            )}
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Read-path render trace</Text>
+            <Text style={styles.sectionCount}>{renderLog.length}</Text>
+          </View>
+          <Text style={styles.sectionHint}>
+            Every dashboard/member fetch (`*-fetch`), every MemberMap prop change
+            (`map-props`), every WebView marker-painted confirmation (`map-rendered`).
+            Compare the lat/lon across the three for the same member to isolate
+            (A) map didn't render fresh, (B) fetch returned stale, (C) state never updated.
+          </Text>
+          <View style={styles.card}>
+            {loading ? (
+              <Text style={styles.muted}>Loading…</Text>
+            ) : renderLog.length === 0 ? (
+              <Text style={styles.muted}>No render events yet. Visit Dashboard or a member detail screen.</Text>
+            ) : (
+              renderLog
+                .slice(-25)
+                .reverse()
+                .map((e, i) => (
+                  <View key={`sr-${e.t}-${i}`} style={styles.entry}>
+                    <Text style={styles.entryTime}>{fmt(e.t)}</Text>
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>src: </Text>{e.src}
+                      {e.memberId ? (
+                        <>
+                          {'  '}
+                          <Text style={styles.entryK}>mid: </Text>{e.memberId.slice(-6)}
+                        </>
+                      ) : null}
+                      {typeof e.memberCount === 'number' ? (
+                        <>
+                          {'  '}
+                          <Text style={styles.entryK}>members: </Text>{e.memberCount}
+                        </>
+                      ) : null}
+                      {typeof e.renderLatencyMs === 'number' ? (
+                        <>
+                          {'  '}
+                          <Text style={styles.entryK}>latency: </Text>{e.renderLatencyMs}ms
+                        </>
+                      ) : null}
+                    </Text>
+                    {(typeof e.lat === 'number' || typeof e.lon === 'number') ? (
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>coord: </Text>
+                        {typeof e.lat === 'number' ? e.lat : '—'}, {typeof e.lon === 'number' ? e.lon : '—'}
+                      </Text>
+                    ) : null}
+                    {e.locationName ? (
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>name: </Text>{e.locationName}
+                      </Text>
+                    ) : null}
+                    {e.lastSeen ? (
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>last_seen: </Text>{new Date(e.lastSeen).toLocaleString()}
                       </Text>
                     ) : null}
                   </View>
