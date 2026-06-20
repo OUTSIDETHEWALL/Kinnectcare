@@ -11,6 +11,7 @@ import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, MemberSummary, getBillingStatus, BillingStatus } from '../../src/api';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { geocodeLabelForCoord } from '../../src/locationRefresh';
 import { logScreenRender } from '../../src/screenRenderLog';
 import { useAuth } from '../../src/AuthContext';
@@ -126,10 +127,52 @@ export default function Dashboard() {
       load().catch(() => {});
     });
 
+    // v1.2.9 — active-mode location watcher.
+    //
+    // While this tab is focused (the user is actively looking at the
+    // family map), subscribe to high-accuracy position updates and
+    // upload directly on every >50 m / >15 s of movement.  This is
+    // the "near-realtime tracking while in the app" mode — the
+    // background task can still throttle, but as long as Joyce has
+    // the app open while moving, her dot keeps pace with her.
+    //
+    // Auto-tears down on tab blur, so battery cost only applies
+    // during active engagement.  Falls back silently if permission
+    // is denied or the platform is web.
+    let watcherSub: any = null;
+    (async () => {
+      try {
+        if (Platform.OS === 'web') return;
+        const perm = await Location.getForegroundPermissionsAsync();
+        if (perm.status !== 'granted') return;
+        watcherSub = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.High,
+            distanceInterval: 50,
+            timeInterval: 15_000,
+          },
+          async (pos) => {
+            try {
+              const memberId = await AsyncStorage.getItem('kc_my_member_id_v1');
+              if (!memberId) return;
+              const label = await geocodeLabelForCoord(pos.coords.latitude, pos.coords.longitude);
+              const body: any = {
+                latitude: pos.coords.latitude,
+                longitude: pos.coords.longitude,
+              };
+              if (label) body.location_name = label;
+              await api.put(`/members/${memberId}/location`, body);
+            } catch (_e) {}
+          },
+        );
+      } catch (_e) {}
+    })();
+
     return () => {
       clearInterval(pollId);
       appStateSub.remove();
       notifSub.remove();
+      try { watcherSub?.remove?.(); } catch (_e) {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [members.length]));

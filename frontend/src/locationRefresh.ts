@@ -59,11 +59,24 @@ const MY_USER_ID_KEY = 'kc_my_user_id_v1';
 const BG_LOCATION_MEMBER_ID_KEY_MIRROR = '@kinnship/bg_location_member_id_v1';
 const LOG_KEY = 'kc_location_refresh_log';
 
+// v1.2.9 — fresh GPS, faster cadence
+//
+// Pre-v1.2.9 this path was `Location.Accuracy.Balanced` (network +
+// coarse GPS, may return cached fix up to a few minutes old) and
+// throttled to once per 60 s.  SOS in the same app uses
+// `Accuracy.Highest` and is consistently described as "always
+// accurate" — that's the difference we're closing.  Passive tracking
+// now uses the same fresh-GPS path as SOS.  Throttle drops to 30 s
+// so a moving user gets twice as many refreshes per minute.
+const MIN_INTERVAL_MS = 30 * 1000;
+const FOREGROUND_ACCURACY = Location.Accuracy.Highest;
+
 // Throttle the foreground refresh — 60 s is the floor.  Background
 // task's normal cadence is 5 min; we deliberately want the foreground
 // path to be MUCH more aggressive so a user actively opening the app
 // always sees a fresh dot.
-const MIN_INTERVAL_MS = 60 * 1000;
+// (v1.2.9: the constants are now declared above with the SOS-matching
+// values — this duplicate line is removed.)
 
 let lastRefreshAt = 0;
 
@@ -318,7 +331,7 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
     let lon: number;
     try {
       const pos = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
+        accuracy: FOREGROUND_ACCURACY,
       });
       lat = pos.coords.latitude;
       lon = pos.coords.longitude;

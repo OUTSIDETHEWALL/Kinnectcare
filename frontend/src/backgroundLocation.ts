@@ -32,8 +32,17 @@ export const SOS_ACTIVE_KEY = '@kinnship/sos_active_v1';
 export const BG_LOCATION_MEMBER_ID_KEY = '@kinnship/bg_location_member_id_v1';
 
 // Cadence settings — see the doc-block above for the rationale.
-const NORMAL_TIME_INTERVAL_MS = 5 * 60 * 1000;   // 5 min
-const NORMAL_DISTANCE_M = 100;
+// v1.2.9 — tighter cadence + accuracy.High instead of Balanced
+//
+// Beta testing showed the OS-owned background task was waking too
+// rarely on stationary devices and (when it did wake) sometimes
+// returning a cached fix.  Trade-offs intentionally accepted:
+//   - Battery drain goes up (still well within Android's foreground-
+//     service quota — the persistent notification keeps us alive).
+//   - Network usage goes up modestly (a PUT every 2 min when moving,
+//     ~same as before when stationary thanks to the 50 m floor).
+const NORMAL_TIME_INTERVAL_MS = 2 * 60 * 1000;   // was 5 min
+const NORMAL_DISTANCE_M = 50;                    // was 100 m
 const SOS_TIME_INTERVAL_MS = 10 * 1000;          // 10 sec
 const SOS_DISTANCE_M = 5;
 
@@ -351,7 +360,12 @@ export async function startBackgroundLocation(memberId: string): Promise<boolean
   }
 
   await Location.startLocationUpdatesAsync(BG_LOCATION_TASK, {
-    accuracy: sosNow ? Location.Accuracy.BestForNavigation : Location.Accuracy.Balanced,
+    // v1.2.9: was Accuracy.Balanced for non-SOS — which the OS could
+    // satisfy with a cached/network fix several minutes old.  Switch
+    // to Accuracy.High so passive tracking forces a fresh GPS fix
+    // just like SOS does (which testers reported as "always
+    // accurate" — the difference is exactly the accuracy preset).
+    accuracy: sosNow ? Location.Accuracy.BestForNavigation : Location.Accuracy.High,
     timeInterval: opts.timeIntervalMs,
     distanceInterval: opts.distanceM,
     deferredUpdatesInterval: opts.timeIntervalMs,
