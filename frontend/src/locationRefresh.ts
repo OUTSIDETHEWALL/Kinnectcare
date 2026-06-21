@@ -278,7 +278,12 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
     if (Platform.OS === 'web') return;
 
     const now = Date.now();
-    if (now - lastRefreshAt < MIN_INTERVAL_MS) return;
+    // v1.3.0 — silent-push pull bypasses the throttle once, because
+    // a family member explicitly requested it.  Flag is set in
+    // push.ts before the call.
+    const forced = !!(global as any).__kc_force_loc_refresh;
+    if (forced) (global as any).__kc_force_loc_refresh = false;
+    if (!forced && now - lastRefreshAt < MIN_INTERVAL_MS) return;
 
     // Snapshot BOTH member-id caches at the start of this refresh so
     // we can compare them in the log entry — divergence between the

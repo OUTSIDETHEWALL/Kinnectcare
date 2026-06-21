@@ -62,6 +62,25 @@ export default function MemberDetail() {
       setMember(m.data);
       setReminders(r.data);
       setHistory(h.data);
+
+      // v1.3.0 — pull-on-stale: if this member's last_seen is
+      // older than 2 minutes, ask the backend to silently ping
+      // their device for a fresh GPS upload.  Throttled client-
+      // side here (60 s/member) and server-side (30 s/member).
+      try {
+        const md: any = m.data || {};
+        if (md.last_seen && md.id) {
+          const seenMs = new Date(md.last_seen).getTime();
+          const now = Date.now();
+          const TWO_MIN_MS = 2 * 60 * 1000;
+          const CLIENT_THROTTLE_MS = 60 * 1000;
+          const lastPullRef = (global as any).__kc_last_pull_at || ((global as any).__kc_last_pull_at = {});
+          if (seenMs && (now - seenMs) >= TWO_MIN_MS && (now - (lastPullRef[md.id] || 0)) >= CLIENT_THROTTLE_MS) {
+            lastPullRef[md.id] = now;
+            api.post(`/members/${md.id}/request-location-refresh`).catch(() => {});
+          }
+        }
+      } catch (_e) {}
     } catch (_e) {}
   };
 

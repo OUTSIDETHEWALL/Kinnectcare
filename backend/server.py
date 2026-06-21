@@ -2516,6 +2516,69 @@ async def root():
     return {"message": "Kinnship API", "status": "ok"}
 
 
+# ========== v1.3.0 — silent-push pull-on-stale ==========
+# In-memory throttle: max one refresh-request push per target member per 30 s.
+# Railway runs a single replica so this is safe; if we ever horizontal-scale
+# this becomes a Redis SETNX with 30 s TTL.
+_REFRESH_PUSH_THROTTLE: dict = {}
+
+@api_router.post("/members/{member_id}/request-location-refresh")
+async def request_location_refresh(member_id: str, current=Depends(get_current_user)):
+    """v1.3.0 — sends a silent data push to the target member's device
+    asking it to upload a fresh GPS fix.  This bypasses Android Doze /
+    Samsung One UI App-Standby throttling on the location task because
+    push notifications wake the device regardless of background quota.
+
+    Caller must share a family_group with the target.  Target must be
+    a linked user (has user_id and push_tokens).  Server-side throttle
+    of 30 s per member protects against the dashboard's auto-pull
+    firing on every refetch tick.
+    """
+    target = await db.members.find_one(
+        {"id": member_id, "family_group_id": current["family_group_id"]},
+        {"_id": 0, "id": 1, "user_id": 1, "name": 1},
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found in your family group")
+    target_user_id = target.get("user_id")
+    if not target_user_id:
+        return {"ok": True, "skipped": "no_user_link"}
+
+    import time as _t
+    now = _t.time()
+    last = _REFRESH_PUSH_THROTTLE.get(member_id, 0)
+    if (now - last) < 30:
+        return {"ok": True, "skipped": "throttled", "retry_in_s": int(30 - (now - last))}
+    _REFRESH_PUSH_THROTTLE[member_id] = now
+
+    target_user = await db.users.find_one({"id": target_user_id}, {"push_tokens": 1})
+    tokens = (target_user or {}).get("push_tokens", []) or []
+    if not tokens:
+        return {"ok": True, "sent_to": 0}
+
+    # Silent data-only push: empty title/body so the device's
+    # notification handler receives a background data event instead of
+    # rendering a visible banner.  Frontend push.ts catches data.type
+    # === 'request_location_refresh' and fires refreshLocationIfStale.
+    try:
+        await send_expo_push(
+            tokens=tokens,
+            title="",
+            body="",
+            data={
+                "type": "request_location_refresh",
+                "member_id": member_id,
+                "_contentAvailable": True,   # iOS silent push hint
+                "channelId": "silent",
+                "_sentAt": now,
+            },
+            sound="",
+        )
+    except Exception as e:
+        logger.warning(f"request-location-refresh push failed: {e}")
+    return {"ok": True, "sent_to": len(tokens)}
+
+
 # ========== Diagnostics ==========
 @api_router.get("/diagnostics/my-members")
 async def diagnostics_my_members(current=Depends(get_current_user)):

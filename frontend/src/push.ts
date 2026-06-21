@@ -697,6 +697,28 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
     })();
 
     const recv = Notifications.addNotificationReceivedListener((n) => {
+      // v1.3.0 — silent pull-on-stale handler.  When a family member
+      // opens this device's owner's screen and their data is stale,
+      // the backend sends a silent data push with type=
+      // request_location_refresh.  Bypass the normal foreground
+      // throttle (caller of the endpoint is already gated by the
+      // server-side 30 s throttle) and trigger a fresh GPS upload
+      // straight away.  Push notifications wake the device even
+      // under Doze / Samsung One UI App-Standby, which is the whole
+      // point of this architectural bypass.
+      try {
+        const data: any = n?.request?.content?.data || {};
+        if (data?.type === 'request_location_refresh') {
+          // Imported lazily to avoid a hot-path cycle with locationRefresh.
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { refreshLocationIfStale } = require('./locationRefresh');
+          // Reset the throttle baseline so this fires immediately
+          // even if a foreground refresh just ran.
+          (global as any).__kc_force_loc_refresh = true;
+          refreshLocationIfStale('pull-request').catch(() => {});
+          return; // do not surface as a sticky/last notification
+        }
+      } catch (_e) {}
       setLast(n);
       // Re-present critical notifications as sticky to keep them in tray.
       rePresentSticky(n);

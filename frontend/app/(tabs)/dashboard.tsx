@@ -72,6 +72,27 @@ export default function Dashboard() {
       setMembers(m.data);
       setSummary(s.data.members || []);
       if (b) setBilling(b);
+
+      // v1.3.0 — pull-on-stale: for any family member whose
+      // last_seen is older than 2 minutes, ask the backend to send
+      // a silent push to that member's device requesting a fresh
+      // GPS upload.  Throttled server-side to one per 30 s per
+      // member, and client-side here to one per 60 s per member.
+      try {
+        const list: any[] = Array.isArray(m.data) ? m.data : [];
+        const now = Date.now();
+        const TWO_MIN_MS = 2 * 60 * 1000;
+        const CLIENT_THROTTLE_MS = 60 * 1000;
+        const lastPullRef = (global as any).__kc_last_pull_at || ((global as any).__kc_last_pull_at = {});
+        for (const mb of list) {
+          if (!mb?.id || !mb?.last_seen) continue;
+          const seenMs = new Date(mb.last_seen).getTime();
+          if (!seenMs || (now - seenMs) < TWO_MIN_MS) continue;
+          if ((now - (lastPullRef[mb.id] || 0)) < CLIENT_THROTTLE_MS) continue;
+          lastPullRef[mb.id] = now;
+          api.post(`/members/${mb.id}/request-location-refresh`).catch(() => {});
+        }
+      } catch (_e) {}
     } catch (_e) {}
   };
 
