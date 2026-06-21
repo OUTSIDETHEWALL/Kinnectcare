@@ -169,13 +169,33 @@ export async function refreshPushTokenIfStale(reason: string): Promise<void> {
 // In-foreground notification display behavior. shouldShowBanner=true ensures
 // the heads-up appears even when the app is open in the foreground.
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: true,
-    priority: Notifications.AndroidNotificationPriority.MAX,
-  }),
+  handleNotification: async (n) => {
+    // v1.3.0 — silent pull-on-stale.  When a family member opens this
+    // device's owner's screen and their data is stale, the backend
+    // sends a data-only push with type=request_location_refresh.
+    // The point of the architecture is that this is INVISIBLE — no
+    // sound, no banner, no tray entry, no badge bump.  The receiving
+    // listener in subscribeNotifications() handles the work.
+    try {
+      const data: any = n?.request?.content?.data || {};
+      if (data?.type === 'request_location_refresh') {
+        return {
+          shouldShowBanner: false,
+          shouldShowList: false,
+          shouldPlaySound: false,
+          shouldSetBadge: false,
+          priority: Notifications.AndroidNotificationPriority.MIN,
+        };
+      }
+    } catch (_e) {}
+    return {
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: true,
+      priority: Notifications.AndroidNotificationPriority.MAX,
+    };
+  },
 });
 
 // ---------- Notification Categories (action buttons) ----------

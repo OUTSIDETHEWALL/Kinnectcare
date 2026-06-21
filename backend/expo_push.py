@@ -66,7 +66,6 @@ async def send_expo_push(
             "to": t,
             "title": title[:200],
             "body": body[:500],
-            "sound": sound,
             "priority": "high",
             "channelId": channel_id,
             "data": data,
@@ -82,6 +81,13 @@ async def send_expo_push(
             # push until the device wakes up — same behavior as any
             # production messaging app.
         }
+        # v1.3.0+ silent-push hardening: omit the sound key entirely
+        # when caller passes a falsy value.  An empty-string sound was
+        # being interpreted by Android FCM as "use default sound",
+        # which made the request_location_refresh data push audibly
+        # buzz on the receiving device — defeating the whole point.
+        if sound:
+            msg["sound"] = sound
         if cat_id:
             msg["categoryId"] = cat_id
             msg["categoryIdentifier"] = cat_id
