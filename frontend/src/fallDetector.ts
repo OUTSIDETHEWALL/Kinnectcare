@@ -56,9 +56,49 @@
  *   via OTA without touching algorithm code.
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Accelerometer, Gyroscope } from 'expo-sensors';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
+
+// ------------------------------------------------------------------
+//  Web-safe expo-sensors import.
+// ------------------------------------------------------------------
+// expo-sensors > 14 fails on web preview the moment ANY method is
+// touched — even `isAvailableAsync()` — because the underlying
+// NativeEventEmitter has no `addListener` shim in the Expo SDK 54
+// web runtime.  Guarding the call-sites isn't enough; we have to
+// gate the import itself so React strict-mode double-renders and
+// Metro hot-reloads can never reach a real Accelerometer reference
+// on web.
+//
+// On web we substitute hollow stubs that satisfy the type contract
+// but no-op.  Production native builds (iOS / Android) load the
+// real expo-sensors normally.
+// ------------------------------------------------------------------
+type SensorListener = (data: { x: number; y: number; z: number }) => void;
+type SensorSub = { remove: () => void };
+type SensorLike = {
+  isAvailableAsync: () => Promise<boolean>;
+  setUpdateInterval: (ms: number) => void;
+  addListener: (cb: SensorListener) => SensorSub;
+};
+
+let Accelerometer: SensorLike;
+let Gyroscope: SensorLike;
+if (Platform.OS === 'web') {
+  const noop = () => {};
+  const stub: SensorLike = {
+    isAvailableAsync: async () => false,
+    setUpdateInterval: noop,
+    addListener: () => ({ remove: noop }),
+  };
+  Accelerometer = stub;
+  Gyroscope = stub;
+} else {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  const sensors = require('expo-sensors');
+  Accelerometer = sensors.Accelerometer as SensorLike;
+  Gyroscope = sensors.Gyroscope as SensorLike;
+}
 
 const KEY = 'kc.fall.enabled';
 
