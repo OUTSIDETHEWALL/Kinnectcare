@@ -270,8 +270,9 @@ export default function SettingsScreen() {
                   <Text style={styles.fallTitle}>Fall Detection</Text>
                 </View>
                 <Text style={styles.fallBody}>
-                  Automatically detect sudden falls using the device accelerometer. You'll get 30 seconds
-                  to cancel before SOS is triggered.
+                  Multi-signal fall detection (v1.4.0). Watches impact, orientation
+                  change, and post-fall stillness — all three must agree before a
+                  30-second "Are you okay?" countdown is shown.
                 </Text>
                 {!fallAvailable ? (
                   <Text style={styles.fallUnavail}>

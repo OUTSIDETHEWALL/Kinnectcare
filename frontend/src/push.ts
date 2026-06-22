@@ -298,6 +298,42 @@ export async function ensureNotificationChannel() {
       showBadge: true,
       bypassDnd: true,
     });
+    // ============================================================
+    //  v1.3.2 — Dedicated SILENT channel for background sync pings.
+    // ============================================================
+    //
+    // The pull-on-stale architecture (v1.3.0) sends a data-only push
+    // to wake the receiver's device for a fresh GPS upload.  These
+    // pushes route to `channelId: "silent"` in the FCM payload, and
+    // historical user reports flagged that on Samsung One UI 6+ the
+    // device fell back to the `default` channel (because the named
+    // channel didn't exist) — which DOES play a sound and DOES
+    // surface a heads-up.  Defeats the whole point of the silent
+    // refresh.
+    //
+    // The cure is to create a real channel with IMPORTANCE_MIN so
+    // Android suppresses the heads-up, the sound, AND the lockscreen
+    // banner.  We additionally pass `sound: null`, `enableVibrate:
+    // false`, and `showBadge: false` so even users who have manually
+    // bumped the channel importance later only ever see a quiet tray
+    // entry — never a sound or a buzz.
+    //
+    // Channel ID is `silent_v2` (not `silent`) to force Android to
+    // re-create the channel with the IMPORTANCE_MIN setting if the
+    // user previously had a `silent` channel cached at a higher
+    // importance.  Backend payload must match — see expo_push.py.
+    try { await Notifications.deleteNotificationChannelAsync('silent'); } catch (_e) {}
+    await Notifications.setNotificationChannelAsync('silent_v2', {
+      name: 'Background sync',
+      description: 'Silent location refresh requests — no sound or banner',
+      importance: Notifications.AndroidImportance.MIN,
+      vibrationPattern: [0],
+      sound: null as any,
+      enableVibrate: false,
+      enableLights: false,
+      showBadge: false,
+      lockscreenVisibility: Notifications.AndroidNotificationVisibility.SECRET,
+    });
   } catch (e) {
     // eslint-disable-next-line no-console
     console.warn('Failed to set Android notification channels:', e);

@@ -13,6 +13,13 @@ import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, MemberSummary, getBillingStatus, BillingStatus } from '../../src/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { geocodeLabelForCoord } from '../../src/locationRefresh';
+import {
+  requestRefresh as requestMemberRefresh,
+  clearIfNewer as clearRefreshIfNewer,
+  subscribeRefreshing,
+  STALE_THRESHOLD_MS,
+} from '../../src/locationRefreshState';
+import { formatTimeAgo } from '../../src/timeFormat';
 import { logScreenRender } from '../../src/screenRenderLog';
 import { useAuth } from '../../src/AuthContext';
 
@@ -73,24 +80,27 @@ export default function Dashboard() {
       setSummary(s.data.members || []);
       if (b) setBilling(b);
 
-      // v1.3.0 — pull-on-stale: for any family member whose
-      // last_seen is older than 2 minutes, ask the backend to send
-      // a silent push to that member's device requesting a fresh
-      // GPS upload.  Throttled server-side to one per 30 s per
-      // member, and client-side here to one per 60 s per member.
+      // v1.3.2 — pull-on-stale: 60 s freshness threshold (was 2 min).
+      // For any family member whose last_seen is older than 60 s, ask
+      // the backend to send a silent push to that member's device
+      // requesting a fresh GPS upload.  The locationRefreshState
+      // helper marks the member as "refreshing" so MemberCard can
+      // show a spinner indicator, and the next /members poll clears
+      // the spinner once a newer last_seen arrives.
       try {
         const list: any[] = Array.isArray(m.data) ? m.data : [];
         const now = Date.now();
-        const TWO_MIN_MS = 2 * 60 * 1000;
-        const CLIENT_THROTTLE_MS = 60 * 1000;
-        const lastPullRef = (global as any).__kc_last_pull_at || ((global as any).__kc_last_pull_at = {});
         for (const mb of list) {
-          if (!mb?.id || !mb?.last_seen) continue;
-          const seenMs = new Date(mb.last_seen).getTime();
-          if (!seenMs || (now - seenMs) < TWO_MIN_MS) continue;
-          if ((now - (lastPullRef[mb.id] || 0)) < CLIENT_THROTTLE_MS) continue;
-          lastPullRef[mb.id] = now;
-          api.post(`/members/${mb.id}/request-location-refresh`).catch(() => {});
+          if (!mb?.id) continue;
+          const seenMs = mb?.last_seen ? new Date(mb.last_seen).getTime() : 0;
+          // Clear any in-flight refresh marker that has a newer last_seen.
+          if (seenMs) clearRefreshIfNewer(mb.id, seenMs);
+          // Skip my OWN member row — I never need to pull-on-stale
+          // for myself; this device uploads its own GPS directly.
+          if (user?.id && mb?.user_id === user.id) continue;
+          if (!seenMs || (now - seenMs) >= STALE_THRESHOLD_MS) {
+            requestMemberRefresh(mb.id, seenMs || null);
+          }
         }
       } catch (_e) {}
     } catch (_e) {}
@@ -460,10 +470,35 @@ export default function Dashboard() {
 
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Your Family</Text>
-          <TouchableOpacity testID="add-member-btn" onPress={() => router.push('/add-member')} style={styles.addBtn}>
-            <Icon name="add" size={16} color={Colors.primary} />
-            <Text style={styles.addBtnText}>Add</Text>
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <TouchableOpacity
+              testID="refresh-all-btn"
+              onPress={() => {
+                // Manual "refresh all" — re-poll + fire pull-on-stale for every
+                // member regardless of their freshness, so the user can force a
+                // GPS update without waiting for the 60 s threshold to elapse.
+                onRefresh().catch(() => {});
+                try {
+                  for (const mb of members) {
+                    if (!mb?.id) continue;
+                    if (user?.id && mb?.user_id === user.id) continue;
+                    requestMemberRefresh(
+                      mb.id,
+                      mb.last_seen ? new Date(mb.last_seen).getTime() : null,
+                    );
+                  }
+                } catch (_e) {}
+              }}
+              style={styles.refreshAllBtn}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.refreshAllText}>🔄 Refresh</Text>
+            </TouchableOpacity>
+            <TouchableOpacity testID="add-member-btn" onPress={() => router.push('/add-member')} style={styles.addBtn}>
+              <Icon name="add" size={16} color={Colors.primary} />
+              <Text style={styles.addBtnText}>Add</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {seniors.length > 0 && <Text style={styles.subSection}>👴 Seniors</Text>}
@@ -587,6 +622,21 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
 }) {
   const initials = member.name.split(' ').map(s => s[0]).slice(0, 2).join('').toUpperCase();
   const dot = member.status === 'healthy' ? '🟢' : member.status === 'warning' ? '🟡' : '🔴';
+
+  // v1.3.2 — live refresh indicator + relative "last updated" timestamp.
+  // We subscribe to the locationRefreshState bus per-member and re-tick
+  // every 20 s so the "X min ago" label stays accurate without a
+  // full dashboard refetch.
+  const [refreshing, setRefreshing] = useState(false);
+  useEffect(() => subscribeRefreshing(member.id, setRefreshing), [member.id]);
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => forceTick((n) => n + 1), 20_000);
+    return () => clearInterval(id);
+  }, []);
+  const seenMs = member.last_seen ? new Date(member.last_seen).getTime() : 0;
+  const ageLabel = seenMs ? formatTimeAgo(seenMs) : '';
+
   return (
     <View testID={`member-card-${member.id}`} style={styles.memberCard}>
       <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={styles.memberMain}>
@@ -606,6 +656,19 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
             <Text style={styles.statusEmoji}>{dot}</Text>
           </View>
           <Text style={styles.memberMeta}>📍 {member.location_name || 'Unknown'}</Text>
+          {refreshing ? (
+            <View style={styles.freshnessRow} testID={`member-refreshing-${member.id}`}>
+              <ActivityIndicator size="small" color={Colors.primary} />
+              <Text style={styles.freshnessRefreshing}>Refreshing location…</Text>
+            </View>
+          ) : ageLabel ? (
+            <Text
+              style={styles.freshnessLabel}
+              testID={`member-freshness-${member.id}`}
+            >
+              🕒 Updated {ageLabel}
+            </Text>
+          ) : null}
           {isSenior && sum && (
             <View style={styles.medRow}>
               <View style={styles.medChip}>
@@ -690,6 +753,15 @@ const styles = StyleSheet.create({
   memberName: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
   statusEmoji: { fontSize: 12 },
   memberMeta: { fontSize: 13, color: Colors.textTertiary, marginTop: 2 },
+  freshnessLabel: { fontSize: 11, color: Colors.textTertiary, marginTop: 2, fontWeight: '600' },
+  freshnessRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
+  freshnessRefreshing: { fontSize: 11, color: Colors.primary, fontWeight: '700' },
+  refreshAllBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: Colors.tertiary,
+    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, gap: 4,
+  },
+  refreshAllText: { color: Colors.primary, fontWeight: '700', fontSize: 13 },
   medRow: { flexDirection: 'row', gap: 6, marginTop: 8, flexWrap: 'wrap' },
   medChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: Colors.tertiary, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 },
   medChipEmoji: { fontSize: 12 },

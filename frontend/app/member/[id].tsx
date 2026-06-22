@@ -15,9 +15,15 @@ import { api, Member, Reminder } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
 import { isFallEnabled } from '../../src/fallDetector';
 import MemberMap from '../../src/MemberMap';
-import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone } from '../../src/timeFormat';
+import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone, formatTimeAgo } from '../../src/timeFormat';
 import { TimePicker12 } from '../../src/TimePicker12';
 import { pickContact, isContactsPickerSupported } from '../../src/contactsPicker';
+import {
+  requestRefresh as requestMemberRefresh,
+  clearIfNewer as clearRefreshIfNewer,
+  subscribeRefreshing,
+  STALE_THRESHOLD_MS,
+} from '../../src/locationRefreshState';
 
 const INTERVAL_OPTIONS = [2, 4, 6, 8, 12] as const;
 type CheckinMode = 'fixed' | 'interval' | 'disabled';
@@ -33,6 +39,29 @@ export default function MemberDetail() {
   const [refreshing, setRefreshing] = useState(false);
   const [showCheckinSettings, setShowCheckinSettings] = useState(false);
   const [fallOn, setFallOn] = useState<boolean>(true);
+  // v1.3.2 — live refresh indicator wired to locationRefreshState.
+  // Subscribes when `id` is set and unsubscribes on unmount.  The
+  // 20-second forceTick keeps the "X min ago" timestamp accurate
+  // without spamming the network.
+  const [locationRefreshing, setLocationRefreshing] = useState(false);
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    if (!id) return;
+    return subscribeRefreshing(id, setLocationRefreshing);
+  }, [id]);
+  useEffect(() => {
+    const t = setInterval(() => forceTick((n) => n + 1), 20_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const onManualRefresh = useCallback(() => {
+    if (!id) return;
+    const seenMs = member?.last_seen ? new Date(member.last_seen).getTime() : null;
+    requestMemberRefresh(id, seenMs);
+    // Also force-refetch /members/{id} immediately so the UI
+    // re-syncs once the silent-push roundtrip completes.
+    load().catch(() => {});
+  }, [id, member?.last_seen]);
 
   useEffect(() => {
     isFallEnabled().then(setFallOn).catch(() => {});
@@ -63,21 +92,20 @@ export default function MemberDetail() {
       setReminders(r.data);
       setHistory(h.data);
 
-      // v1.3.0 — pull-on-stale: if this member's last_seen is
-      // older than 2 minutes, ask the backend to silently ping
-      // their device for a fresh GPS upload.  Throttled client-
-      // side here (60 s/member) and server-side (30 s/member).
+      // v1.3.2 — pull-on-stale (60 s freshness threshold).  If this
+      // member's last_seen is older than 60 s, ask the backend to
+      // silently ping their device for a fresh GPS upload.  The
+      // refresh marker drives the "Refreshing location…" indicator
+      // on this screen via the locationRefreshState subscription
+      // hook below.
       try {
         const md: any = m.data || {};
-        if (md.last_seen && md.id) {
-          const seenMs = new Date(md.last_seen).getTime();
-          const now = Date.now();
-          const TWO_MIN_MS = 2 * 60 * 1000;
-          const CLIENT_THROTTLE_MS = 60 * 1000;
-          const lastPullRef = (global as any).__kc_last_pull_at || ((global as any).__kc_last_pull_at = {});
-          if (seenMs && (now - seenMs) >= TWO_MIN_MS && (now - (lastPullRef[md.id] || 0)) >= CLIENT_THROTTLE_MS) {
-            lastPullRef[md.id] = now;
-            api.post(`/members/${md.id}/request-location-refresh`).catch(() => {});
+        if (md.id) {
+          const seenMs = md.last_seen ? new Date(md.last_seen).getTime() : 0;
+          if (seenMs) clearRefreshIfNewer(md.id, seenMs);
+          const skipSelf = user?.id && md?.user_id === user.id;
+          if (!skipSelf && (!seenMs || (Date.now() - seenMs) >= STALE_THRESHOLD_MS)) {
+            requestMemberRefresh(md.id, seenMs || null);
           }
         }
       } catch (_e) {}
@@ -345,13 +373,40 @@ export default function MemberDetail() {
 
         {/* Location Card */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Location</Text>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Location</Text>
+            <TouchableOpacity
+              testID="member-refresh-location"
+              onPress={onManualRefresh}
+              activeOpacity={0.85}
+              disabled={locationRefreshing}
+              style={[styles.refreshChip, locationRefreshing && styles.refreshChipDisabled]}
+            >
+              {locationRefreshing ? (
+                <>
+                  <ActivityIndicator size="small" color={Colors.primary} />
+                  <Text style={styles.refreshChipText}>Refreshing…</Text>
+                </>
+              ) : (
+                <Text style={styles.refreshChipText}>🔄 Refresh</Text>
+              )}
+            </TouchableOpacity>
+          </View>
           <View style={styles.locationCard}>
             <View style={styles.locRow}>
               <View style={styles.locPinBubble}><Text style={styles.locPinEmoji}>📍</Text></View>
               <View style={{ flex: 1, marginLeft: 14 }}>
                 <Text style={styles.locName}>{member.location_name || 'Unknown location'}</Text>
-                <Text style={styles.locSub}>Last seen 🕐 recently</Text>
+                {locationRefreshing ? (
+                  <View style={styles.locFreshRow} testID="member-refreshing-banner">
+                    <ActivityIndicator size="small" color={Colors.primary} />
+                    <Text style={styles.locFreshRefreshing}>Refreshing location…</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.locSub} testID="member-freshness">
+                    🕒 Last updated {member.last_seen ? formatTimeAgo(member.last_seen) : 'never'}
+                  </Text>
+                )}
               </View>
             </View>
             <View style={{ marginTop: 12 }}>
@@ -385,7 +440,7 @@ export default function MemberDetail() {
               <Text style={styles.featureTitle}>Fall Detection</Text>
               <Text style={styles.featureBody}>
                 {fallOn
-                  ? 'Active — accelerometer is watching for sudden falls. 30 s grace period before automatic SOS.'
+                  ? 'Active — multi-signal pipeline (impact + orientation + stillness). 30 s grace period before automatic family alert.'
                   : 'Off — turn on in Settings to detect falls automatically.'}
               </Text>
             </View>
@@ -750,6 +805,16 @@ const styles = StyleSheet.create({
   locPinEmoji: { fontSize: 22 },
   locName: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
   locSub: { fontSize: 13, color: Colors.textTertiary, marginTop: 2 },
+  locFreshRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
+  locFreshRefreshing: { fontSize: 12, color: Colors.primary, fontWeight: '700' },
+  refreshChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+    backgroundColor: Colors.tertiary,
+    minHeight: 32,
+  },
+  refreshChipDisabled: { opacity: 0.7 },
+  refreshChipText: { fontSize: 12, fontWeight: '700', color: Colors.primary },
   locDivider: { height: 1, backgroundColor: Colors.border, marginVertical: 12 },
   locMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
   locMetaLabel: { fontSize: 12, fontWeight: '700', color: Colors.textTertiary, textTransform: 'uppercase', letterSpacing: 0.5 },

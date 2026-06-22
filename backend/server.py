@@ -2569,7 +2569,12 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
                 "type": "request_location_refresh",
                 "member_id": member_id,
                 "_contentAvailable": True,   # iOS silent push hint
-                "channelId": "silent",
+                # v1.3.2 — use the dedicated IMPORTANCE_MIN channel
+                # registered by the frontend.  Channel name bumped to
+                # `silent_v2` to force Android to re-create the channel
+                # at the lowest possible importance on devices that had
+                # the old `silent` channel cached at a higher level.
+                "channelId": "silent_v2",
                 "_sentAt": now,
             },
             sound="",

@@ -41,8 +41,8 @@ export const BG_LOCATION_MEMBER_ID_KEY = '@kinnship/bg_location_member_id_v1';
 //     service quota — the persistent notification keeps us alive).
 //   - Network usage goes up modestly (a PUT every 2 min when moving,
 //     ~same as before when stationary thanks to the 50 m floor).
-const NORMAL_TIME_INTERVAL_MS = 2 * 60 * 1000;   // was 5 min
-const NORMAL_DISTANCE_M = 50;                    // was 100 m
+const NORMAL_TIME_INTERVAL_MS = 60 * 1000;   // v1.3.2: tightened 2 min → 60 s after field testing
+const NORMAL_DISTANCE_M = 50;
 const SOS_TIME_INTERVAL_MS = 10 * 1000;          // 10 sec
 const SOS_DISTANCE_M = 5;
 

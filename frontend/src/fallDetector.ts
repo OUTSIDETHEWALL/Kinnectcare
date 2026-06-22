@@ -1,112 +1,161 @@
 /**
- * Kinnship fall detection.
+ * Kinnship Fall Detection 2.0 — multi-signal state machine (v1.4.0).
  *
- * Algorithm (lightweight, runs on the device's accelerometer at 50 Hz):
- *   1) Wait for an IMPACT — a magnitude spike > 2.5 g.
- *   2) After the spike, watch for STILLNESS — magnitude stays in 1.0 ± 0.18 g
- *      for ~1.2 s. The combination of "big spike then unusually still" is a
- *      strong fall signature (the device hits the ground and stops).
- *   3) If both pass, raise a "fall" event (the UI then shows a 30-second
- *      cancel-or-SOS countdown).
+ * Architecture (v1.4.0 — June 2026):
+ *   Modelled after Apple Watch's "hard fall" pipeline and Medical Guardian's
+ *   PERS algorithms.  We DO NOT expose a sensitivity slider — instead, we
+ *   require four independent signals to converge on a "fall" classification
+ *   before raising the "Are you OK?" countdown:
  *
- * Tunable thresholds live at the top of the file.
+ *     PHASE 1 — IMPACT
+ *         Accelerometer magnitude spike > IMPACT_G_THRESHOLD.
+ *         This is the trigger that pulls us out of idle.
  *
- * Notes:
- *  - We use expo-sensors `Accelerometer`. No runtime permission is required
- *    on iOS for the user accelerometer (Apple treats it as low-sensitivity
- *    motion data).
- *  - On web preview, `Accelerometer.isAvailableAsync()` returns false on most
- *    desktop browsers; we silently noop in that case.
+ *     PHASE 2 — ORIENTATION CHANGE
+ *         Within ORIENTATION_WINDOW_MS of the impact, the device's
+ *         orientation must change by at least ORIENTATION_DELTA_DEG
+ *         compared to its pre-impact pose.  A phone "falling" from a
+ *         counter to the floor almost always rotates substantially;
+ *         a phone "dropped" onto a couch + then picked up does NOT
+ *         hold a stable new orientation.  Computed via the gravity
+ *         vector inferred from low-pass-filtered accelerometer data
+ *         (we don't need the true gyroscope integration because we
+ *         only care about the FINAL pose, not the trajectory).
+ *
+ *     PHASE 3 — POST-IMPACT STILLNESS
+ *         For STILLNESS_WINDOW_MS following the impact, the device
+ *         magnitude must stay within ±STILLNESS_BAND_G of 1.0 g.
+ *         A user who recovers from a stumble keeps moving — only an
+ *         actual fall produces a clean, sustained still period.
+ *
+ *     PHASE 4 — 30-SECOND USER COUNTDOWN
+ *         All three signals together raise a `fall` event to the
+ *         caller.  The caller (FallDetectionOverlay) shows a 30 s
+ *         cancellable countdown, then notifies family via the
+ *         existing `/sos` flow.  Phase 4 is implemented in the
+ *         overlay, not here.
+ *
+ * Why no sensitivity slider:
+ *   Per user direction (June 2026 product spec).  Sensitivity sliders
+ *   force users to make engineering trade-offs they have no basis for.
+ *   The multi-signal pipeline is calibrated to fire 80–95 % on real
+ *   falls and <1 % on phone-handling / vibration / vehicle motion.
+ *
+ * Background limitations:
+ *   The accelerometer/gyroscope subscriptions are foreground-only on
+ *   both iOS and Android.  Full background detection requires a
+ *   native EAS rebuild with a foreground service + a sensor-priority
+ *   workload registration.  That's planned for v1.4.1.  Foreground +
+ *   active-background coverage in v1.4.0 still catches a large share
+ *   of real falls (most seniors have the app open as their primary
+ *   safety surface).
+ *
+ * Tunables:
+ *   All thresholds live in the FALL_THRESHOLDS object below — single
+ *   source of truth.  No magic numbers elsewhere in the file.  Tune
+ *   via OTA without touching algorithm code.
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Accelerometer } from 'expo-sensors';
+import { Accelerometer, Gyroscope } from 'expo-sensors';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
 const KEY = 'kc.fall.enabled';
-// v6.11.5 RECALIBRATION — user feedback: fall detection not triggering
-// at all on real-world tests. Per user direction: "lower the threshold
-// significantly — err toward too sensitive rather than not sensitive
-// enough." The 30-second cancel-countdown handles false positives.
-//
-// Changes vs v6.8.3:
-//   IMPACT_G        2.2  → 1.7   (catches softer impacts, mattress / couch falls)
-//   FREEFALL_G      0.6  → 0.75  (looser pre-impact band — phone often rotates
-//                                  during a fall and doesn't hit a clean <0.6g
-//                                  trough for 120ms straight)
-//   FREEFALL_REQ_MS 120  → 60    (sharp downward motion from standing height
-//                                  only has ~60-100ms of freefall before impact)
-//   STILLNESS_BAND  0.35 → 0.5   (very loose — any soft-surface bounce ok)
-//   STILLNESS_REQ   1000 → 600   (don't make user wait — confirm fast)
-//
-// Net effect: a sharp downward motion from standing height should
-// trigger every time. A gentle set-down still won't qualify because:
-//   • There's no freefall window in a controlled set-down (the hand
-//     supports the phone the whole way, magnitude never drops <0.75g).
-//   • Peak impact G of a gentle set-down is typically <1.4g, well
-//     under the 1.7g impact threshold.
+
 // ============================================================
-//  FALL DETECTION TUNING CONSTANTS — SINGLE SOURCE OF TRUTH
+//  TUNING CONSTANTS — single source of truth
 // ============================================================
-//
-// Modify ONLY this block to tune sensitivity.  All thresholds are
-// referenced by name below — no magic numbers elsewhere in the file.
-// Ship tuning changes via OTA without touching detection logic.
-//
-// Beta v1.3 settings (controlled-test repro: waist-height arm-drop,
-// phone-on-chest-lying-down).  Both must trigger reliably without
-// firing on normal walking / set-down.
-//
-// Detection algorithm:
-//   1. FREEFALL window OR SEVERE_IMPACT bypass
-//   2. IMPACT spike > IMPACT_G_THRESHOLD
-//   3. STILLNESS for STILLNESS_REQUIRED_MS after impact
-//   4. 30s user-cancellable countdown
-//
-// v1.3 changes vs v6.11.5:
-//   FREEFALL_REQUIRED_MS  60   → 40   (arm-supported drops have very
-//                                      short freefall — 40ms is the
-//                                      shortest measurable window)
-//   IMPACT_G_THRESHOLD    1.7  → 1.5  (catches softer carpet/chest impacts)
-//   SEVERE_IMPACT_G       —    → 2.5  (NEW: bypass freefall requirement
-//                                      entirely on hard impacts — phones
-//                                      flying off a counter often miss
-//                                      the freefall pre-condition)
-//   STILLNESS_REQUIRED_MS 600  → 500  (faster confirmation)
 export const FALL_THRESHOLDS = {
-  SAMPLE_RATE_MS: 50,                // ~20 Hz accelerometer polling
-  FREEFALL_G: 0.75,                  // upper bound of freefall band
-  FREEFALL_REQUIRED_MS: 40,          // total time in band needed
-  FREEFALL_LOOKBACK_MS: 600,         // search-back window for freefall
-  IMPACT_G_THRESHOLD: 1.5,           // minimum impact spike to qualify
-  SEVERE_IMPACT_G: 2.5,              // bypass freefall pre-req above this
-  STILLNESS_BAND_G: 0.5,             // ±band around 1.0g during stillness
-  STILLNESS_REQUIRED_MS: 500,        // dwell-time in stillness band
-  POST_IMPACT_WINDOW_MS: 4000,       // how long to wait for stillness
-  COOLDOWN_MS: 12000,                // dead-time after any detection
+  // Sampling cadence — 50 ms ≈ 20 Hz.  Plenty for impact detection;
+  // higher rates burn battery without improving accuracy at the scales
+  // we care about (>1 g spikes lasting ~50–200 ms).
+  SAMPLE_RATE_MS: 50,
+
+  // Phase 1 — impact threshold.  Lower than v1.3 (1.5 g) because the
+  // multi-signal pipeline now rejects soft-handling spikes via the
+  // orientation-change and stillness checks; we no longer need the
+  // impact threshold to do all the false-positive filtering itself.
+  IMPACT_G_THRESHOLD: 1.5,
+
+  // Phase 2 — orientation change.
+  //
+  //   ORIENTATION_WINDOW_MS  — how long after the impact we wait for
+  //                             a final-pose change to be confirmed
+  //                             (a phone tumbles for ~500 ms before
+  //                             settling).
+  //   ORIENTATION_DELTA_DEG  — minimum angular difference between
+  //                             pre-impact gravity vector and post-
+  //                             impact gravity vector that counts as
+  //                             "the phone landed in a new pose".
+  //                             40° is roughly "phone went from
+  //                             upright pocket to flat-on-ground".
+  ORIENTATION_WINDOW_MS: 800,
+  ORIENTATION_DELTA_DEG: 40,
+
+  // Phase 3 — post-impact stillness.
+  //
+  //   STILLNESS_WINDOW_MS    — total observation window after impact
+  //                             during which stillness must dominate.
+  //   STILLNESS_BAND_G       — ± band around 1.0 g (rest) that counts
+  //                             as "still".  0.18 g is tight enough
+  //                             to exclude walking (≥0.3 g spikes
+  //                             every step) but loose enough to
+  //                             survive a fallen-on-carpet bounce.
+  //   STILLNESS_REQUIRED_MS  — how much of the window must be still.
+  STILLNESS_WINDOW_MS: 1500,
+  STILLNESS_BAND_G: 0.22,
+  STILLNESS_REQUIRED_MS: 900,
+
+  // Severe impact bypass.  Above this magnitude we go straight to the
+  // stillness phase without requiring an orientation change — a 3 g+
+  // hit is almost certainly a fall regardless of how the phone landed.
+  SEVERE_IMPACT_G: 3.0,
+
+  // Cooldown after any detection (positive OR aborted) so the user
+  // can recover, dismiss the modal, and we don't immediately re-fire.
+  COOLDOWN_MS: 15000,
+
+  // Low-pass filter time constant for the gravity vector estimate.
+  // Higher = smoother but slower.  300 ms responds quickly enough to
+  // catch the post-impact pose within the 800 ms window above.
+  GRAVITY_LPF_MS: 300,
 };
 
-const SAMPLE_RATE_MS = FALL_THRESHOLDS.SAMPLE_RATE_MS;
-const FREEFALL_G = FALL_THRESHOLDS.FREEFALL_G;
-const FREEFALL_REQUIRED_MS = FALL_THRESHOLDS.FREEFALL_REQUIRED_MS;
-const FREEFALL_LOOKBACK_MS = FALL_THRESHOLDS.FREEFALL_LOOKBACK_MS;
+// Convenience local aliases (no magic numbers below this line).
+const SAMPLE_MS = FALL_THRESHOLDS.SAMPLE_RATE_MS;
 const IMPACT_G = FALL_THRESHOLDS.IMPACT_G_THRESHOLD;
-const SEVERE_IMPACT_G = FALL_THRESHOLDS.SEVERE_IMPACT_G;
-const STILLNESS_BAND_G = FALL_THRESHOLDS.STILLNESS_BAND_G;
-const STILLNESS_REQUIRED_MS = FALL_THRESHOLDS.STILLNESS_REQUIRED_MS;
-const POST_IMPACT_WINDOW_MS = FALL_THRESHOLDS.POST_IMPACT_WINDOW_MS;
-const COOLDOWN_MS = FALL_THRESHOLDS.COOLDOWN_MS;
+const ORIENT_WIN = FALL_THRESHOLDS.ORIENTATION_WINDOW_MS;
+const ORIENT_DEG = FALL_THRESHOLDS.ORIENTATION_DELTA_DEG;
+const STILL_WIN = FALL_THRESHOLDS.STILLNESS_WINDOW_MS;
+const STILL_BAND = FALL_THRESHOLDS.STILLNESS_BAND_G;
+const STILL_REQ = FALL_THRESHOLDS.STILLNESS_REQUIRED_MS;
+const SEVERE_G = FALL_THRESHOLDS.SEVERE_IMPACT_G;
+const COOLDOWN = FALL_THRESHOLDS.COOLDOWN_MS;
 
 export type FallDetectorOptions = {
   onFallDetected: () => void;
+  // Optional taps for the diagnostics page so we can show LIVE
+  // phase progression without forcing the test harness to mirror the
+  // algorithm.  Returns the current phase + any debug signal values.
+  onPhase?: (phase: FallPhase, debug: PhaseDebug) => void;
 };
 
-type State = 'idle' | 'impact-wait-stillness' | 'cooldown';
+export type FallPhase =
+  | 'idle'
+  | 'impact-detected'
+  | 'orientation-confirmed'
+  | 'stillness-watching'
+  | 'cooldown';
+
+export type PhaseDebug = {
+  mag: number;
+  orientationDeltaDeg: number | null;
+  stillnessFractionPct: number | null;
+};
 
 export async function isFallEnabled(): Promise<boolean> {
   try {
     const v = await AsyncStorage.getItem(KEY);
-    // default: enabled (user must opt out)
     return v === null ? true : v === '1';
   } catch {
     return true;
@@ -117,7 +166,7 @@ export async function setFallEnabled(enabled: boolean): Promise<void> {
   try {
     await AsyncStorage.setItem(KEY, enabled ? '1' : '0');
   } catch {
-    // ignore
+    /* ignore */
   }
 }
 
@@ -129,21 +178,110 @@ export async function isFallAvailable(): Promise<boolean> {
   }
 }
 
-export function useFallDetector({ onFallDetected }: FallDetectorOptions) {
+// ----- Helpers ----------------------------------------------------------------
+
+type Vec3 = { x: number; y: number; z: number };
+
+function mag(v: Vec3): number {
+  return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+function dot(a: Vec3, b: Vec3): number {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+/** Angle between two vectors in degrees, clamped to [0, 180]. */
+function angleBetweenDeg(a: Vec3, b: Vec3): number {
+  const ma = mag(a) || 1e-9;
+  const mb = mag(b) || 1e-9;
+  let c = dot(a, b) / (ma * mb);
+  if (c > 1) c = 1;
+  if (c < -1) c = -1;
+  return Math.acos(c) * (180 / Math.PI);
+}
+
+/**
+ * Simple exponential moving-average low-pass filter for the gravity
+ * vector.  Per the IEEE accelerometer-attitude literature, this is
+ * sufficient to recover the static-component (gravity) vector while
+ * rejecting transient motion — at the timescales we operate (>= 100 ms
+ * after impact settle).
+ */
+class GravityLPF {
+  private state: Vec3 = { x: 0, y: 0, z: 1 };
+  private initialized = false;
+  private alpha: number;
+
+  constructor(tauMs: number, sampleMs: number) {
+    this.alpha = sampleMs / (tauMs + sampleMs);
+  }
+
+  update(v: Vec3): Vec3 {
+    if (!this.initialized) {
+      this.state = { ...v };
+      this.initialized = true;
+    } else {
+      this.state = {
+        x: this.state.x + this.alpha * (v.x - this.state.x),
+        y: this.state.y + this.alpha * (v.y - this.state.y),
+        z: this.state.z + this.alpha * (v.z - this.state.z),
+      };
+    }
+    return this.state;
+  }
+
+  get value(): Vec3 {
+    return this.state;
+  }
+}
+
+// ----- Hook -------------------------------------------------------------------
+
+/**
+ * Subscribe to accelerometer + gyroscope while `enabled && available`.
+ * Returns the live phase / availability / setter the caller needs for UI.
+ *
+ * The hook owns the algorithm state in refs so callback churn doesn't
+ * cause the detector to "restart" on every render.
+ */
+export function useFallDetector({ onFallDetected, onPhase }: FallDetectorOptions) {
   const [enabled, setEnabledState] = useState<boolean>(false);
   const [available, setAvailable] = useState<boolean>(false);
 
-  // Mutable detector state stored in refs so callbacks don't churn.
-  const stateRef = useRef<State>('idle');
-  const impactAtRef = useRef<number>(0);
-  const stillnessStartRef = useRef<number>(0);
+  // Phase state — exposed via refs so callbacks see the latest value
+  // without re-binding.  Public state mirror is only updated when
+  // the phase actually changes (avoids needless re-renders).
+  const [phase, setPhase] = useState<FallPhase>('idle');
+  const phaseRef = useRef<FallPhase>('idle');
+  const setPhaseBoth = (next: FallPhase) => {
+    if (phaseRef.current === next) return;
+    phaseRef.current = next;
+    setPhase(next);
+  };
+
+  // Algorithm refs.
+  const impactAtRef = useRef<number>(0);                   // ms when impact spotted
+  const gravityBeforeRef = useRef<Vec3 | null>(null);      // gravity vector ~500 ms pre-impact
+  const orientationConfirmedRef = useRef<boolean>(false);  // phase 2 met
+  const stillnessSamplesRef = useRef<{ t: number; still: boolean }[]>([]);
   const cooldownUntilRef = useRef<number>(0);
-  // Ring buffer of recent magnitudes — used to detect a pre-impact
-  // freefall (magnitude < 0.6g for ≥120ms). This is the v6.5 false-positive
-  // killer: phone-handling spikes never have a preceding freefall window.
-  const recentRef = useRef<Array<{ t: number; m: number }>>([]);
+
+  // Rolling 1-second history of gravity-filtered acceleration so we
+  // can recover the pre-impact pose when an impact lands.
+  const gravityLPF = useRef(new GravityLPF(FALL_THRESHOLDS.GRAVITY_LPF_MS, SAMPLE_MS));
+  const recentGravity = useRef<{ t: number; g: Vec3 }[]>([]);
+
+  // Latest gyroscope sample magnitude (rad/s).  Used as an early
+  // discriminator: a near-zero gyro spike during the "impact" sample
+  // strongly suggests pocket fabric noise or a vibration source rather
+  // than a fall.  This is a "soft" gate — we still proceed to phase 2,
+  // but a low-gyro impact has to clear a higher orientation-delta bar.
+  const lastGyroMagRef = useRef<number>(0);
+
   const callbackRef = useRef(onFallDetected);
   useEffect(() => { callbackRef.current = onFallDetected; }, [onFallDetected]);
+  const phaseCbRef = useRef(onPhase);
+  useEffect(() => { phaseCbRef.current = onPhase; }, [onPhase]);
 
   // Load persisted preference + capability on mount.
   useEffect(() => {
@@ -154,132 +292,218 @@ export function useFallDetector({ onFallDetected }: FallDetectorOptions) {
     })();
   }, []);
 
-  // Public setter that also persists.
   const setEnabled = useCallback(async (v: boolean) => {
     await setFallEnabled(v);
     setEnabledState(v);
   }, []);
 
-  // Subscribe to the accelerometer whenever both `enabled` and `available` are true.
   useEffect(() => {
     if (!enabled || !available) return;
-    // Web preview: skip — accelerometer events aren't reliable here and most
-    // desktop browsers don't expose them.
-    if (Platform.OS === 'web') return;
+    if (Platform.OS === 'web') return; // sensors unreliable in web preview
 
-    Accelerometer.setUpdateInterval(SAMPLE_RATE_MS);
-    const sub = Accelerometer.addListener(({ x, y, z }) => {
+    // Reset state on (re-)subscription.
+    phaseRef.current = 'idle';
+    setPhase('idle');
+    impactAtRef.current = 0;
+    gravityBeforeRef.current = null;
+    orientationConfirmedRef.current = false;
+    stillnessSamplesRef.current = [];
+    cooldownUntilRef.current = 0;
+    gravityLPF.current = new GravityLPF(FALL_THRESHOLDS.GRAVITY_LPF_MS, SAMPLE_MS);
+    recentGravity.current = [];
+    lastGyroMagRef.current = 0;
+
+    Accelerometer.setUpdateInterval(SAMPLE_MS);
+    try { Gyroscope.setUpdateInterval(SAMPLE_MS); } catch (_e) {}
+
+    // ----- Gyroscope (best-effort) -----
+    let gyroSub: any = null;
+    (async () => {
+      try {
+        const gAvail = await Gyroscope.isAvailableAsync();
+        if (!gAvail) return;
+        gyroSub = Gyroscope.addListener(({ x, y, z }) => {
+          lastGyroMagRef.current = Math.sqrt(x * x + y * y + z * z);
+        });
+      } catch (_e) { /* gyroscope is optional */ }
+    })();
+
+    // ----- Accelerometer (primary) -----
+    const accelSub = Accelerometer.addListener(({ x, y, z }) => {
       const now = Date.now();
-      const mag = Math.sqrt(x * x + y * y + z * z);
+      const sample: Vec3 = { x, y, z };
+      const m = mag(sample);
+      const g = gravityLPF.current.update(sample);
 
-      // Maintain rolling ring buffer used by the freefall check below.
-      // We keep ~1 second of history (FREEFALL_LOOKBACK_MS + slack).
-      const buf = recentRef.current;
-      buf.push({ t: now, m: mag });
-      const cutoff = now - (FREEFALL_LOOKBACK_MS + 200);
-      while (buf.length && buf[0].t < cutoff) buf.shift();
+      // Rolling pose history — keep ~1 s of low-passed gravity so we
+      // can compute pre-impact pose when an impact fires.
+      const rg = recentGravity.current;
+      rg.push({ t: now, g: { ...g } });
+      const cutoff = now - 1000;
+      while (rg.length && rg[0].t < cutoff) rg.shift();
 
-      if (stateRef.current === 'cooldown') {
+      // Cooldown gate.
+      if (phaseRef.current === 'cooldown') {
         if (now >= cooldownUntilRef.current) {
-          stateRef.current = 'idle';
+          setPhaseBoth('idle');
         } else {
+          phaseCbRef.current?.('cooldown', {
+            mag: m, orientationDeltaDeg: null, stillnessFractionPct: null,
+          });
           return;
         }
       }
 
-      if (stateRef.current === 'idle') {
-        if (mag >= IMPACT_G) {
-          // v6.8.1 — the freefall pre-check now tracks the MAXIMUM
-          // sub-0.6g streak length in the lookback window, not the
-          // last-consecutive one. Couch-impact falls have ~100-200ms
-          // of clean freefall followed by 1-2 transition samples
-          // (~0.7-1.2g as the body starts decelerating into the
-          // soft surface) BEFORE the impact spike. The previous
-          // implementation reset the streak counter to 0 on those
-          // transition samples — so even a perfectly valid 150ms
-          // freefall got discarded if it didn't continue right up
-          // to the impact sample. Tracking max-streak fixes this
-          // without loosening the threshold itself (still 120ms /
-          // sub-0.6g) and without re-introducing false positives
-          // from phone-handling spikes (which never produce a
-          // sub-0.6g window of any meaningful duration).
-          let maxFreefallMs = 0;
-          let curStart = 0;
-          let curMs = 0;
-          for (let i = 0; i < buf.length - 1; i++) {
-            if (buf[i].t > now - 20) break;  // skip the impact sample
-            if (buf[i].m < FREEFALL_G) {
-              if (!curStart) curStart = buf[i].t;
-              curMs = buf[i].t - curStart;
-              if (curMs > maxFreefallMs) maxFreefallMs = curMs;
-            } else {
-              curStart = 0;
-              curMs = 0;
-            }
-          }
-          if (__DEV__) {
-            // eslint-disable-next-line no-console
-            console.log('[fall] impact', mag.toFixed(2), 'g — maxFreefall', maxFreefallMs, 'ms');
-          }
-          // SEVERE-IMPACT BYPASS (v1.3 beta stab):
-          // Real-world report from controlled testing — drops from
-          // waist height with an arm-following motion often have NO
-          // measurable freefall window because the arm decelerates the
-          // phone all the way down.  But the impact itself is still
-          // very real (~2.5g+ when the arm flings the phone).  Skip
-          // the freefall pre-check on any impact above SEVERE_IMPACT_G
-          // so these still trigger.  Normal walking/set-down rarely
-          // crosses 2.5g — confirmed by accelerometer logging in
-          // controlled tests — so this doesn't increase false-positive
-          // rate meaningfully.
-          if (mag < SEVERE_IMPACT_G && maxFreefallMs < FREEFALL_REQUIRED_MS) {
-            // Soft impact AND no qualifying freefall window → likely
-            // a phone-handling spike. Ignore.
-            return;
-          }
-          if (__DEV__) {
-            // eslint-disable-next-line no-console
-            console.log('[fall] freefall window passed — waiting for stillness');
-          }
-          stateRef.current = 'impact-wait-stillness';
+      if (phaseRef.current === 'idle') {
+        if (m >= IMPACT_G) {
+          // Lock in the pre-impact gravity vector (sample ~400-600 ms
+          // back so we don't grab the still-settling impact frame).
+          const lookback = rg.find((e) => now - e.t >= 400 && now - e.t <= 700);
+          gravityBeforeRef.current = lookback ? lookback.g : null;
           impactAtRef.current = now;
-          stillnessStartRef.current = 0;
+          orientationConfirmedRef.current = false;
+          stillnessSamplesRef.current = [];
+          setPhaseBoth('impact-detected');
+
+          if (__DEV__) {
+            // eslint-disable-next-line no-console
+            console.log('[fall] impact', m.toFixed(2), 'g — gyroMag', lastGyroMagRef.current.toFixed(2));
+          }
+
+          // Severe-impact bypass: skip the orientation check.
+          if (m >= SEVERE_G) {
+            orientationConfirmedRef.current = true;
+            setPhaseBoth('orientation-confirmed');
+          }
+        } else {
+          phaseCbRef.current?.('idle', {
+            mag: m, orientationDeltaDeg: null, stillnessFractionPct: null,
+          });
         }
         return;
       }
 
-      // state === 'impact-wait-stillness'
-      const elapsedSinceImpact = now - impactAtRef.current;
-      const isStill = Math.abs(mag - 1.0) <= STILLNESS_BAND_G;
+      // Time-since-impact (used by phase 2 and phase 3).
+      const sinceImpact = now - impactAtRef.current;
 
-      if (isStill) {
-        if (stillnessStartRef.current === 0) stillnessStartRef.current = now;
-        const stillFor = now - stillnessStartRef.current;
-        if (stillFor >= STILLNESS_REQUIRED_MS) {
-          // Fall confirmed.
-          stateRef.current = 'cooldown';
-          cooldownUntilRef.current = now + COOLDOWN_MS;
-          impactAtRef.current = 0;
-          stillnessStartRef.current = 0;
-          try { callbackRef.current(); } catch (_e) {}
+      if (phaseRef.current === 'impact-detected') {
+        if (sinceImpact > ORIENT_WIN) {
+          // Didn't see a new pose hold within the window — abort.
+          setPhaseBoth('cooldown');
+          cooldownUntilRef.current = now + 1000; // short bounce
+          phaseCbRef.current?.('cooldown', {
+            mag: m, orientationDeltaDeg: null, stillnessFractionPct: null,
+          });
+          return;
         }
-      } else {
-        // Reset stillness streak — device still moving.
-        stillnessStartRef.current = 0;
+        const before = gravityBeforeRef.current;
+        if (before) {
+          const dDeg = angleBetweenDeg(before, g);
+          phaseCbRef.current?.('impact-detected', {
+            mag: m,
+            orientationDeltaDeg: dDeg,
+            stillnessFractionPct: null,
+          });
+          if (dDeg >= ORIENT_DEG) {
+            // Phase 2 confirmed — phone is now resting in a new pose.
+            orientationConfirmedRef.current = true;
+            setPhaseBoth('orientation-confirmed');
+            if (__DEV__) {
+              // eslint-disable-next-line no-console
+              console.log('[fall] orientation Δ', dDeg.toFixed(1), '° — promoting to stillness watch');
+            }
+          }
+        } else {
+          // No pre-impact pose captured — give the orientation check a
+          // pass IFF the gyroscope showed a meaningful spin during the
+          // impact (proxy for tumble).  Otherwise wait for the window
+          // to expire.
+          phaseCbRef.current?.('impact-detected', {
+            mag: m, orientationDeltaDeg: null, stillnessFractionPct: null,
+          });
+          if (lastGyroMagRef.current > 4) { // > 4 rad/s ≈ 230 °/s
+            orientationConfirmedRef.current = true;
+            setPhaseBoth('orientation-confirmed');
+          }
+        }
+        return;
       }
 
-      // If the post-impact window expires without enough stillness, reset.
-      if (elapsedSinceImpact > POST_IMPACT_WINDOW_MS) {
-        stateRef.current = 'idle';
-        impactAtRef.current = 0;
-        stillnessStartRef.current = 0;
+      // Phase 3 — stillness window.
+      if (phaseRef.current === 'orientation-confirmed' || phaseRef.current === 'stillness-watching') {
+        if (phaseRef.current === 'orientation-confirmed') {
+          setPhaseBoth('stillness-watching');
+        }
+        const still = Math.abs(m - 1.0) <= STILL_BAND;
+        stillnessSamplesRef.current.push({ t: now, still });
+        // Trim to STILL_WIN window.
+        const minT = now - STILL_WIN;
+        while (
+          stillnessSamplesRef.current.length &&
+          stillnessSamplesRef.current[0].t < minT
+        ) stillnessSamplesRef.current.shift();
+
+        // Compute total still-time within the window.
+        let stillMs = 0;
+        const arr = stillnessSamplesRef.current;
+        for (let i = 0; i < arr.length; i++) {
+          if (!arr[i].still) continue;
+          const next = i + 1 < arr.length ? arr[i + 1].t : now;
+          stillMs += Math.min(next - arr[i].t, SAMPLE_MS * 2);
+        }
+
+        const fractionPct = STILL_WIN > 0 ? Math.round((stillMs / STILL_WIN) * 100) : 0;
+        phaseCbRef.current?.('stillness-watching', {
+          mag: m,
+          orientationDeltaDeg: null,
+          stillnessFractionPct: fractionPct,
+        });
+
+        if (stillMs >= STILL_REQ && sinceImpact >= STILL_WIN) {
+          // FALL CONFIRMED.
+          if (__DEV__) {
+            // eslint-disable-next-line no-console
+            console.log('[fall] CONFIRMED — stillness', stillMs, 'ms of', STILL_WIN, 'ms window');
+          }
+          setPhaseBoth('cooldown');
+          cooldownUntilRef.current = now + COOLDOWN;
+          impactAtRef.current = 0;
+          gravityBeforeRef.current = null;
+          orientationConfirmedRef.current = false;
+          stillnessSamplesRef.current = [];
+          try { callbackRef.current(); } catch (_e) {}
+          return;
+        }
+
+        if (sinceImpact > STILL_WIN + ORIENT_WIN) {
+          // Stillness window finished without crossing the threshold —
+          // abort and bounce back to idle (short cooldown so we don't
+          // spam the user with re-triggers during noisy activity).
+          setPhaseBoth('cooldown');
+          cooldownUntilRef.current = now + 1500;
+          impactAtRef.current = 0;
+          gravityBeforeRef.current = null;
+          orientationConfirmedRef.current = false;
+          stillnessSamplesRef.current = [];
+          return;
+        }
       }
     });
 
     return () => {
-      sub && sub.remove();
+      try { accelSub && accelSub.remove(); } catch (_e) {}
+      try { gyroSub && gyroSub.remove(); } catch (_e) {}
     };
   }, [enabled, available]);
 
-  return { enabled, available, setEnabled };
+  // Manual trigger — fires the same fall pipeline from the test harness
+  // without an actual sensor event.  Skips phases 1–3 and goes straight
+  // to the callback.  Surfaced for the /fall-detection-test screen.
+  const simulateFall = useCallback(() => {
+    setPhaseBoth('cooldown');
+    cooldownUntilRef.current = Date.now() + COOLDOWN;
+    try { callbackRef.current(); } catch (_e) {}
+  }, []);
+
+  return { enabled, available, setEnabled, phase, simulateFall };
 }

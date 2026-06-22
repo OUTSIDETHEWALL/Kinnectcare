@@ -1,171 +1,87 @@
 /**
- * Fall Detection Test page.
+ * Fall Detection Test page (v1.4.0 — multi-signal state machine).
  *
- * Senior-safety app diagnostic tool. Subscribes directly to the raw
- * accelerometer and shows live magnitude + a rolling history so the
- * user (Charles) can drop the phone onto a couch and INSTANTLY see
- * what the device actually produced:
+ * Surfaces the LIVE four-phase fall pipeline from `useFallDetector`
+ * so a tester can verify each signal independently before relying on
+ * it in production:
  *
- *   • Live magnitude (g) — current reading, updated 20× / sec.
- *   • Peak magnitude (last impact) — the biggest spike seen so far.
- *   • Last max-freefall streak length — informs whether the freefall
- *     pre-check would have passed.
- *   • Stillness check — % of post-impact samples within the band,
- *     and longest consecutive stillness streak.
- *   • Last 60 samples on a tiny inline strip chart (text-based) so
- *     we don't have to ship a charting library.
- *
- * This eliminates the "no telemetry" problem we were stuck on: couch
- * drops weren't triggering, the algorithm fix didn't help, but we had
- * no idea WHY because there's no way to see raw sensor data from a
- * production build. Now there is.
- *
- * Tap the "Simulate fall" button at the bottom to verify the modal /
- * SOS path works end-to-end without actually dropping the phone.
+ *   PHASE 1 — IMPACT
+ *       Lights up the moment the accelerometer reads a magnitude
+ *       spike over the threshold.
+ *   PHASE 2 — ORIENTATION CHANGE
+ *       Shows the live angular delta (degrees) between pre-impact
+ *       pose and current pose.  Promotes when the delta crosses the
+ *       configured floor.
+ *   PHASE 3 — POST-IMPACT STILLNESS
+ *       Shows the percent of the stillness window currently
+ *       satisfied.  Promotes to "FALL CONFIRMED" when the dwell-time
+ *       is met.
+ *   PHASE 4 — 30-SECOND COUNTDOWN
+ *       Owned by the global FallDetectionOverlay component — this
+ *       page only logs the trigger.  Tap "Simulate fall" to manually
+ *       jump to phase 4 without dropping a phone.
  */
 import { useEffect, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { Accelerometer } from 'expo-sensors';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
+import {
+  useFallDetector,
+  FALL_THRESHOLDS,
+  FallPhase,
+  PhaseDebug,
+} from '../src/fallDetector';
 
-const SAMPLE_MS = 50;
-const RING_SIZE = 200;
-const FREEFALL_G = 0.6;
-const IMPACT_G = 2.2;
-const STILLNESS_BAND_G = 0.35; // matches the relaxed band for couch compat
-const STILLNESS_REQUIRED_MS = 1000;
-const POST_IMPACT_WINDOW_MS = 4000;
-
-type Sample = { t: number; m: number };
+const PHASE_LABELS: Record<FallPhase, string> = {
+  'idle': '⚪ Idle — waiting for impact',
+  'impact-detected': '🟡 Phase 1 ✅ Impact detected',
+  'orientation-confirmed': '🟠 Phase 2 ✅ Orientation change confirmed',
+  'stillness-watching': '🟣 Phase 3 — watching for stillness',
+  'cooldown': '🔵 Cooldown — try again in a few seconds',
+};
 
 export default function FallDetectionTest() {
   const router = useRouter();
-  const [available, setAvailable] = useState<boolean | null>(null);
-  const [liveMag, setLiveMag] = useState(0);
-  const [peakMag, setPeakMag] = useState(0);
-  const [lastFreefallMs, setLastFreefallMs] = useState(0);
-  const [lastStillnessMs, setLastStillnessMs] = useState(0);
-  const [lastImpactTs, setLastImpactTs] = useState(0);
-  const [wouldTrigger, setWouldTrigger] = useState<boolean | null>(null);
+  const [latestPhase, setLatestPhase] = useState<FallPhase>('idle');
+  const [debug, setDebug] = useState<PhaseDebug>({
+    mag: 0, orientationDeltaDeg: null, stillnessFractionPct: null,
+  });
   const [eventLog, setEventLog] = useState<string[]>([]);
-
-  const bufRef = useRef<Sample[]>([]);
-  const stateRef = useRef<'idle' | 'impact-wait-stillness'>('idle');
-  const impactAtRef = useRef(0);
-  const stillStartRef = useRef(0);
-  const peakRef = useRef(0);
-  const stillBestRef = useRef(0);
+  const lastPhaseRef = useRef<FallPhase>('idle');
+  const [triggeredAt, setTriggeredAt] = useState<number | null>(null);
 
   const pushLog = (msg: string) => {
     setEventLog((prev) => {
       const line = `${new Date().toLocaleTimeString()} · ${msg}`;
-      return [line, ...prev].slice(0, 20);
+      return [line, ...prev].slice(0, 25);
     });
   };
 
-  useEffect(() => {
-    (async () => {
-      const isAvail = await Accelerometer.isAvailableAsync();
-      setAvailable(isAvail);
-      if (!isAvail) {
-        pushLog('Accelerometer NOT AVAILABLE on this device. Test cannot run.');
-        return;
+  // Live phase tap from the production detector.
+  const { available, phase, simulateFall } = useFallDetector({
+    onFallDetected: () => {
+      setTriggeredAt(Date.now());
+      pushLog('🚨 FALL CONFIRMED — overlay would show 30 s countdown now');
+    },
+    onPhase: (p, d) => {
+      setLatestPhase(p);
+      setDebug(d);
+      if (lastPhaseRef.current !== p) {
+        lastPhaseRef.current = p;
+        pushLog(`→ ${p}`);
       }
-      Accelerometer.setUpdateInterval(SAMPLE_MS);
-      const sub = Accelerometer.addListener(({ x, y, z }) => {
-        const now = Date.now();
-        const mag = Math.sqrt(x * x + y * y + z * z);
-        setLiveMag(mag);
+    },
+  });
 
-        // Ring buffer
-        const buf = bufRef.current;
-        buf.push({ t: now, m: mag });
-        while (buf.length > RING_SIZE) buf.shift();
-
-        if (stateRef.current === 'idle') {
-          if (mag >= IMPACT_G) {
-            // Compute MAX freefall streak in the lookback window.
-            let maxFf = 0;
-            let curStart = 0;
-            for (let i = 0; i < buf.length - 1; i++) {
-              if (buf[i].t > now - 20) break;
-              if (buf[i].m < FREEFALL_G) {
-                if (!curStart) curStart = buf[i].t;
-                const len = buf[i].t - curStart;
-                if (len > maxFf) maxFf = len;
-              } else {
-                curStart = 0;
-              }
-            }
-            peakRef.current = Math.max(peakRef.current, mag);
-            setPeakMag(peakRef.current);
-            setLastFreefallMs(maxFf);
-            setLastImpactTs(now);
-            pushLog(`IMPACT ${mag.toFixed(2)}g — pre-impact freefall ${maxFf}ms`);
-            if (maxFf >= 120) {
-              stateRef.current = 'impact-wait-stillness';
-              impactAtRef.current = now;
-              stillStartRef.current = 0;
-              stillBestRef.current = 0;
-              pushLog('→ freefall window OK, watching for stillness…');
-            } else {
-              pushLog(`✗ freefall window TOO SHORT (need ≥120ms, got ${maxFf}ms) — ignored`);
-            }
-          }
-          return;
-        }
-
-        // state === 'impact-wait-stillness'
-        const elapsed = now - impactAtRef.current;
-        const isStill = Math.abs(mag - 1.0) <= STILLNESS_BAND_G;
-        if (isStill) {
-          if (stillStartRef.current === 0) stillStartRef.current = now;
-          const dur = now - stillStartRef.current;
-          if (dur > stillBestRef.current) {
-            stillBestRef.current = dur;
-            setLastStillnessMs(dur);
-          }
-          if (dur >= STILLNESS_REQUIRED_MS) {
-            pushLog(`✅ FALL CONFIRMED — stillness held ${dur}ms (band ${STILLNESS_BAND_G}g)`);
-            setWouldTrigger(true);
-            stateRef.current = 'idle';
-            impactAtRef.current = 0;
-            stillStartRef.current = 0;
-          }
-        } else {
-          if (stillStartRef.current !== 0) {
-            pushLog(`stillness broken at ${(mag).toFixed(2)}g — restart`);
-          }
-          stillStartRef.current = 0;
-        }
-        if (elapsed > POST_IMPACT_WINDOW_MS) {
-          pushLog(`✗ post-impact window expired (best stillness ${stillBestRef.current}ms / need ${STILLNESS_REQUIRED_MS}ms)`);
-          setWouldTrigger(false);
-          stateRef.current = 'idle';
-          impactAtRef.current = 0;
-          stillStartRef.current = 0;
-        }
-      });
-      return () => sub.remove();
-    })();
-  }, []);
-
-  const resetCounters = () => {
-    peakRef.current = 0;
-    stillBestRef.current = 0;
-    setPeakMag(0);
-    setLastFreefallMs(0);
-    setLastStillnessMs(0);
-    setLastImpactTs(0);
-    setWouldTrigger(null);
-    setEventLog([]);
-    pushLog('counters reset');
-  };
+  useEffect(() => {
+    if (!available && Platform.OS !== 'web') {
+      pushLog('Accelerometer NOT AVAILABLE on this device.');
+    }
+  }, [available]);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -173,9 +89,13 @@ export default function FallDetectionTest() {
         <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
           <Icon name="chevron-back" size={28} color={Colors.textPrimary} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Fall Detection Test</Text>
-        <TouchableOpacity onPress={resetCounters} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-          <Text style={styles.resetTxt}>Reset</Text>
+        <Text style={styles.headerTitle}>Fall Detection · v1.4.0</Text>
+        <TouchableOpacity
+          testID="fall-test-simulate"
+          onPress={simulateFall}
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+        >
+          <Text style={styles.resetTxt}>Simulate</Text>
         </TouchableOpacity>
       </View>
 
@@ -191,43 +111,72 @@ export default function FallDetectionTest() {
           </Text>
         </View>
 
-        <View style={styles.bigCard}>
-          <Text style={styles.bigLabel}>Live magnitude</Text>
-          <Text style={styles.bigValue}>{liveMag.toFixed(2)}<Text style={styles.bigUnit}> g</Text></Text>
-          <Text style={styles.bigHint}>
-            ≈1.0g resting · &lt;0.6g freefall · ≥2.2g impact
+        {/* Big phase indicator */}
+        <View style={styles.phaseCard}>
+          <Text style={styles.phaseLabel}>Current phase</Text>
+          <Text style={styles.phaseValue} testID="fall-test-phase">
+            {PHASE_LABELS[latestPhase] || latestPhase}
+          </Text>
+          <Text style={styles.phaseSub}>
+            Multi-signal state machine — all phases must pass before the 30 s countdown fires.
           </Text>
         </View>
 
+        {/* Live signal cards */}
         <View style={styles.row}>
-          <MetricCard label="Peak G seen" value={peakMag > 0 ? `${peakMag.toFixed(2)} g` : '—'} />
-          <MetricCard label="Last freefall" value={lastFreefallMs > 0 ? `${lastFreefallMs} ms` : '—'} hint="need ≥120ms" />
+          <MetricCard
+            label="Magnitude"
+            value={`${debug.mag.toFixed(2)} g`}
+            hint={`impact ≥ ${FALL_THRESHOLDS.IMPACT_G_THRESHOLD} g`}
+          />
+          <MetricCard
+            label="Orientation Δ"
+            value={
+              debug.orientationDeltaDeg === null
+                ? '—'
+                : `${debug.orientationDeltaDeg.toFixed(0)}°`
+            }
+            hint={`need ≥ ${FALL_THRESHOLDS.ORIENTATION_DELTA_DEG}°`}
+          />
         </View>
         <View style={styles.row}>
-          <MetricCard label="Best stillness" value={lastStillnessMs > 0 ? `${lastStillnessMs} ms` : '—'} hint="need ≥1000ms" />
           <MetricCard
-            label="Would trigger?"
-            value={wouldTrigger === null ? '—' : wouldTrigger ? 'YES' : 'NO'}
-            color={wouldTrigger === true ? Colors.success : wouldTrigger === false ? Colors.error : Colors.textSecondary}
+            label="Stillness fill"
+            value={
+              debug.stillnessFractionPct === null
+                ? '—'
+                : `${debug.stillnessFractionPct}%`
+            }
+            hint={`need ${Math.round(
+              (FALL_THRESHOLDS.STILLNESS_REQUIRED_MS /
+                FALL_THRESHOLDS.STILLNESS_WINDOW_MS) * 100,
+            )}% of ${FALL_THRESHOLDS.STILLNESS_WINDOW_MS}ms`}
+          />
+          <MetricCard
+            label="Last triggered"
+            value={triggeredAt ? `${Math.round((Date.now() - triggeredAt) / 1000)}s ago` : '—'}
+            hint="when phase 4 fired"
           />
         </View>
 
         <Text style={styles.sectionLabel}>How to use</Text>
         <View style={styles.helpCard}>
           <Text style={styles.helpText}>
-            1. Hold the phone at chest height.{'\n'}
-            2. Drop onto the test surface (couch, bed, floor).{'\n'}
-            3. Watch the event log below — it shows the IMPACT g, the pre-impact freefall streak that was detected, and whether stillness held for the required 1000ms.{'\n'}
-            4. If "freefall window TOO SHORT" — the device decelerated too gently before impact (couch may absorb the freefall too fast).{'\n'}
-            5. If "post-impact window expired" — the device kept moving after impact (couch bouncing).{'\n'}
-            6. Share screenshot of the event log so we can tune thresholds to your device.
+            1. Hold the phone in any pose (pocket, hand, table).{'\n'}
+            2. Trigger a controlled fall onto a soft surface.{'\n'}
+            3. Watch the four phase indicators above progress in real time:{'\n'}
+               • Impact (g spike) → Orientation Δ (new resting pose) → Stillness fill (~60% of 1.5 s window){'\n'}
+            4. If phase 3 fills past the required threshold, the production
+            overlay will fire its 30 s "Are you OK?" countdown.{'\n'}
+            5. Tap "Simulate" in the header to bypass the sensors and trigger
+            the overlay flow directly.
           </Text>
         </View>
 
         <Text style={styles.sectionLabel}>Event log</Text>
         <View style={styles.logCard}>
           {eventLog.length === 0 ? (
-            <Text style={styles.logEmpty}>No events yet — drop the phone to see data.</Text>
+            <Text style={styles.logEmpty}>No events yet — drop the phone to see live data.</Text>
           ) : (
             eventLog.map((line, i) => (
               <Text key={i} style={styles.logLine}>{line}</Text>
@@ -236,9 +185,7 @@ export default function FallDetectionTest() {
         </View>
 
         <Text style={styles.disclaimer}>
-          This test page uses the same algorithm as the production fall
-          detector — IMPACT_G {IMPACT_G}, FREEFALL_G {FREEFALL_G},
-          STILLNESS_BAND {STILLNESS_BAND_G}g for {STILLNESS_REQUIRED_MS}ms.
+          Multi-signal v1.4.0 — IMPACT ≥ {FALL_THRESHOLDS.IMPACT_G_THRESHOLD} g, orientation Δ ≥ {FALL_THRESHOLDS.ORIENTATION_DELTA_DEG}°, stillness {FALL_THRESHOLDS.STILLNESS_REQUIRED_MS}ms / {FALL_THRESHOLDS.STILLNESS_WINDOW_MS}ms window, severe-impact bypass ≥ {FALL_THRESHOLDS.SEVERE_IMPACT_G} g.
         </Text>
       </ScrollView>
     </SafeAreaView>
@@ -271,14 +218,22 @@ const styles = StyleSheet.create({
   },
   statusLabel: { fontSize: 14, color: Colors.textSecondary },
   statusValue: { fontSize: 14, fontWeight: '800', color: Colors.textPrimary },
-  bigCard: {
-    backgroundColor: Colors.surface, borderRadius: 16, padding: 24,
-    alignItems: 'center', marginBottom: 14, borderWidth: 1, borderColor: Colors.border,
+  phaseCard: {
+    backgroundColor: Colors.surface, borderRadius: 16, padding: 22,
+    marginBottom: 14, borderWidth: 1, borderColor: Colors.tertiary,
+    boxShadow: '0px 4px 12px rgba(27,94,53,0.08)' as any,
   },
-  bigLabel: { fontSize: 13, fontWeight: '700', color: Colors.textSecondary, letterSpacing: 0.5 },
-  bigValue: { fontSize: 64, fontWeight: '900', color: Colors.textPrimary, marginTop: 8 },
-  bigUnit: { fontSize: 28, fontWeight: '700', color: Colors.textSecondary },
-  bigHint: { fontSize: 12, color: Colors.textTertiary, marginTop: 6, textAlign: 'center' },
+  phaseLabel: {
+    fontSize: 12, fontWeight: '800', color: Colors.textTertiary,
+    textTransform: 'uppercase', letterSpacing: 0.6,
+  },
+  phaseValue: {
+    fontSize: 18, fontWeight: '800', color: Colors.textPrimary,
+    marginTop: 6, lineHeight: 24,
+  },
+  phaseSub: {
+    fontSize: 12, color: Colors.textSecondary, marginTop: 10, lineHeight: 17,
+  },
   row: { flexDirection: 'row', gap: 10, marginBottom: 10 },
   metricCard: {
     flex: 1, backgroundColor: Colors.surface, borderRadius: 12, padding: 14,

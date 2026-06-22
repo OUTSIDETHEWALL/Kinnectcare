@@ -105,6 +105,41 @@ export function formatRelativeLocal(iso?: string | null): string {
   return formatDateTimeLocal(iso);
 }
 
+/**
+ * Format a timestamp (ISO string OR epoch ms) as a compact "time ago" label.
+ * Tuned for the dashboard location freshness indicator — we want the most
+ * frequent values ("just now", "30 s ago", "2 min ago") to read at a glance
+ * without needing the user to do math.
+ *
+ *   <10s     → "just now"
+ *   10-59s   → "Xs ago"
+ *   60-3599s → "X min ago"
+ *   1-23h    → "Xh ago"
+ *   >=24h    → "Xd ago"
+ *
+ * Returns '' for invalid / null input so callers can ?? past it.
+ */
+export function formatTimeAgo(input?: string | number | null): string {
+  if (input === null || input === undefined) return '';
+  let ms: number;
+  if (typeof input === 'number') {
+    ms = input;
+  } else {
+    const d = new Date(input);
+    if (isNaN(d.getTime())) return '';
+    ms = d.getTime();
+  }
+  const deltaSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (deltaSec < 10) return 'just now';
+  if (deltaSec < 60) return `${deltaSec}s ago`;
+  const min = Math.floor(deltaSec / 60);
+  if (min < 60) return `${min} min ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
+}
+
 /** Format a YYYY-MM-DD date string (in local tz) as a short day label like "Sat 5/17". */
 export function formatShortDate(ymd?: string | null): string {
   if (!ymd) return '';
