@@ -27,6 +27,7 @@ import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import Constants from 'expo-constants';
+import * as Updates from 'expo-updates';
 import { Platform } from 'react-native';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
@@ -153,12 +154,29 @@ export default function DiagnosticsScreen() {
       'unknown';
     const runtimeVersion =
       ((Constants?.expoConfig as any)?.runtimeVersion as string) || 'unknown';
+    // expo-updates exposes the running update's identity, channel
+    // subscription, and an `isEmbeddedLaunch` flag — together these
+    // let a tester confirm a freshly-published OTA actually replaced
+    // the previously-running bundle on their device.  All fields are
+    // safe-defaults to '—' if expo-updates hasn't initialized yet
+    // (e.g. on Expo Go or web preview).
+    const otaInfo = {
+      updateId: (Updates as any)?.updateId || null,
+      channel: (Updates as any)?.channel || null,
+      createdAt:
+        (Updates as any)?.createdAt
+          ? new Date((Updates as any).createdAt).toISOString()
+          : null,
+      isEmbeddedLaunch: (Updates as any)?.isEmbeddedLaunch ?? null,
+      runtimeVersion: (Updates as any)?.runtimeVersion || runtimeVersion,
+    };
     return {
       generatedAt: new Date().toISOString(),
       platform: Platform.OS,
       platformVersion: String(Platform.Version),
       appVersion,
       runtimeVersion,
+      ota: otaInfo,
       user: user ? { id: user.id, email: user.email } : null,
       authClearLog: authLog,
       routeLog,
@@ -191,6 +209,40 @@ export default function DiagnosticsScreen() {
       Alert.alert('Could not copy', e?.message || 'Try again.');
     }
   };
+
+  const onCheckForUpdate = useCallback(async () => {
+    // Force the device to query Expo for a newer bundle on the
+    // currently-subscribed channel.  If found, downloads it and
+    // applies it on the NEXT app launch (or immediately if the user
+    // taps "Reload").  Web preview / dev builds always return
+    // isAvailable=false, so we silently no-op in that case.
+    if (Platform.OS === 'web') {
+      Alert.alert('Not available', 'OTA updates can only be checked on a native build.');
+      return;
+    }
+    try {
+      const r = await Updates.checkForUpdateAsync();
+      if (r?.isAvailable) {
+        const fetchRes = await Updates.fetchUpdateAsync();
+        Alert.alert(
+          'Update downloaded',
+          fetchRes?.isNew
+            ? 'A new bundle was downloaded. Tap Reload to apply it now, or it will activate on the next app launch.'
+            : 'Up to date — no newer bundle found.',
+          [
+            { text: 'Later', style: 'cancel' },
+            ...(fetchRes?.isNew
+              ? [{ text: 'Reload now', onPress: () => Updates.reloadAsync().catch(() => {}) }]
+              : []),
+          ],
+        );
+      } else {
+        Alert.alert('Up to date', 'No newer bundle is available on this channel.');
+      }
+    } catch (e: any) {
+      Alert.alert('Update check failed', e?.message || 'Try again in a minute.');
+    }
+  }, []);
 
   const onClear = () => {
     Alert.alert(
@@ -230,6 +282,66 @@ export default function DiagnosticsScreen() {
           Beta diagnostics. If support asks, tap <Text style={styles.bold}>Copy Log</Text> and
           paste into your reply. No personal data leaves your phone until you paste.
         </Text>
+
+        {/*
+          v1.3.2 — Build / OTA info section.
+          Shows the EXACT bundle the device is running so we can
+          confirm whether a freshly-published OTA actually replaced
+          the previous bundle.  Without this, a "still on v1.3.1"
+          report is impossible to disambiguate between
+          (A) OTA not delivered (channel/runtime mismatch),
+          (B) device cached old bundle (needs hard relaunch), or
+          (C) bundle delivered but the source code was never bumped.
+        */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Build / OTA info</Text>
+          </View>
+          <View style={styles.card} testID="diagnostics-build-info">
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>app version: </Text>
+              {(Constants?.expoConfig?.version as string) || 'unknown'}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>runtime: </Text>
+              {(Updates as any)?.runtimeVersion ||
+                ((Constants?.expoConfig as any)?.runtimeVersion as string) ||
+                'unknown'}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>channel: </Text>
+              {(Updates as any)?.channel || '— (Expo Go / dev)'}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>update id: </Text>
+              <Text testID="diagnostics-update-id" selectable>
+                {(Updates as any)?.updateId || '— (embedded bundle)'}
+              </Text>
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>published at: </Text>
+              {(Updates as any)?.createdAt
+                ? new Date((Updates as any).createdAt).toLocaleString()
+                : '—'}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>source: </Text>
+              {(Updates as any)?.isEmbeddedLaunch === true
+                ? 'EMBEDDED (app store build — no OTA applied yet)'
+                : (Updates as any)?.isEmbeddedLaunch === false
+                ? 'OTA UPDATE (over-the-air bundle is active)'
+                : '— (unavailable)'}
+            </Text>
+            <TouchableOpacity
+              testID="diagnostics-check-update"
+              style={[styles.secondaryBtn, { marginTop: 12 }]}
+              onPress={onCheckForUpdate}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.secondaryBtnText}>Check for OTA update now</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
 
         <View style={styles.actionRow}>
           <TouchableOpacity
