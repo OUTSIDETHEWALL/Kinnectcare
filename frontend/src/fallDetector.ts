@@ -171,6 +171,13 @@ export async function setFallEnabled(enabled: boolean): Promise<void> {
 }
 
 export async function isFallAvailable(): Promise<boolean> {
+  // Web preview never has a real accelerometer hooked up; calling
+  // `Accelerometer.isAvailableAsync()` on web triggers a
+  // NativeEventEmitter `addListener is not a function` crash on
+  // expo-sensors > 14, blocking the Fall Detection test screen from
+  // even rendering for web QA.  Short-circuit early — production
+  // native builds still flow through to the real probe.
+  if (Platform.OS === 'web') return false;
   try {
     return await Accelerometer.isAvailableAsync();
   } catch {
