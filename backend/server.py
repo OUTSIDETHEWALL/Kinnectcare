@@ -159,6 +159,32 @@ class TimezoneUpdate(BaseModel):
     timezone: str
 
 
+# v1.3.3 — Quiet Hours preference.
+#
+# Stored as `user.quiet_hours = { enabled, start, end }`.  Times are
+# 24-hour "HH:MM" strings in the user's local timezone (server reads
+# `user.timezone` to interpret).  When the window is active, all non-
+# emergency push types are suppressed at the push_to_user gate.
+#
+# Bypass list (always delivered, even in Quiet Hours):
+#   • sos                     — manual emergency button
+#   • fall_detected           — fall-detection countdown expired
+#   • request_location_refresh — silent data ping (already silent)
+#   • alert_resolved          — "they're OK now" confirmation push
+class QuietHoursPreference(BaseModel):
+    enabled: bool = False
+    start: str = "22:00"
+    end: str = "07:00"
+
+
+class PreferencesResponse(BaseModel):
+    quiet_hours: QuietHoursPreference
+
+
+class PreferencesUpdate(BaseModel):
+    quiet_hours: Optional[QuietHoursPreference] = None
+
+
 class PushTokenRegister(BaseModel):
     token: str
     platform: Optional[str] = None
@@ -453,13 +479,36 @@ async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
     (DeviceNotRegistered, InvalidCredentials, MismatchSenderId).  This is
     how we stop "ghost notifications" being sent to uninstalled-app push
     tokens forever.
+
+    v1.3.3 — Quiet Hours: if the recipient has a quiet-hours window
+    active and the notification is NOT in the emergency bypass list,
+    the push is suppressed.  Bypass types: `sos`, `fall_detected`,
+    `request_location_refresh` (silent), `alert_resolved`.  Anything
+    else (medication, activity, routine, missed-checkin, family-join,
+    checkin) is gated.  We log the suppression at INFO so Diagnostics
+    + Railway logs both show that the gate fired (proves it's not a
+    push-delivery bug).
     """
-    user = await db.users.find_one({"id": user_id}, {"_id": 0, "push_tokens": 1})
+    user = await db.users.find_one(
+        {"id": user_id},
+        {"_id": 0, "push_tokens": 1, "quiet_hours": 1, "timezone": 1},
+    )
     if not user:
         return 0
     tokens = user.get("push_tokens") or []
     if not tokens:
         return 0
+
+    # ----- Quiet Hours gate -----
+    push_type = (data or {}).get("type") or ""
+    BYPASS_TYPES = {"sos", "fall_detected", "request_location_refresh", "alert_resolved"}
+    if push_type not in BYPASS_TYPES and _is_in_quiet_hours(user):
+        logger.info(
+            f"quiet-hours-suppress user={user_id} type={push_type or '(none)'} "
+            f"tokens={len(tokens)}"
+        )
+        return 0
+
     dead_tokens: List[str] = []
     try:
         dead_tokens = await send_expo_push(tokens, title, body, data) or []
@@ -480,6 +529,64 @@ async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
         except Exception as e:
             logger.warning(f"failed to prune dead tokens for {user_id}: {e}")
     return len(tokens)
+
+
+def _is_in_quiet_hours(user: dict) -> bool:
+    """v1.3.3 — Quiet Hours window check.
+
+    `user.quiet_hours` shape:
+        {
+          "enabled": bool,
+          "start": "HH:MM" (24h),
+          "end":   "HH:MM" (24h),
+        }
+
+    The window is interpreted in the user's local timezone (defaults
+    to UTC if `user.timezone` is missing — best-effort, never crashes).
+    Windows that cross midnight (start > end, e.g. 22:00 → 07:00)
+    are handled correctly.
+
+    Returns False if quiet hours are disabled, malformed, or we can't
+    parse the times — safer to ERR on the side of delivery than
+    silently swallowing a reminder.
+    """
+    qh = user.get("quiet_hours") or {}
+    if not isinstance(qh, dict) or not qh.get("enabled"):
+        return False
+    start = str(qh.get("start") or "").strip()
+    end = str(qh.get("end") or "").strip()
+    if not start or not end:
+        return False
+    try:
+        sh, sm = [int(x) for x in start.split(":")[:2]]
+        eh, em = [int(x) for x in end.split(":")[:2]]
+        if not (0 <= sh <= 23 and 0 <= sm <= 59 and 0 <= eh <= 23 and 0 <= em <= 59):
+            return False
+    except Exception:
+        return False
+    # Get user's local wall-clock minutes-of-day.
+    try:
+        from zoneinfo import ZoneInfo
+        tz_name = user.get("timezone") or "UTC"
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("UTC")
+        now_local = datetime.now(tz)
+    except Exception:
+        now_local = datetime.utcnow()
+    cur = now_local.hour * 60 + now_local.minute
+    a = sh * 60 + sm
+    b = eh * 60 + em
+    if a == b:
+        # Degenerate "all day quiet" interpretation — treat as disabled
+        # to avoid muting the user 24/7 if they fat-finger the picker.
+        return False
+    if a < b:
+        # Same-day window, e.g. 13:00 → 15:00 (nap time).
+        return a <= cur < b
+    # Wrap-around window, e.g. 22:00 → 07:00 (overnight).
+    return cur >= a or cur < b
 
 
 # ========== Daily reset ==========
@@ -1339,6 +1446,55 @@ async def set_timezone(data: TimezoneUpdate, current=Depends(get_current_user)):
     await db.users.update_one({"id": current["id"]}, {"$set": {"timezone": data.timezone}})
     current["timezone"] = data.timezone
     return _user_response(current)
+
+
+# ============================================================
+#  v1.3.3 — User preferences (Quiet Hours).
+# ============================================================
+@api_router.get("/me/preferences", response_model=PreferencesResponse)
+async def get_my_preferences(current=Depends(get_current_user)):
+    """Return the caller's notification preferences.  Currently only
+    Quiet Hours — but the response is wrapped in a `PreferencesResponse`
+    container so we can add additional pref groups later without
+    breaking the contract.
+    """
+    user = await db.users.find_one({"id": current["id"]}, {"_id": 0, "quiet_hours": 1})
+    qh_raw = (user or {}).get("quiet_hours") or {}
+    qh = QuietHoursPreference(
+        enabled=bool(qh_raw.get("enabled", False)),
+        start=str(qh_raw.get("start") or "22:00"),
+        end=str(qh_raw.get("end") or "07:00"),
+    )
+    return PreferencesResponse(quiet_hours=qh)
+
+
+@api_router.put("/me/preferences", response_model=PreferencesResponse)
+async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_current_user)):
+    """Patch the caller's notification preferences.  Only fields
+    present in the request body are touched — partial updates are
+    supported so the frontend can ship a smaller payload."""
+    set_doc: dict = {}
+    if data.quiet_hours is not None:
+        qh = data.quiet_hours
+        # Validate HH:MM format defensively.
+        for label, val in [("start", qh.start), ("end", qh.end)]:
+            try:
+                hh, mm = [int(x) for x in str(val).split(":")[:2]]
+                if not (0 <= hh <= 23 and 0 <= mm <= 59):
+                    raise ValueError
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid quiet_hours.{label} — expected HH:MM (24h).",
+                )
+        set_doc["quiet_hours"] = {
+            "enabled": bool(qh.enabled),
+            "start": qh.start,
+            "end": qh.end,
+        }
+    if set_doc:
+        await db.users.update_one({"id": current["id"]}, {"$set": set_doc})
+    return await get_my_preferences(current)
 
 
 @api_router.post("/auth/push-token")

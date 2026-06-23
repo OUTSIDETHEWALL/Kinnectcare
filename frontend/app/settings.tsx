@@ -298,6 +298,20 @@ export default function SettingsScreen() {
           </View>
         </View>
 
+        {/* v1.3.3 — Quiet Hours.  App-level only; OS-DND inheritance
+            queued for v1.4.0 native build. */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Notifications</Text>
+          <View style={styles.card}>
+            <NavRow
+              testID="settings-quiet-hours"
+              icon="🌙"
+              label="Quiet Hours"
+              onPress={() => router.push('/quiet-hours')}
+            />
+          </View>
+        </View>
+
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Account</Text>
           <View style={styles.card}>
