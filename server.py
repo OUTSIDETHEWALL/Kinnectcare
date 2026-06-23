@@ -159,6 +159,32 @@ class TimezoneUpdate(BaseModel):
     timezone: str
 
 
+# v1.3.3 — Quiet Hours preference.
+#
+# Stored as `user.quiet_hours = { enabled, start, end }`.  Times are
+# 24-hour "HH:MM" strings in the user's local timezone (server reads
+# `user.timezone` to interpret).  When the window is active, all non-
+# emergency push types are suppressed at the push_to_user gate.
+#
+# Bypass list (always delivered, even in Quiet Hours):
+#   • sos                     — manual emergency button
+#   • fall_detected           — fall-detection countdown expired
+#   • request_location_refresh — silent data ping (already silent)
+#   • alert_resolved          — "they're OK now" confirmation push
+class QuietHoursPreference(BaseModel):
+    enabled: bool = False
+    start: str = "22:00"
+    end: str = "07:00"
+
+
+class PreferencesResponse(BaseModel):
+    quiet_hours: QuietHoursPreference
+
+
+class PreferencesUpdate(BaseModel):
+    quiet_hours: Optional[QuietHoursPreference] = None
+
+
 class PushTokenRegister(BaseModel):
     token: str
     platform: Optional[str] = None
@@ -453,13 +479,36 @@ async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
     (DeviceNotRegistered, InvalidCredentials, MismatchSenderId).  This is
     how we stop "ghost notifications" being sent to uninstalled-app push
     tokens forever.
+
+    v1.3.3 — Quiet Hours: if the recipient has a quiet-hours window
+    active and the notification is NOT in the emergency bypass list,
+    the push is suppressed.  Bypass types: `sos`, `fall_detected`,
+    `request_location_refresh` (silent), `alert_resolved`.  Anything
+    else (medication, activity, routine, missed-checkin, family-join,
+    checkin) is gated.  We log the suppression at INFO so Diagnostics
+    + Railway logs both show that the gate fired (proves it's not a
+    push-delivery bug).
     """
-    user = await db.users.find_one({"id": user_id}, {"_id": 0, "push_tokens": 1})
+    user = await db.users.find_one(
+        {"id": user_id},
+        {"_id": 0, "push_tokens": 1, "quiet_hours": 1, "timezone": 1},
+    )
     if not user:
         return 0
     tokens = user.get("push_tokens") or []
     if not tokens:
         return 0
+
+    # ----- Quiet Hours gate -----
+    push_type = (data or {}).get("type") or ""
+    BYPASS_TYPES = {"sos", "fall_detected", "request_location_refresh", "alert_resolved"}
+    if push_type not in BYPASS_TYPES and _is_in_quiet_hours(user):
+        logger.info(
+            f"quiet-hours-suppress user={user_id} type={push_type or '(none)'} "
+            f"tokens={len(tokens)}"
+        )
+        return 0
+
     dead_tokens: List[str] = []
     try:
         dead_tokens = await send_expo_push(tokens, title, body, data) or []
@@ -480,6 +529,64 @@ async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
         except Exception as e:
             logger.warning(f"failed to prune dead tokens for {user_id}: {e}")
     return len(tokens)
+
+
+def _is_in_quiet_hours(user: dict) -> bool:
+    """v1.3.3 — Quiet Hours window check.
+
+    `user.quiet_hours` shape:
+        {
+          "enabled": bool,
+          "start": "HH:MM" (24h),
+          "end":   "HH:MM" (24h),
+        }
+
+    The window is interpreted in the user's local timezone (defaults
+    to UTC if `user.timezone` is missing — best-effort, never crashes).
+    Windows that cross midnight (start > end, e.g. 22:00 → 07:00)
+    are handled correctly.
+
+    Returns False if quiet hours are disabled, malformed, or we can't
+    parse the times — safer to ERR on the side of delivery than
+    silently swallowing a reminder.
+    """
+    qh = user.get("quiet_hours") or {}
+    if not isinstance(qh, dict) or not qh.get("enabled"):
+        return False
+    start = str(qh.get("start") or "").strip()
+    end = str(qh.get("end") or "").strip()
+    if not start or not end:
+        return False
+    try:
+        sh, sm = [int(x) for x in start.split(":")[:2]]
+        eh, em = [int(x) for x in end.split(":")[:2]]
+        if not (0 <= sh <= 23 and 0 <= sm <= 59 and 0 <= eh <= 23 and 0 <= em <= 59):
+            return False
+    except Exception:
+        return False
+    # Get user's local wall-clock minutes-of-day.
+    try:
+        from zoneinfo import ZoneInfo
+        tz_name = user.get("timezone") or "UTC"
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("UTC")
+        now_local = datetime.now(tz)
+    except Exception:
+        now_local = datetime.utcnow()
+    cur = now_local.hour * 60 + now_local.minute
+    a = sh * 60 + sm
+    b = eh * 60 + em
+    if a == b:
+        # Degenerate "all day quiet" interpretation — treat as disabled
+        # to avoid muting the user 24/7 if they fat-finger the picker.
+        return False
+    if a < b:
+        # Same-day window, e.g. 13:00 → 15:00 (nap time).
+        return a <= cur < b
+    # Wrap-around window, e.g. 22:00 → 07:00 (overnight).
+    return cur >= a or cur < b
 
 
 # ========== Daily reset ==========
@@ -1341,6 +1448,55 @@ async def set_timezone(data: TimezoneUpdate, current=Depends(get_current_user)):
     return _user_response(current)
 
 
+# ============================================================
+#  v1.3.3 — User preferences (Quiet Hours).
+# ============================================================
+@api_router.get("/me/preferences", response_model=PreferencesResponse)
+async def get_my_preferences(current=Depends(get_current_user)):
+    """Return the caller's notification preferences.  Currently only
+    Quiet Hours — but the response is wrapped in a `PreferencesResponse`
+    container so we can add additional pref groups later without
+    breaking the contract.
+    """
+    user = await db.users.find_one({"id": current["id"]}, {"_id": 0, "quiet_hours": 1})
+    qh_raw = (user or {}).get("quiet_hours") or {}
+    qh = QuietHoursPreference(
+        enabled=bool(qh_raw.get("enabled", False)),
+        start=str(qh_raw.get("start") or "22:00"),
+        end=str(qh_raw.get("end") or "07:00"),
+    )
+    return PreferencesResponse(quiet_hours=qh)
+
+
+@api_router.put("/me/preferences", response_model=PreferencesResponse)
+async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_current_user)):
+    """Patch the caller's notification preferences.  Only fields
+    present in the request body are touched — partial updates are
+    supported so the frontend can ship a smaller payload."""
+    set_doc: dict = {}
+    if data.quiet_hours is not None:
+        qh = data.quiet_hours
+        # Validate HH:MM format defensively.
+        for label, val in [("start", qh.start), ("end", qh.end)]:
+            try:
+                hh, mm = [int(x) for x in str(val).split(":")[:2]]
+                if not (0 <= hh <= 23 and 0 <= mm <= 59):
+                    raise ValueError
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid quiet_hours.{label} — expected HH:MM (24h).",
+                )
+        set_doc["quiet_hours"] = {
+            "enabled": bool(qh.enabled),
+            "start": qh.start,
+            "end": qh.end,
+        }
+    if set_doc:
+        await db.users.update_one({"id": current["id"]}, {"$set": set_doc})
+    return await get_my_preferences(current)
+
+
 @api_router.post("/auth/push-token")
 async def register_push_token(data: PushTokenRegister, current=Depends(get_current_user)):
     """Register a push token for the current user.
@@ -1685,6 +1841,12 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         f"stored=({rd.get('latitude')},{rd.get('longitude')}) "
         f"last_seen={rd.get('last_seen')}"
     )
+    # v1.3.3 — match this GPS upload to a pending refresh trace
+    # so /api/diagnostics/refresh-traces can show end-to-end latency.
+    try:
+        _trace_record_gps(member_id, data.latitude, data.longitude)
+    except Exception as _e:
+        pass
     return FamilyMember(**doc)
 
 
@@ -2522,6 +2684,76 @@ async def root():
 # this becomes a Redis SETNX with 30 s TTL.
 _REFRESH_PUSH_THROTTLE: dict = {}
 
+# ============================================================
+#  v1.3.3 — Refresh trace log (in-memory ring buffer).
+# ============================================================
+#
+# The user reported a "timestamp lie": Charles taps Refresh, spinner
+# runs ~30 s, server reports success, dashboard still shows "17 min
+# ago" — while Joyce's device reports "just now".  We need to be
+# able to answer "for member X, what was the timing of:
+#   request_received -> push_sent -> gps_received -> ui_polled".
+# Without persistence we can only guess.
+#
+# Ring buffer is 200 entries deep, indexed by member_id.  Each entry:
+#   {
+#     "member_id": str,
+#     "requested_at": epoch_ms (timestamp request hit the endpoint),
+#     "requester_user_id": str,
+#     "push_sent_at": epoch_ms or None,
+#     "push_skipped_reason": "no_user_link" | "throttled" | None,
+#     "gps_received_at": epoch_ms or None  (filled by PUT /location),
+#     "gps_lat": float or None,
+#     "gps_lon": float or None,
+#     "request_id": uuid (so frontend can correlate w/ its own logs)
+#   }
+#
+# A single in-memory deque is sufficient — even if the pod restarts
+# the trace evaporates, that's acceptable for diagnostics-only.
+# When 1.4.0 lands native build we can graduate this to MongoDB.
+# ============================================================
+from collections import deque as _deque
+_REFRESH_TRACE_LOG: _deque = _deque(maxlen=200)
+
+
+def _trace_record_request(member_id: str, requester_user_id: str, request_id: str) -> dict:
+    import time as _t
+    entry = {
+        "member_id": member_id,
+        "request_id": request_id,
+        "requested_at": int(_t.time() * 1000),
+        "requester_user_id": requester_user_id,
+        "push_sent_at": None,
+        "push_skipped_reason": None,
+        "gps_received_at": None,
+        "gps_lat": None,
+        "gps_lon": None,
+    }
+    _REFRESH_TRACE_LOG.append(entry)
+    return entry
+
+
+def _trace_record_gps(member_id: str, lat: float, lon: float) -> None:
+    """Match the GPS upload to the most recent pending refresh trace
+    for this member (one whose `gps_received_at` is still None and
+    `requested_at` is within the last 90 s).  If no match exists, the
+    write is a non-refresh upload and we silently no-op.
+    """
+    import time as _t
+    now_ms = int(_t.time() * 1000)
+    for entry in reversed(_REFRESH_TRACE_LOG):
+        if entry["member_id"] != member_id:
+            continue
+        if entry["gps_received_at"] is not None:
+            continue
+        if (now_ms - entry["requested_at"]) > 90_000:
+            break  # entries are appended in order; older ones won't match
+        entry["gps_received_at"] = now_ms
+        entry["gps_lat"] = lat
+        entry["gps_lon"] = lon
+        return
+
+
 @api_router.post("/members/{member_id}/request-location-refresh")
 async def request_location_refresh(member_id: str, current=Depends(get_current_user)):
     """v1.3.0 — sends a silent data push to the target member's device
@@ -2533,28 +2765,40 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
     a linked user (has user_id and push_tokens).  Server-side throttle
     of 30 s per member protects against the dashboard's auto-pull
     firing on every refetch tick.
+
+    v1.3.3 — every invocation writes a refresh-trace row (in-memory)
+    so the Diagnostics page can show end-to-end latency for the four
+    phases: request_received -> push_sent -> gps_received -> ui_polled.
     """
+    import uuid as _uuid
+    request_id = _uuid.uuid4().hex[:12]
+    trace = _trace_record_request(member_id, current["id"], request_id)
+
     target = await db.members.find_one(
         {"id": member_id, "family_group_id": current["family_group_id"]},
         {"_id": 0, "id": 1, "user_id": 1, "name": 1},
     )
     if not target:
+        trace["push_skipped_reason"] = "member_not_found"
         raise HTTPException(status_code=404, detail="Member not found in your family group")
     target_user_id = target.get("user_id")
     if not target_user_id:
-        return {"ok": True, "skipped": "no_user_link"}
+        trace["push_skipped_reason"] = "no_user_link"
+        return {"ok": True, "skipped": "no_user_link", "request_id": request_id}
 
     import time as _t
     now = _t.time()
     last = _REFRESH_PUSH_THROTTLE.get(member_id, 0)
     if (now - last) < 30:
-        return {"ok": True, "skipped": "throttled", "retry_in_s": int(30 - (now - last))}
+        trace["push_skipped_reason"] = "throttled"
+        return {"ok": True, "skipped": "throttled", "retry_in_s": int(30 - (now - last)), "request_id": request_id}
     _REFRESH_PUSH_THROTTLE[member_id] = now
 
     target_user = await db.users.find_one({"id": target_user_id}, {"push_tokens": 1})
     tokens = (target_user or {}).get("push_tokens", []) or []
     if not tokens:
-        return {"ok": True, "sent_to": 0}
+        trace["push_skipped_reason"] = "no_tokens"
+        return {"ok": True, "sent_to": 0, "request_id": request_id}
 
     # Silent data-only push: empty title/body so the device's
     # notification handler receives a background data event instead of
@@ -2569,17 +2813,68 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
                 "type": "request_location_refresh",
                 "member_id": member_id,
                 "_contentAvailable": True,   # iOS silent push hint
-                "channelId": "silent",
+                # v1.3.2 — use the dedicated IMPORTANCE_MIN channel
+                # registered by the frontend.  Channel name bumped to
+                # `silent_v2` to force Android to re-create the channel
+                # at the lowest possible importance on devices that had
+                # the old `silent` channel cached at a higher level.
+                "channelId": "silent_v2",
                 "_sentAt": now,
+                "_requestId": request_id,
             },
             sound="",
         )
+        trace["push_sent_at"] = int(_t.time() * 1000)
     except Exception as e:
         logger.warning(f"request-location-refresh push failed: {e}")
-    return {"ok": True, "sent_to": len(tokens)}
+        trace["push_skipped_reason"] = f"push_error:{type(e).__name__}"
+    return {"ok": True, "sent_to": len(tokens), "request_id": request_id}
 
 
 # ========== Diagnostics ==========
+@api_router.get("/diagnostics/refresh-traces")
+async def diagnostics_refresh_traces(
+    member_id: Optional[str] = None,
+    limit: int = 20,
+    current=Depends(get_current_user),
+):
+    """v1.3.3 — return the most recent N refresh-trace entries so the
+    Diagnostics page can show end-to-end latency for the four phases:
+      request_received -> push_sent -> gps_received.
+
+    For privacy we only return traces the caller is allowed to see:
+      • Traces they themselves requested (caller is `requester_user_id`).
+      • Traces for members in the caller's family_group (so caregivers
+        can see what their seniors' devices did).
+
+    `limit` capped at 100.  `member_id` optional filter.
+    """
+    limit = max(1, min(int(limit or 20), 100))
+    fg_id = current.get("family_group_id")
+    fg_members = set()
+    if fg_id:
+        async for m in db.members.find({"family_group_id": fg_id}, {"id": 1}):
+            fg_members.add(m["id"])
+    out = []
+    for entry in reversed(_REFRESH_TRACE_LOG):
+        if member_id and entry["member_id"] != member_id:
+            continue
+        if entry["requester_user_id"] != current["id"] and entry["member_id"] not in fg_members:
+            continue
+        # Computed deltas — friendlier to render.
+        ms = entry["requested_at"]
+        push_delta = (entry["push_sent_at"] - ms) if entry.get("push_sent_at") else None
+        gps_delta = (entry["gps_received_at"] - ms) if entry.get("gps_received_at") else None
+        out.append({
+            **entry,
+            "push_sent_after_ms": push_delta,
+            "gps_received_after_ms": gps_delta,
+        })
+        if len(out) >= limit:
+            break
+    return {"count": len(out), "traces": out}
+
+
 @api_router.get("/diagnostics/my-members")
 async def diagnostics_my_members(current=Depends(get_current_user)):
     """v1.2.6 — surface every member document the calling user is
