@@ -29,6 +29,16 @@ import * as Clipboard from 'expo-clipboard';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
 import { Platform } from 'react-native';
+import {
+  subscribeLiveState,
+  readLiveStateSync,
+  getPhases,
+  getSamples,
+  getEvents,
+  clearAllFallLogs,
+  armSampleCapture,
+} from '../src/fallTelemetry';
+import { getNotificationLog, clearNotificationLog } from '../src/notificationLog';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { readRouteLog, clearRouteLog, RouteDiagEntry } from '../src/routeDiagnostics';
@@ -244,6 +254,72 @@ export default function DiagnosticsScreen() {
     }
   }, []);
 
+  // v1.3.3 — Refresh trace (server-side), Notification log,
+  // Fall live state + persisted ring buffers.
+  const [refreshTraces, setRefreshTraces] = useState<any[]>([]);
+  const [notifLog, setNotifLog] = useState<any[]>([]);
+  const [fallLive, setFallLive] = useState<any>(readLiveStateSync());
+  const [fallPhases, setFallPhases] = useState<any[]>([]);
+  const [fallSamples, setFallSamples] = useState<any[]>([]);
+  const [fallEvents, setFallEvents] = useState<any[]>([]);
+  const [captureArmed, setCaptureArmed] = useState(false);
+  const [captureUntil, setCaptureUntil] = useState<number | null>(null);
+
+  useEffect(() => subscribeLiveState(setFallLive), []);
+
+  const refreshFallTelemetry = useCallback(async () => {
+    const [p, s, e] = await Promise.all([getPhases(), getSamples(), getEvents()]);
+    setFallPhases(p);
+    setFallSamples(s);
+    setFallEvents(e);
+  }, []);
+
+  const refreshNotifLog = useCallback(async () => {
+    const arr = await getNotificationLog();
+    setNotifLog(arr);
+  }, []);
+
+  const refreshTraceData = useCallback(async () => {
+    try {
+      const r = await api.get('/diagnostics/refresh-traces?limit=20');
+      setRefreshTraces(r?.data?.traces || []);
+    } catch (_e) {
+      setRefreshTraces([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshFallTelemetry();
+    refreshNotifLog();
+    refreshTraceData();
+    // Live tick — live phase/sample-count update every 500 ms.
+    const tick = setInterval(() => {
+      setFallLive(readLiveStateSync());
+    }, 500);
+    return () => clearInterval(tick);
+  }, [refreshFallTelemetry, refreshNotifLog, refreshTraceData]);
+
+  const onArmCapture = useCallback(() => {
+    armSampleCapture(30_000);
+    setCaptureArmed(true);
+    setCaptureUntil(Date.now() + 30_000);
+    setTimeout(() => {
+      setCaptureArmed(false);
+      setCaptureUntil(null);
+      refreshFallTelemetry();
+    }, 30_500);
+  }, [refreshFallTelemetry]);
+
+  const onClearFallLogs = useCallback(async () => {
+    await clearAllFallLogs();
+    refreshFallTelemetry();
+  }, [refreshFallTelemetry]);
+
+  const onClearNotifLog = useCallback(async () => {
+    await clearNotificationLog();
+    refreshNotifLog();
+  }, [refreshNotifLog]);
+
   const onClear = () => {
     Alert.alert(
       'Clear diagnostic logs?',
@@ -340,6 +416,210 @@ export default function DiagnosticsScreen() {
             >
               <Text style={styles.secondaryBtnText}>Check for OTA update now</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* =====================================================
+            v1.3.3 — Fall Detection live + persistent telemetry.
+            ===================================================== */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Fall Detection · live</Text>
+          </View>
+          <Text style={styles.sectionHint}>
+            Proves the multi-signal state machine is alive and receiving sensor events.
+            If "subscribed" is blank or "accelerometer" is unavailable, the detector
+            is NOT running and no real fall will ever fire — see Settings → Fall
+            Detection.
+          </Text>
+          <View style={styles.card} testID="diagnostics-fall-live">
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>enabled: </Text>{String(fallLive.enabled)}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>accelerometer: </Text>{String(fallLive.available)}
+              {'   '}
+              <Text style={styles.entryK}>gyroscope: </Text>{String(fallLive.gyroAvailable)}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>current phase: </Text>{fallLive.phase}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>AppState: </Text>{fallLive.appState}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>samples observed: </Text>{fallLive.sampleCount}
+              {'   '}
+              <Text style={styles.entryK}>last mag: </Text>{(fallLive.lastMag || 0).toFixed(2)} g
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>peak (last 5 s): </Text>{(fallLive.peakMag5s || 0).toFixed(2)} g
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>subscribed at: </Text>
+              {fallLive.subscribedAt ? fmt(new Date(fallLive.subscribedAt).toISOString()) : '— never'}
+            </Text>
+          </View>
+          <View style={styles.actionRow}>
+            <TouchableOpacity
+              testID="diagnostics-fall-arm"
+              style={styles.primaryBtn}
+              onPress={onArmCapture}
+              disabled={captureArmed}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.primaryBtnText}>
+                {captureArmed
+                  ? `⏱ Capturing… (${Math.max(0, Math.round(((captureUntil || 0) - Date.now()) / 1000))} s)`
+                  : '⏱ Arm 30 s sample capture'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="diagnostics-fall-clear"
+              style={styles.secondaryBtn}
+              onPress={onClearFallLogs}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.secondaryBtnText}>Clear fall logs</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={styles.sectionHint}>
+            Tap "Arm" then throw the phone within 30 s — every accelerometer sample
+            during the window is logged below.  Without arming, only phase
+            transitions are persisted (to save battery).
+          </Text>
+
+          {/* Phase transitions */}
+          <Text style={styles.subSectionLabel}>Phase transitions (last 20)</Text>
+          <View style={styles.card}>
+            {fallPhases.length === 0 ? (
+              <Text style={styles.muted}>— no transitions recorded.</Text>
+            ) : fallPhases.slice(0, 20).map((p, i) => (
+              <Text key={i} style={styles.entryLine}>
+                <Text style={styles.entryK}>{fmt(new Date(p.at).toISOString())}: </Text>
+                {p.phase}
+              </Text>
+            ))}
+          </View>
+
+          {/* Lifecycle events */}
+          <Text style={styles.subSectionLabel}>Events (last 20)</Text>
+          <View style={styles.card}>
+            {fallEvents.length === 0 ? (
+              <Text style={styles.muted}>— no events recorded.</Text>
+            ) : fallEvents.slice(0, 20).map((e, i) => (
+              <Text key={i} style={styles.entryLine}>
+                <Text style={styles.entryK}>{fmt(new Date(e.at).toISOString())}: </Text>
+                {e.kind}{e.detail ? ` (${e.detail})` : ''}
+              </Text>
+            ))}
+          </View>
+
+          {/* Captured sensor samples (only populated during armed capture) */}
+          <Text style={styles.subSectionLabel}>Captured samples (last 30)</Text>
+          <View style={styles.card}>
+            {fallSamples.length === 0 ? (
+              <Text style={styles.muted}>— no samples captured. Tap Arm and throw the phone.</Text>
+            ) : fallSamples.slice(0, 30).map((s, i) => (
+              <Text key={i} style={styles.entryLine}>
+                <Text style={styles.entryK}>{fmt(new Date(s.at).toISOString())}: </Text>
+                {s.mag.toFixed(2)} g  ({s.x.toFixed(2)}, {s.y.toFixed(2)}, {s.z.toFixed(2)})
+              </Text>
+            ))}
+          </View>
+        </View>
+
+        {/* =====================================================
+            v1.3.3 — Notifications received (sound-leak diagnostic).
+            ===================================================== */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Notifications received</Text>
+            <TouchableOpacity onPress={onClearNotifLog} style={styles.secondaryBtnSmall}>
+              <Text style={styles.secondaryBtnText}>Clear</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={styles.sectionHint}>
+            Every push observed by this device — for diagnosing intermittent silent-
+            push sound leaks.  If a notification with `channelId: silent_v2` ever
+            shows `sound: "default"`, that's the leak source.
+          </Text>
+          <View style={styles.card} testID="diagnostics-notif-log">
+            {notifLog.length === 0 ? (
+              <Text style={styles.muted}>— no notifications observed yet.</Text>
+            ) : notifLog.slice(0, 20).map((n, i) => (
+              <View key={i} style={{ marginBottom: 8 }}>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>{fmt(new Date(n.at).toISOString())} </Text>
+                  ({n.source})
+                </Text>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>channel: </Text>{n.channelId ?? '—'}
+                  {'   '}
+                  <Text style={styles.entryK}>sound: </Text>
+                  <Text style={n.sound && n.sound !== '' ? styles.divergent : undefined}>
+                    {String(n.sound)}
+                  </Text>
+                </Text>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>priority: </Text>{n.priority ?? '—'}
+                  {'   '}
+                  <Text style={styles.entryK}>vibrate: </Text>{String(n.vibrate)}
+                </Text>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>type: </Text>{n.type ?? '—'}
+                  {'   '}
+                  <Text style={styles.entryK}>requestId: </Text>{n.requestId ?? '—'}
+                </Text>
+                {n.title || n.body ? (
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>title: </Text>{n.title || '(empty)'}
+                    {n.body ? `  · body: ${n.body}` : ''}
+                  </Text>
+                ) : null}
+              </View>
+            ))}
+          </View>
+        </View>
+
+        {/* =====================================================
+            v1.3.3 — Refresh trace (server-side).
+            ===================================================== */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Refresh traces (server)</Text>
+            <TouchableOpacity onPress={refreshTraceData} style={styles.secondaryBtnSmall}>
+              <Text style={styles.secondaryBtnText}>Refresh</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={styles.sectionHint}>
+            End-to-end latency for each refresh.  Columns: when requested, time to
+            push send, time to GPS upload received.  Reveals whether a slow refresh
+            is the server, FCM, or the device's GPS warmup.
+          </Text>
+          <View style={styles.card} testID="diagnostics-refresh-traces">
+            {refreshTraces.length === 0 ? (
+              <Text style={styles.muted}>— no traces yet. Tap Refresh on the dashboard, then come back.</Text>
+            ) : refreshTraces.slice(0, 20).map((t, i) => (
+              <View key={i} style={{ marginBottom: 8 }}>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>{fmt(new Date(t.requested_at).toISOString())} </Text>
+                  member <Text style={styles.entryK}>{t.member_id?.slice(0, 8)}</Text>
+                </Text>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>push sent +</Text>
+                  {t.push_sent_after_ms != null ? `${t.push_sent_after_ms} ms` : '— (skipped)'}
+                  {'   '}
+                  <Text style={styles.entryK}>gps received +</Text>
+                  {t.gps_received_after_ms != null ? `${t.gps_received_after_ms} ms` : '—'}
+                </Text>
+                {t.push_skipped_reason ? (
+                  <Text style={[styles.entryLine, styles.divergent]}>
+                    skipped: {t.push_skipped_reason}
+                  </Text>
+                ) : null}
+              </View>
+            ))}
           </View>
         </View>
 
@@ -807,6 +1087,14 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent',
   },
   secondaryBtnText: { color: Colors.primary, fontSize: 14, fontWeight: '800' },
+  secondaryBtnSmall: {
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+    borderWidth: 1, borderColor: Colors.primary, backgroundColor: 'transparent',
+  },
+  subSectionLabel: {
+    fontSize: 11, fontWeight: '800', color: Colors.textSecondary,
+    letterSpacing: 0.5, textTransform: 'uppercase', marginTop: 12, marginBottom: 4,
+  },
   section: { marginBottom: 22 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
   sectionTitle: {

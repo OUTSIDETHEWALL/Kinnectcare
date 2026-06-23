@@ -17,6 +17,7 @@ import {
   requestRefresh as requestMemberRefresh,
   clearIfNewer as clearRefreshIfNewer,
   subscribeRefreshing,
+  subscribeMember,
   STALE_THRESHOLD_MS,
 } from '../../src/locationRefreshState';
 import { formatTimeAgo } from '../../src/timeFormat';
@@ -46,6 +47,28 @@ export default function Dashboard() {
   // same event loop tick can still see `sosDialState === 'idle'`. The ref is
   // checked synchronously and is bulletproof against double-tap races.
   const sosDialingRef = useRef(false);
+
+  // v1.3.3 — subscribe to member broadcast bus.  When the
+  // pull-on-stale poller in locationRefreshState detects a fresh
+  // `last_seen` for one of our family members, it broadcasts the
+  // freshly-fetched member doc — we merge it into local state so
+  // every card re-renders with the new timestamp / location_name
+  // immediately, without waiting for the next /members refetch.
+  useEffect(() => {
+    const unsub = subscribeMember((m: any) => {
+      if (!m?.id) return;
+      setMembers((prev) => {
+        let touched = false;
+        const next = prev.map((row) => {
+          if (row.id !== m.id) return row;
+          touched = true;
+          return { ...row, ...m };
+        });
+        return touched ? next : prev;
+      });
+    });
+    return unsub;
+  }, []);
 
   const load = async () => {
     try {

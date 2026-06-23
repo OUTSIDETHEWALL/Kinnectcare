@@ -1685,6 +1685,12 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         f"stored=({rd.get('latitude')},{rd.get('longitude')}) "
         f"last_seen={rd.get('last_seen')}"
     )
+    # v1.3.3 — match this GPS upload to a pending refresh trace
+    # so /api/diagnostics/refresh-traces can show end-to-end latency.
+    try:
+        _trace_record_gps(member_id, data.latitude, data.longitude)
+    except Exception as _e:
+        pass
     return FamilyMember(**doc)
 
 
@@ -2522,6 +2528,76 @@ async def root():
 # this becomes a Redis SETNX with 30 s TTL.
 _REFRESH_PUSH_THROTTLE: dict = {}
 
+# ============================================================
+#  v1.3.3 — Refresh trace log (in-memory ring buffer).
+# ============================================================
+#
+# The user reported a "timestamp lie": Charles taps Refresh, spinner
+# runs ~30 s, server reports success, dashboard still shows "17 min
+# ago" — while Joyce's device reports "just now".  We need to be
+# able to answer "for member X, what was the timing of:
+#   request_received -> push_sent -> gps_received -> ui_polled".
+# Without persistence we can only guess.
+#
+# Ring buffer is 200 entries deep, indexed by member_id.  Each entry:
+#   {
+#     "member_id": str,
+#     "requested_at": epoch_ms (timestamp request hit the endpoint),
+#     "requester_user_id": str,
+#     "push_sent_at": epoch_ms or None,
+#     "push_skipped_reason": "no_user_link" | "throttled" | None,
+#     "gps_received_at": epoch_ms or None  (filled by PUT /location),
+#     "gps_lat": float or None,
+#     "gps_lon": float or None,
+#     "request_id": uuid (so frontend can correlate w/ its own logs)
+#   }
+#
+# A single in-memory deque is sufficient — even if the pod restarts
+# the trace evaporates, that's acceptable for diagnostics-only.
+# When 1.4.0 lands native build we can graduate this to MongoDB.
+# ============================================================
+from collections import deque as _deque
+_REFRESH_TRACE_LOG: _deque = _deque(maxlen=200)
+
+
+def _trace_record_request(member_id: str, requester_user_id: str, request_id: str) -> dict:
+    import time as _t
+    entry = {
+        "member_id": member_id,
+        "request_id": request_id,
+        "requested_at": int(_t.time() * 1000),
+        "requester_user_id": requester_user_id,
+        "push_sent_at": None,
+        "push_skipped_reason": None,
+        "gps_received_at": None,
+        "gps_lat": None,
+        "gps_lon": None,
+    }
+    _REFRESH_TRACE_LOG.append(entry)
+    return entry
+
+
+def _trace_record_gps(member_id: str, lat: float, lon: float) -> None:
+    """Match the GPS upload to the most recent pending refresh trace
+    for this member (one whose `gps_received_at` is still None and
+    `requested_at` is within the last 90 s).  If no match exists, the
+    write is a non-refresh upload and we silently no-op.
+    """
+    import time as _t
+    now_ms = int(_t.time() * 1000)
+    for entry in reversed(_REFRESH_TRACE_LOG):
+        if entry["member_id"] != member_id:
+            continue
+        if entry["gps_received_at"] is not None:
+            continue
+        if (now_ms - entry["requested_at"]) > 90_000:
+            break  # entries are appended in order; older ones won't match
+        entry["gps_received_at"] = now_ms
+        entry["gps_lat"] = lat
+        entry["gps_lon"] = lon
+        return
+
+
 @api_router.post("/members/{member_id}/request-location-refresh")
 async def request_location_refresh(member_id: str, current=Depends(get_current_user)):
     """v1.3.0 — sends a silent data push to the target member's device
@@ -2533,28 +2609,40 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
     a linked user (has user_id and push_tokens).  Server-side throttle
     of 30 s per member protects against the dashboard's auto-pull
     firing on every refetch tick.
+
+    v1.3.3 — every invocation writes a refresh-trace row (in-memory)
+    so the Diagnostics page can show end-to-end latency for the four
+    phases: request_received -> push_sent -> gps_received -> ui_polled.
     """
+    import uuid as _uuid
+    request_id = _uuid.uuid4().hex[:12]
+    trace = _trace_record_request(member_id, current["id"], request_id)
+
     target = await db.members.find_one(
         {"id": member_id, "family_group_id": current["family_group_id"]},
         {"_id": 0, "id": 1, "user_id": 1, "name": 1},
     )
     if not target:
+        trace["push_skipped_reason"] = "member_not_found"
         raise HTTPException(status_code=404, detail="Member not found in your family group")
     target_user_id = target.get("user_id")
     if not target_user_id:
-        return {"ok": True, "skipped": "no_user_link"}
+        trace["push_skipped_reason"] = "no_user_link"
+        return {"ok": True, "skipped": "no_user_link", "request_id": request_id}
 
     import time as _t
     now = _t.time()
     last = _REFRESH_PUSH_THROTTLE.get(member_id, 0)
     if (now - last) < 30:
-        return {"ok": True, "skipped": "throttled", "retry_in_s": int(30 - (now - last))}
+        trace["push_skipped_reason"] = "throttled"
+        return {"ok": True, "skipped": "throttled", "retry_in_s": int(30 - (now - last)), "request_id": request_id}
     _REFRESH_PUSH_THROTTLE[member_id] = now
 
     target_user = await db.users.find_one({"id": target_user_id}, {"push_tokens": 1})
     tokens = (target_user or {}).get("push_tokens", []) or []
     if not tokens:
-        return {"ok": True, "sent_to": 0}
+        trace["push_skipped_reason"] = "no_tokens"
+        return {"ok": True, "sent_to": 0, "request_id": request_id}
 
     # Silent data-only push: empty title/body so the device's
     # notification handler receives a background data event instead of
@@ -2576,15 +2664,61 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
                 # the old `silent` channel cached at a higher level.
                 "channelId": "silent_v2",
                 "_sentAt": now,
+                "_requestId": request_id,
             },
             sound="",
         )
+        trace["push_sent_at"] = int(_t.time() * 1000)
     except Exception as e:
         logger.warning(f"request-location-refresh push failed: {e}")
-    return {"ok": True, "sent_to": len(tokens)}
+        trace["push_skipped_reason"] = f"push_error:{type(e).__name__}"
+    return {"ok": True, "sent_to": len(tokens), "request_id": request_id}
 
 
 # ========== Diagnostics ==========
+@api_router.get("/diagnostics/refresh-traces")
+async def diagnostics_refresh_traces(
+    member_id: Optional[str] = None,
+    limit: int = 20,
+    current=Depends(get_current_user),
+):
+    """v1.3.3 — return the most recent N refresh-trace entries so the
+    Diagnostics page can show end-to-end latency for the four phases:
+      request_received -> push_sent -> gps_received.
+
+    For privacy we only return traces the caller is allowed to see:
+      • Traces they themselves requested (caller is `requester_user_id`).
+      • Traces for members in the caller's family_group (so caregivers
+        can see what their seniors' devices did).
+
+    `limit` capped at 100.  `member_id` optional filter.
+    """
+    limit = max(1, min(int(limit or 20), 100))
+    fg_id = current.get("family_group_id")
+    fg_members = set()
+    if fg_id:
+        async for m in db.members.find({"family_group_id": fg_id}, {"id": 1}):
+            fg_members.add(m["id"])
+    out = []
+    for entry in reversed(_REFRESH_TRACE_LOG):
+        if member_id and entry["member_id"] != member_id:
+            continue
+        if entry["requester_user_id"] != current["id"] and entry["member_id"] not in fg_members:
+            continue
+        # Computed deltas — friendlier to render.
+        ms = entry["requested_at"]
+        push_delta = (entry["push_sent_at"] - ms) if entry.get("push_sent_at") else None
+        gps_delta = (entry["gps_received_at"] - ms) if entry.get("gps_received_at") else None
+        out.append({
+            **entry,
+            "push_sent_after_ms": push_delta,
+            "gps_received_after_ms": gps_delta,
+        })
+        if len(out) >= limit:
+            break
+    return {"count": len(out), "traces": out}
+
+
 @api_router.get("/diagnostics/my-members")
 async def diagnostics_my_members(current=Depends(get_current_user)):
     """v1.2.6 — surface every member document the calling user is

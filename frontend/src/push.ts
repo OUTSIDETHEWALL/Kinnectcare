@@ -170,6 +170,43 @@ export async function refreshPushTokenIfStale(reason: string): Promise<void> {
 // the heads-up appears even when the app is open in the foreground.
 Notifications.setNotificationHandler({
   handleNotification: async (n) => {
+    // v1.3.3 — log EVERY notification observation so Diagnostics can
+    // pinpoint which payload / channel produced an audible alert.
+    // Best-effort, never blocks the handler.
+    try {
+      const content: any = n?.request?.content || {};
+      const data: any = content?.data || {};
+      const trigger: any = (n?.request as any)?.trigger || {};
+      // Lazy require keeps this file's import graph stable.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+      const { logNotification } = require('./notificationLog');
+      logNotification({
+        at: Date.now(),
+        source: 'foreground-handler',
+        channelId:
+          data?.channelId ??
+          (trigger?.remoteMessage?.notification?.channelId) ??
+          (content?.android?.channelId) ??
+          null,
+        sound: content?.sound ?? null,
+        priority:
+          (content?.priority as any) ??
+          (data?._priority as any) ??
+          null,
+        title: content?.title ?? null,
+        body: content?.body ?? null,
+        vibrate: Array.isArray(content?.vibrationPattern)
+          ? content.vibrationPattern.some((v: number) => v > 0)
+          : null,
+        type: data?.type ?? null,
+        requestId: data?._requestId ?? null,
+        raw: {
+          data,
+          contentSound: content?.sound,
+        },
+      });
+    } catch (_e) { /* swallow */ }
+
     // v1.3.0 — silent pull-on-stale.  When a family member opens this
     // device's owner's screen and their data is stale, the backend
     // sends a data-only push with type=request_location_refresh.
@@ -753,6 +790,31 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
     })();
 
     const recv = Notifications.addNotificationReceivedListener((n) => {
+      // v1.3.3 — additionally log to the notification ring buffer
+      // so even pushes that don't traverse setNotificationHandler
+      // (background data pushes on some Android OEMs) leave a trace.
+      try {
+        const content: any = n?.request?.content || {};
+        const data: any = content?.data || {};
+        // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+        const { logNotification } = require('./notificationLog');
+        logNotification({
+          at: Date.now(),
+          source: 'received-listener',
+          channelId: data?.channelId ?? (content?.android?.channelId) ?? null,
+          sound: content?.sound ?? null,
+          priority: (content?.priority as any) ?? null,
+          title: content?.title ?? null,
+          body: content?.body ?? null,
+          vibrate: Array.isArray(content?.vibrationPattern)
+            ? content.vibrationPattern.some((v: number) => v > 0)
+            : null,
+          type: data?.type ?? null,
+          requestId: data?._requestId ?? null,
+          raw: { data, contentSound: content?.sound },
+        });
+      } catch (_e) {}
+
       // v1.3.0 — silent pull-on-stale handler.  When a family member
       // opens this device's owner's screen and their data is stale,
       // the backend sends a silent data push with type=

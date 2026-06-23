@@ -22,6 +22,7 @@ import {
   requestRefresh as requestMemberRefresh,
   clearIfNewer as clearRefreshIfNewer,
   subscribeRefreshing,
+  subscribeMember,
   STALE_THRESHOLD_MS,
 } from '../../src/locationRefreshState';
 
@@ -48,6 +49,18 @@ export default function MemberDetail() {
   useEffect(() => {
     if (!id) return;
     return subscribeRefreshing(id, setLocationRefreshing);
+  }, [id]);
+  // v1.3.3 — receive broadcasted member updates from the active
+  // pull-on-stale poller and merge into local state so the location
+  // header re-renders with the fresh timestamp / location_name as
+  // soon as the GPS upload lands (sub-5 s after Joyce's device
+  // actually uploads, rather than waiting for our 60 s refetch).
+  useEffect(() => {
+    if (!id) return;
+    return subscribeMember((m: any) => {
+      if (!m?.id || m.id !== id) return;
+      setMember((prev) => (prev ? ({ ...prev, ...m } as any) : (m as any)));
+    });
   }, [id]);
   useEffect(() => {
     const t = setInterval(() => forceTick((n) => n + 1), 20_000);

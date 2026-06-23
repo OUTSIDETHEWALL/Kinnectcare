@@ -57,7 +57,20 @@
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform } from 'react-native';
+import { Platform, AppState } from 'react-native';
+import {
+  logPhase as telLogPhase,
+  logSample as telLogSample,
+  logEvent as telLogEvent,
+  setLivePhase,
+  setLiveEnabled,
+  setLiveAvailability,
+  setLiveAppState,
+  markSubscribeStart,
+  markSubscribeStop,
+  bumpSample,
+  isCaptureActive,
+} from './fallTelemetry';
 
 // ------------------------------------------------------------------
 //  Web-safe expo-sensors import.
@@ -304,6 +317,18 @@ export function useFallDetector({ onFallDetected, onPhase }: FallDetectorOptions
     if (phaseRef.current === next) return;
     phaseRef.current = next;
     setPhase(next);
+    // v1.3.3 — mirror to telemetry so Diagnostics shows live phase
+    // and the persistent ring buffer records the transition.
+    try { setLivePhase(next); } catch (_e) {}
+    try {
+      telLogPhase({
+        at: Date.now(),
+        phase: next,
+        mag: 0,
+        orientationDeltaDeg: null,
+        stillnessFractionPct: null,
+      });
+    } catch (_e) {}
   };
 
   // Algorithm refs.
@@ -345,12 +370,18 @@ export function useFallDetector({ onFallDetected, onPhase }: FallDetectorOptions
   }, []);
 
   useEffect(() => {
-    if (!enabled || !available) return;
+    if (!enabled || !available) {
+      setLiveEnabled(!!enabled);
+      return;
+    }
     if (Platform.OS === 'web') return; // sensors unreliable in web preview
+
+    setLiveEnabled(true);
 
     // Reset state on (re-)subscription.
     phaseRef.current = 'idle';
     setPhase('idle');
+    setLivePhase('idle');
     impactAtRef.current = 0;
     gravityBeforeRef.current = null;
     orientationConfirmedRef.current = false;
@@ -363,24 +394,58 @@ export function useFallDetector({ onFallDetected, onPhase }: FallDetectorOptions
     Accelerometer.setUpdateInterval(SAMPLE_MS);
     try { Gyroscope.setUpdateInterval(SAMPLE_MS); } catch (_e) {}
 
+    // v1.3.3 — telemetry: announce subscription start so the
+    // Diagnostics screen can show "subscribed at HH:MM:SS" and prove
+    // the detector is actually wired up to a real sensor stream
+    // (rather than silently failing on a permission deny / OEM
+    // restriction / web preview).
+    markSubscribeStart();
+    telLogEvent({ at: Date.now(), kind: 'subscribe-start' });
+
+    // Track AppState — the dominant suspected cause of "fall detection
+    // never fired" is the app being backgrounded when the user threw
+    // the phone.  Persist every transition so we can post-hoc see
+    // whether the detector was even alive at the moment of the throw.
+    setLiveAppState(AppState.currentState || 'unknown');
+    const appStateSub = AppState.addEventListener('change', (s) => {
+      setLiveAppState(s);
+      telLogEvent({ at: Date.now(), kind: 'appstate-change', detail: String(s) });
+    });
+
     // ----- Gyroscope (best-effort) -----
     let gyroSub: any = null;
     (async () => {
       try {
         const gAvail = await Gyroscope.isAvailableAsync();
+        setLiveAvailability({ accel: true, gyro: gAvail });
+        telLogEvent({ at: Date.now(), kind: gAvail ? 'gyro-available' : 'gyro-unavailable' });
         if (!gAvail) return;
         gyroSub = Gyroscope.addListener(({ x, y, z }) => {
           lastGyroMagRef.current = Math.sqrt(x * x + y * y + z * z);
         });
-      } catch (_e) { /* gyroscope is optional */ }
+      } catch (_e) {
+        setLiveAvailability({ accel: true, gyro: false });
+        telLogEvent({ at: Date.now(), kind: 'gyro-unavailable', detail: 'exception' });
+      }
     })();
 
     // ----- Accelerometer (primary) -----
+    telLogEvent({ at: Date.now(), kind: 'accel-available' });
     const accelSub = Accelerometer.addListener(({ x, y, z }) => {
       const now = Date.now();
       const sample: Vec3 = { x, y, z };
       const m = mag(sample);
       const g = gravityLPF.current.update(sample);
+
+      // v1.3.3 — push sample into live state + (when capture armed)
+      // persistent log.  We DON'T persist every sample by default —
+      // that's 20 Hz × indefinite which would burn flash storage and
+      // CPU.  Default path: bump live-state only; persist only when
+      // the user has armed a 30 s capture window from Diagnostics.
+      bumpSample(m);
+      if (isCaptureActive()) {
+        telLogSample({ at: now, mag: m, x, y, z });
+      }
 
       // Rolling pose history — keep ~1 s of low-passed gravity so we
       // can compute pre-impact pose when an impact fires.
@@ -512,6 +577,11 @@ export function useFallDetector({ onFallDetected, onPhase }: FallDetectorOptions
             // eslint-disable-next-line no-console
             console.log('[fall] CONFIRMED — stillness', stillMs, 'ms of', STILL_WIN, 'ms window');
           }
+          telLogEvent({
+            at: Date.now(),
+            kind: 'confirmed',
+            detail: `mag=${m.toFixed(2)} stillMs=${stillMs}`,
+          });
           setPhaseBoth('cooldown');
           cooldownUntilRef.current = now + COOLDOWN;
           impactAtRef.current = 0;
@@ -540,6 +610,9 @@ export function useFallDetector({ onFallDetected, onPhase }: FallDetectorOptions
     return () => {
       try { accelSub && accelSub.remove(); } catch (_e) {}
       try { gyroSub && gyroSub.remove(); } catch (_e) {}
+      try { appStateSub && appStateSub.remove && appStateSub.remove(); } catch (_e) {}
+      markSubscribeStop();
+      telLogEvent({ at: Date.now(), kind: 'subscribe-stop' });
     };
   }, [enabled, available]);
 
@@ -549,6 +622,7 @@ export function useFallDetector({ onFallDetected, onPhase }: FallDetectorOptions
   const simulateFall = useCallback(() => {
     setPhaseBoth('cooldown');
     cooldownUntilRef.current = Date.now() + COOLDOWN;
+    telLogEvent({ at: Date.now(), kind: 'simulate-fall' });
     try { callbackRef.current(); } catch (_e) {}
   }, []);
 
