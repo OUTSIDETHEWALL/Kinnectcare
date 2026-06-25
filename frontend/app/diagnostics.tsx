@@ -45,6 +45,12 @@ import { readRouteLog, clearRouteLog, RouteDiagEntry } from '../src/routeDiagnos
 import { readLocationRefreshLog, clearLocationRefreshLog, LocationRefreshEntry } from '../src/locationRefresh';
 import { readBgTaskLog, clearBgTaskLog, BgTaskLogEntry } from '../src/backgroundLocation';
 import { readScreenRenderLog, clearScreenRenderLog, ScreenRenderEntry } from '../src/screenRenderLog';
+import {
+  getEngineDiagnostics,
+  clearEngineLog,
+  EngineLogEvent,
+  LocationEngineState,
+} from '../src/locationEngine';
 import { api } from '../src/api';
 import { useAuth } from '../src/AuthContext';
 
@@ -116,19 +122,23 @@ export default function DiagnosticsScreen() {
   const [locLog, setLocLog] = useState<LocationRefreshEntry[]>([]);
   const [bgLog, setBgLog] = useState<BgTaskLogEntry[]>([]);
   const [renderLog, setRenderLog] = useState<ScreenRenderEntry[]>([]);
+  const [engineLog, setEngineLog] = useState<EngineLogEvent[]>([]);
+  const [engineState, setEngineState] = useState<LocationEngineState | null>(null);
+  const [engineAvailable, setEngineAvailable] = useState<boolean>(false);
   const [serverState, setServerState] = useState<any>(null);
   const [serverStateLoading, setServerStateLoading] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [r, a, p, l, b, sr] = await Promise.all([
+    const [r, a, p, l, b, sr, eng] = await Promise.all([
       readRouteLog(),
       readAuthClearLog(),
       readPushRefreshLog(),
       readLocationRefreshLog(),
       readBgTaskLog(),
       readScreenRenderLog(),
+      getEngineDiagnostics(),
     ]);
     setRouteLog(r);
     setAuthLog(a);
@@ -136,6 +146,9 @@ export default function DiagnosticsScreen() {
     setLocLog(l);
     setBgLog(b);
     setRenderLog(sr);
+    setEngineLog(eng.log);
+    setEngineState(eng.state);
+    setEngineAvailable(eng.available);
     setLoading(false);
   }, []);
 
@@ -194,6 +207,11 @@ export default function DiagnosticsScreen() {
       locationRefreshLog: locLog,
       backgroundLocationTaskLog: bgLog,
       screenRenderLog: renderLog,
+      locationEngine: {
+        available: engineAvailable,
+        state: engineState,
+        log: engineLog,
+      },
       serverState,
       counts: {
         authClear: authLog.length,
@@ -202,9 +220,10 @@ export default function DiagnosticsScreen() {
         locationRefresh: locLog.length,
         bgTask: bgLog.length,
         screenRender: renderLog.length,
+        engineLog: engineLog.length,
       },
     };
-  }, [authLog, routeLog, pushLog, locLog, bgLog, renderLog, serverState, user]);
+  }, [authLog, routeLog, pushLog, locLog, bgLog, renderLog, engineLog, engineState, engineAvailable, serverState, user]);
 
   const onCopy = async () => {
     try {
@@ -417,6 +436,99 @@ export default function DiagnosticsScreen() {
               <Text style={styles.secondaryBtnText}>Check for OTA update now</Text>
             </TouchableOpacity>
           </View>
+        </View>
+
+        {/* =====================================================
+            v1.2.1 (build 41) — Transistor Location Engine.
+            Shows whether the background-geolocation native module
+            is loaded, the SDK's current tracking state, and a
+            ring-buffer of every lifecycle event captured since
+            the app started.  This is the primary diagnostic for
+            verifying that the engine is actually running after
+            authentication (the open question from the v1.2.0 (40)
+            field test).
+            ===================================================== */}
+        <View style={styles.section} testID="diagnostics-engine">
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Transistor Location Engine</Text>
+            <Text style={styles.sectionCount}>{engineLog.length}</Text>
+          </View>
+          <Text style={styles.sectionHint}>
+            Live state of the background-location SDK.  If &quot;available&quot; is true
+            but &quot;enabled&quot; is false, the engine never started — check the log
+            for the failure reason.  If both are true, look for `sdk_onHeartbeat`
+            entries while the app is backgrounded to confirm tracking continues.
+          </Text>
+          <View style={styles.card}>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>available: </Text>
+              {String(engineAvailable)}
+              {!engineAvailable && (
+                <Text style={styles.entryV}> (native module not loaded — web or non-Transistor build)</Text>
+              )}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>enabled: </Text>
+              {String(engineState?.enabled ?? false)}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>trackingMode: </Text>
+              {engineState?.trackingMode ?? 'unknown'}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>isMoving: </Text>
+              {engineState?.isMoving === null ? '—' : String(engineState?.isMoving)}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>odometer (m): </Text>
+              {engineState?.odometerMeters === null
+                ? '—'
+                : String(Math.round((engineState?.odometerMeters ?? 0) * 10) / 10)}
+            </Text>
+          </View>
+
+          <Text style={[styles.subSectionLabel, { marginTop: 12 }]}>Lifecycle log (last 30)</Text>
+          {engineLog.length === 0 ? (
+            <View style={styles.card}>
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryV}>
+                  No events recorded yet.  If you reached this screen after login but
+                  see nothing here, the layout effect never fired — likely an auth-state
+                  or member-row issue.
+                </Text>
+              </Text>
+            </View>
+          ) : (
+            engineLog.slice().reverse().map((entry, i) => (
+              <View key={`eng-${i}-${entry.at}`} style={styles.card}>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>{fmt(entry.at)}: </Text>
+                  <Text style={styles.bold}>{entry.event}</Text>
+                </Text>
+                {entry.detail && Object.keys(entry.detail).length > 0 ? (
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryV}>
+                      {Object.entries(entry.detail)
+                        .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
+                        .join('  ·  ')}
+                    </Text>
+                  </Text>
+                ) : null}
+              </View>
+            ))
+          )}
+
+          <TouchableOpacity
+            testID="diagnostics-clear-engine-log"
+            style={[styles.secondaryBtn, { marginTop: 8 }]}
+            onPress={async () => {
+              await clearEngineLog();
+              await reload();
+            }}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.secondaryBtnText}>Clear engine log</Text>
+          </TouchableOpacity>
         </View>
 
         {/* =====================================================

@@ -6,15 +6,6 @@
  * background location reliability calls into THIS module, not the
  * library directly.
  *
- * Why the envelope:
- *   • Single place to swap engines in the future without touching the
- *     rest of the app (~unlikely now that we've committed to Transistor,
- *     but cheap insurance).
- *   • Single place to add future features (Safe Zones, arrival
- *     notifications, wandering detection) without re-plumbing screens.
- *   • Clean test boundary — screens can mock the engine interface
- *     instead of mocking the underlying SDK.
- *
  * v1.2.0 scope:
  *   • `start()` — ready + start the SDK with our recommended config.
  *   • `stop()` — clean shutdown.
@@ -24,16 +15,41 @@
  *   • Per-user backend URL injection so we POST to
  *     `PUT /api/members/{member_id}/location` on Railway.
  *
- * NOT in v1.2.0 (intentionally deferred per founder directive):
- *   • Safe Zones / geofence CRUD UI / arrival-departure notification
- *     events / wandering alerts / privacy controls / Bubble mode.
- *   • Those features will layer on top of this engine via
- *     `BackgroundGeolocation.onGeofence(...)` etc. when ready.
+ * v1.2.1 — Diagnostic instrumentation (build 41).
+ *
+ * The Phase 3 field test showed neither engine displaying a foreground
+ * service notification, and Joyce's location going stale 15+ minutes
+ * after the app backgrounded.  The previous wrapper caught every SDK
+ * exception silently, which left us blind to the actual failure mode.
+ *
+ * Build 41 adds:
+ *
+ *   1. Named try/catch on every SDK call — every error path now logs
+ *      a structured entry (event name + reason).
+ *
+ *   2. Explicit `requestPermission()` call before `start()` — required
+ *      on Android 10+ to escalate to ACCESS_BACKGROUND_LOCATION.  The
+ *      SDK's `start()` does NOT auto-request this on its own; without
+ *      it tracking silently degrades to foreground-only.
+ *
+ *   3. Persistent ring buffer (30 entries, AsyncStorage) capturing
+ *      every lifecycle event: invocation, permission state, ready
+ *      result, start result, SDK event callbacks (location, motion
+ *      change, HTTP success/error, heartbeat, provider change),
+ *      stop result.  No JWT contents written.  Readable via
+ *      `getEngineDiagnostics()` and surfaced on the Diagnostics screen
+ *      so we can triage from a field device without a debug build.
+ *
+ *   4. SDK event subscriptions — onLocation / onMotionChange /
+ *      onProviderChange / onHttp / onHeartbeat all funnel into the
+ *      ring buffer so we can SEE whether the SDK is generating
+ *      fixes, posting to the backend, and what the backend returns.
  */
 import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Lazy require so this module is safe to import on web (where the
-// native module is absent).  Phase 1 + 2 work happens on Android only.
+// native module is absent).
 let BGGeo: any = null;
 function bgGeo(): any | null {
   if (Platform.OS === 'web') return null;
@@ -41,10 +57,92 @@ function bgGeo(): any | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     BGGeo = require('react-native-background-geolocation').default;
-  } catch (_e) {
+  } catch (e: any) {
     BGGeo = null;
+    // Log this — if the native module fails to load on Android, we
+    // need to know immediately.  The error is rarely fatal but it's
+    // ALWAYS the root cause when "the engine doesn't work".
+    void logEvent('require_failed', { error: String(e?.message || e) });
   }
   return BGGeo;
+}
+
+// ============================================================
+//  Diagnostic ring buffer (v1.2.1 / build 41)
+// ============================================================
+//
+// Persisted to AsyncStorage so it survives app kill/restart cycles
+// and can be retrieved from the Diagnostics screen even if the
+// underlying SDK crashed.  30 entries is enough to capture the
+// last ~30 minutes of activity at default heartbeat cadence,
+// well past the "engine never started" diagnosis horizon we need.
+//
+// PRIVACY: coordinates rounded to 0.01° (~1.1 km) before logging,
+// same convention used by the legacy `backgroundLocation.ts` log
+// buffer.  JWTs are NEVER logged — only their presence as boolean.
+const LOG_KEY = '@kinnship/location_engine_log_v1';
+const LOG_MAX = 30;
+
+export type EngineLogEvent = {
+  at: number;                  // epoch ms
+  event: string;               // event name (see below)
+  detail?: Record<string, any>;
+};
+
+// In-memory mirror so reads from the Diagnostics screen don't wait on
+// AsyncStorage.  AsyncStorage is the source of truth on cold start.
+let logBuffer: EngineLogEvent[] = [];
+let logBufferLoaded = false;
+
+async function loadLogBuffer(): Promise<void> {
+  if (logBufferLoaded) return;
+  try {
+    const raw = await AsyncStorage.getItem(LOG_KEY);
+    if (raw) logBuffer = JSON.parse(raw);
+  } catch (_e) {
+    logBuffer = [];
+  }
+  logBufferLoaded = true;
+}
+
+async function persistLogBuffer(): Promise<void> {
+  try {
+    await AsyncStorage.setItem(LOG_KEY, JSON.stringify(logBuffer));
+  } catch (_e) {
+    // Persistence is best-effort; in-memory mirror is still valid.
+  }
+}
+
+/**
+ * Append a single diagnostic event to the ring buffer.  Exported so
+ * that the layout (app launched / foregrounded / backgrounded) can
+ * push its own lifecycle events alongside the SDK ones.
+ */
+export async function logEvent(
+  event: string,
+  detail?: Record<string, any>,
+): Promise<void> {
+  await loadLogBuffer();
+  logBuffer.push({ at: Date.now(), event, detail });
+  if (logBuffer.length > LOG_MAX) {
+    logBuffer = logBuffer.slice(-LOG_MAX);
+  }
+  await persistLogBuffer();
+}
+
+/**
+ * Read the full diagnostic log for the Diagnostics screen.
+ * Oldest-first.  Safe to call on web (returns []).
+ */
+export async function getEngineLog(): Promise<EngineLogEvent[]> {
+  await loadLogBuffer();
+  return [...logBuffer];
+}
+
+/** Clear the log buffer.  Surfaced as a button on Diagnostics. */
+export async function clearEngineLog(): Promise<void> {
+  logBuffer = [];
+  await persistLogBuffer();
 }
 
 export type LocationEngineConfig = {
@@ -66,13 +164,77 @@ export type LocationEngineState = {
 
 let cachedConfig: LocationEngineConfig | null = null;
 let isReady = false;
+let listenersAttached = false;
 
 /**
- * Build the SDK config object for a given session.  Extracted so that
- * both the cold-start `ready()` path and the re-login `setConfig()`
- * path stay in lock-step (same URL template, same headers, same
- * auth strategy).
+ * One-time SDK event subscription.  These callbacks feed the
+ * diagnostic ring buffer — they are READ-ONLY observers, they do not
+ * affect engine behavior.  Idempotent (guarded by listenersAttached).
  */
+function attachSdkListeners(lib: any): void {
+  if (listenersAttached) return;
+  try {
+    lib.onLocation(
+      (loc: any) => {
+        void logEvent('sdk_onLocation', {
+          // Round to 0.01 deg for privacy in logs.  Real PUT uses full
+          // precision via the SDK's native HTTP transport.
+          lat: round01(loc?.coords?.latitude),
+          lng: round01(loc?.coords?.longitude),
+          acc: loc?.coords?.accuracy,
+          speed: loc?.coords?.speed,
+          isMoving: !!loc?.is_moving,
+          event: loc?.event,
+        });
+      },
+      (err: any) => {
+        void logEvent('sdk_onLocation_error', {
+          code: err?.code ?? err?.status ?? -1,
+          message: String(err?.message || err),
+        });
+      },
+    );
+    lib.onMotionChange((evt: any) => {
+      void logEvent('sdk_onMotionChange', {
+        isMoving: !!evt?.isMoving,
+      });
+    });
+    lib.onProviderChange((evt: any) => {
+      // status: 0=disabled, 1=allow-while-using, 3=always.
+      void logEvent('sdk_onProviderChange', {
+        enabled: !!evt?.enabled,
+        gps: !!evt?.gps,
+        network: !!evt?.network,
+        status: evt?.status,
+      });
+    });
+    lib.onHttp((evt: any) => {
+      // success: boolean, status: HTTP code, url: string.
+      void logEvent('sdk_onHttp', {
+        success: !!evt?.success,
+        status: evt?.status,
+        // Strip query strings; preserve path so we can confirm we're
+        // hitting /api/members/{id}/location and not a misconfigured URL.
+        path: (evt?.url || '').split('?')[0],
+      });
+    });
+    lib.onHeartbeat(() => {
+      void logEvent('sdk_onHeartbeat');
+    });
+    listenersAttached = true;
+    void logEvent('sdk_listeners_attached');
+  } catch (e: any) {
+    void logEvent('sdk_listeners_failed', {
+      error: String(e?.message || e),
+    });
+  }
+}
+
+function round01(n: any): number | null {
+  if (typeof n !== 'number' || !isFinite(n)) return null;
+  return Math.round(n * 100) / 100;
+}
+
 function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any> {
   const uploadUrl =
     `${cfg.backendBaseUrl.replace(/\/$/, '')}/api/members/${cfg.memberId}/location`;
@@ -80,19 +242,24 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
   return {
     // Tracking
     desiredAccuracy: lib.DESIRED_ACCURACY_HIGH,
-    distanceFilter: 10,            // meters between fixes when moving
-    stopTimeout: 5,                 // minutes of stationary before SDK goes "still"
-    locationUpdateInterval: 30000,  // fallback cadence ~30s
+    distanceFilter: 10,
+    stopTimeout: 5,
+    locationUpdateInterval: 30000,
     fastestLocationUpdateInterval: 10000,
 
     // Activity Recognition / motion detection
     activityRecognitionInterval: 10000,
     minimumActivityRecognitionConfidence: 75,
 
+    // Heartbeat — fires onHeartbeat every N seconds while STILL.  Used
+    // here purely as a "the SDK is alive" signal in the diagnostic log.
+    // 60s keeps log noise reasonable.
+    heartbeatInterval: 60,
+
     // Lifecycle
-    stopOnTerminate: false,        // keep tracking after app swipe-killed
-    startOnBoot: true,             // resume after device reboot
-    enableHeadless: true,          // allow background JS in headless mode
+    stopOnTerminate: false,
+    startOnBoot: true,
+    enableHeadless: true,
 
     // Foreground service (Android — required by Android 14+)
     foregroundService: true,
@@ -101,14 +268,11 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
       text: 'Your family can see where you are. Tap to pause.',
       smallIcon: 'mipmap/ic_launcher',
       channelName: 'Location sharing',
-      // IMPORTANCE_LOW — visible but no sound / no banner.
       priority: lib.NOTIFICATION_PRIORITY_LOW,
       sticky: true,
     },
 
-    // Native HTTP transport — uploads directly from the native service
-    // to our backend, bypassing the JS engine entirely.  This is the
-    // single biggest reliability win over expo-location.
+    // Native HTTP transport
     url: uploadUrl,
     method: 'PUT',
     autoSync: true,
@@ -120,38 +284,14 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
     headers: {
       'Content-Type': 'application/json',
     },
-    // ============================================================
-    //  JWT authorization (Phase 2 — Transistor official pattern)
-    // ============================================================
-    //  Per Transistor's official documentation and GitHub issue #1980
-    //  (the canonical "JWT rotation" reference), the SDK ships a
-    //  built-in `authorization` config that dynamically rebinds the
-    //  JWT to outgoing requests.  Manually rotating the
-    //  `headers.Authorization` field via setConfig() is documented as
-    //  unreliable — the SDK's internal HTTP client may cache the old
-    //  value and 401 silently.  Using `authorization` with
-    //  `strategy: 'JWT'` means subsequent `setConfig({ authorization:
-    //  { accessToken: <new> } })` calls correctly hot-swap the token
-    //  on the next outgoing PUT.
-    //
-    //  Our rolling-refresh path (api.ts response interceptor) listens
-    //  to the X-Refresh-Token header on every authenticated response
-    //  and calls saveToken() — which fans out to setAuthToken() in
-    //  this module via the subscriber registry in api.ts.
     authorization: {
       strategy: 'JWT',
       accessToken: cfg.jwt,
     },
 
-    // Retry queue — locations persist in SDK's SQLite and retry on
-    // network return.  Offline drives / Walmart-basement parking are
-    // covered automatically.
     maxRecordsToPersist: 10000,
     maxDaysToPersist: 7,
 
-    // Debug — INFO in production once we ship.  VERBOSE during the
-    // integration so the sound-effect-free debug ribbon helps field
-    // testers see life-cycle events.
     debug: false,
     logLevel: lib.LOG_LEVEL_INFO,
   };
@@ -160,64 +300,134 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
 /**
  * Start (or re-configure) the background location engine.
  *
- *  - First call after install: invokes `ready()` to configure the
- *    SDK, then `start()` to begin tracking.
- *  - Subsequent calls (e.g. account switch on the same device, or a
- *    cold-restart where the SDK retained its previous configuration):
- *    invokes `setConfig()` instead of `ready()` (per Transistor docs,
- *    `ready()` is intended to be called once per process), then
- *    `start()` to ensure tracking is on.
+ * v1.2.1 (build 41): Now performs the full lifecycle
+ *   listeners → ready → requestPermission → start
  *
- *  Safe to call repeatedly.
+ * Each step logs success or failure to the diagnostic ring buffer
+ * so the Diagnostics screen can show exactly where the engine failed.
  */
 export async function start(cfg: LocationEngineConfig): Promise<void> {
+  await logEvent('start_invoked', {
+    hasJwt: !!cfg.jwt,
+    memberId: cfg.memberId,
+    backendBaseUrlSet: !!cfg.backendBaseUrl,
+    platform: Platform.OS,
+  });
+
   const lib = bgGeo();
-  if (!lib) return; // web / not-yet-built environments
+  if (!lib) {
+    await logEvent('start_skipped', { reason: 'native_module_unavailable' });
+    return;
+  }
+
+  // ----- Attach SDK event listeners (idempotent) -----
+  attachSdkListeners(lib);
 
   const config = buildSdkConfig(lib, cfg);
   cachedConfig = cfg;
 
-  if (isReady) {
-    // Re-login / member-id change / token rotation between sessions.
-    // setConfig() updates url + authorization + everything else
-    // without re-running the one-shot ready() initializer.
-    await lib.setConfig(config);
-  } else {
-    await lib.ready(config);
-    isReady = true;
+  // ----- ready() / setConfig() -----
+  try {
+    if (isReady) {
+      await lib.setConfig(config);
+      await logEvent('setConfig_ok');
+    } else {
+      const state = await lib.ready(config);
+      isReady = true;
+      await logEvent('ready_ok', {
+        enabled: !!state?.enabled,
+        trackingMode: state?.trackingMode,
+        didLaunchInBackground: !!state?.didLaunchInBackground,
+      });
+    }
+  } catch (e: any) {
+    await logEvent('ready_or_setConfig_error', {
+      error: String(e?.message || e),
+    });
+    // Don't continue to start() — without a successful ready/setConfig
+    // the engine state is undefined.
+    return;
   }
 
-  // start() is the only call that actually begins tracking.  ready()
-  // alone configures but does not subscribe to updates.  Idempotent
-  // per Transistor docs — calling on an already-running engine is a
-  // no-op.
-  await lib.start();
+  // ----- requestPermission() (CRITICAL on Android 10+) -----
+  //
+  // Per Transistor docs, lib.start() does NOT auto-request
+  // ACCESS_BACKGROUND_LOCATION on Android — it requests only
+  // foreground.  Without this explicit call the SDK silently
+  // degrades to foreground-only tracking, which is exactly what
+  // the Phase 3 field test exhibited (location refreshes while
+  // app open, goes stale when backgrounded).
+  //
+  // Return codes:
+  //   AUTHORIZATION_STATUS_ALWAYS (3) — background granted
+  //   AUTHORIZATION_STATUS_WHEN_IN_USE (2) — foreground only
+  //   AUTHORIZATION_STATUS_DENIED (1) — denied
+  //   AUTHORIZATION_STATUS_NOT_DETERMINED (0) — never asked
+  try {
+    const status = await lib.requestPermission();
+    await logEvent('requestPermission_ok', {
+      status,
+      // Add human-readable label for the Diagnostics panel.
+      label:
+        status === 3 ? 'ALWAYS'
+        : status === 2 ? 'WHEN_IN_USE (foreground only)'
+        : status === 1 ? 'DENIED'
+        : status === 0 ? 'NOT_DETERMINED'
+        : `unknown(${status})`,
+    });
+  } catch (e: any) {
+    await logEvent('requestPermission_error', {
+      error: String(e?.message || e),
+    });
+    // Continue anyway — the user may have granted permission via the
+    // OS settings page outside the SDK's request flow.  start() will
+    // then succeed.  If permission really is denied, start() will
+    // log its own failure.
+  }
+
+  // ----- start() — the actual tracking subscription -----
+  try {
+    const state = await lib.start();
+    await logEvent('started_ok', {
+      enabled: !!state?.enabled,
+      trackingMode: state?.trackingMode,
+      isMoving: state?.isMoving,
+    });
+  } catch (e: any) {
+    await logEvent('start_error', {
+      error: String(e?.message || e),
+    });
+  }
 }
 
-/** Stop the engine (used during logout or pause). */
+/** Stop the engine.  Logs the outcome. */
 export async function stop(): Promise<void> {
+  await logEvent('stop_invoked');
   const lib = bgGeo();
-  if (!lib) return;
-  try { await lib.stop(); } catch (_e) {}
-  // Intentionally do NOT clear isReady or cachedConfig here — they
-  // describe SDK state (which persists across stop/start) and cached
-  // session config (which the next login will overwrite).  Clearing
-  // them on logout is handled by the layout effect calling start()
-  // with the new session's config.
+  if (!lib) {
+    await logEvent('stop_skipped', { reason: 'native_module_unavailable' });
+    return;
+  }
+  try {
+    await lib.stop();
+    await logEvent('stop_ok');
+  } catch (e: any) {
+    await logEvent('stop_error', { error: String(e?.message || e) });
+  }
 }
 
 /**
- * Update the JWT used by the native HTTP transport.
- *
- * Called every time `api.ts/saveToken()` runs — i.e. after OTP
- * verify AND after every rolling-refresh response from the backend.
- * Uses the documented `authorization` patch (not `headers`) so the
- * SDK's HTTP interceptor correctly rebinds the token to the next
- * outgoing PUT.  See JWT-rotation comment block in buildSdkConfig.
+ * Update the JWT used by the native HTTP transport.  Logged.
  */
 export async function setAuthToken(jwt: string): Promise<void> {
   const lib = bgGeo();
-  if (!lib || !cachedConfig) return;
+  if (!lib || !cachedConfig) {
+    await logEvent('setAuthToken_skipped', {
+      hasLib: !!lib,
+      hasCachedConfig: !!cachedConfig,
+    });
+    return;
+  }
   cachedConfig.jwt = jwt;
   try {
     await lib.setConfig({
@@ -226,10 +436,11 @@ export async function setAuthToken(jwt: string): Promise<void> {
         accessToken: jwt,
       },
     });
-  } catch (_e) {
-    // Never let a token-refresh failure crash the api response
-    // interceptor — the engine will pick up the new token on the
-    // next session boot in the worst case.
+    await logEvent('setAuthToken_ok');
+  } catch (e: any) {
+    await logEvent('setAuthToken_error', {
+      error: String(e?.message || e),
+    });
   }
 }
 
@@ -254,7 +465,8 @@ export async function getState(): Promise<LocationEngineState> {
       lastSampleAt: null,
       odometerMeters: state?.odometer ?? null,
     };
-  } catch (_e) {
+  } catch (e: any) {
+    await logEvent('getState_error', { error: String(e?.message || e) });
     return {
       enabled: false,
       trackingMode: 'unknown',
@@ -268,4 +480,20 @@ export async function getState(): Promise<LocationEngineState> {
 /** Available — true if the native module is loaded (i.e. not web). */
 export function isAvailable(): boolean {
   return bgGeo() !== null;
+}
+
+/**
+ * Aggregate diagnostics payload for the Diagnostics screen.
+ * Combines the in-memory engine state with the persisted ring buffer.
+ */
+export async function getEngineDiagnostics(): Promise<{
+  available: boolean;
+  state: LocationEngineState;
+  log: EngineLogEvent[];
+}> {
+  return {
+    available: isAvailable(),
+    state: await getState(),
+    log: await getEngineLog(),
+  };
 }

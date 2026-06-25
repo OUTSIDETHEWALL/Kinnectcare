@@ -3,7 +3,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from '../src/AuthContext';
 import { useEffect, useState } from 'react';
-import { View, ActivityIndicator, AppState } from 'react-native';
+import { View, ActivityIndicator, AppState, Platform } from 'react-native';
 import { Colors } from '../src/theme';
 import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink, refreshPushTokenIfStale } from '../src/push';
 import { isOnboardingDone } from '../src/onboardingStore';
@@ -77,6 +77,32 @@ function RootNav() {
       setNeedsOnboarding(!done);
       setOnboardingChecked(true);
     })();
+  }, []);
+
+  // ============================================================
+  //  v1.2.1 (build 41) — Lifecycle diagnostics
+  // ============================================================
+  //  Logs `app_launched` once on mount and `app_foregrounded` /
+  //  `app_backgrounded` on every AppState transition.  These entries
+  //  land in the same ring buffer as the location-engine events so
+  //  the Diagnostics screen can show the FULL timeline (e.g.
+  //  "app_backgrounded at 21:14, no SDK heartbeat since 21:13 →
+  //  engine not running in background").
+  useEffect(() => {
+    void locationEngine.logEvent('app_launched', {
+      platform: Platform.OS,
+      initialAppState: AppState.currentState,
+    });
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        void locationEngine.logEvent('app_foregrounded');
+      } else if (next === 'background' || next === 'inactive') {
+        void locationEngine.logEvent('app_backgrounded', { state: next });
+      }
+    });
+    return () => {
+      try { sub.remove(); } catch (_e) {}
+    };
   }, []);
 
   // Re-evaluate the PIN gate whenever the auth user changes. If the
