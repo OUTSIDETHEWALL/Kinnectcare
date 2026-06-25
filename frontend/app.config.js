@@ -73,7 +73,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 39, // bumped from 38 for v1.2.0 native build
+      versionCode: 40, // bumped from 39 for v1.2.0 Phase 3 production AAB (Play Internal Track)
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',

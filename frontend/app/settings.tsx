@@ -1,9 +1,10 @@
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Modal, TextInput, ActivityIndicator, Switch } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Modal, TextInput, ActivityIndicator, Switch, Platform } from 'react-native';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
+import Constants from 'expo-constants';
 import { useAuth } from '../src/AuthContext';
 import { APP_NAME, COMPANY_NAME } from '../src/legal';
 import { getBillingStatus, BillingStatus, api } from '../src/api';
@@ -439,7 +440,30 @@ export default function SettingsScreen() {
           {APP_NAME} · © {new Date().getFullYear()} {COMPANY_NAME}
         </Text>
         <Text style={styles.versionFooter} testID="settings-version">
-          Kinnship v1.3.3
+          {(() => {
+            // ============================================================
+            //  Settings footer — version + build number (v1.4 Phase 3)
+            // ============================================================
+            //  Reads dynamically from Constants.expoConfig so every future
+            //  release auto-updates without manual edits to this screen.
+            //  • appVersion: app.config.js `expo.version` (semantic).
+            //  • buildNumber: Android `android.versionCode` (integer)
+            //    OR iOS `ios.buildNumber` (string).  Falls back to '—'
+            //    if the build pipeline ever drops the field.
+            //  Format: `Kinnship v1.2.0 (40)` — single line, glanceable,
+            //  unambiguous when QA emails screenshots back from the field.
+            const cfg = Constants.expoConfig as any;
+            const appVersion = (cfg?.version as string | undefined) || '—';
+            const buildNumber =
+              Platform.OS === 'ios'
+                ? (cfg?.ios?.buildNumber as string | number | undefined)
+                : (cfg?.android?.versionCode as number | undefined);
+            const buildStr =
+              buildNumber === undefined || buildNumber === null
+                ? '—'
+                : String(buildNumber);
+            return `Kinnship v${appVersion} (${buildStr})`;
+          })()}
         </Text>
       </ScrollView>
 
