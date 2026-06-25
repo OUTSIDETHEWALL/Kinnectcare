@@ -403,6 +403,21 @@ function RootNav() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // ============================================================
+      //  v1.2.2 (build 42) — Legacy engine runtime gate
+      // ============================================================
+      //  Source code for the expo-location TaskManager path remains in
+      //  the repo per the Phase 5 cleanup directive (don't remove yet),
+      //  but the legacy engine is NOT invoked at runtime when the
+      //  Transistor build is available.  Reason: running both engines
+      //  concurrently risks (a) a second foreground-service slot in
+      //  Android's notification shade and (b) duplicate PUTs to
+      //  /api/members/{id}/location for every fix.  Transistor is the
+      //  single source of truth on this build.  If a future fallback
+      //  OTA ships without Transistor, this gate returns false and the
+      //  legacy path resumes automatically.
+      if (locationEngine.isAvailable()) return;
+
       if (!user?.id) {
         await stopBackgroundLocation();
         return;
@@ -412,17 +427,12 @@ function RootNav() {
         if (cancelled) return;
         const me = (res.data || []).find((m: any) => m.user_id === user.id);
         if (!me) {
-          // User is a caregiver-only — no member row tied to them yet.
-          // Do NOT start the service.  When they're linked later
-          // (via INV-invite auto-bind or retro-link script), the
-          // next /members fetch will pick it up.
           await stopBackgroundLocation();
           return;
         }
         await startBackgroundLocation(me.id);
       } catch (_e) {
-        // Silent — without an authenticated /members fetch we can't
-        // start anyway, and the next session will retry.
+        // Silent — next session retries.
       }
     })();
     return () => {

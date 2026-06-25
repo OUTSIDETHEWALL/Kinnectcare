@@ -17,33 +17,49 @@
  *
  * v1.2.1 — Diagnostic instrumentation (build 41).
  *
- * The Phase 3 field test showed neither engine displaying a foreground
- * service notification, and Joyce's location going stale 15+ minutes
- * after the app backgrounded.  The previous wrapper caught every SDK
- * exception silently, which left us blind to the actual failure mode.
+ *   1. Named try/catch on every SDK call.
+ *   2. Explicit requestPermission() before start().
+ *   3. Persistent ring buffer (30 entries, AsyncStorage).
+ *   4. SDK event subscriptions feeding the ring buffer.
  *
- * Build 41 adds:
+ * v1.2.2 — Headless heartbeat (build 42).
  *
- *   1. Named try/catch on every SDK call — every error path now logs
- *      a structured entry (event name + reason).
+ * Build 41 confirmed the engine starts cleanly (`started_ok`,
+ * permission ALWAYS) but produced ZERO `sdk_onLocation` /
+ * `sdk_onHeartbeat` / `sdk_onHttp` events once the device backgrounded
+ * and went stationary.  Root cause: when Android moves Kinnship to the
+ * background, the React Native JS runtime is frozen — the native
+ * Transistor service stays alive, but the JS callbacks (lib.onLocation,
+ * lib.onHeartbeat, ...) can't fire to request a fresh GPS fix or log
+ * events.  Without a JS handler to call getCurrentPosition() on each
+ * heartbeat, the SDK's motion-detection design suppresses GPS while
+ * stationary → no fixes → no uploads → stale location.
  *
- *   2. Explicit `requestPermission()` call before `start()` — required
- *      on Android 10+ to escalate to ACCESS_BACKGROUND_LOCATION.  The
- *      SDK's `start()` does NOT auto-request this on its own; without
- *      it tracking silently degrades to foreground-only.
+ * Build 42 adds the OFFICIAL Transistor fix:
  *
- *   3. Persistent ring buffer (30 entries, AsyncStorage) capturing
- *      every lifecycle event: invocation, permission state, ready
- *      result, start result, SDK event callbacks (location, motion
- *      change, HTTP success/error, heartbeat, provider change),
- *      stop result.  No JWT contents written.  Readable via
- *      `getEngineDiagnostics()` and surfaced on the Diagnostics screen
- *      so we can triage from a field device without a debug build.
+ *   1. Module-load `BackgroundGeolocation.registerHeadlessTask(...)`:
+ *      A NATIVE-CONTEXT JS task that Android instantiates on a fresh
+ *      tiny JS engine when the SDK fires a heartbeat (or location /
+ *      motionchange / http) event AND the main app's JS runtime is
+ *      frozen/dead.  Inside the headless task we call
+ *      `getCurrentPosition({ samples: 1, persist: true })` — forces a
+ *      single GPS sample and queues it through the SDK's native HTTP
+ *      transport using the URL+headers+JWT we already configured.
  *
- *   4. SDK event subscriptions — onLocation / onMotionChange /
- *      onProviderChange / onHttp / onHeartbeat all funnel into the
- *      ring buffer so we can SEE whether the SDK is generating
- *      fixes, posting to the backend, and what the backend returns.
+ *   2. Same handler via `lib.onHeartbeat(...)` for the JS-alive case
+ *      (app foregrounded).  Idempotent — both layers do the same
+ *      `getCurrentPosition` call.
+ *
+ *   3. Explicit `notification.id: 1` on the foreground-service config
+ *      to prevent any chance of multiple notification slots if
+ *      setConfig() ever runs concurrently with engine start.
+ *
+ * Net effect: every 60 seconds while stationary, regardless of JS
+ * runtime state, the device wakes briefly, gets a fix, uploads it,
+ * and goes back to sleep.  Family dashboard stays fresh; battery
+ * cost is roughly identical to the previous foreground polling
+ * because the SDK gates GPS acquisition tightly (single sample, no
+ * keep-alive).
  */
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -66,6 +82,95 @@ function bgGeo(): any | null {
   }
   return BGGeo;
 }
+
+// ============================================================
+//  Headless task registration (v1.2.2 / build 42)
+// ============================================================
+//
+// MUST be invoked at module-load time, BEFORE any user interaction.
+// Android instantiates a fresh native-context JS engine to run this
+// task when the SDK fires an event (heartbeat / location / etc.) AND
+// the main app's JS runtime is frozen or dead (post-background or
+// post-kill).  Without this, JS callbacks via lib.onHeartbeat(...)
+// cannot fire while backgrounded and the SDK's stationary-mode
+// behavior (no GPS while still) leads to stale locations.
+//
+// The headless task must be MINIMAL:
+//   • Pure Transistor SDK calls only (no AsyncStorage, no fetch,
+//     no other library calls that aren't guaranteed to be initialised
+//     in the headless JS context).
+//   • Short-running — the headless engine has a strict time budget
+//     before Android terminates it (~30 seconds).
+//   • Stateless — the headless JS context doesn't share memory with
+//     the main app.  Use SDK config (already persisted natively) to
+//     pass URL / JWT / headers.
+//
+// The official documented contract: on every heartbeat we call
+// `getCurrentPosition({ samples: 1, persist: true })`.  This:
+//   1. Forces a single fresh GPS sample even though the SDK is in
+//      stationary mode.
+//   2. Persists the sample to the SDK's SQLite queue with
+//      `persist: true`.
+//   3. The SDK's native HTTP transport (autoSync: true, url, method,
+//      headers, authorization — all set by the main-app start() call
+//      and persisted natively) PUTs it to our backend.
+//   4. SDK releases GPS and the device returns to sleep.
+let headlessRegistered = false;
+function registerHeadlessTaskOnce(): void {
+  if (Platform.OS === 'web') return;
+  if (headlessRegistered) return;
+  const lib = bgGeo();
+  if (!lib) return;
+
+  const HeadlessTask = async (event: any) => {
+    try {
+      const name = event?.name;
+      if (name === 'heartbeat') {
+        // Force a fresh GPS fix; SDK persists and uploads via native
+        // HTTP transport.  No-op if permission was revoked at the OS
+        // level since we last started.
+        try {
+          await lib.getCurrentPosition({
+            samples: 1,
+            persist: true,
+            timeout: 30,
+            extras: { source: 'headless-heartbeat' },
+          });
+        } catch (_e) {
+          // Swallow — Android may also kill us mid-flight; the SDK
+          // will retry the upload from its queue on the next event.
+        }
+      }
+      // Other event types (location, motionchange, http) are
+      // observability only — we don't need to act on them in
+      // headless context, the SDK already handled them natively.
+    } catch (_e) {
+      // Any uncaught throw in a headless task could destabilize the
+      // SDK's native service; defensive top-level catch.
+    }
+  };
+
+  try {
+    lib.registerHeadlessTask(HeadlessTask);
+    headlessRegistered = true;
+    void logEvent('registerHeadlessTask_ok');
+  } catch (e: any) {
+    void logEvent('registerHeadlessTask_error', {
+      error: String(e?.message || e),
+    });
+  }
+}
+
+// Fire the registration as a side-effect of the first import of this
+// module.  React Native module loading order guarantees this runs
+// before any login flow because _layout.tsx imports locationEngine at
+// the top of its module graph.
+//
+// IMPORTANT: invoked at the BOTTOM of the file, AFTER all module-level
+// `let`/`const` declarations (LOG_KEY, logBuffer, etc.).  If called
+// inline here, `bgGeo()` could hit a require failure and try to call
+// `logEvent()` which references TDZ'd const/let bindings — TypeError.
+// The bottom-of-file invocation is at line ~end of this module.
 
 // ============================================================
 //  Diagnostic ring buffer (v1.2.1 / build 41)
@@ -218,8 +323,25 @@ function attachSdkListeners(lib: any): void {
         path: (evt?.url || '').split('?')[0],
       });
     });
-    lib.onHeartbeat(() => {
+    lib.onHeartbeat(async () => {
       void logEvent('sdk_onHeartbeat');
+      // JS-alive companion to the headless task above.  When the app
+      // is foregrounded (or just-backgrounded and JS still attached),
+      // force a single fresh GPS sample so the family dashboard
+      // stays current without waiting for the headless engine.
+      try {
+        await lib.getCurrentPosition({
+          samples: 1,
+          persist: true,
+          timeout: 30,
+          extras: { source: 'js-heartbeat' },
+        });
+        void logEvent('heartbeat_getCurrentPosition_ok');
+      } catch (e: any) {
+        void logEvent('heartbeat_getCurrentPosition_error', {
+          error: String(e?.message || e),
+        });
+      }
     });
     listenersAttached = true;
     void logEvent('sdk_listeners_attached');
@@ -264,6 +386,11 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
     // Foreground service (Android — required by Android 14+)
     foregroundService: true,
     notification: {
+      // Explicit fixed id ensures Android updates the existing
+      // foreground-service notification in place rather than creating
+      // a new slot if setConfig() ever rebinds the notification config
+      // mid-session (e.g. on a token rotation).
+      id: 1,
       title: 'Kinnship is sharing your location',
       text: 'Your family can see where you are. Tap to pause.',
       smallIcon: 'mipmap/ic_launcher',
@@ -497,3 +624,21 @@ export async function getEngineDiagnostics(): Promise<{
     log: await getEngineLog(),
   };
 }
+
+// ============================================================
+//  Module bootstrap (v1.2.2 / build 42)
+// ============================================================
+//
+// Registers the native headless task with the Transistor SDK on the
+// first import of this module — typically done by _layout.tsx at app
+// startup, well before any auth flow runs.
+//
+// Placed at the VERY END of the file (rather than co-located with the
+// `registerHeadlessTaskOnce` declaration up top) so that all
+// module-level `let` / `const` bindings used by the diagnostic
+// logger (LOG_KEY, LOG_MAX, logBuffer, logBufferLoaded, etc.) are
+// already initialised before bootstrap runs.  If `bgGeo()` happens to
+// fail on first require and `logEvent('require_failed', ...)` is
+// invoked, that path now reads fully-initialised bindings instead of
+// hitting a temporal-dead-zone TypeError.
+registerHeadlessTaskOnce();
