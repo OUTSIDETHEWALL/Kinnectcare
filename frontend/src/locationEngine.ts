@@ -65,20 +65,19 @@ export type LocationEngineState = {
 };
 
 let cachedConfig: LocationEngineConfig | null = null;
+let isReady = false;
 
-/** Start (or re-configure) the background location engine. */
-export async function start(cfg: LocationEngineConfig): Promise<void> {
-  const lib = bgGeo();
-  if (!lib) return; // web / not-yet-built environments
-
-  cachedConfig = cfg;
+/**
+ * Build the SDK config object for a given session.  Extracted so that
+ * both the cold-start `ready()` path and the re-login `setConfig()`
+ * path stay in lock-step (same URL template, same headers, same
+ * auth strategy).
+ */
+function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any> {
   const uploadUrl =
     `${cfg.backendBaseUrl.replace(/\/$/, '')}/api/members/${cfg.memberId}/location`;
 
-  // SDK config — follows Transistor's recommended "family safety" preset.
-  // Adaptive cadence is driven by the SDK's internal motion detection;
-  // we don't try to override it with custom intervals.  Reliability first.
-  await lib.ready({
+  return {
     // Tracking
     desiredAccuracy: lib.DESIRED_ACCURACY_HIGH,
     distanceFilter: 10,            // meters between fixes when moving
@@ -119,9 +118,31 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
     locationTemplate:
       '{"latitude":<%= latitude %>,"longitude":<%= longitude %>,"accuracy":<%= accuracy %>,"speed":<%= speed %>,"heading":<%= heading %>,"timestamp":"<%= timestamp %>","is_moving":<%= is_moving %>,"event":"<%= event %>","provider":"transistor"}',
     headers: {
-      Authorization: `Bearer ${cfg.jwt}`,
       'Content-Type': 'application/json',
     },
+    // ============================================================
+    //  JWT authorization (Phase 2 — Transistor official pattern)
+    // ============================================================
+    //  Per Transistor's official documentation and GitHub issue #1980
+    //  (the canonical "JWT rotation" reference), the SDK ships a
+    //  built-in `authorization` config that dynamically rebinds the
+    //  JWT to outgoing requests.  Manually rotating the
+    //  `headers.Authorization` field via setConfig() is documented as
+    //  unreliable — the SDK's internal HTTP client may cache the old
+    //  value and 401 silently.  Using `authorization` with
+    //  `strategy: 'JWT'` means subsequent `setConfig({ authorization:
+    //  { accessToken: <new> } })` calls correctly hot-swap the token
+    //  on the next outgoing PUT.
+    //
+    //  Our rolling-refresh path (api.ts response interceptor) listens
+    //  to the X-Refresh-Token header on every authenticated response
+    //  and calls saveToken() — which fans out to setAuthToken() in
+    //  this module via the subscriber registry in api.ts.
+    authorization: {
+      strategy: 'JWT',
+      accessToken: cfg.jwt,
+    },
+
     // Retry queue — locations persist in SDK's SQLite and retry on
     // network return.  Offline drives / Walmart-basement parking are
     // covered automatically.
@@ -133,10 +154,43 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
     // testers see life-cycle events.
     debug: false,
     logLevel: lib.LOG_LEVEL_INFO,
-  });
+  };
+}
+
+/**
+ * Start (or re-configure) the background location engine.
+ *
+ *  - First call after install: invokes `ready()` to configure the
+ *    SDK, then `start()` to begin tracking.
+ *  - Subsequent calls (e.g. account switch on the same device, or a
+ *    cold-restart where the SDK retained its previous configuration):
+ *    invokes `setConfig()` instead of `ready()` (per Transistor docs,
+ *    `ready()` is intended to be called once per process), then
+ *    `start()` to ensure tracking is on.
+ *
+ *  Safe to call repeatedly.
+ */
+export async function start(cfg: LocationEngineConfig): Promise<void> {
+  const lib = bgGeo();
+  if (!lib) return; // web / not-yet-built environments
+
+  const config = buildSdkConfig(lib, cfg);
+  cachedConfig = cfg;
+
+  if (isReady) {
+    // Re-login / member-id change / token rotation between sessions.
+    // setConfig() updates url + authorization + everything else
+    // without re-running the one-shot ready() initializer.
+    await lib.setConfig(config);
+  } else {
+    await lib.ready(config);
+    isReady = true;
+  }
 
   // start() is the only call that actually begins tracking.  ready()
-  // alone configures but does not subscribe to updates.
+  // alone configures but does not subscribe to updates.  Idempotent
+  // per Transistor docs — calling on an already-running engine is a
+  // no-op.
   await lib.start();
 }
 
@@ -145,19 +199,38 @@ export async function stop(): Promise<void> {
   const lib = bgGeo();
   if (!lib) return;
   try { await lib.stop(); } catch (_e) {}
+  // Intentionally do NOT clear isReady or cachedConfig here — they
+  // describe SDK state (which persists across stop/start) and cached
+  // session config (which the next login will overwrite).  Clearing
+  // them on logout is handled by the layout effect calling start()
+  // with the new session's config.
 }
 
-/** Update the JWT header (called on token refresh). */
+/**
+ * Update the JWT used by the native HTTP transport.
+ *
+ * Called every time `api.ts/saveToken()` runs — i.e. after OTP
+ * verify AND after every rolling-refresh response from the backend.
+ * Uses the documented `authorization` patch (not `headers`) so the
+ * SDK's HTTP interceptor correctly rebinds the token to the next
+ * outgoing PUT.  See JWT-rotation comment block in buildSdkConfig.
+ */
 export async function setAuthToken(jwt: string): Promise<void> {
   const lib = bgGeo();
   if (!lib || !cachedConfig) return;
   cachedConfig.jwt = jwt;
-  await lib.setConfig({
-    headers: {
-      Authorization: `Bearer ${jwt}`,
-      'Content-Type': 'application/json',
-    },
-  });
+  try {
+    await lib.setConfig({
+      authorization: {
+        strategy: 'JWT',
+        accessToken: jwt,
+      },
+    });
+  } catch (_e) {
+    // Never let a token-refresh failure crash the api response
+    // interceptor — the engine will pick up the new token on the
+    // next session boot in the worst case.
+  }
 }
 
 /** Sync read of current engine state for diagnostics. */

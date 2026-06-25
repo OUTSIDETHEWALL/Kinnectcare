@@ -11,14 +11,70 @@ async function getToken(): Promise<string | null> {
   return SecureStore.getItemAsync(TOKEN_KEY);
 }
 
+/**
+ * Public accessor for the current JWT.  Added in Phase 2 of the
+ * Transistor location-engine migration: the engine wrapper needs to
+ * read the token at start-up to seed the SDK's native HTTP transport,
+ * and the RootNav layout effect is the canonical caller.  Kept as an
+ * async wrapper around the internal getToken() so the on-disk path
+ * stays a single source of truth.
+ */
+export async function getCurrentToken(): Promise<string | null> {
+  return getToken();
+}
+
+// ============================================================
+//  Token-change subscriber registry (v1.4 / Phase 2)
+// ============================================================
+//
+// The Transistor background-location engine ships JWTs in the SDK's
+// native HTTP transport via the `authorization` config.  Whenever
+// THIS app refreshes the JWT — either explicitly (verifyOtp) or
+// silently (rolling X-Refresh-Token header on any authenticated
+// response) — every saveToken() call must propagate the new value
+// to the engine via setAuthToken().
+//
+// A pub/sub here is the cleanest plumbing because:
+//   * api.ts is the chokepoint for token mutations (saveToken,
+//     clearToken).
+//   * The engine wrapper (locationEngine.ts) can't depend on api.ts
+//     without creating a circular import; the layout is the wiring
+//     layer.
+//   * Multiple subscribers may want token events in the future
+//     (push token re-registration, websocket reconnects, etc.).
+type TokenListener = (token: string | null) => void;
+const tokenListeners = new Set<TokenListener>();
+
+export function subscribeToTokenChanges(listener: TokenListener): () => void {
+  tokenListeners.add(listener);
+  return () => {
+    tokenListeners.delete(listener);
+  };
+}
+
+function notifyTokenChange(token: string | null): void {
+  // Snapshot to a list so listeners that unsubscribe themselves
+  // during the notification don't break the iteration.
+  const snap = Array.from(tokenListeners);
+  for (const l of snap) {
+    try {
+      l(token);
+    } catch (_e) {
+      // Subscribers must never crash the auth flow.
+    }
+  }
+}
+
 export async function saveToken(token: string) {
   if (Platform.OS === 'web') await AsyncStorage.setItem(TOKEN_KEY, token);
   else await SecureStore.setItemAsync(TOKEN_KEY, token);
+  notifyTokenChange(token);
 }
 
 export async function clearToken() {
   if (Platform.OS === 'web') await AsyncStorage.removeItem(TOKEN_KEY);
   else await SecureStore.deleteItemAsync(TOKEN_KEY);
+  notifyTokenChange(null);
 }
 
 export const api = axios.create({

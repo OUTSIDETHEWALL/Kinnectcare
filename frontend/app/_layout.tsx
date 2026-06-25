@@ -12,7 +12,8 @@ import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
 import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
 import { startBackgroundLocation, stopBackgroundLocation } from '../src/backgroundLocation';
 import { refreshLocationIfStale, setMyMemberId, setMyUserId } from '../src/locationRefresh';
-import { api } from '../src/api';
+import * as locationEngine from '../src/locationEngine';
+import { api, getCurrentToken, subscribeToTokenChanges } from '../src/api';
 import {
   loadDisclaimerAck,
   subscribeDisclaimerAck,
@@ -400,6 +401,100 @@ function RootNav() {
     })();
     return () => {
       cancelled = true;
+    };
+  }, [user?.id]);
+
+  // ============================================================
+  //  v1.4 (Phase 2) — Transistor Location Engine wiring
+  // ============================================================
+  //
+  //  Companion to the legacy expo-location effect above.  Starts the
+  //  Transistor `react-native-background-geolocation` engine after
+  //  successful authentication AND once we've identified the
+  //  current user's member row.  The engine's native HTTP transport
+  //  posts location fixes DIRECTLY from the OS service to
+  //  `PUT /api/members/{member_id}/location` — no JS round-trip,
+  //  no React lifecycle dependency, no Android-Doze suppression.
+  //  Payload carries `"provider":"transistor"` so backend logs (and
+  //  future analytics) can distinguish engine source from the legacy
+  //  expo-location path.
+  //
+  //  Phase 2 strict-scope decisions (per founder directive):
+  //   • Engine runs IN PARALLEL with the legacy expo-location task
+  //     during the validation window.  Both write to the same
+  //     idempotent latest-wins endpoint.  Legacy is NOT removed —
+  //     Phase 5 cleanup decommissions it once Walmart + Overnight
+  //     field tests pass.
+  //   • Engine is opt-in via runtime detection: if the native module
+  //     is absent (web, Expo Go, or a future fallback OTA build),
+  //     this effect is a clean no-op and the legacy path remains
+  //     authoritative.
+  //   • Caregivers who don't own a member row (no `user_id` match
+  //     in /members) intentionally don't run the engine — they're
+  //     tracking, not being tracked.  Same logic as the legacy
+  //     effect above.
+  //
+  //  JWT sync: subscribes to api.ts's token-change registry so every
+  //  saveToken() (verifyOtp + rolling X-Refresh-Token refresh) fans
+  //  out to locationEngine.setAuthToken().  Per Transistor docs we
+  //  patch the `authorization` config, not the `headers` field —
+  //  the SDK's HTTP interceptor rebinds the new token on the next
+  //  outgoing PUT.
+  useEffect(() => {
+    let cancelled = false;
+    let unsubscribeToken: (() => void) | null = null;
+
+    (async () => {
+      if (!user?.id) {
+        await locationEngine.stop();
+        return;
+      }
+      if (!locationEngine.isAvailable()) {
+        // Web / Expo Go / non-Transistor build — legacy engine remains
+        // authoritative on this device.
+        return;
+      }
+      try {
+        const res = await api.get('/members');
+        if (cancelled) return;
+        const me = (res.data || []).find((m: any) => m.user_id === user.id);
+        if (!me) {
+          // Caregiver-only or unlinked — nothing to upload from this
+          // device.  Ensure engine is stopped in case it was running
+          // from a previous session.
+          await locationEngine.stop();
+          return;
+        }
+        const jwt = await getCurrentToken();
+        const backendBaseUrl = process.env.EXPO_PUBLIC_BACKEND_URL || '';
+        if (!jwt || !backendBaseUrl) {
+          // Missing config — bail rather than start with broken auth.
+          return;
+        }
+        await locationEngine.start({
+          backendBaseUrl,
+          memberId: me.id,
+          jwt,
+        });
+        // Subscribe AFTER successful start so any rolling token
+        // refresh during the live session flows through.
+        unsubscribeToken = subscribeToTokenChanges((tok) => {
+          if (tok) {
+            locationEngine.setAuthToken(tok).catch(() => {});
+          }
+        });
+      } catch (_e) {
+        // Silent — without an authenticated /members fetch we can't
+        // identify the member row to upload to.  Next session retries.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unsubscribeToken) {
+        unsubscribeToken();
+        unsubscribeToken = null;
+      }
     };
   }, [user?.id]);
 
