@@ -125,7 +125,7 @@ module.exports = ({ config }) => ({
         'expo-gradle-ext-vars',
         {
           googlePlayServicesLocationVersion: '21.3.0',
-          tslocationmanagerVersion: '4.0.+',
+          tslocationmanagerVersion: '4.2.+',
           appCompatVersion: '1.6.1',
         },
       ],
