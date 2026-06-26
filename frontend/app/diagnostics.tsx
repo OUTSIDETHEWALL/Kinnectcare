@@ -46,6 +46,11 @@ import { readLocationRefreshLog, clearLocationRefreshLog, LocationRefreshEntry }
 import { readBgTaskLog, clearBgTaskLog, BgTaskLogEntry } from '../src/backgroundLocation';
 import { readScreenRenderLog, clearScreenRenderLog, ScreenRenderEntry } from '../src/screenRenderLog';
 import {
+  getDashboardLoadLog,
+  clearDashboardLoadLog,
+  DashboardLoadEntry,
+} from '../src/dashboardLoadLog';
+import {
   getEngineDiagnostics,
   clearEngineLog,
   EngineLogEvent,
@@ -125,13 +130,14 @@ export default function DiagnosticsScreen() {
   const [engineLog, setEngineLog] = useState<EngineLogEvent[]>([]);
   const [engineState, setEngineState] = useState<LocationEngineState | null>(null);
   const [engineAvailable, setEngineAvailable] = useState<boolean>(false);
+  const [dashLoadLog, setDashLoadLog] = useState<DashboardLoadEntry[]>([]);
   const [serverState, setServerState] = useState<any>(null);
   const [serverStateLoading, setServerStateLoading] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [r, a, p, l, b, sr, eng] = await Promise.all([
+    const [r, a, p, l, b, sr, eng, dl] = await Promise.all([
       readRouteLog(),
       readAuthClearLog(),
       readPushRefreshLog(),
@@ -139,6 +145,7 @@ export default function DiagnosticsScreen() {
       readBgTaskLog(),
       readScreenRenderLog(),
       getEngineDiagnostics(),
+      getDashboardLoadLog(),
     ]);
     setRouteLog(r);
     setAuthLog(a);
@@ -149,6 +156,7 @@ export default function DiagnosticsScreen() {
     setEngineLog(eng.log);
     setEngineState(eng.state);
     setEngineAvailable(eng.available);
+    setDashLoadLog(dl);
     setLoading(false);
   }, []);
 
@@ -212,6 +220,7 @@ export default function DiagnosticsScreen() {
         state: engineState,
         log: engineLog,
       },
+      dashboardLoadLog: dashLoadLog,
       serverState,
       counts: {
         authClear: authLog.length,
@@ -221,9 +230,10 @@ export default function DiagnosticsScreen() {
         bgTask: bgLog.length,
         screenRender: renderLog.length,
         engineLog: engineLog.length,
+        dashboardLoad: dashLoadLog.length,
       },
     };
-  }, [authLog, routeLog, pushLog, locLog, bgLog, renderLog, engineLog, engineState, engineAvailable, serverState, user]);
+  }, [authLog, routeLog, pushLog, locLog, bgLog, renderLog, engineLog, engineState, engineAvailable, dashLoadLog, serverState, user]);
 
   const onCopy = async () => {
     try {
@@ -528,6 +538,101 @@ export default function DiagnosticsScreen() {
             activeOpacity={0.85}
           >
             <Text style={styles.secondaryBtnText}>Clear engine log</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* =====================================================
+            v1.2.0 (43) — Dashboard Refresh Log.  Pure-additive
+            observation of every load() call that the Dashboard
+            tab fires.  Captures: who triggered (interval / focus /
+            AppState / notif / pull / quick-checkin), four
+            timestamps (start, get-sent, get-received, setState),
+            full raw /members response body, member ids that fired
+            the silent-push pull-on-stale cascade, plus any error.
+            This panel is the single source of truth for "what
+            did the API return vs what the UI rendered" during a
+            stale-render incident.
+            ===================================================== */}
+        <View style={styles.section} testID="diagnostics-dash-load">
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Dashboard Refresh Log</Text>
+            <Text style={styles.sectionCount}>{dashLoadLog.length}</Text>
+          </View>
+          <Text style={styles.sectionHint}>
+            Every dashboard `load()` invocation, newest first.  Each entry shows:
+            trigger source, the four end-to-end timestamps, the HTTP status,
+            the raw `/members` response (full unaltered JSON), and which member
+            ids fired the silent-push pull-on-stale cascade.  This is the
+            authoritative record of what the API returned at each refresh.
+          </Text>
+          {dashLoadLog.length === 0 ? (
+            <View style={styles.card}>
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryV}>
+                  No dashboard refreshes recorded yet.  Open the Dashboard tab
+                  and wait for a refresh cycle.
+                </Text>
+              </Text>
+            </View>
+          ) : (
+            dashLoadLog.slice().reverse().map((entry, i) => {
+              const dur = (entry.t_get_received && entry.t_get_sent)
+                ? `${entry.t_get_received - entry.t_get_sent}ms`
+                : '—';
+              const total = (entry.t_setstate && entry.t_load_started)
+                ? `${entry.t_setstate - entry.t_load_started}ms`
+                : '—';
+              return (
+                <View key={`dl-${i}-${entry.id}`} style={styles.card}>
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>{fmt(entry.t_load_started)} </Text>
+                    <Text style={styles.bold}>[{entry.trigger}]</Text>
+                    <Text style={styles.entryV}>  status={entry.http_status ?? '—'}  http={dur}  total={total}  count={entry.member_count ?? '—'}</Text>
+                  </Text>
+                  {entry.server_date_header ? (
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>server Date: </Text>
+                      <Text style={styles.entryV}>{entry.server_date_header}</Text>
+                    </Text>
+                  ) : null}
+                  {entry.error ? (
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>error: </Text>
+                      <Text style={styles.entryV}>{entry.error}</Text>
+                    </Text>
+                  ) : null}
+                  {entry.staleness_triggered_for.length > 0 ? (
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>silent-push fired for: </Text>
+                      <Text style={styles.entryV}>
+                        {entry.staleness_triggered_for.map((m) => m.slice(-6)).join(', ')}
+                      </Text>
+                    </Text>
+                  ) : null}
+                  {entry.raw_members && entry.raw_members.length > 0 ? (
+                    entry.raw_members.map((mb: any, j: number) => (
+                      <Text key={`dl-${entry.id}-mb-${j}`} style={styles.entryLine}>
+                        <Text style={styles.entryK}>id={(mb?.id || '').slice(-6)} </Text>
+                        <Text style={styles.entryV}>
+                          user_id={(mb?.user_id || '').slice(-6)} · fg={(mb?.family_group_id || '').slice(-6)} · last_seen={mb?.last_seen ?? 'null'} · lat={mb?.latitude ?? '—'} · lon={mb?.longitude ?? '—'} · name={mb?.location_name ?? '—'}
+                        </Text>
+                      </Text>
+                    ))
+                  ) : null}
+                </View>
+              );
+            })
+          )}
+          <TouchableOpacity
+            testID="diagnostics-clear-dash-load"
+            style={[styles.secondaryBtn, { marginTop: 8 }]}
+            onPress={async () => {
+              await clearDashboardLoadLog();
+              await reload();
+            }}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.secondaryBtnText}>Clear dashboard refresh log</Text>
           </TouchableOpacity>
         </View>
 

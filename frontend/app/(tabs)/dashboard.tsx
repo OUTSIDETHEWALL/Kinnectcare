@@ -22,6 +22,15 @@ import {
 } from '../../src/locationRefreshState';
 import { formatTimeAgo } from '../../src/timeFormat';
 import { logScreenRender } from '../../src/screenRenderLog';
+import {
+  startLoad as dashStartLoad,
+  markGetSent as dashMarkGetSent,
+  markGetReceived as dashMarkGetReceived,
+  markSetState as dashMarkSetState,
+  recordStalenessTrigger as dashRecordStaleness,
+  markError as dashMarkError,
+  DashboardLoadTrigger,
+} from '../../src/dashboardLoadLog';
 import { useAuth } from '../../src/AuthContext';
 
 export default function Dashboard() {
@@ -70,38 +79,73 @@ export default function Dashboard() {
     return unsub;
   }, []);
 
-  const load = async () => {
+  const load = async (trigger: DashboardLoadTrigger = 'unknown') => {
+    // ============================================================
+    //  v1.2.0 (43) — Dashboard Refresh Log (pure additive)
+    // ============================================================
+    //  Open a new entry on every load() invocation regardless of
+    //  trigger.  All timestamps + raw response + cascade are written
+    //  here; this is the canonical source of truth for "what did the
+    //  /members API return to Charles" during a stale-render incident.
+    const dlogId = await dashStartLoad(trigger).catch(() => '');
     try {
-      const [m, s, b] = await Promise.all([
-        api.get('/members'),
-        api.get('/summary'),
-        getBillingStatus().catch(() => null),
-      ]);
-      // v1.2.8 instrumentation: capture the raw API response BEFORE
-      // setState so the kc_screen_render_log entry is proof of what
-      // the network actually returned — separate from whether React
-      // ultimately re-rendered with that data.  One entry per
-      // member, plus a roll-up with memberCount.
+      // Mark the moment axios.get('/members') is about to fire.  We
+      // do this BEFORE Promise.all so a slow /summary doesn't skew
+      // the timing of the /members request.
+      if (dlogId) await dashMarkGetSent(dlogId).catch(() => {});
+      let mRes: any = null;
       try {
-        const list: any[] = Array.isArray(m.data) ? m.data : [];
-        await logScreenRender({
-          src: 'dashboard-fetch',
-          memberCount: list.length,
-        });
-        for (const mb of list) {
+        const [m, s, b] = await Promise.all([
+          api.get('/members'),
+          api.get('/summary'),
+          getBillingStatus().catch(() => null),
+        ]);
+        mRes = m;
+        // Capture full raw response + status + Date header BEFORE any
+        // mutation.  This is the immutable record of "what the API
+        // returned to this device at this exact moment in time".
+        if (dlogId) {
+          await dashMarkGetReceived(dlogId, {
+            status: m?.status ?? null,
+            raw_members: Array.isArray(m?.data) ? m.data : null,
+            server_date_header:
+              (m?.headers?.date as string | undefined) ||
+              (m?.headers?.Date as string | undefined) ||
+              null,
+          }).catch(() => {});
+        }
+        // v1.2.8 instrumentation (kept for backwards compat with
+        // existing tests that read the screenRenderLog).
+        try {
+          const list: any[] = Array.isArray(m.data) ? m.data : [];
           await logScreenRender({
             src: 'dashboard-fetch',
-            memberId: mb?.id,
-            lat: mb?.latitude,
-            lon: mb?.longitude,
-            lastSeen: mb?.last_seen ?? null,
-            locationName: mb?.location_name ?? null,
+            memberCount: list.length,
           });
+          for (const mb of list) {
+            await logScreenRender({
+              src: 'dashboard-fetch',
+              memberId: mb?.id,
+              lat: mb?.latitude,
+              lon: mb?.longitude,
+              lastSeen: mb?.last_seen ?? null,
+              locationName: mb?.location_name ?? null,
+            });
+          }
+        } catch (_e) {}
+        setMembers(m.data);
+        setSummary(s.data.members || []);
+        if (b) setBilling(b);
+        if (dlogId) await dashMarkSetState(dlogId).catch(() => {});
+      } catch (e: any) {
+        if (dlogId) {
+          await dashMarkError(
+            dlogId,
+            String(e?.response?.status ? `HTTP ${e.response.status}` : e?.message || e),
+          ).catch(() => {});
         }
-      } catch (_e) {}
-      setMembers(m.data);
-      setSummary(s.data.members || []);
-      if (b) setBilling(b);
+        throw e;
+      }
 
       // v1.3.2 — pull-on-stale: 60 s freshness threshold (was 2 min).
       // For any family member whose last_seen is older than 60 s, ask
@@ -111,7 +155,7 @@ export default function Dashboard() {
       // show a spinner indicator, and the next /members poll clears
       // the spinner once a newer last_seen arrives.
       try {
-        const list: any[] = Array.isArray(m.data) ? m.data : [];
+        const list: any[] = Array.isArray(mRes?.data) ? mRes.data : [];
         const now = Date.now();
         for (const mb of list) {
           if (!mb?.id) continue;
@@ -123,10 +167,16 @@ export default function Dashboard() {
           if (user?.id && mb?.user_id === user.id) continue;
           if (!seenMs || (now - seenMs) >= STALE_THRESHOLD_MS) {
             requestMemberRefresh(mb.id, seenMs || null);
+            // Record exactly which members triggered the silent-push
+            // cascade.  This is what links Joyce's per-minute "K"
+            // notifications back to Charles's pull-on-stale logic.
+            if (dlogId) await dashRecordStaleness(dlogId, mb.id).catch(() => {});
           }
         }
       } catch (_e) {}
-    } catch (_e) {}
+    } catch (_e) {
+      // Top-level catch — already recorded as error on the entry.
+    }
   };
 
   useFocusEffect(useCallback(() => {
@@ -135,7 +185,7 @@ export default function Dashboard() {
     // the background to avoid the jarring spinner-flash that v6 testers
     // reported as a perceived perf regression.
     setLoading((prev) => members.length === 0 ? true : prev);
-    load().finally(() => setLoading(false));
+    load('focus').finally(() => setLoading(false));
 
     // ============================================================
     //  v1.2.2 — Dashboard freshness improvements
@@ -170,15 +220,15 @@ export default function Dashboard() {
     //  Dashboard (tab switch, navigate to /settings, etc.) stops the
     //  polling and unsubscribes the listeners — no background work.
     const pollId = setInterval(() => {
-      load().catch(() => {});
+      load('interval-60s').catch(() => {});
     }, 60_000);
 
     const appStateSub = AppState.addEventListener('change', (next) => {
-      if (next === 'active') load().catch(() => {});
+      if (next === 'active') load('appstate-active').catch(() => {});
     });
 
     const notifSub = Notifications.addNotificationReceivedListener(() => {
-      load().catch(() => {});
+      load('notif-received').catch(() => {});
     });
 
     // v1.2.9 — active-mode location watcher.
@@ -291,7 +341,7 @@ export default function Dashboard() {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await load();
+    await load('pull-to-refresh');
     setRefreshing(false);
   };
 
@@ -392,7 +442,7 @@ export default function Dashboard() {
           const bg = await import('../../src/backgroundLocation');
           await bg.beginSosBoost();
         } catch (_e) {}
-        load().catch(() => {});
+        load('quick-checkin').catch(() => {});
         try {
           (globalThis as any).__kinnshipAlertsBump = Date.now();
         } catch (_e) {}
@@ -430,7 +480,7 @@ export default function Dashboard() {
           }
         } catch (_e) {}
         await api.post('/checkins', { member_id: m.id, latitude: lat, longitude: lon, location_name: name });
-        load().catch(() => {});
+        load('quick-checkin').catch(() => {});
       } catch (_e) {
         // Silent failure on the network side; the user already saw the confirmation.
       }

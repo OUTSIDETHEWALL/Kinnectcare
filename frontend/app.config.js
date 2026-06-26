@@ -73,7 +73,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 42, // bumped from 41 for v1.2.0 (42) — Headless heartbeat: native task forces fresh GPS fix while stationary + JS-runtime-frozen, plus notification.id=1 + legacy engine runtime-gated
+      versionCode: 43, // bumped from 42 for v1.2.0 (43) — Diagnostic build: dashboard refresh ring buffer + onHttp responseText capture + trigger source per load()
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',

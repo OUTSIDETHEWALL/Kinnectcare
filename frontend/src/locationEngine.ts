@@ -314,13 +314,30 @@ function attachSdkListeners(lib: any): void {
       });
     });
     lib.onHttp((evt: any) => {
-      // success: boolean, status: HTTP code, url: string.
+      // success: boolean, status: HTTP code, url: string, responseText: string.
+      //
+      // v1.2.0 (43) — also capture responseText so we have proof of
+      // what the BACKEND told us was stored.  The PUT response body
+      // is the updated FamilyMember doc as the server saw it,
+      // including the `last_seen` value the server actually wrote.
+      // Truncate to 400 chars to keep the ring buffer reasonable in
+      // size; the leading 400 chars of `{"id":...,"latitude":...,
+      // "longitude":...,"last_seen":"..."}` is plenty to confirm
+      // identity and freshness.
+      let bodyHead: string | null = null;
+      try {
+        const rt = evt?.responseText;
+        if (typeof rt === 'string' && rt.length > 0) {
+          bodyHead = rt.length > 400 ? rt.slice(0, 400) + '…' : rt;
+        }
+      } catch (_e) {}
       void logEvent('sdk_onHttp', {
         success: !!evt?.success,
         status: evt?.status,
         // Strip query strings; preserve path so we can confirm we're
         // hitting /api/members/{id}/location and not a misconfigured URL.
         path: (evt?.url || '').split('?')[0],
+        bodyHead,
       });
     });
     lib.onHeartbeat(async () => {
