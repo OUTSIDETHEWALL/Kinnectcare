@@ -31,6 +31,7 @@ import {
   markError as dashMarkError,
   DashboardLoadTrigger,
 } from '../../src/dashboardLoadLog';
+import { logCardRender, logBroadcast } from '../../src/cardRenderLog';
 import { useAuth } from '../../src/AuthContext';
 
 export default function Dashboard() {
@@ -68,11 +69,23 @@ export default function Dashboard() {
       if (!m?.id) return;
       setMembers((prev) => {
         let touched = false;
+        let priorLastSeen: string | null = null;
         const next = prev.map((row) => {
           if (row.id !== m.id) return row;
           touched = true;
+          priorLastSeen = row.last_seen ?? null;
           return { ...row, ...m };
         });
+        // v1.2.0 (44) — log every broadcast with the prior state value
+        // so we can detect stale-overwrite races.  Fire-and-forget so
+        // the React render isn't blocked.
+        try {
+          logBroadcast({
+            member_id: m.id,
+            broadcast_last_seen: m?.last_seen ?? null,
+            prior_state_last_seen: touched ? priorLastSeen : null,
+          });
+        } catch (_e) {}
         return touched ? next : prev;
       });
     });
@@ -709,6 +722,20 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
   }, []);
   const seenMs = member.last_seen ? new Date(member.last_seen).getTime() : 0;
   const ageLabel = seenMs ? formatTimeAgo(seenMs) : '';
+
+  // v1.2.0 (44) — log every render with the exact prop value the card
+  // received and the ageLabel it rendered.  Fire-and-forget; the helper
+  // never blocks render.  This pairs with the broadcast log in the
+  // diagnostics timeline so we can see whether the card painted the
+  // value that was just broadcast, or a stale earlier value.
+  try {
+    logCardRender({
+      member_id: member.id,
+      last_seen: member.last_seen ?? null,
+      age_label: ageLabel,
+      refreshing,
+    });
+  } catch (_e) {}
 
   return (
     <View testID={`member-card-${member.id}`} style={styles.memberCard}>

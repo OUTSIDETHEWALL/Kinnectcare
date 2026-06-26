@@ -32,6 +32,7 @@
  * code paths to write entries here; no existing behavior changes.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { nextSeq } from './diagSeq';
 
 const KEY = '@kinnship/dashboard_load_log_v1';
 const MAX = 50;
@@ -53,6 +54,10 @@ export type DashboardLoadTrigger =
  * the failure point.
  */
 export type DashboardLoadEntry = {
+  /** Global monotonic seq from diagSeq — strict ordering across all diagnostic streams. */
+  seq: number;
+  /** Source tag — always 'dashboard-load' for entries created by this module. */
+  src: 'dashboard-load';
   /** Stable id for cross-referencing within the buffer. */
   id: string;
   /** What caused this load() to fire. */
@@ -131,6 +136,8 @@ function nextId(): string {
 export async function startLoad(trigger: DashboardLoadTrigger): Promise<string> {
   await ensureLoaded();
   const entry: DashboardLoadEntry = {
+    seq: nextSeq(),
+    src: 'dashboard-load',
     id: nextId(),
     trigger,
     t_load_started: Date.now(),

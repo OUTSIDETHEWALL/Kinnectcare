@@ -51,6 +51,11 @@ import {
   DashboardLoadEntry,
 } from '../src/dashboardLoadLog';
 import {
+  getCardRenderLog,
+  clearCardRenderLog,
+  CardRenderEntry,
+} from '../src/cardRenderLog';
+import {
   getEngineDiagnostics,
   clearEngineLog,
   EngineLogEvent,
@@ -131,13 +136,14 @@ export default function DiagnosticsScreen() {
   const [engineState, setEngineState] = useState<LocationEngineState | null>(null);
   const [engineAvailable, setEngineAvailable] = useState<boolean>(false);
   const [dashLoadLog, setDashLoadLog] = useState<DashboardLoadEntry[]>([]);
+  const [cardLog, setCardLog] = useState<CardRenderEntry[]>([]);
   const [serverState, setServerState] = useState<any>(null);
   const [serverStateLoading, setServerStateLoading] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [r, a, p, l, b, sr, eng, dl] = await Promise.all([
+    const [r, a, p, l, b, sr, eng, dl, cr] = await Promise.all([
       readRouteLog(),
       readAuthClearLog(),
       readPushRefreshLog(),
@@ -146,6 +152,7 @@ export default function DiagnosticsScreen() {
       readScreenRenderLog(),
       getEngineDiagnostics(),
       getDashboardLoadLog(),
+      getCardRenderLog(),
     ]);
     setRouteLog(r);
     setAuthLog(a);
@@ -157,6 +164,7 @@ export default function DiagnosticsScreen() {
     setEngineState(eng.state);
     setEngineAvailable(eng.available);
     setDashLoadLog(dl);
+    setCardLog(cr);
     setLoading(false);
   }, []);
 
@@ -633,6 +641,92 @@ export default function DiagnosticsScreen() {
             activeOpacity={0.85}
           >
             <Text style={styles.secondaryBtnText}>Clear dashboard refresh log</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* =====================================================
+            v1.2.0 (44) — Card Render & Broadcast Timeline.
+            Interleaves two event streams (card-render and
+            broadcast) into a single seq-ordered list.  Use this
+            to pin down whether the visible card text matches
+            what was just broadcast vs. what was stored earlier.
+            ===================================================== */}
+        <View style={styles.section} testID="diagnostics-card-render">
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Card Render & Broadcast Timeline</Text>
+            <Text style={styles.sectionCount}>{cardLog.length}</Text>
+          </View>
+          <Text style={styles.sectionHint}>
+            Every card render (`card-render`) and every member broadcast
+            (`broadcast`) in strict seq order.  Compare the `last_seen` value
+            in a `broadcast` entry with the `last_seen` painted by the very
+            next `card-render` entry for the same `member_id` — divergence
+            here proves where stale data enters the UI.
+          </Text>
+          {cardLog.length === 0 ? (
+            <View style={styles.card}>
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryV}>
+                  No card renders or broadcasts recorded yet.  Open the
+                  Dashboard tab to populate this log.
+                </Text>
+              </Text>
+            </View>
+          ) : (
+            // Sort by seq descending (newest first) to keep the most
+            // diagnostically-interesting entries at the top.
+            cardLog.slice().sort((a, b) => b.seq - a.seq).map((entry) => {
+              const seqStr = `#${entry.seq}`;
+              const mid = entry.member_id.slice(-6);
+              if (entry.src === 'card-render') {
+                return (
+                  <View key={`cr-${entry.seq}`} style={styles.card}>
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>{seqStr} {fmt(entry.at)} </Text>
+                      <Text style={styles.bold}>[card-render]</Text>
+                      <Text style={styles.entryV}>  member={mid}  refreshing={String(entry.refreshing)}</Text>
+                    </Text>
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>  prop last_seen: </Text>
+                      <Text style={styles.entryV}>{entry.last_seen ?? 'null'}</Text>
+                    </Text>
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>  rendered ageLabel: </Text>
+                      <Text style={styles.entryV}>&quot;{entry.age_label}&quot;</Text>
+                    </Text>
+                  </View>
+                );
+              }
+              // broadcast entry
+              return (
+                <View key={`bc-${entry.seq}`} style={styles.card}>
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>{seqStr} {fmt(entry.at)} </Text>
+                    <Text style={styles.bold}>[broadcast]</Text>
+                    <Text style={styles.entryV}>  member={mid}  is_newer={String(entry.is_newer)}</Text>
+                  </Text>
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>  broadcast last_seen: </Text>
+                    <Text style={styles.entryV}>{entry.broadcast_last_seen ?? 'null'}</Text>
+                  </Text>
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>  prior state last_seen: </Text>
+                    <Text style={styles.entryV}>{entry.prior_state_last_seen ?? 'null'}</Text>
+                  </Text>
+                </View>
+              );
+            })
+          )}
+          <TouchableOpacity
+            testID="diagnostics-clear-card-log"
+            style={[styles.secondaryBtn, { marginTop: 8 }]}
+            onPress={async () => {
+              await clearCardRenderLog();
+              await reload();
+            }}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.secondaryBtnText}>Clear card render & broadcast log</Text>
           </TouchableOpacity>
         </View>
 

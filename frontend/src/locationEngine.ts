@@ -63,6 +63,7 @@
  */
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { nextSeq } from './diagSeq';
 
 // Lazy require so this module is safe to import on web (where the
 // native module is absent).
@@ -189,6 +190,10 @@ const LOG_KEY = '@kinnship/location_engine_log_v1';
 const LOG_MAX = 30;
 
 export type EngineLogEvent = {
+  /** Global monotonic seq from diagSeq — strict ordering across all diagnostic streams. */
+  seq: number;
+  /** Source tag — always 'engine' for entries created by this module. */
+  src: 'engine';
   at: number;                  // epoch ms
   event: string;               // event name (see below)
   detail?: Record<string, any>;
@@ -228,7 +233,13 @@ export async function logEvent(
   detail?: Record<string, any>,
 ): Promise<void> {
   await loadLogBuffer();
-  logBuffer.push({ at: Date.now(), event, detail });
+  logBuffer.push({
+    seq: nextSeq(),
+    src: 'engine',
+    at: Date.now(),
+    event,
+    detail,
+  });
   if (logBuffer.length > LOG_MAX) {
     logBuffer = logBuffer.slice(-LOG_MAX);
   }

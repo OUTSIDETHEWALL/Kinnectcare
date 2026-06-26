@@ -73,7 +73,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 43, // bumped from 42 for v1.2.0 (43) — Diagnostic build: dashboard refresh ring buffer + onHttp responseText capture + trigger source per load()
+      versionCode: 44, // bumped from 43 for v1.2.0 (44) — Card render & broadcast timeline: per-render log + per-broadcast log + shared monotonic seq + src tag across all diagnostic streams
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
