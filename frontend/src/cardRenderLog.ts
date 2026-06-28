@@ -40,9 +40,10 @@
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
+import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
 
 const KEY = '@kinnship/card_render_log_v1';
-const MAX = 100;
+const MAX = DIAG_BUFFER_SIZES.cardRender;
 
 export type CardRenderSource = 'card-render' | 'broadcast';
 
@@ -103,7 +104,7 @@ async function persist(): Promise<void> {
 async function append(entry: CardRenderEntry): Promise<void> {
   await ensureLoaded();
   buffer.push(entry);
-  if (buffer.length > MAX) buffer = buffer.slice(-MAX);
+  buffer = pruneBuffer(buffer, (e) => e.at, MAX);
   await persist();
 }
 
@@ -172,6 +173,7 @@ export function logBroadcast(args: {
 /** Read the full buffer (oldest-first by append order; seq is the authoritative order). */
 export async function getCardRenderLog(): Promise<CardRenderEntry[]> {
   await ensureLoaded();
+  buffer = pruneBuffer(buffer, (e) => e.at, MAX);
   return [...buffer];
 }
 

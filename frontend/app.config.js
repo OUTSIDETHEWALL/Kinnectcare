@@ -73,7 +73,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 45, // bumped from 44 for v1.2.0 (45) — Leonidas v1.0 Health Monitor: passive patrol of engine state + one-shot conservative recovery (no restart loops); wired into auth+engine lifecycle alongside Transistor
+      versionCode: 46, // bumped from 45 for v1.2.0 (46) — Leonidas Diagnostics panel (snapshot + recovery log + copy/clear) + Diagnostics cleanup: per-buffer size caps via diagBufferConfig, 2-hour auto-prune, "Clear ALL Diagnostics" button at top, collapsible sections (3 noisiest gated) with persisted expansion state.  No Leonidas behavior changes.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',

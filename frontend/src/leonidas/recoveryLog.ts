@@ -9,6 +9,7 @@
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from '../diagSeq';
+import { pruneBuffer } from '../diagBufferConfig';
 import {
   RecoveryLogEntry,
   RECOVERY_LOG_MAX,
@@ -58,14 +59,13 @@ export async function logRecovery(
     health_state,
     detail,
   });
-  if (buffer.length > RECOVERY_LOG_MAX) {
-    buffer = buffer.slice(-RECOVERY_LOG_MAX);
-  }
+  buffer = pruneBuffer(buffer, (e) => e.at, RECOVERY_LOG_MAX);
   await persist();
 }
 
 export async function getRecoveryLog(): Promise<RecoveryLogEntry[]> {
   await ensureLoaded();
+  buffer = pruneBuffer(buffer, (e) => e.at, RECOVERY_LOG_MAX);
   return [...buffer];
 }
 

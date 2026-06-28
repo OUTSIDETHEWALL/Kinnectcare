@@ -12,6 +12,8 @@
  *   more weight than idle time.
  */
 
+import { DIAG_BUFFER_SIZES } from '../diagBufferConfig';
+
 // ===========================================================
 //  TUNABLE CONSTANTS
 // ===========================================================
@@ -42,7 +44,7 @@ export const STATIONARY_RECOVERY_MAX_MINUTES = 30;  // ≥30 min → still just 
 export const RECOVERY_VERIFY_TIMEOUT_SECONDS = 30;
 
 /** Recovery ring buffer size — keeps the last N Leonidas events. */
-export const RECOVERY_LOG_MAX = 50;
+export const RECOVERY_LOG_MAX = DIAG_BUFFER_SIZES.leonidas;
 
 // ===========================================================
 //  HEALTH STATE MACHINE

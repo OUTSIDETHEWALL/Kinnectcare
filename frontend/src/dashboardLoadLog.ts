@@ -33,9 +33,10 @@
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
+import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
 
 const KEY = '@kinnship/dashboard_load_log_v1';
-const MAX = 50;
+const MAX = DIAG_BUFFER_SIZES.dashboardLoad;
 
 export type DashboardLoadTrigger =
   | 'mount'
@@ -152,7 +153,7 @@ export async function startLoad(trigger: DashboardLoadTrigger): Promise<string> 
     server_date_header: null,
   };
   buffer.push(entry);
-  if (buffer.length > MAX) buffer = buffer.slice(-MAX);
+  buffer = pruneBuffer(buffer, (e) => e.t_load_started, MAX);
   await persist();
   return entry.id;
 }
@@ -217,6 +218,9 @@ export async function markError(id: string, error: string): Promise<void> {
 /** Read the full buffer (oldest-first). */
 export async function getDashboardLoadLog(): Promise<DashboardLoadEntry[]> {
   await ensureLoaded();
+  // Prune-on-read so a long-idle device that hasn't appended in
+  // hours still surfaces a freshness-bounded buffer in Diagnostics.
+  buffer = pruneBuffer(buffer, (e) => e.t_load_started, MAX);
   return [...buffer];
 }
 

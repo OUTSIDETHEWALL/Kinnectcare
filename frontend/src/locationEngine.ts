@@ -64,6 +64,7 @@
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
+import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
 
 // Lazy require so this module is safe to import on web (where the
 // native module is absent).
@@ -187,7 +188,7 @@ function registerHeadlessTaskOnce(): void {
 // same convention used by the legacy `backgroundLocation.ts` log
 // buffer.  JWTs are NEVER logged — only their presence as boolean.
 const LOG_KEY = '@kinnship/location_engine_log_v1';
-const LOG_MAX = 30;
+const LOG_MAX = DIAG_BUFFER_SIZES.engineLog;
 
 export type EngineLogEvent = {
   /** Global monotonic seq from diagSeq — strict ordering across all diagnostic streams. */
@@ -240,9 +241,7 @@ export async function logEvent(
     event,
     detail,
   });
-  if (logBuffer.length > LOG_MAX) {
-    logBuffer = logBuffer.slice(-LOG_MAX);
-  }
+  logBuffer = pruneBuffer(logBuffer, (e) => e.at, LOG_MAX);
   await persistLogBuffer();
 }
 
@@ -252,6 +251,7 @@ export async function logEvent(
  */
 export async function getEngineLog(): Promise<EngineLogEvent[]> {
   await loadLogBuffer();
+  logBuffer = pruneBuffer(logBuffer, (e) => e.at, LOG_MAX);
   return [...logBuffer];
 }
 

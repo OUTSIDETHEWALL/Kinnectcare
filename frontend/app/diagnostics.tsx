@@ -20,7 +20,7 @@
  * Linked from Settings → "Diagnostics" (Beta) row. Safe to keep in
  * production — both logs cap themselves and are rolling buffers.
  */
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef, ReactNode } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -61,11 +61,14 @@ import {
   EngineLogEvent,
   LocationEngineState,
 } from '../src/locationEngine';
+import * as leonidas from '../src/leonidas';
+import { DIAG_BUFFER_SIZES, pruneBuffer } from '../src/diagBufferConfig';
 import { api } from '../src/api';
 import { useAuth } from '../src/AuthContext';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
 const PUSH_REFRESH_KEY = 'kc_push_refresh_log';
+const EXPANSION_STATE_KEY = '@kinnship/diagnostics_expanded_v1';
 
 type AuthClearEntry = {
   t: number;
@@ -87,7 +90,10 @@ type PushRefreshEntry = {
 async function readAuthClearLog(): Promise<AuthClearEntry[]> {
   try {
     const raw = await AsyncStorage.getItem(AUTH_CLEAR_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const arr: AuthClearEntry[] = raw ? JSON.parse(raw) : [];
+    // Build 46: prune-on-read (size + age) so the auth-clear log
+    // honors the same diagnostics budget as the in-process buffers.
+    return pruneBuffer(arr, (e) => e.t, DIAG_BUFFER_SIZES.authClear);
   } catch (_e) {
     return [];
   }
@@ -123,6 +129,120 @@ function roundCoordDisp(x: number): number {
   return Math.round(x * 100) / 100;
 }
 
+// ===========================================================
+//  Leonidas — pretty-formatters for the Last Decision summary
+// ===========================================================
+/**
+ * Translate the Leonidas event + state + reason triple into a single
+ * caregiver-grade sentence for the Last Decision field.  Build 46
+ * intentionally keeps this human-friendly: "No Action — Stationary
+ * within expected upload window" is more useful at a glance than
+ * "standing-guard + null".
+ */
+function formatLeonidasDecision(
+  event: string | null,
+  state: string | null,
+  reason: string | null,
+  action: string | null,
+): string {
+  if (!event) return '— no patrol yet';
+  if (event === 'patrol-tick') {
+    if (state === 'standing-guard') return 'No Action — Healthy';
+    if (state === 'watching') return 'No Action — Stationary within expected upload window';
+    if (state === 'unknown') return 'No Action — Awaiting first upload';
+    return `No Action — ${state}`;
+  }
+  if (event === 'state-change') return `State changed → ${state}`;
+  if (event === 'recovery-invoked') {
+    if (action === 'request-fresh-location') return `Requested Fresh Location — ${reason ?? state}`;
+    if (action === 'restart-engine') return `Restart Engine — ${reason ?? state}`;
+    if (action === 'restart-engine+request-fresh-location')
+      return `Restart + Fresh Fix — ${reason ?? state}`;
+    return `Invoked ${action ?? 'recovery'} — ${reason ?? state}`;
+  }
+  if (event === 'recovery-succeeded') return `Recovery Successful (${action ?? 'recovery'})`;
+  if (event === 'recovery-failed') return `Recovery Failed (${action ?? 'recovery'})`;
+  if (event === 'engine-restart-attempted') return 'Engine restart attempted';
+  if (event === 'engine-restart-succeeded') return 'Restart Deferred — Waiting for next patrol';
+  if (event === 'engine-restart-failed') return 'Engine restart failed';
+  if (event === 'patrol-started') return 'Patrol started';
+  if (event === 'patrol-stopped') return 'Patrol stopped';
+  return event;
+}
+
+function formatAgeMs(ms: number | null): string {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  return `${h}h ago`;
+}
+
+// ===========================================================
+//  CollapsibleSection — Build 46 wrapper.
+//
+//  Every Diagnostics section uses this so users can hide the noise
+//  they don't currently care about.  Contents are NOT rendered when
+//  collapsed — this is the key perf win for a 12-section screen.
+//
+//  Expansion state is persisted to AsyncStorage under a single
+//  JSON object, keyed by `id`, so the screen remembers what you
+//  had open across navigations within the same session.
+// ===========================================================
+type CollapsibleSectionProps = {
+  id: string;
+  title: string;
+  count?: number | string | null;
+  /** Optional one-line hint shown under the header when expanded. */
+  hint?: string;
+  /** Whether the section starts open if the user has no saved state. */
+  defaultExpanded?: boolean;
+  expanded: boolean;
+  onToggle: (id: string) => void;
+  children: ReactNode;
+  testID?: string;
+};
+
+function CollapsibleSection({
+  id,
+  title,
+  count,
+  hint,
+  expanded,
+  onToggle,
+  children,
+  testID,
+}: CollapsibleSectionProps) {
+  return (
+    <View style={styles.section} testID={testID}>
+      <TouchableOpacity
+        accessibilityLabel={`${expanded ? 'Collapse' : 'Expand'} ${title}`}
+        accessibilityRole="button"
+        onPress={() => onToggle(id)}
+        activeOpacity={0.7}
+        style={styles.collapsibleHeader}
+        testID={`${testID || `diagnostics-section-${id}`}-header`}
+      >
+        <Text style={styles.collapsibleChevron}>{expanded ? '▼' : '▶'}</Text>
+        <Text style={styles.collapsibleTitle} numberOfLines={1}>
+          {title}
+        </Text>
+        {count !== null && count !== undefined ? (
+          <Text style={styles.collapsibleCount}>{count}</Text>
+        ) : null}
+      </TouchableOpacity>
+      {expanded ? (
+        <>
+          {hint ? <Text style={styles.sectionHint}>{hint}</Text> : null}
+          {children}
+        </>
+      ) : null}
+    </View>
+  );
+}
+
 export default function DiagnosticsScreen() {
   const router = useRouter();
   const { user } = useAuth();
@@ -141,9 +261,50 @@ export default function DiagnosticsScreen() {
   const [serverStateLoading, setServerStateLoading] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  // Leonidas (Build 46) — snapshot + recovery log
+  const [leoSnapshot, setLeoSnapshot] = useState<leonidas.LeonidasSnapshotForUI | null>(null);
+  const [leoLog, setLeoLog] = useState<leonidas.RecoveryLogEntry[]>([]);
+
+  // Build 46 — collapsible-section state.  Persisted to AsyncStorage
+  // (best-effort) so the screen remembers which panels were open
+  // during the current session.  Default-closed for everything
+  // except Leonidas + Engine + Build/OTA, which are the most useful
+  // panels for ongoing field testing.
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({
+    'build-ota': true,
+    leonidas: true,
+    engine: true,
+  });
+  const expansionLoadedRef = useRef(false);
+
+  // Restore persisted expansion state once on mount.
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(EXPANSION_STATE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object') {
+            setExpanded((prev) => ({ ...prev, ...parsed }));
+          }
+        }
+      } catch (_e) { /* best-effort */ }
+      expansionLoadedRef.current = true;
+    })();
+  }, []);
+
+  const toggleSection = useCallback((id: string) => {
+    setExpanded((prev) => {
+      const next = { ...prev, [id]: !prev[id] };
+      // Persist async, fire-and-forget.
+      AsyncStorage.setItem(EXPANSION_STATE_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }, []);
+
   const reload = useCallback(async () => {
     setLoading(true);
-    const [r, a, p, l, b, sr, eng, dl, cr] = await Promise.all([
+    const [r, a, p, l, b, sr, eng, dl, cr, lsnap, llog] = await Promise.all([
       readRouteLog(),
       readAuthClearLog(),
       readPushRefreshLog(),
@@ -153,6 +314,8 @@ export default function DiagnosticsScreen() {
       getEngineDiagnostics(),
       getDashboardLoadLog(),
       getCardRenderLog(),
+      Promise.resolve(leonidas.getSnapshot()),
+      leonidas.getRecoveryLog(),
     ]);
     setRouteLog(r);
     setAuthLog(a);
@@ -165,10 +328,32 @@ export default function DiagnosticsScreen() {
     setEngineAvailable(eng.available);
     setDashLoadLog(dl);
     setCardLog(cr);
+    setLeoSnapshot(lsnap);
+    setLeoLog(llog);
     setLoading(false);
   }, []);
 
   useEffect(() => { reload(); }, [reload]);
+
+  // Build 46 — Leonidas-only fast-refresh tick.  Only ticks while the
+  // Leonidas panel is expanded, so we don't burn cycles when the user
+  // is looking at other sections.  Refreshes every 4s, which is fast
+  // enough to watch state transitions live without spamming
+  // AsyncStorage reads.
+  useEffect(() => {
+    if (!expanded.leonidas) return;
+    const tick = setInterval(async () => {
+      try {
+        const [snap, log] = await Promise.all([
+          Promise.resolve(leonidas.getSnapshot()),
+          leonidas.getRecoveryLog(),
+        ]);
+        setLeoSnapshot(snap);
+        setLeoLog(log);
+      } catch (_e) { /* swallow */ }
+    }, 4000);
+    return () => clearInterval(tick);
+  }, [expanded.leonidas]);
 
   const fetchServerState = useCallback(async () => {
     setServerStateLoading(true);
@@ -359,21 +544,76 @@ export default function DiagnosticsScreen() {
 
   const onClear = () => {
     Alert.alert(
-      'Clear diagnostic logs?',
-      'This removes all auth-clear and route-tap entries from this device. Cannot be undone.',
+      'Clear ALL Diagnostics?',
+      'This removes EVERY developer ring buffer from this device — engine log, dashboard log, card render log, Leonidas log, auth log, route log, push log, notification log, fall logs, and more. Cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear ALL',
+          style: 'destructive',
+          onPress: async () => {
+            await Promise.all([
+              clearAuthClearLog(),
+              clearRouteLog(),
+              clearPushRefreshLog(),
+              clearLocationRefreshLog(),
+              clearBgTaskLog(),
+              clearScreenRenderLog(),
+              clearEngineLog(),
+              clearDashboardLoadLog(),
+              clearCardRenderLog(),
+              leonidas.clearRecoveryLog(),
+              clearNotificationLog(),
+              clearAllFallLogs(),
+            ]);
+            await reload();
+            try { await refreshNotifLog(); } catch (_e) {}
+            try { await refreshFallTelemetry(); } catch (_e) {}
+          },
+        },
+      ],
+    );
+  };
+
+  // Build 46 — Leonidas-specific actions.
+  const onCopyLeonidasLog = useCallback(async () => {
+    try {
+      const payload = {
+        generatedAt: new Date().toISOString(),
+        leonidas: {
+          snapshot: leoSnapshot,
+          recovery_log: leoLog,
+        },
+      };
+      await Clipboard.setStringAsync(JSON.stringify(payload, null, 2));
+      Alert.alert('Copied', `Leonidas log copied (${leoLog.length} entries).`);
+    } catch (e: any) {
+      Alert.alert('Could not copy', e?.message || 'Try again.');
+    }
+  }, [leoSnapshot, leoLog]);
+
+  const onClearLeonidasLog = useCallback(() => {
+    Alert.alert(
+      'Clear Leonidas log?',
+      'Removes the recovery log on this device. The patrol loop keeps running.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Clear',
           style: 'destructive',
           onPress: async () => {
-            await Promise.all([clearAuthClearLog(), clearRouteLog(), clearPushRefreshLog(), clearLocationRefreshLog(), clearBgTaskLog(), clearScreenRenderLog()]);
-            await reload();
+            await leonidas.clearRecoveryLog();
+            const [snap, log] = await Promise.all([
+              Promise.resolve(leonidas.getSnapshot()),
+              leonidas.getRecoveryLog(),
+            ]);
+            setLeoSnapshot(snap);
+            setLeoLog(log);
           },
         },
       ],
     );
-  };
+  }, []);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -396,6 +636,190 @@ export default function DiagnosticsScreen() {
           paste into your reply. No personal data leaves your phone until you paste.
         </Text>
 
+        {/* =====================================================
+            Build 46 — Clear ALL Diagnostics.
+            One button at the top wipes every developer ring
+            buffer so testers don't have to scroll to each panel
+            to clear individually between test windows.
+            ===================================================== */}
+        <TouchableOpacity
+          testID="diagnostics-clear-all-top"
+          style={styles.clearAllBtn}
+          onPress={onClear}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.clearAllBtnText}>🗑  Clear ALL Diagnostics</Text>
+        </TouchableOpacity>
+        <Text style={styles.clearAllHint}>
+          Clears engine, dashboard, card-render, Leonidas, auth, route, push,
+          notifications, fall logs, and every other developer ring buffer in one tap.
+        </Text>
+
+        {/* =====================================================
+            Build 46 — Leonidas v1.0 Health Monitor.
+            Live snapshot + recovery log.  Auto-refreshes only
+            while expanded.  This is the primary observation
+            surface for the Build 45 health-monitor subsystem.
+            ===================================================== */}
+        <CollapsibleSection
+          id="leonidas"
+          title="Leonidas Health Monitor"
+          count={leoLog.length}
+          expanded={!!expanded.leonidas}
+          onToggle={toggleSection}
+          hint="Passive patrol of engine state + one-shot conservative recovery.  Auto-refreshes every 4 s while this panel is expanded."
+          testID="diagnostics-leonidas"
+        >
+          {/* Snapshot card — at-a-glance health */}
+          <View style={styles.card} testID="diagnostics-leonidas-snapshot">
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>Patrol active: </Text>
+              <Text style={leoSnapshot?.patrol_active ? styles.bold : undefined}>
+                {leoSnapshot?.patrol_active ? 'Yes' : 'No'}
+              </Text>
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>Health state: </Text>
+              <Text style={styles.bold}>{leoSnapshot?.state ?? 'unknown'}</Text>
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>Motion state: </Text>
+              {leoSnapshot?.last_patrol
+                ? (leoSnapshot.last_patrol.engine_is_moving === null
+                    ? 'unknown'
+                    : leoSnapshot.last_patrol.engine_is_moving
+                    ? 'moving'
+                    : 'stationary')
+                : '—'}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>Last patrol: </Text>
+              {leoSnapshot?.last_patrol ? fmt(leoSnapshot.last_patrol.at) : '—'}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>Patrol count: </Text>
+              {leoSnapshot?.patrol_count ?? 0}
+              {'   '}
+              <Text style={styles.entryK}>Recoveries today: </Text>
+              {leoSnapshot?.recoveries_today ?? 0}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>Last upload age: </Text>
+              {formatAgeMs(leoSnapshot?.last_patrol?.last_upload_age_ms ?? null)}
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>Last decision: </Text>
+              <Text style={styles.bold}>
+                {formatLeonidasDecision(
+                  leoLog.length > 0 ? leoLog[leoLog.length - 1].event : null,
+                  leoLog.length > 0 ? leoLog[leoLog.length - 1].health_state : (leoSnapshot?.state ?? null),
+                  leoLog.length > 0 ? (leoLog[leoLog.length - 1].detail?.reason ?? null) : null,
+                  leoLog.length > 0 ? (leoLog[leoLog.length - 1].detail?.action ?? null) : null,
+                )}
+              </Text>
+            </Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>Current recovery state: </Text>
+              {leoSnapshot?.last_recovery
+                ? `${leoSnapshot.last_recovery.recovery_action} → ${leoSnapshot.last_recovery.recovery_result ?? '—'}${
+                    leoSnapshot.last_recovery.recovery_duration_ms != null
+                      ? ` (${leoSnapshot.last_recovery.recovery_duration_ms} ms)`
+                      : ''
+                  }`
+                : 'idle — no recovery this session'}
+            </Text>
+          </View>
+
+          {/* Recovery log */}
+          <Text style={styles.subSectionLabel}>Recovery log (newest first, last {DIAG_BUFFER_SIZES.leonidas})</Text>
+          {leoLog.length === 0 ? (
+            <View style={styles.card}>
+              <Text style={styles.muted}>
+                — no Leonidas events recorded yet.  The first patrol fires
+                ~60 s after engine start; if this stays empty, Leonidas is
+                not booting (check auth / engine state above).
+              </Text>
+            </View>
+          ) : (
+            leoLog.slice().sort((a, b) => b.seq - a.seq).map((e) => (
+              <View key={`leo-${e.seq}`} style={styles.card}>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>#{e.seq} {fmt(e.at)} </Text>
+                  <Text style={styles.bold}>{e.event}</Text>
+                  <Text style={styles.entryV}>  state={e.health_state}</Text>
+                </Text>
+                {e.detail?.reason ? (
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>  reason: </Text>
+                    <Text style={styles.entryV}>{String(e.detail.reason)}</Text>
+                  </Text>
+                ) : null}
+                {e.detail?.action ? (
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>  action: </Text>
+                    <Text style={styles.entryV}>{String(e.detail.action)}</Text>
+                  </Text>
+                ) : null}
+                {e.detail?.duration_ms != null ? (
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>  duration: </Text>
+                    <Text style={styles.entryV}>{String(e.detail.duration_ms)} ms</Text>
+                  </Text>
+                ) : null}
+                {e.detail?.last_upload_age_ms != null ? (
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>  last_upload_age: </Text>
+                    <Text style={styles.entryV}>{formatAgeMs(e.detail.last_upload_age_ms)}</Text>
+                  </Text>
+                ) : null}
+                {e.detail?.engine_is_moving != null ? (
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>  engine_is_moving: </Text>
+                    <Text style={styles.entryV}>{String(e.detail.engine_is_moving)}</Text>
+                  </Text>
+                ) : null}
+                {e.detail?.note ? (
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>  note: </Text>
+                    <Text style={styles.entryV}>{String(e.detail.note)}</Text>
+                  </Text>
+                ) : null}
+                {e.detail?.error ? (
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>  error: </Text>
+                    <Text style={styles.divergent}>{String(e.detail.error)}</Text>
+                  </Text>
+                ) : null}
+                {e.detail?.from && e.detail?.to ? (
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>  transition: </Text>
+                    <Text style={styles.entryV}>{String(e.detail.from)} → {String(e.detail.to)}</Text>
+                  </Text>
+                ) : null}
+              </View>
+            ))
+          )}
+
+          <View style={styles.actionRow}>
+            <TouchableOpacity
+              testID="diagnostics-leonidas-copy"
+              style={styles.primaryBtn}
+              onPress={onCopyLeonidasLog}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.primaryBtnText}>📋  Copy Leonidas Log</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="diagnostics-leonidas-clear"
+              style={styles.secondaryBtn}
+              onPress={onClearLeonidasLog}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.secondaryBtnText}>Clear Leonidas Log</Text>
+            </TouchableOpacity>
+          </View>
+        </CollapsibleSection>
+
         {/*
           v1.3.2 — Build / OTA info section.
           Shows the EXACT bundle the device is running so we can
@@ -417,9 +841,14 @@ export default function DiagnosticsScreen() {
             </Text>
             <Text style={styles.entryLine}>
               <Text style={styles.entryK}>runtime: </Text>
-              {(Updates as any)?.runtimeVersion ||
-                ((Constants?.expoConfig as any)?.runtimeVersion as string) ||
-                'unknown'}
+              {(() => {
+                const u = (Updates as any)?.runtimeVersion;
+                if (typeof u === 'string' && u.length > 0) return u;
+                const c = (Constants?.expoConfig as any)?.runtimeVersion;
+                if (typeof c === 'string' && c.length > 0) return c;
+                if (c && typeof c === 'object' && c.policy) return `policy:${c.policy}`;
+                return 'unknown';
+              })()}
             </Text>
             <Text style={styles.entryLine}>
               <Text style={styles.entryK}>channel: </Text>
@@ -467,10 +896,17 @@ export default function DiagnosticsScreen() {
             field test).
             ===================================================== */}
         <View style={styles.section} testID="diagnostics-engine">
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Transistor Location Engine</Text>
-            <Text style={styles.sectionCount}>{engineLog.length}</Text>
-          </View>
+          <TouchableOpacity
+            style={styles.collapsibleHeader}
+            onPress={() => toggleSection('engine')}
+            activeOpacity={0.7}
+            accessibilityLabel={`${expanded.engine ? 'Collapse' : 'Expand'} Engine`}
+          >
+            <Text style={styles.collapsibleChevron}>{expanded.engine ? '▼' : '▶'}</Text>
+            <Text style={styles.collapsibleTitle}>Transistor Location Engine</Text>
+            <Text style={styles.collapsibleCount}>{engineLog.length}</Text>
+          </TouchableOpacity>
+          {!!expanded.engine && (<>
           <Text style={styles.sectionHint}>
             Live state of the background-location SDK.  If &quot;available&quot; is true
             but &quot;enabled&quot; is false, the engine never started — check the log
@@ -547,6 +983,7 @@ export default function DiagnosticsScreen() {
           >
             <Text style={styles.secondaryBtnText}>Clear engine log</Text>
           </TouchableOpacity>
+          </>)}
         </View>
 
         {/* =====================================================
@@ -562,10 +999,17 @@ export default function DiagnosticsScreen() {
             stale-render incident.
             ===================================================== */}
         <View style={styles.section} testID="diagnostics-dash-load">
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Dashboard Refresh Log</Text>
-            <Text style={styles.sectionCount}>{dashLoadLog.length}</Text>
-          </View>
+          <TouchableOpacity
+            style={styles.collapsibleHeader}
+            onPress={() => toggleSection('dashboard')}
+            activeOpacity={0.7}
+            accessibilityLabel={`${expanded.dashboard ? 'Collapse' : 'Expand'} Dashboard`}
+          >
+            <Text style={styles.collapsibleChevron}>{expanded.dashboard ? '▼' : '▶'}</Text>
+            <Text style={styles.collapsibleTitle}>Dashboard Refresh Log</Text>
+            <Text style={styles.collapsibleCount}>{dashLoadLog.length}</Text>
+          </TouchableOpacity>
+          {!!expanded.dashboard && (<>
           <Text style={styles.sectionHint}>
             Every dashboard `load()` invocation, newest first.  Each entry shows:
             trigger source, the four end-to-end timestamps, the HTTP status,
@@ -642,6 +1086,7 @@ export default function DiagnosticsScreen() {
           >
             <Text style={styles.secondaryBtnText}>Clear dashboard refresh log</Text>
           </TouchableOpacity>
+          </>)}
         </View>
 
         {/* =====================================================
@@ -652,10 +1097,17 @@ export default function DiagnosticsScreen() {
             what was just broadcast vs. what was stored earlier.
             ===================================================== */}
         <View style={styles.section} testID="diagnostics-card-render">
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Card Render & Broadcast Timeline</Text>
-            <Text style={styles.sectionCount}>{cardLog.length}</Text>
-          </View>
+          <TouchableOpacity
+            style={styles.collapsibleHeader}
+            onPress={() => toggleSection('card-render')}
+            activeOpacity={0.7}
+            accessibilityLabel={`${expanded['card-render'] ? 'Collapse' : 'Expand'} Card Render`}
+          >
+            <Text style={styles.collapsibleChevron}>{expanded['card-render'] ? '▼' : '▶'}</Text>
+            <Text style={styles.collapsibleTitle}>Card Render & Broadcast Timeline</Text>
+            <Text style={styles.collapsibleCount}>{cardLog.length}</Text>
+          </TouchableOpacity>
+          {!!expanded['card-render'] && (<>
           <Text style={styles.sectionHint}>
             Every card render (`card-render`) and every member broadcast
             (`broadcast`) in strict seq order.  Compare the `last_seen` value
@@ -728,6 +1180,7 @@ export default function DiagnosticsScreen() {
           >
             <Text style={styles.secondaryBtnText}>Clear card render & broadcast log</Text>
           </TouchableOpacity>
+          </>)}
         </View>
 
         {/* =====================================================
@@ -1408,6 +1861,36 @@ const styles = StyleSheet.create({
   },
   section: { marginBottom: 22 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  collapsibleHeader: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 12, paddingHorizontal: 12, marginBottom: 6,
+    backgroundColor: Colors.surface,
+    borderRadius: 10, borderWidth: 1, borderColor: Colors.border,
+    gap: 8,
+  },
+  collapsibleChevron: {
+    fontSize: 13, fontWeight: '800', color: Colors.textTertiary, width: 14,
+  },
+  collapsibleTitle: {
+    flex: 1,
+    fontSize: 13, fontWeight: '800', color: Colors.textPrimary,
+    letterSpacing: 0.4, textTransform: 'uppercase',
+  },
+  collapsibleCount: {
+    fontSize: 12, fontWeight: '800', color: Colors.primary,
+    backgroundColor: Colors.tertiary, paddingHorizontal: 8, paddingVertical: 2,
+    borderRadius: 8, minWidth: 26, textAlign: 'center', overflow: 'hidden',
+  },
+  clearAllBtn: {
+    marginBottom: 6, paddingVertical: 14, borderRadius: 12,
+    backgroundColor: Colors.error,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  clearAllBtnText: { color: Colors.surface, fontSize: 15, fontWeight: '800' },
+  clearAllHint: {
+    fontSize: 11.5, color: Colors.textTertiary,
+    textAlign: 'center', marginBottom: 18, lineHeight: 16, paddingHorizontal: 6,
+  },
   sectionTitle: {
     fontSize: 13, fontWeight: '800', color: Colors.textTertiary,
     letterSpacing: 0.6, textTransform: 'uppercase',

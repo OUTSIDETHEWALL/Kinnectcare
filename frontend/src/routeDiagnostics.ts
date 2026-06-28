@@ -34,9 +34,10 @@
  * automatically so the storage cost never grows unboundedly.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
 
 const KEY = '@kinnship/route_diagnostics_v1';
-const CAP = 50;
+const CAP = DIAG_BUFFER_SIZES.routeLog;
 
 export type RouteDiagEntry = {
   t: number;
@@ -53,9 +54,9 @@ export type RouteDiagEntry = {
 export async function logRouteDecision(entry: Omit<RouteDiagEntry, 't'>): Promise<void> {
   try {
     const raw = await AsyncStorage.getItem(KEY);
-    const arr: RouteDiagEntry[] = raw ? JSON.parse(raw) : [];
+    let arr: RouteDiagEntry[] = raw ? JSON.parse(raw) : [];
     arr.push({ t: Date.now(), ...entry });
-    while (arr.length > CAP) arr.shift();
+    arr = pruneBuffer(arr, (e) => e.t, CAP);
     await AsyncStorage.setItem(KEY, JSON.stringify(arr));
   } catch (_e) {
     // best-effort, never block routing
@@ -65,7 +66,8 @@ export async function logRouteDecision(entry: Omit<RouteDiagEntry, 't'>): Promis
 export async function readRouteLog(): Promise<RouteDiagEntry[]> {
   try {
     const raw = await AsyncStorage.getItem(KEY);
-    return raw ? JSON.parse(raw) : [];
+    const arr: RouteDiagEntry[] = raw ? JSON.parse(raw) : [];
+    return pruneBuffer(arr, (e) => e.t, CAP);
   } catch (_e) {
     return [];
   }
