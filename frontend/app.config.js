@@ -73,7 +73,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 44, // bumped from 43 for v1.2.0 (44) — Card render & broadcast timeline: per-render log + per-broadcast log + shared monotonic seq + src tag across all diagnostic streams
+      versionCode: 45, // bumped from 44 for v1.2.0 (45) — Leonidas v1.0 Health Monitor: passive patrol of engine state + one-shot conservative recovery (no restart loops); wired into auth+engine lifecycle alongside Transistor
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
