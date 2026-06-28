@@ -638,6 +638,34 @@ export function isAvailable(): boolean {
 }
 
 /**
+ * Force a single fresh GPS sample and queue it through the SDK's
+ * native HTTP transport.  Used by Leonidas (Build 45) for intelligent
+ * recovery when a stationary phone has gone silent too long.
+ * Returns void on success / throws on SDK error.  Caller should treat
+ * an absence of `sdk_onHttp` events as failure even if this resolves.
+ */
+export async function requestFreshLocation(): Promise<void> {
+  const lib = bgGeo();
+  if (!lib) {
+    await logEvent('requestFreshLocation_skipped', { reason: 'native_module_unavailable' });
+    return;
+  }
+  await logEvent('requestFreshLocation_invoked');
+  try {
+    await lib.getCurrentPosition({
+      samples: 1,
+      persist: true,
+      timeout: 30,
+      extras: { source: 'leonidas-recovery' },
+    });
+    await logEvent('requestFreshLocation_ok');
+  } catch (e: any) {
+    await logEvent('requestFreshLocation_error', { error: String(e?.message || e) });
+    throw e;
+  }
+}
+
+/**
  * Aggregate diagnostics payload for the Diagnostics screen.
  * Combines the in-memory engine state with the persisted ring buffer.
  */

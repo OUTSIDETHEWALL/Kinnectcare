@@ -13,6 +13,7 @@ import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
 import { startBackgroundLocation, stopBackgroundLocation } from '../src/backgroundLocation';
 import { refreshLocationIfStale, setMyMemberId, setMyUserId } from '../src/locationRefresh';
 import * as locationEngine from '../src/locationEngine';
+import * as leonidas from '../src/leonidas';
 import { api, getCurrentToken, subscribeToTokenChanges } from '../src/api';
 import {
   loadDisclaimerAck,
@@ -482,12 +483,14 @@ function RootNav() {
 
     (async () => {
       if (!user?.id) {
+        try { leonidas.stop(); } catch (_e) {}
         await locationEngine.stop();
         return;
       }
       if (!locationEngine.isAvailable()) {
         // Web / Expo Go / non-Transistor build — legacy engine remains
-        // authoritative on this device.
+        // authoritative on this device.  Leonidas is a no-op without
+        // the Transistor engine, so we skip starting it here too.
         return;
       }
       try {
@@ -498,6 +501,7 @@ function RootNav() {
           // Caregiver-only or unlinked — nothing to upload from this
           // device.  Ensure engine is stopped in case it was running
           // from a previous session.
+          try { leonidas.stop(); } catch (_e) {}
           await locationEngine.stop();
           return;
         }
@@ -512,6 +516,10 @@ function RootNav() {
           memberId: me.id,
           jwt,
         });
+        // Leonidas v1.0 — passive health monitor.  Boots in lockstep
+        // with the location engine; tears down on sign-out via the
+        // cleanup block below.  No-op if already active.
+        try { leonidas.start(); } catch (_e) {}
         // Subscribe AFTER successful start so any rolling token
         // refresh during the live session flows through.
         unsubscribeToken = subscribeToTokenChanges((tok) => {
@@ -531,6 +539,9 @@ function RootNav() {
         unsubscribeToken();
         unsubscribeToken = null;
       }
+      // Stop Leonidas on cleanup so a user.id change tears down the
+      // patrol loop in lockstep with the engine restart.
+      try { leonidas.stop(); } catch (_e) {}
     };
   }, [user?.id]);
 
