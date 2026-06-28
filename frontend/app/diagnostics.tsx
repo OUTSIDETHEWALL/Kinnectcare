@@ -62,6 +62,7 @@ import {
   LocationEngineState,
 } from '../src/locationEngine';
 import * as leonidas from '../src/leonidas';
+import { PATROL_INTERVAL_SECONDS } from '../src/leonidas/types';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from '../src/diagBufferConfig';
 import { api } from '../src/api';
 import { useAuth } from '../src/AuthContext';
@@ -264,6 +265,10 @@ export default function DiagnosticsScreen() {
   // Leonidas (Build 46) — snapshot + recovery log
   const [leoSnapshot, setLeoSnapshot] = useState<leonidas.LeonidasSnapshotForUI | null>(null);
   const [leoLog, setLeoLog] = useState<leonidas.RecoveryLogEntry[]>([]);
+  // 1-second ticking clock used ONLY for the live "Next Patrol" countdown
+  // in the Leonidas snapshot card.  Only ticks while the Leonidas panel
+  // is expanded — see the gated effect below.
+  const [nowTick, setNowTick] = useState<number>(Date.now());
 
   // Build 46 — collapsible-section state.  Persisted to AsyncStorage
   // (best-effort) so the screen remembers which panels were open
@@ -353,6 +358,15 @@ export default function DiagnosticsScreen() {
       } catch (_e) { /* swallow */ }
     }, 4000);
     return () => clearInterval(tick);
+  }, [expanded.leonidas]);
+
+  // Build 46 — "Next Patrol" live countdown.  Independent 1-second tick
+  // gated on Leonidas-panel expansion, so the countdown updates smoothly
+  // without depending on the slower 4-s data refresh above.
+  useEffect(() => {
+    if (!expanded.leonidas) return;
+    const t = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(t);
   }, [expanded.leonidas]);
 
   const fetchServerState = useCallback(async () => {
@@ -702,6 +716,26 @@ export default function DiagnosticsScreen() {
               {'   '}
               <Text style={styles.entryK}>Recoveries today: </Text>
               {leoSnapshot?.recoveries_today ?? 0}
+            </Text>
+            {/* Build 46 — live "Next Patrol" countdown.  Computed from
+                last_patrol.at + PATROL_INTERVAL_SECONDS.  Ticks every
+                second via nowTick (gated on Leonidas-panel expansion).
+                Says "due now" if overdue, "—" if no patrol yet. */}
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>Next patrol: </Text>
+              {(() => {
+                if (!leoSnapshot?.patrol_active) return 'patrol stopped';
+                const lastAt = leoSnapshot?.last_patrol?.at;
+                if (typeof lastAt !== 'number') return '— awaiting first patrol';
+                const nextAt = lastAt + PATROL_INTERVAL_SECONDS * 1000;
+                const remainingMs = nextAt - nowTick;
+                if (remainingMs <= 0) {
+                  const overdue = Math.round(-remainingMs / 1000);
+                  return overdue < 5 ? 'due now' : `overdue ${overdue}s`;
+                }
+                const s = Math.ceil(remainingMs / 1000);
+                return s === 1 ? '1 second' : `${s} seconds`;
+              })()}
             </Text>
             <Text style={styles.entryLine}>
               <Text style={styles.entryK}>Last upload age: </Text>
