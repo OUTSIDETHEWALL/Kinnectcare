@@ -354,9 +354,14 @@ function RootNav() {
     setMyUserId(user.id).catch(() => {});
     (async () => {
       try {
-        const r = await api.get('/members');
+        // Build 47 — route through the canonical store.  This both
+        // resolves "my member id" AND hydrates the store before
+        // Dashboard mounts, so the first paint reads canonical data
+        // and Leonidas's first patrol has a real last_seen instead
+        // of falling back to the engine log.
+        const arr = await memberStore.fetchAll();
         if (cancelled) return;
-        const me = (r.data as any[]).find((m) => m.user_id === user.id);
+        const me = (arr as any[]).find((m) => m.user_id === user.id);
         await setMyMemberId(me ? me.id : null);
       } catch (_e) {
         // Network failure here is OK — dashboard's mount effect is
@@ -460,9 +465,12 @@ function RootNav() {
         return;
       }
       try {
-        const res = await api.get('/members');
+        // Build 47 — canonical store fetch.  The store dedupes
+        // concurrent fetchAll() calls so this shares the in-flight
+        // promise with the foreground-sync effect above.
+        const arr = await memberStore.fetchAll();
         if (cancelled) return;
-        const me = (res.data || []).find((m: any) => m.user_id === user.id);
+        const me = (arr || []).find((m: any) => m.user_id === user.id);
         if (!me) {
           await stopBackgroundLocation();
           return;
@@ -530,9 +538,12 @@ function RootNav() {
         return;
       }
       try {
-        const res = await api.get('/members');
+        // Build 47 — canonical store fetch (shared in-flight with
+        // the other two bootstrap effects above via store-level
+        // dedupe).
+        const arr = await memberStore.fetchAll();
         if (cancelled) return;
-        const me = (res.data || []).find((m: any) => m.user_id === user.id);
+        const me = (arr || []).find((m: any) => m.user_id === user.id);
         if (!me) {
           // Caregiver-only or unlinked — nothing to upload from this
           // device.  Ensure engine is stopped in case it was running

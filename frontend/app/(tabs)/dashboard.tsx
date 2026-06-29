@@ -88,6 +88,22 @@ export default function Dashboard() {
       if (dlogId) await dashMarkGetSent(dlogId).catch(() => {});
       let mRes: any = null;
       try {
+        // Build 47 — INTENTIONALLY retains a direct `api.get('/members')`
+        // here (rather than `memberStore.fetchAll()`) because the
+        // dashboard load log captures the raw axios response —
+        // status code + Date header + raw_members payload — for
+        // the diagnostic ring buffer.  The store's fetchAll()
+        // returns only the parsed array, losing those forensic
+        // fields that were critical to diagnosing the Build 41-46
+        // stale-render incidents.
+        //
+        // This is NOT a state-ownership bypass: the line directly
+        // below feeds `m.data` into the canonical store via
+        // `memberStore.upsertMany()`, so every consumer of
+        // `useAllMembers()` / `useMember(id)` sees the same record
+        // this dashboard renders.  The dashboard is one of several
+        // writers into the canonical store, not an owner of
+        // independent state.
         const [m, s, b] = await Promise.all([
           api.get('/members'),
           api.get('/summary'),
