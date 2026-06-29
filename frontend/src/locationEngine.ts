@@ -336,10 +336,35 @@ function attachSdkListeners(lib: any): void {
       // "longitude":...,"last_seen":"..."}` is plenty to confirm
       // identity and freshness.
       let bodyHead: string | null = null;
+      let parsed: any = null;
       try {
         const rt = evt?.responseText;
         if (typeof rt === 'string' && rt.length > 0) {
           bodyHead = rt.length > 400 ? rt.slice(0, 400) + '…' : rt;
+          // Build 48 — data-integrity fix.
+          //
+          // The Transistor native HTTP transport pushes location
+          // uploads from a JS-less native context.  Pre-Build 48
+          // the JS side received the success event but threw the
+          // response body away — so the senior's local memberStore
+          // could drift many minutes behind the backend even
+          // though her engine was uploading successfully every
+          // minute.  That divergence is what made Leonidas (which
+          // read the engine log) disagree with the Member screen
+          // (which read the memberStore).
+          //
+          // Parse the FULL response (not just the truncated head)
+          // and upsert into the canonical store.  Best-effort —
+          // any parse failure simply skips the upsert and the
+          // next /members poll picks up the change instead.
+          if (evt?.success === true && (evt?.status === 200 || evt?.status === 201) && rt.length < 16_000) {
+            try {
+              const obj = JSON.parse(rt);
+              if (obj && typeof obj === 'object' && obj.id) {
+                parsed = obj;
+              }
+            } catch (_e) { /* malformed body — ignore */ }
+          }
         }
       } catch (_e) {}
       void logEvent('sdk_onHttp', {
@@ -350,6 +375,17 @@ function attachSdkListeners(lib: any): void {
         path: (evt?.url || '').split('?')[0],
         bodyHead,
       });
+      // Fire upsert AFTER the diagnostic log so the log entry stays
+      // a faithful record of what the backend returned even if the
+      // upsert throws for some reason.  Use a require()'d ref to the
+      // store to avoid a top-of-file circular import.
+      if (parsed) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const ms = require('./store/memberStore');
+          ms.upsertOne(parsed);
+        } catch (_e) { /* swallow — diagnostics already wrote the bodyHead */ }
+      }
     });
     lib.onHeartbeat(async () => {
       void logEvent('sdk_onHeartbeat');

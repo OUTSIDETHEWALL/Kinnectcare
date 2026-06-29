@@ -279,7 +279,13 @@ export default function Dashboard() {
                 longitude: pos.coords.longitude,
               };
               if (label) body.location_name = label;
-              await api.put(`/members/${memberId}/location`, body);
+              const resp = await api.put(`/members/${memberId}/location`, body);
+              // Build 48 — upsert canonical post-write doc into store so
+              // Dashboard and Member screen see the fresh timestamp
+              // without waiting for the 60 s /members poll.
+              if (resp?.data?.id) {
+                try { memberStore.upsertOne(resp.data); } catch (_e) {}
+              }
             } catch (_e) {}
           },
         );
@@ -348,7 +354,13 @@ export default function Dashboard() {
           longitude: pos.coords.longitude,
         };
         if (label) body.location_name = label;
-        await api.put(`/members/${me.id}/location`, body).catch(() => {});
+        // Build 48 — upsert the post-write Member doc into the
+        // canonical store so the senior's own Dashboard re-renders
+        // with the fresh timestamp instantly.
+        const resp = await api.put(`/members/${me.id}/location`, body).catch(() => null);
+        if (resp && (resp as any).data?.id) {
+          try { memberStore.upsertOne((resp as any).data); } catch (_e) {}
+        }
       } catch (_e) {}
     })();
   }, [members.length, user?.id]);

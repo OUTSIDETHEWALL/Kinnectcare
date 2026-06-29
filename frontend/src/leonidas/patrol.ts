@@ -39,35 +39,40 @@ let lastRecovery: HealthSnapshot | null = null;
 let lastState: HealthState = 'unknown';
 
 // ===========================================================
-//  Last-upload source — Build 47 canonical pipeline
+//  Last-upload source — Build 48 forensic fix
 // ===========================================================
 //
-//  Per Build 47 architectural directive: Leonidas evaluates the
-//  SAME backend timestamp that the UI shows.  Previously this
-//  function returned the engine log's `sdk_onHttp` success time —
-//  the device's "I successfully transmitted" timestamp — which
-//  could drift from the backend's recorded `last_seen` (the value
-//  every caregiver UI displays).  That divergence meant Leonidas
-//  could believe uploads were healthy while the family dashboard
-//  showed stale data, or vice versa.
+//  Build 47 wired Leonidas's primary path to the canonical
+//  memberStore but kept the engine-log `sdk_onHttp` as a fallback.
 //
-//  Build 47 reads `last_seen` from the canonical memberStore for
-//  THIS user's own member row.  This is the EXACT same field the
-//  Dashboard and Member screen render via `formatTimeAgo()`.
+//  Field testing in Build 47 revealed the fallback itself was the
+//  defect — when the senior's local store was stale (because her
+//  app was backgrounded and her engine was uploading silently),
+//  Leonidas would silently switch sources to engine-log-fresh and
+//  report a different `last_upload_age_ms` than the Member screen
+//  rendered.  Joyce's UI said 48 min ago; Joyce's Leonidas said 4
+//  min ago.  Both were "right" from their own data source, but
+//  the invariant "everywhere shows the same timestamp" was broken.
 //
-//  Fallback: when the store hasn't been populated yet (very early
-//  boot, before the first /members fetch completes), we still fall
-//  back to the engine log so Leonidas can patrol immediately rather
-//  than wait for the network.  Once the store hydrates, the
-//  canonical path takes over automatically.
+//  Build 48 enforces the invariant: Leonidas reads ONLY the
+//  canonical store.  If the store has no record yet, Leonidas
+//  returns null and the patrol cycle classifies as `unknown` —
+//  which is consistent with what the UI would also show.
+//
+//  Build 48 also fixes the upstream divergence cause: every
+//  successful PUT /members/{id}/location response is now upserted
+//  into the canonical store from FIVE callers (locationRefresh,
+//  backgroundLocation, two dashboard active-mode watchers, AND
+//  the Transistor onHttp event).  So the senior's local store
+//  self-updates on every upload — no waiting for the next
+//  /members poll, no engine-log fallback needed.
 // ===========================================================
 async function findLastUploadAt(): Promise<number | null> {
-  // Primary path: canonical backend timestamp from memberStore.
-  //
-  // We resolve "my member" by reading `kc_my_member_id_v1` which the
-  // dashboard persists when it identifies this device's own member
-  // row — this is the same identifier used by the active-mode
-  // location uploader, so it stays in lockstep.
+  // Single source of truth — canonical backend timestamp from
+  // memberStore.  No fallback by design.  If the store has no
+  // record for this device's member, Leonidas reports `unknown`
+  // and skips this cycle.  The next upload will populate the
+  // store via the onHttp/upsertOne chain.
   try {
     const myMemberId = await AsyncStorage.getItem('kc_my_member_id_v1');
     if (myMemberId) {
@@ -75,18 +80,6 @@ async function findLastUploadAt(): Promise<number | null> {
       if (me?.last_seen) {
         const t = new Date(me.last_seen).getTime();
         if (Number.isFinite(t)) return t;
-      }
-    }
-  } catch (_e) {}
-  // Fallback: engine-log sdk_onHttp success (Build 45-46 behaviour).
-  // Only used until the store has data; this keeps the very first
-  // patrol after a fresh boot useful instead of stranded at "unknown".
-  try {
-    const log = await locationEngine.getEngineLog();
-    for (let i = log.length - 1; i >= 0; i--) {
-      const entry = log[i];
-      if (entry.event === 'sdk_onHttp' && entry.detail?.success === true && entry.detail?.status === 200) {
-        return entry.at;
       }
     }
   } catch (_e) {}

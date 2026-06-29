@@ -26,6 +26,7 @@ import * as TaskManager from 'expo-task-manager';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { api } from './api';
+import * as memberStore from './store/memberStore';
 
 export const BG_LOCATION_TASK = 'kinnship/background-location-v1';
 export const SOS_ACTIVE_KEY = '@kinnship/sos_active_v1';
@@ -281,6 +282,13 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
       writeMismatch =
         Math.abs(respLat - fresh.coords.latitude) > 5e-5 ||
         Math.abs(respLon - fresh.coords.longitude) > 5e-5;
+    }
+    // Build 48 — close data-integrity gap: upsert the post-write
+    // Member doc into the canonical store so the senior's local
+    // memberStore stays in lockstep with the backend without
+    // requiring her to foreground the app.
+    if (rd && rd.id) {
+      try { memberStore.upsertOne(rd); } catch (_e) {}
     }
     await appendBgLog({
       t: now,

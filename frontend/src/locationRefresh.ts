@@ -43,6 +43,7 @@ import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { api } from './api';
+import * as memberStore from './store/memberStore';
 
 const MY_MEMBER_ID_KEY = 'kc_my_member_id_v1';
 // v1.2.5 diagnostic: stash the user_id alongside the member_id so
@@ -384,6 +385,21 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
       if (respLat !== null && respLon !== null) {
         writeMismatch =
           Math.abs(respLat - lat) > 5e-5 || Math.abs(respLon - lon) > 5e-5;
+      }
+      // ============================================================
+      //  Build 48 — close the data-integrity gap.
+      //  The PUT response body is the canonical post-write Member
+      //  doc with the fresh server-stamped `last_seen`.  Upsert it
+      //  directly into the canonical store so Joyce's own phone
+      //  re-renders her Member screen (and Leonidas re-evaluates
+      //  her last upload age) with the EXACT same timestamp the
+      //  backend just persisted — no waiting for the next /members
+      //  poll.  Without this upsert, the senior's local store
+      //  could drift many minutes behind the backend while her
+      //  Transistor engine was uploading successfully.
+      // ============================================================
+      if (rd && rd.id) {
+        try { memberStore.upsertOne(rd); } catch (_e) {}
       }
       ok = true;
     } catch (e: any) {

@@ -73,7 +73,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 47, // bumped from 46 for v1.2.0 (47) — Canonical Member Pipeline: in-house memberStore is single source of truth for {coords, last_seen, location_name, accuracy}; Dashboard + Member detail + Leonidas all read the SAME record atomically; foreground/PIN-unlock triggers memberStore.fetchAll() so caregiver always sees freshest backend state; locationRefreshState reduced to spinner-only wrapper; engine log 25→50; leonidas log 25→100.
+      versionCode: 48, // bumped from 47 for v1.2.0 (48) — Forensic data-integrity fix: every successful PUT /members/{id}/location response is upserted into the canonical memberStore from all 5 callers (locationRefresh, backgroundLocation, two dashboard active-mode watchers, AND Transistor native onHttp).  Senior's local store now self-updates on every upload — no waiting for /members poll, no UI drift while app is backgrounded.  Leonidas engine-log fallback REMOVED — store is single source of truth.  No architecture changes; pipeline structure unchanged from Build 47.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
