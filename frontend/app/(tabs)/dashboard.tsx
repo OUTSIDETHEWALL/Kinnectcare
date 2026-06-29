@@ -17,7 +17,6 @@ import {
   requestRefresh as requestMemberRefresh,
   clearIfNewer as clearRefreshIfNewer,
   subscribeRefreshing,
-  subscribeMember,
   STALE_THRESHOLD_MS,
 } from '../../src/locationRefreshState';
 import { formatTimeAgo } from '../../src/timeFormat';
@@ -31,13 +30,20 @@ import {
   markError as dashMarkError,
   DashboardLoadTrigger,
 } from '../../src/dashboardLoadLog';
-import { logCardRender, logBroadcast } from '../../src/cardRenderLog';
+import { logCardRender } from '../../src/cardRenderLog';
 import { useAuth } from '../../src/AuthContext';
+import * as memberStore from '../../src/store/memberStore';
 
 export default function Dashboard() {
   const router = useRouter();
   const { user, logout } = useAuth();
-  const [members, setMembers] = useState<Member[]>([]);
+  // Build 47 — Dashboard no longer owns a local copy of the members
+  // array.  Every consumer reads from `memberStore` so coordinates,
+  // last_seen, location_name, and accuracy can never drift apart
+  // between this screen and the Member detail screen.  The previous
+  // setMembers() + subscribeMember() merge dance has been deleted in
+  // favour of the canonical store.
+  const members = memberStore.useAllMembers();
   const [summary, setSummary] = useState<MemberSummary[]>([]);
   const [billing, setBilling] = useState<BillingStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -58,39 +64,13 @@ export default function Dashboard() {
   // checked synchronously and is bulletproof against double-tap races.
   const sosDialingRef = useRef(false);
 
-  // v1.3.3 — subscribe to member broadcast bus.  When the
-  // pull-on-stale poller in locationRefreshState detects a fresh
-  // `last_seen` for one of our family members, it broadcasts the
-  // freshly-fetched member doc — we merge it into local state so
-  // every card re-renders with the new timestamp / location_name
-  // immediately, without waiting for the next /members refetch.
-  useEffect(() => {
-    const unsub = subscribeMember((m: any) => {
-      if (!m?.id) return;
-      setMembers((prev) => {
-        let touched = false;
-        let priorLastSeen: string | null = null;
-        const next = prev.map((row) => {
-          if (row.id !== m.id) return row;
-          touched = true;
-          priorLastSeen = row.last_seen ?? null;
-          return { ...row, ...m };
-        });
-        // v1.2.0 (44) — log every broadcast with the prior state value
-        // so we can detect stale-overwrite races.  Fire-and-forget so
-        // the React render isn't blocked.
-        try {
-          logBroadcast({
-            member_id: m.id,
-            broadcast_last_seen: m?.last_seen ?? null,
-            prior_state_last_seen: touched ? priorLastSeen : null,
-          });
-        } catch (_e) {}
-        return touched ? next : prev;
-      });
-    });
-    return unsub;
-  }, []);
+  // Build 47 — the dashboard's old "subscribe to fresh-member broadcasts
+  // and merge into local state" useEffect has been DELETED.  Member
+  // updates now arrive through `useAllMembers()` from the canonical
+  // store, which atomically replaces records and notifies every
+  // consumer (this dashboard, the member detail screen, Leonidas,
+  // SOS, etc.) simultaneously.  No more setMembers((prev) => ...)
+  // merge races.
 
   const load = async (trigger: DashboardLoadTrigger = 'unknown') => {
     // ============================================================
@@ -146,7 +126,12 @@ export default function Dashboard() {
             });
           }
         } catch (_e) {}
-        setMembers(m.data);
+        // Build 47 — atomic write to the canonical store.  Every
+        // subscriber (this dashboard via useAllMembers, the member
+        // detail screen, Leonidas via getMyLastSeenMs, etc.) sees the
+        // exact same record at the same moment.  Never partial:
+        // upsertMany replaces each member's full object reference.
+        memberStore.upsertMany(Array.isArray(m.data) ? m.data : []);
         setSummary(s.data.members || []);
         if (b) setBilling(b);
         if (dlogId) await dashMarkSetState(dlogId).catch(() => {});

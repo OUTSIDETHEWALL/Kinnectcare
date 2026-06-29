@@ -29,10 +29,14 @@
  */
 export const DIAG_BUFFER_SIZES = {
   // The six explicitly-listed buffers from the Build 46 spec
+  // Build 47 — bumped Leonidas 25→100 and Engine 25→50 per the
+  // architectural directive: Leonidas generates entries rapidly
+  // during active monitoring and 25 disappear too quickly during
+  // location-pipeline validation testing.
   dashboardLoad: 15,
   cardRender: 15,
-  engineLog: 25,
-  leonidas: 25,
+  engineLog: 50,
+  leonidas: 100,
   authClear: 10,
   routeLog: 10,
 } as const;

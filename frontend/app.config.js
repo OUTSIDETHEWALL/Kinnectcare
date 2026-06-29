@@ -73,7 +73,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 46, // bumped from 45 for v1.2.0 (46) — Leonidas Diagnostics panel (snapshot + recovery log + live Next Patrol countdown + copy/clear) + Diagnostics cleanup: per-buffer size caps via diagBufferConfig, 2-hour auto-prune, "Clear ALL Diagnostics" button at top, collapsible sections (Leonidas/Engine/Dashboard/Card Render fully gated, rest tappable) with persisted expansion state.  No Leonidas behavior changes.
+      versionCode: 47, // bumped from 46 for v1.2.0 (47) — Canonical Member Pipeline: in-house memberStore is single source of truth for {coords, last_seen, location_name, accuracy}; Dashboard + Member detail + Leonidas all read the SAME record atomically; foreground/PIN-unlock triggers memberStore.fetchAll() so caregiver always sees freshest backend state; locationRefreshState reduced to spinner-only wrapper; engine log 25→50; leonidas log 25→100.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',

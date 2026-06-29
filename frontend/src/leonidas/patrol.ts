@@ -11,7 +11,9 @@
  * support that without redesign.
  */
 import { AppState, AppStateStatus } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as locationEngine from '../locationEngine';
+import * as memberStore from '../store/memberStore';
 import { getCurrentToken } from '../api';
 import { classifyHealth } from './healthChecks';
 import { logRecovery } from './recoveryLog';
@@ -37,12 +39,50 @@ let lastRecovery: HealthSnapshot | null = null;
 let lastState: HealthState = 'unknown';
 
 // ===========================================================
-//  Engine-log peeking — derive last upload age from sdk_onHttp
+//  Last-upload source — Build 47 canonical pipeline
+// ===========================================================
+//
+//  Per Build 47 architectural directive: Leonidas evaluates the
+//  SAME backend timestamp that the UI shows.  Previously this
+//  function returned the engine log's `sdk_onHttp` success time —
+//  the device's "I successfully transmitted" timestamp — which
+//  could drift from the backend's recorded `last_seen` (the value
+//  every caregiver UI displays).  That divergence meant Leonidas
+//  could believe uploads were healthy while the family dashboard
+//  showed stale data, or vice versa.
+//
+//  Build 47 reads `last_seen` from the canonical memberStore for
+//  THIS user's own member row.  This is the EXACT same field the
+//  Dashboard and Member screen render via `formatTimeAgo()`.
+//
+//  Fallback: when the store hasn't been populated yet (very early
+//  boot, before the first /members fetch completes), we still fall
+//  back to the engine log so Leonidas can patrol immediately rather
+//  than wait for the network.  Once the store hydrates, the
+//  canonical path takes over automatically.
 // ===========================================================
 async function findLastUploadAt(): Promise<number | null> {
+  // Primary path: canonical backend timestamp from memberStore.
+  //
+  // We resolve "my member" by reading `kc_my_member_id_v1` which the
+  // dashboard persists when it identifies this device's own member
+  // row — this is the same identifier used by the active-mode
+  // location uploader, so it stays in lockstep.
+  try {
+    const myMemberId = await AsyncStorage.getItem('kc_my_member_id_v1');
+    if (myMemberId) {
+      const me = memberStore.getMemberById(myMemberId);
+      if (me?.last_seen) {
+        const t = new Date(me.last_seen).getTime();
+        if (Number.isFinite(t)) return t;
+      }
+    }
+  } catch (_e) {}
+  // Fallback: engine-log sdk_onHttp success (Build 45-46 behaviour).
+  // Only used until the store has data; this keeps the very first
+  // patrol after a fresh boot useful instead of stranded at "unknown".
   try {
     const log = await locationEngine.getEngineLog();
-    // Newest-first scan
     for (let i = log.length - 1; i >= 0; i--) {
       const entry = log[i];
       if (entry.event === 'sdk_onHttp' && entry.detail?.success === true && entry.detail?.status === 200) {

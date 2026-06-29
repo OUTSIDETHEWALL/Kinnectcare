@@ -22,9 +22,9 @@ import {
   requestRefresh as requestMemberRefresh,
   clearIfNewer as clearRefreshIfNewer,
   subscribeRefreshing,
-  subscribeMember,
   STALE_THRESHOLD_MS,
 } from '../../src/locationRefreshState';
+import * as memberStore from '../../src/store/memberStore';
 
 const INTERVAL_OPTIONS = [2, 4, 6, 8, 12] as const;
 type CheckinMode = 'fixed' | 'interval' | 'disabled';
@@ -33,7 +33,11 @@ export default function MemberDetail() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
-  const [member, setMember] = useState<Member | null>(null);
+  // Build 47 — Member detail no longer owns a local `member` state
+  // object.  It reads from the canonical store via useMember(id) so
+  // coordinates + last_seen + location_name + accuracy can never
+  // diverge from what the Dashboard renders.
+  const member = memberStore.useMember(id) ?? null;
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [history, setHistory] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
@@ -50,18 +54,12 @@ export default function MemberDetail() {
     if (!id) return;
     return subscribeRefreshing(id, setLocationRefreshing);
   }, [id]);
-  // v1.3.3 — receive broadcasted member updates from the active
-  // pull-on-stale poller and merge into local state so the location
-  // header re-renders with the fresh timestamp / location_name as
-  // soon as the GPS upload lands (sub-5 s after Joyce's device
-  // actually uploads, rather than waiting for our 60 s refetch).
-  useEffect(() => {
-    if (!id) return;
-    return subscribeMember((m: any) => {
-      if (!m?.id || m.id !== id) return;
-      setMember((prev) => (prev ? ({ ...prev, ...m } as any) : (m as any)));
-    });
-  }, [id]);
+  // Build 47 — the old "subscribeMember + setMember merge" useEffect
+  // has been DELETED.  `useMember(id)` is itself a live subscription
+  // to the canonical store, so any fresh upload arriving from
+  // memberStore.requestRefresh()/fetchAll()/fetchOne() rebinds this
+  // component automatically — and it sees the exact same record as
+  // the Dashboard at the exact same moment (atomic upsert).
   useEffect(() => {
     const t = setInterval(() => forceTick((n) => n + 1), 20_000);
     return () => clearInterval(t);
@@ -82,16 +80,20 @@ export default function MemberDetail() {
 
   const load = async () => {
     try {
+      // Build 47 — `/members/{id}` fetch routes through the canonical
+      // store.  The store atomically upserts the returned record so
+      // both this screen AND the Dashboard repaint with the same
+      // {coords, last_seen, location_name, accuracy} tuple in lockstep.
       const [m, r, h] = await Promise.all([
-        api.get(`/members/${id}`),
+        memberStore.fetchOne(id as string),
         api.get(`/reminders/member/${id}`),
         api.get(`/history/member/${id}?days=7`).catch(() => ({ data: null })),
       ]);
-      // v1.2.8 instrumentation: log what the API returned BEFORE the
-      // setState below, so the entry is proof of the network result
-      // independent of whether React subsequently re-rendered.
+      // v1.2.8 instrumentation: log what the API returned BEFORE
+      // any downstream consumer sees it.  This is now a proof-of-
+      // canonical-record marker rather than a proof-of-setState marker.
       try {
-        const md: any = m.data || {};
+        const md: any = m || {};
         await logScreenRender({
           src: 'member-fetch',
           memberId: md.id,
@@ -101,7 +103,6 @@ export default function MemberDetail() {
           locationName: md.location_name ?? null,
         });
       } catch (_e) {}
-      setMember(m.data);
       setReminders(r.data);
       setHistory(h.data);
 
@@ -112,7 +113,7 @@ export default function MemberDetail() {
       // on this screen via the locationRefreshState subscription
       // hook below.
       try {
-        const md: any = m.data || {};
+        const md: any = m || {};
         if (md.id) {
           const seenMs = md.last_seen ? new Date(md.last_seen).getTime() : 0;
           if (seenMs) clearRefreshIfNewer(md.id, seenMs);
@@ -234,7 +235,9 @@ export default function MemberDetail() {
         daily_checkin_time: hhmm,
         checkin_interval_hours: null,
       });
-      setMember(r.data);
+      // Build 47 — write through the canonical store so Dashboard
+      // re-renders too.  Backend returns the full member object.
+      if (r?.data?.id) memberStore.upsertOne(r.data);
       setShowCheckinSettings(false);
     } catch (_e) {
       Alert.alert('Failed', 'Could not update check-in time.');
@@ -246,7 +249,7 @@ export default function MemberDetail() {
         daily_checkin_time: null,
         checkin_interval_hours: hours,
       });
-      setMember(r.data);
+      if (r?.data?.id) memberStore.upsertOne(r.data);
       setShowCheckinSettings(false);
     } catch (_e) {
       Alert.alert('Failed', 'Could not update check-in interval.');
@@ -258,7 +261,7 @@ export default function MemberDetail() {
         daily_checkin_time: null,
         checkin_interval_hours: null,
       });
-      setMember(r.data);
+      if (r?.data?.id) memberStore.upsertOne(r.data);
       setShowCheckinSettings(false);
     } catch (_e) {
       Alert.alert('Failed', 'Could not disable check-ins.');
@@ -285,7 +288,7 @@ export default function MemberDetail() {
         emergency_contact_phone: phone || null,
         emergency_contact_name: name || null,
       });
-      setMember(r.data);
+      if (r?.data?.id) memberStore.upsertOne(r.data);
       setEcEditing(false);
     } catch (e: any) {
       Alert.alert(

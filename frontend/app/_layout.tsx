@@ -14,6 +14,7 @@ import { startBackgroundLocation, stopBackgroundLocation } from '../src/backgrou
 import { refreshLocationIfStale, setMyMemberId, setMyUserId } from '../src/locationRefresh';
 import * as locationEngine from '../src/locationEngine';
 import * as leonidas from '../src/leonidas';
+import * as memberStore from '../src/store/memberStore';
 import { api, getCurrentToken, subscribeToTokenChanges } from '../src/api';
 import {
   loadDisclaimerAck,
@@ -375,6 +376,41 @@ function RootNav() {
     const sub = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
         refreshLocationIfStale('foreground').catch(() => {});
+      }
+    });
+    return () => sub.remove();
+  }, [user?.id]);
+
+  // ============================================================
+  //  Build 47 — canonical member-store foreground sync
+  // ============================================================
+  //  Per the Build 47 architectural directive: whenever the
+  //  caregiver application returns to the foreground (including
+  //  after PIN unlock), automatically perform
+  //  `memberStore.fetchAll()`.  This mirrors the observed user
+  //  experience where opening Kinnship and entering the PIN
+  //  immediately corrected stale location data — the cause was
+  //  that the AuthProvider's session bootstrap refetched the
+  //  /members endpoint, which then atomically replaced the
+  //  member records.  We promote that behaviour from a happy
+  //  side-effect into a deliberate guarantee.
+  //
+  //  The store dedupes concurrent fetchAll() calls, so this is
+  //  safe to fire on every 'active' transition without hammering
+  //  the API.  It runs on BOTH caregiver and senior devices —
+  //  every consumer of useAllMembers()/useMember() gets the
+  //  freshest backend record the instant the app comes back to
+  //  the foreground.
+  // ============================================================
+  useEffect(() => {
+    if (!user?.id) return;
+    // Prime once on mount so the very first paint after PIN unlock
+    // already has the freshest data (Charles's PIN-unlock = fresh
+    // location refresh in his observed test).
+    memberStore.fetchAll().catch(() => {});
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        memberStore.fetchAll().catch(() => {});
       }
     });
     return () => sub.remove();
