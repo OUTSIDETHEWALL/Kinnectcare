@@ -2,7 +2,7 @@ import { Stack, useRouter, useSegments } from 'expo-router';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from '../src/AuthContext';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { View, ActivityIndicator, AppState, Platform } from 'react-native';
 import { Colors } from '../src/theme';
 import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink, refreshPushTokenIfStale } from '../src/push';
@@ -521,20 +521,42 @@ function RootNav() {
   //  patch the `authorization` config, not the `headers` field —
   //  the SDK's HTTP interceptor rebinds the new token on the next
   //  outgoing PUT.
+  //
+  //  Build 49 — patrol-lifecycle cleanup.  This effect runs on every
+  //  `user?.id` change, including transient flickers during token
+  //  rotation / AuthContext re-mounts.  Pre-49 each flicker called
+  //  `leonidas.stop()` from the cleanup THEN `leonidas.start()` from
+  //  the next run — producing the chatty `patrol-started` /
+  //  `patrol-stopped` log pairs even though nothing functional had
+  //  changed.  We now track the user.id we last booted Leonidas+engine
+  //  for in a ref, and only tear down on a genuine change (logout, or
+  //  switching to a different user.id).  Idempotent re-runs are no-ops.
+  const engineBootedForUserIdRef = useRef<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     let unsubscribeToken: (() => void) | null = null;
 
     (async () => {
       if (!user?.id) {
-        try { leonidas.stop(); } catch (_e) {}
-        await locationEngine.stop();
+        // Genuine sign-out — tear everything down.
+        if (engineBootedForUserIdRef.current !== null) {
+          try { leonidas.stop(); } catch (_e) {}
+          await locationEngine.stop();
+          engineBootedForUserIdRef.current = null;
+        }
         return;
       }
       if (!locationEngine.isAvailable()) {
         // Web / Expo Go / non-Transistor build — legacy engine remains
         // authoritative on this device.  Leonidas is a no-op without
         // the Transistor engine, so we skip starting it here too.
+        return;
+      }
+      // Build 49 — idempotency.  If we already booted Leonidas+engine
+      // for this exact user.id, this is a flicker re-run — skip the
+      // whole boot dance.  No log noise, no SDK churn, no patrol
+      // restart.
+      if (engineBootedForUserIdRef.current === user.id) {
         return;
       }
       try {
@@ -550,6 +572,7 @@ function RootNav() {
           // from a previous session.
           try { leonidas.stop(); } catch (_e) {}
           await locationEngine.stop();
+          engineBootedForUserIdRef.current = null;
           return;
         }
         const jwt = await getCurrentToken();
@@ -567,6 +590,7 @@ function RootNav() {
         // with the location engine; tears down on sign-out via the
         // cleanup block below.  No-op if already active.
         try { leonidas.start(); } catch (_e) {}
+        engineBootedForUserIdRef.current = user.id;
         // Subscribe AFTER successful start so any rolling token
         // refresh during the live session flows through.
         unsubscribeToken = subscribeToTokenChanges((tok) => {
@@ -586,9 +610,12 @@ function RootNav() {
         unsubscribeToken();
         unsubscribeToken = null;
       }
-      // Stop Leonidas on cleanup so a user.id change tears down the
-      // patrol loop in lockstep with the engine restart.
-      try { leonidas.stop(); } catch (_e) {}
+      // Build 49 — do NOT call leonidas.stop() here unconditionally.
+      // The cleanup runs on every effect re-evaluation (including
+      // flickers during token rotation), and stopping/restarting on
+      // each one produced the duplicate patrol-started/stopped log
+      // noise we're eliminating in this build.  Real teardown happens
+      // in the `!user?.id` branch above when sign-out is genuine.
     };
   }, [user?.id]);
 

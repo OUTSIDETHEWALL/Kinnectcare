@@ -73,7 +73,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 48, // bumped from 47 for v1.2.0 (48) — Forensic data-integrity fix: every successful PUT /members/{id}/location response is upserted into the canonical memberStore from all 5 callers (locationRefresh, backgroundLocation, two dashboard active-mode watchers, AND Transistor native onHttp).  Senior's local store now self-updates on every upload — no waiting for /members poll, no UI drift while app is backgrounded.  Leonidas engine-log fallback REMOVED — store is single source of truth.  No architecture changes; pipeline structure unchanged from Build 47.
+      versionCode: 49, // bumped from 48 for v1.2.0 (49) — Notification cleanup + Leonidas polish: ghost "K" notifications killed via dismissNotificationAsync on request_location_refresh + silent_v2 channel arrivals; single-flight recoveryInProgress guard kills duplicate Leonidas recovery dispatches; engine/Leonidas boot effect made idempotent via useRef sentinel so flicker re-runs no longer churn patrol-started/patrol-stopped.  No architecture changes; location subsystem moves to maintenance mode after this.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',

@@ -37,6 +37,15 @@ let recoveriesDayKey = ''; // YYYY-MM-DD of recoveriesToday counter
 let lastPatrol: HealthSnapshot | null = null;
 let lastRecovery: HealthSnapshot | null = null;
 let lastState: HealthState = 'unknown';
+// Build 49 — single-flight recovery guard.
+//
+// Before Build 49 a patrol tick could fire a second recovery while the
+// first was still inside its 30 s verify-poll, producing duplicate
+// "recovery-invoked" / "recovery-succeeded" pairs in the log.  This
+// flag is set the moment we commit to a recovery and cleared in the
+// finally block of the dispatch.  No behavioural change beyond log
+// deduplication and avoiding the wasted second SDK request.
+let recoveryInProgress = false;
 
 // ===========================================================
 //  Last-upload source — Build 48 forensic fix
@@ -163,6 +172,22 @@ export async function runOnePatrol(): Promise<HealthSnapshot> {
 
   // 4) Dispatch action (one-shot)
   if (verdict.action !== 'none') {
+    // Build 49 — single-flight guard.  If a previous patrol is still
+    // inside the 30 s verify window, skip this dispatch entirely.
+    // The next patrol tick (60 s from now) will re-evaluate; if the
+    // first recovery succeeded, state will be `standing-guard` and
+    // nothing will fire; if it failed, this guard will be cleared
+    // and the next tick can try again.
+    if (recoveryInProgress) {
+      await logRecovery('state-change', verdict.state, {
+        note: 'recovery-skipped-already-in-progress',
+        reason: verdict.reason,
+        action: verdict.action,
+      });
+      lastPatrol = snapshot;
+      return snapshot;
+    }
+    recoveryInProgress = true;
     snapshot.recovery_action = verdict.action;
     recoveriesToday += 1;
     const startedAt = Date.now();
@@ -233,6 +258,11 @@ export async function runOnePatrol(): Promise<HealthSnapshot> {
       { duration_ms: snapshot.recovery_duration_ms, action: verdict.action },
     );
     lastRecovery = snapshot;
+    // Build 49 — clear the single-flight guard so the next patrol can
+    // act on a future degraded state.  Place at the very end of the
+    // dispatch block so any error path above still releases it via
+    // the catch handlers (which complete with `result = 'failure'`).
+    recoveryInProgress = false;
   } else {
     await logRecovery('patrol-tick', verdict.state, {
       last_upload_age_ms, engine_is_moving,

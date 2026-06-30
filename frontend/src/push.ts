@@ -824,16 +824,41 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
       // straight away.  Push notifications wake the device even
       // under Doze / Samsung One UI App-Standby, which is the whole
       // point of this architectural bypass.
+      //
+      // Build 49 — ghost-notification kill.  Android's system tray
+      // renders the inbound push BEFORE this JS handler runs, even
+      // at IMPORTANCE_MIN — Samsung/Xiaomi/etc. surface a minimal
+      // entry that falls back to the app-name initial ("K") because
+      // the silent push intentionally has empty title/body.  Calling
+      // `dismissNotificationAsync()` here removes that tray entry
+      // within ~100 ms of arrival, so the user only ever sees a
+      // brief blip (often imperceptible) instead of a sticky K.
       try {
         const data: any = n?.request?.content?.data || {};
-        if (data?.type === 'request_location_refresh') {
-          // Imported lazily to avoid a hot-path cycle with locationRefresh.
-          // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const { refreshLocationIfStale } = require('./locationRefresh');
-          // Reset the throttle baseline so this fires immediately
-          // even if a foreground refresh just ran.
-          (global as any).__kc_force_loc_refresh = true;
-          refreshLocationIfStale('pull-request').catch(() => {});
+        const channelId: string | null =
+          data?.channelId ??
+          ((n?.request?.content as any)?.android?.channelId) ??
+          null;
+        const isSilentRefresh = data?.type === 'request_location_refresh';
+        const isSilentChannel = channelId === 'silent_v2' || channelId === 'silent';
+        if (isSilentRefresh || isSilentChannel) {
+          // Trigger the refresh BEFORE dismissing — never block work
+          // on the cosmetic cleanup.
+          if (isSilentRefresh) {
+            // Imported lazily to avoid a hot-path cycle with locationRefresh.
+            // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+            const { refreshLocationIfStale } = require('./locationRefresh');
+            (global as any).__kc_force_loc_refresh = true;
+            refreshLocationIfStale('pull-request').catch(() => {});
+          }
+          // Dismiss the just-arrived tray entry.  Fire-and-forget;
+          // any failure here is purely cosmetic.
+          try {
+            const reqId = n?.request?.identifier;
+            if (reqId) {
+              Notifications.dismissNotificationAsync(reqId).catch(() => {});
+            }
+          } catch (_e) {}
           return; // do not surface as a sticky/last notification
         }
       } catch (_e) {}
