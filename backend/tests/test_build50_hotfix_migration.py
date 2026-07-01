@@ -396,3 +396,153 @@ class TestT8DeleteAllAlerts:
         assert g.status_code == 200
         remaining = g.json() if isinstance(g.json(), list) else g.json().get("alerts", [])
         assert remaining == [], f"GET /alerts should be empty after DELETE, got: {remaining}"
+
+
+# ------------------------- Safeguard A : sentinel one-shot -------------------------
+
+
+class TestSafeguardASentinelOneShot:
+    """
+    Build 50 hotfix — after v2 of the migration, a `migrations` collection
+    stores a per-migration sentinel doc.  When present, the startup
+    handler must short-circuit and produce ZERO log lines (housekeeping,
+    backfill, or promotion).
+
+    We assert this by:
+      1. Ensuring the sentinel exists (write it if missing).
+      2. Restarting the backend and reading the log tail after our
+         restart-marker.
+      3. Asserting no `alerts (housekeeping|backfill: ...)` line is emitted.
+    """
+
+    def test_sentinel_short_circuits_migration(self, mongo):
+        # Guarantee the sentinel exists so we're testing the skip path.
+        mongo.migrations.update_one(
+            {"_id": "alerts_backfill_v50"},
+            {"$setOnInsert": {"_id": "alerts_backfill_v50", "run_at": "test-preset"}},
+            upsert=True,
+        )
+        marker = f"SAFEGUARD-A-{uuid.uuid4().hex[:8]}"
+        with open(BACKEND_ERR_LOG, "a") as fh:
+            fh.write(f"\n{marker}\n")
+
+        subprocess.run(
+            ["sudo", "supervisorctl", "restart", "backend"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        # Wait for backend ready
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                if requests.get(f"{BASE_URL}/api/", timeout=3).status_code < 500:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        time.sleep(2.0)
+
+        with open(BACKEND_ERR_LOG, "r") as fh:
+            content = fh.read()
+        idx = content.rfind(marker)
+        tail = content[idx + len(marker):] if idx >= 0 else ""
+        assert tail, "Failed to locate marker after restart"
+
+        forbidden = [
+            "alerts housekeeping: removed",
+            "alerts backfill: set resolved=False",
+            "alerts backfill: promoted",
+        ]
+        offenders = [line for line in forbidden if line in tail]
+        assert not offenders, (
+            f"Sentinel did not short-circuit — these lines appeared post-restart: "
+            f"{offenders}\n---tail---\n{tail[-2000:]}"
+        )
+
+
+# ------------------------- Safeguard B : 1-hour safety window -------------------------
+
+
+class TestSafeguardBSafetyWindow:
+    """
+    A truly active SOS that was just acknowledged in the last few minutes
+    MUST NEVER be promoted to resolved by the migration.  We simulate this
+    by:
+      1. Inserting a synthetic SOS with created_at = now, acknowledged=True,
+         resolved=False (matches all migration criteria EXCEPT the age gate).
+      2. Deleting the sentinel and restarting so the migration re-runs.
+      3. Asserting that our fresh SOS is STILL unresolved after the boot.
+
+    Then repeat with created_at = now - 2h — that SOS SHOULD get promoted.
+    """
+
+    def test_recent_ack_not_promoted_but_old_ack_is(self, mongo):
+        from datetime import datetime, timedelta, timezone
+
+        # Setup: clear sentinel so migration re-runs.
+        mongo.migrations.delete_one({"_id": "alerts_backfill_v50"})
+
+        now = datetime.now(timezone.utc)
+        fresh_id = f"safety-fresh-{uuid.uuid4().hex[:8]}"
+        old_id = f"safety-old-{uuid.uuid4().hex[:8]}"
+
+        # Fresh SOS — acknowledged 30 seconds ago (within 1-hour window).
+        # MUST NOT be promoted.
+        mongo.alerts.insert_one({
+            "id": fresh_id, "owner_id": "test-owner",
+            "family_group_id": "test-family-safeguard-b",
+            "member_id": "test-member", "member_name": "Test Fresh",
+            "type": "sos", "severity": "critical",
+            "title": "Fresh SOS", "message": "Active caregiver response",
+            "acknowledged": True, "resolved": False,
+            "created_at": now - timedelta(seconds=30),
+        })
+
+        # Old SOS — acknowledged 2 hours ago (outside safety window).
+        # SHOULD be promoted to resolved by the migration.
+        mongo.alerts.insert_one({
+            "id": old_id, "owner_id": "test-owner",
+            "family_group_id": "test-family-safeguard-b",
+            "member_id": "test-member", "member_name": "Test Old",
+            "type": "sos", "severity": "critical",
+            "title": "Old SOS", "message": "Stale legacy",
+            "acknowledged": True, "resolved": False,
+            "created_at": now - timedelta(hours=2),
+        })
+
+        try:
+            subprocess.run(
+                ["sudo", "supervisorctl", "restart", "backend"],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
+            # Wait for backend
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                try:
+                    if requests.get(f"{BASE_URL}/api/", timeout=3).status_code < 500:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            time.sleep(2.0)
+
+            fresh_doc = mongo.alerts.find_one({"id": fresh_id})
+            old_doc = mongo.alerts.find_one({"id": old_id})
+
+            assert fresh_doc is not None, "Fresh SOS was destroyed by migration"
+            assert fresh_doc.get("resolved") is False, (
+                f"REGRESSION: fresh acknowledged SOS (30 s old) was promoted "
+                f"to resolved by the migration. Safety window failed.\n"
+                f"Doc: {fresh_doc}"
+            )
+            assert fresh_doc.get("resolved_at") is None, (
+                f"REGRESSION: fresh SOS got a resolved_at stamp. Doc: {fresh_doc}"
+            )
+
+            assert old_doc is not None, "Old SOS was destroyed"
+            assert old_doc.get("resolved") is True, (
+                f"Old (2h) acknowledged SOS was NOT promoted — expected legacy "
+                f"cleanup. Doc: {old_doc}"
+            )
+            assert old_doc.get("resolved_by_name") == "Legacy (pre-Build-50)"
+        finally:
+            mongo.alerts.delete_many({"id": {"$in": [fresh_id, old_id]}})

@@ -3377,22 +3377,48 @@ async def _migrate_dedupe_push_tokens():
 # trapping the user on an incident screen for an alert nobody was
 # handling.
 #
-# This migration runs once per pod startup and is fully idempotent:
+# SAFETY MODEL — this migration must NEVER accidentally mark a truly
+# active unresolved SOS as resolved.  Two safeguards:
+#
+#   A. SENTINEL DOC — a marker in the `migrations` collection.  When
+#      present, the migration short-circuits on subsequent boots (true
+#      one-shot semantics).  Even if the marker is manually removed
+#      (e.g. for a re-run in a dev env), safeguard B still holds.
+#
+#   B. SAFETY WINDOW — the promotion step (acknowledged → resolved)
+#      ONLY affects SOS alerts older than 1 hour.  A genuine emergency
+#      response completes in minutes; anything acknowledged-but-not-
+#      resolved after 1 h is stale.  This bounds the worst-case damage
+#      even if the sentinel is deleted AND the migration is re-run
+#      moments after a caregiver ack'd a real SOS via a legacy bundle.
+#
+# Steps (each idempotent independently, so re-running is safe):
 #   1. DELETE alerts older than 30 days (opportunistic housekeeping —
 #      Kinnship maintains a clean DB; obsolete test data serves no
 #      caregiver purpose).
 #   2. BACKFILL `resolved: False` on any alert missing the field.
-#   3. MARK legacy `sos` alerts that were already acknowledged
-#      (`acknowledged: True`) as `resolved: True` with `resolved_at =
-#      created_at` — those were handled pre-Build-50; no reason to
-#      resurrect them.  Missed-checkin / medication / routine alerts
-#      are NOT affected — they use `acknowledged` semantics only.
+#   3. MARK legacy `sos` alerts that are (acknowledged AND created ≥1h
+#      ago) as `resolved: True` with `resolved_at = created_at`.
+#      Missed-checkin / medication / routine alerts are NOT affected —
+#      they use `acknowledged` semantics only.
 # =========================================================================
+MIGRATION_ID_ALERTS_V50 = "alerts_backfill_v50"
+MIGRATION_PROMOTE_MIN_AGE = timedelta(hours=1)
+
+
 @app.on_event("startup")
 async def _migrate_alerts_backfill_v50():
     try:
+        # Safeguard A — sentinel doc.  If this migration has already
+        # completed on this deployment, short-circuit.
+        marker = await db.migrations.find_one({"_id": MIGRATION_ID_ALERTS_V50})
+        if marker:
+            return
+
+        now = datetime.now(timezone.utc)
+
         # 1. Housekeeping — delete alerts older than 30 days.
-        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        cutoff = now - timedelta(days=30)
         del_res = await db.alerts.delete_many({"created_at": {"$lt": cutoff}})
         if del_res.deleted_count:
             logger.info(
@@ -3411,14 +3437,17 @@ async def _migrate_alerts_backfill_v50():
                 f"{backfill_res.modified_count} legacy alert(s)"
             )
 
-        # 3. Mark legacy acknowledged SOS as resolved (using created_at
-        #    as resolved_at — best available proxy).  Uses aggregation
-        #    pipeline update so we can copy `$created_at` into `resolved_at`.
+        # 3. Mark legacy acknowledged SOS as resolved — WITH SAFETY WINDOW.
+        #    Only touches alerts older than 1 hour, so an active
+        #    caregiver response ack'd in the last few minutes is never
+        #    accidentally promoted to "resolved".
+        promote_cutoff = now - MIGRATION_PROMOTE_MIN_AGE
         promote_res = await db.alerts.update_many(
             {
                 "type": "sos",
                 "acknowledged": True,
                 "resolved": {"$in": [False, None]},
+                "created_at": {"$lt": promote_cutoff},
             },
             [
                 {
@@ -3433,8 +3462,23 @@ async def _migrate_alerts_backfill_v50():
         if promote_res.modified_count:
             logger.info(
                 f"alerts backfill: promoted {promote_res.modified_count} legacy "
-                f"acknowledged SOS to resolved"
+                f"acknowledged SOS to resolved (safety window: ≥1h old)"
             )
+
+        # Record completion so subsequent boots short-circuit (safeguard A).
+        await db.migrations.update_one(
+            {"_id": MIGRATION_ID_ALERTS_V50},
+            {
+                "$set": {
+                    "_id": MIGRATION_ID_ALERTS_V50,
+                    "run_at": now,
+                    "deleted": del_res.deleted_count,
+                    "backfilled": backfill_res.modified_count,
+                    "promoted": promote_res.modified_count,
+                }
+            },
+            upsert=True,
+        )
     except Exception as e:
         logger.warning(f"alerts backfill migration skipped: {e}")
 
