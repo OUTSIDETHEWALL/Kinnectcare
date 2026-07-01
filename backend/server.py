@@ -3367,6 +3367,78 @@ async def _migrate_dedupe_push_tokens():
         logger.warning(f"push_tokens dedupe migration skipped: {e}")
 
 
+# =========================================================================
+# Build 50 hotfix — Alerts backfill + ancient-cleanup migration.
+#
+# Problem observed in the field: pre-Build-50 SOS alerts stored in Mongo
+# have no `resolved` field.  The frontend auto-resume detector treats
+# every SOS with `resolved` != true as "unresolved", so any legacy
+# record (from days-old testing) was being resurfaced on cold-start,
+# trapping the user on an incident screen for an alert nobody was
+# handling.
+#
+# This migration runs once per pod startup and is fully idempotent:
+#   1. DELETE alerts older than 30 days (opportunistic housekeeping —
+#      Kinnship maintains a clean DB; obsolete test data serves no
+#      caregiver purpose).
+#   2. BACKFILL `resolved: False` on any alert missing the field.
+#   3. MARK legacy `sos` alerts that were already acknowledged
+#      (`acknowledged: True`) as `resolved: True` with `resolved_at =
+#      created_at` — those were handled pre-Build-50; no reason to
+#      resurrect them.  Missed-checkin / medication / routine alerts
+#      are NOT affected — they use `acknowledged` semantics only.
+# =========================================================================
+@app.on_event("startup")
+async def _migrate_alerts_backfill_v50():
+    try:
+        # 1. Housekeeping — delete alerts older than 30 days.
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        del_res = await db.alerts.delete_many({"created_at": {"$lt": cutoff}})
+        if del_res.deleted_count:
+            logger.info(
+                f"alerts housekeeping: removed {del_res.deleted_count} alert(s) "
+                f"older than 30 days"
+            )
+
+        # 2. Backfill `resolved: False` on any record missing the field.
+        backfill_res = await db.alerts.update_many(
+            {"resolved": {"$exists": False}},
+            {"$set": {"resolved": False}},
+        )
+        if backfill_res.modified_count:
+            logger.info(
+                f"alerts backfill: set resolved=False on "
+                f"{backfill_res.modified_count} legacy alert(s)"
+            )
+
+        # 3. Mark legacy acknowledged SOS as resolved (using created_at
+        #    as resolved_at — best available proxy).  Uses aggregation
+        #    pipeline update so we can copy `$created_at` into `resolved_at`.
+        promote_res = await db.alerts.update_many(
+            {
+                "type": "sos",
+                "acknowledged": True,
+                "resolved": {"$in": [False, None]},
+            },
+            [
+                {
+                    "$set": {
+                        "resolved": True,
+                        "resolved_at": "$created_at",
+                        "resolved_by_name": "Legacy (pre-Build-50)",
+                    }
+                }
+            ],
+        )
+        if promote_res.modified_count:
+            logger.info(
+                f"alerts backfill: promoted {promote_res.modified_count} legacy "
+                f"acknowledged SOS to resolved"
+            )
+    except Exception as e:
+        logger.warning(f"alerts backfill migration skipped: {e}")
+
+
 @app.on_event("startup")
 async def _migrate_iso_string_timestamps_to_date():
     """One-time migration: convert string-typed `created_at` to BSON Date.

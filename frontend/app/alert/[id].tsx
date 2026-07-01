@@ -59,6 +59,8 @@ import { api, Alert, Member } from '../../src/api';
 import MemberMap from '../../src/MemberMap';
 import { formatRelativeLocal } from '../../src/timeFormat';
 import * as memberStore from '../../src/store/memberStore';
+import { logResumeDecision, markAlertDismissed } from '../../src/resumeDiagnostics';
+import { setActiveEmergency } from '../../src/activeEmergency';
 
 // -------------------------------------------------------------------------
 // Tracking-status helper
@@ -126,7 +128,23 @@ export default function AlertDetail() {
       const list: Alert[] = res.data || [];
       const found = list.find((a) => a.id === params.id) || null;
       if (!found) {
+        // Alert no longer exists — mark it dismissed so the auto-resume
+        // detector never routes back here in this session, clear the
+        // shared active-emergency store (so the dashboard banner
+        // disappears too), and log the reason.
+        if (params.id) markAlertDismissed(params.id as string);
+        setActiveEmergency(null);
+        logResumeDecision({
+          reason: 'get-404',
+          alertId: (params.id as string) || null,
+          detail: 'GET /alerts did not include this id',
+        });
         setNotFound(true);
+      } else if (found.resolved === true) {
+        // Already resolved — surface briefly then bounce to dashboard.
+        if (params.id) markAlertDismissed(params.id as string);
+        setActiveEmergency(null);
+        setAlert(found);
       } else {
         setAlert(found);
         // Prime the canonical store immediately.  If the caller hasn't
@@ -136,7 +154,17 @@ export default function AlertDetail() {
           memberStore.fetchOne(found.member_id).catch(() => {});
         }
       }
-    } catch (_e) {
+    } catch (e: any) {
+      // Treat auth/network as not-found so we don't trap. The
+      // auto-resume detector will re-validate on the next
+      // AppState → active anyway.
+      if (params.id) markAlertDismissed(params.id as string);
+      setActiveEmergency(null);
+      logResumeDecision({
+        reason: 'fetch-failed',
+        alertId: (params.id as string) || null,
+        detail: e?.response?.status ? `HTTP ${e.response.status}` : (e?.message || 'unknown'),
+      });
       setNotFound(true);
     } finally {
       setLoading(false);
@@ -147,10 +175,13 @@ export default function AlertDetail() {
 
   // If the alert vanished from the server (resolved-and-pruned or
   // cross-tenant), bounce out after a short grace so the user isn't
-  // stuck staring at an empty state.
+  // stuck staring at an empty state.  Build 50 hotfix: bounce to the
+  // Dashboard (not /(tabs)/alerts) so the user lands in a stable,
+  // safe location.  The Dashboard's banner will pick up any genuinely
+  // still-active emergency from activeEmergency store.
   useEffect(() => {
     if (!notFound) return;
-    const t = setTimeout(() => router.replace('/(tabs)/alerts'), 1800);
+    const t = setTimeout(() => router.replace('/(tabs)/dashboard'), 1500);
     return () => clearTimeout(t);
   }, [notFound, router]);
 
@@ -222,9 +253,30 @@ export default function AlertDetail() {
               const res = await api.post(`/alerts/${alert.id}/resolve`);
               const updated = res?.data?.alert ?? { ...alert, resolved: true };
               setAlert(updated as Alert);
+              // Clear the shared active-emergency store so the dashboard
+              // banner disappears everywhere at once.
+              setActiveEmergency(null);
+              markAlertDismissed(alert.id);
               // Stop the tracking pulse loop by falling through the
               // useEffect above (resolved flag flip triggers cleanup).
             } catch (e: any) {
+              const status = e?.response?.status;
+              if (status === 404) {
+                // The alert no longer exists (deleted by another
+                // caregiver, TTL-expired, cross-tenant, etc.) — never
+                // trap the user here.  Clear all cached emergency
+                // state, log the decision, and bounce to Dashboard.
+                markAlertDismissed(alert.id);
+                setActiveEmergency(null);
+                logResumeDecision({
+                  reason: 'resolve-404',
+                  alertId: alert.id,
+                  detail: 'POST /alerts/{id}/resolve returned 404',
+                });
+                setResolving(false);
+                setNotFound(true); // triggers 1.5s bounce to /(tabs)/dashboard
+                return;
+              }
               RNAlert.alert(
                 'Could not resolve',
                 e?.response?.data?.detail || 'Please try again.',

@@ -39,6 +39,7 @@ export const DIAG_BUFFER_SIZES = {
   leonidas: 100,
   authClear: 10,
   routeLog: 10,
+  resumeDecisions: 30,
 } as const;
 
 /**

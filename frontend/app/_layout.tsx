@@ -19,6 +19,8 @@ import {
   subscribeDisclaimerAck,
   getDisclaimerAckSync,
 } from '../src/disclaimerStore';
+import { logResumeDecision, isAlertDismissed } from '../src/resumeDiagnostics';
+import { setActiveEmergency } from '../src/activeEmergency';
 
 function RootNav() {
   const { user, loading } = useAuth();
@@ -322,61 +324,144 @@ function RootNav() {
   }, [user?.id]);
 
   // ============================================================
-  //  Build 50 — Smart AppState-active resume to unresolved SOS
+  //  Build 50 hotfix — Hardened SOS auto-resume
   // ============================================================
   //
-  //  When the app becomes foreground, if ANY unresolved SOS exists in
-  //  the user's family group, auto-navigate them to the incident
-  //  screen — UNLESS they're already viewing it.  If it's been resolved
-  //  in the meantime, we do nothing (never interrupt a foreground
-  //  session for a resolved incident).
+  //  When the app becomes foreground, we ONLY auto-navigate the user
+  //  to an incident screen when ALL of the following hold:
+  //     • /alerts returned a NEWEST alert of type='sos'
+  //     • resolved !== true  AND  acknowledged !== true
+  //     • age (now − created_at) ≤ 5 minutes
+  //     • id NOT in the session-dismissed set (see resumeDiagnostics)
+  //     • pathname NOT already on /alert/<same id>
+  //     • ≥3 s since the last check (cooldown)
   //
-  //  Rules:
-  //    • Only fires on 'active' transitions (not on mount — the initial
-  //      deep-link routing already handles cold-start via notification).
-  //    • Skips when `pathname` already matches `/alert/<id>` for that
-  //      exact alert — they're either responding or reviewing.
-  //    • Fetches /alerts and picks the NEWEST unresolved SOS
-  //      (ordered by created_at desc).  If none, no-op.
-  //    • 3-second cooldown to prevent tight loops on rapid
-  //      background→foreground transitions.
+  //  If we find an unresolved-but-stale (>5 min) SOS, we DON'T yank
+  //  the user — we surface a Dashboard banner via activeEmergency
+  //  store instead, and they can tap into the incident screen on
+  //  their own terms.  This prevents "trapped by a 4h-old alert"
+  //  after the user has already moved on.
+  //
+  //  Every decision — resume, banner, or suppress — is logged to
+  //  the resumeDiagnostics ring buffer with a `reason` so post-
+  //  mortem investigation is evidence-based (no more guessing why
+  //  the auto-resume fired).
+  //
+  //  A 404 anywhere in the pipeline (GET or resolve) is a signal
+  //  the alert no longer exists; alert/[id].tsx marks the id
+  //  dismissed for this session, sets activeEmergency to null,
+  //  and routes back to Dashboard.  That state is then honoured
+  //  here on the next AppState transition.
   // ============================================================
   const smartResumeCooldownRef = useRef<number>(0);
   useEffect(() => {
-    if (!user?.id) return;
+    if (!user?.id) {
+      logResumeDecision({ reason: 'no-user' });
+      return;
+    }
+    const AUTO_RESUME_MAX_AGE_MS = 5 * 60 * 1000; // 5 min
+
     const checkAndResume = async () => {
       const now = Date.now();
-      if (now - smartResumeCooldownRef.current < 3000) return;
+      if (now - smartResumeCooldownRef.current < 3000) {
+        logResumeDecision({ reason: 'cooldown', fromPathname: pathname || null });
+        return;
+      }
       smartResumeCooldownRef.current = now;
+
+      let list: any[] = [];
       try {
         const res = await api.get('/alerts');
-        const list: any[] = res?.data || [];
-        // Newest unresolved SOS first.
-        const activeSos = list
-          .filter((a) => a?.type === 'sos' && !a?.resolved)
-          .sort((a, b) => {
-            const ta = a?.created_at ? new Date(a.created_at).getTime() : 0;
-            const tb = b?.created_at ? new Date(b.created_at).getTime() : 0;
-            return tb - ta;
-          })[0];
-        if (!activeSos?.id) return;
-        // If they're already on THIS alert's screen, don't yank them.
-        if (pathname && pathname.startsWith(`/alert/${activeSos.id}`)) {
-          return;
-        }
-        router.replace(`/alert/${activeSos.id}`);
-      } catch (_e) {
-        // Silent — the user can still tap the alerts tab manually.
+        list = res?.data || [];
+      } catch (e: any) {
+        logResumeDecision({
+          reason: 'fetch-failed',
+          fromPathname: pathname || null,
+          detail: e?.message || 'unknown',
+        });
+        return;
       }
+
+      // Consider only SOS alerts that are NEITHER resolved NOR ack'd,
+      // and not already dismissed in this session.  Sort newest-first.
+      const candidates = list
+        .filter((a) => a?.type === 'sos' && a?.resolved !== true && a?.acknowledged !== true)
+        .filter((a) => !isAlertDismissed(a?.id))
+        .sort((a, b) => {
+          const ta = a?.created_at ? new Date(a.created_at).getTime() : 0;
+          const tb = b?.created_at ? new Date(b.created_at).getTime() : 0;
+          return tb - ta;
+        });
+      const activeSos = candidates[0];
+
+      if (!activeSos?.id) {
+        setActiveEmergency(null);
+        logResumeDecision({ reason: 'no-cached-alert', fromPathname: pathname || null });
+        return;
+      }
+
+      const createdMs = activeSos.created_at ? new Date(activeSos.created_at).getTime() : 0;
+      const ageMs = createdMs ? now - createdMs : Number.POSITIVE_INFINITY;
+
+      // Update the shared active-emergency store so Dashboard can
+      // render its banner regardless of the resume decision below.
+      setActiveEmergency({
+        id: activeSos.id,
+        member_id: activeSos.member_id,
+        member_name: activeSos.member_name,
+        created_at: activeSos.created_at,
+        latitude: activeSos.latitude ?? null,
+        longitude: activeSos.longitude ?? null,
+        ageMs,
+      });
+
+      // Already viewing this alert → don't yank them again.
+      if (pathname && pathname.startsWith(`/alert/${activeSos.id}`)) {
+        logResumeDecision({
+          reason: 'already-viewing',
+          alertId: activeSos.id,
+          ageMs,
+          fromPathname: pathname || null,
+        });
+        return;
+      }
+
+      // Stale — show the banner on the Dashboard instead of yanking.
+      if (ageMs > AUTO_RESUME_MAX_AGE_MS) {
+        logResumeDecision({
+          reason: 'stale-alert',
+          alertId: activeSos.id,
+          ageMs,
+          fromPathname: pathname || null,
+          detail: `age ${Math.round(ageMs / 1000)}s > 5min`,
+        });
+        return;
+      }
+
+      // Fresh + unresolved + unacknowledged + not-dismissed → resume.
+      logResumeDecision({
+        reason: 'resumed',
+        alertId: activeSos.id,
+        ageMs,
+        fromPathname: pathname || null,
+      });
+      router.replace(`/alert/${activeSos.id}`);
     };
+
+    // Fire once on mount so users who cold-start (AppState never
+    // 'changes' to active — it starts active) still get a validation
+    // pass.  Delayed 800 ms so /me + auth-context settle first.
+    const initialTimer = setTimeout(checkAndResume, 800);
+
     const sub = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
-        // Debounce with a small delay so any parallel /me refresh has
-        // time to prime AuthContext before we call /alerts.
         setTimeout(checkAndResume, 400);
       }
     });
-    return () => sub.remove();
+    return () => {
+      clearTimeout(initialTimer);
+      sub.remove();
+    };
   }, [user?.id, pathname, router]);
 
   // ============================================================

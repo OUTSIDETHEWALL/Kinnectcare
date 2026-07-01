@@ -33,6 +33,7 @@ import {
 import { logCardRender } from '../../src/cardRenderLog';
 import { useAuth } from '../../src/AuthContext';
 import * as memberStore from '../../src/store/memberStore';
+import { useActiveEmergency } from '../../src/activeEmergency';
 
 export default function Dashboard() {
   const router = useRouter();
@@ -48,6 +49,9 @@ export default function Dashboard() {
   const [billing, setBilling] = useState<BillingStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Build 50 hotfix — banner surfaces stale-but-unresolved emergencies
+  // (>5 min old) instead of auto-yanking the user to the incident screen.
+  const activeEmergency = useActiveEmergency();
   // SOS confirmation modal — purposefully in-app (NOT Alert.alert) so:
   //   1. Cancel responds instantly with no system animation lag
   //   2. The dialer launch fires from a clean synchronous event handler,
@@ -550,6 +554,30 @@ export default function Dashboard() {
           </View>
         </View>
 
+        {/* Build 50 hotfix — Active-Emergency banner.  Shown when an
+            unresolved SOS is detected in the family group.  The banner
+            is passive (never yanks the user), always visible until the
+            alert is resolved or auto-dismissed by a 404. */}
+        {activeEmergency ? (
+          <TouchableOpacity
+            testID="dashboard-active-emergency-banner"
+            style={styles.emergencyBanner}
+            onPress={() => router.push(`/alert/${activeEmergency.id}`)}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.emergencyBannerEmoji}>🆘</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.emergencyBannerTitle}>
+                Unresolved emergency — {activeEmergency.member_name}
+              </Text>
+              <Text style={styles.emergencyBannerBody}>
+                Tap to open the incident screen and resolve.
+              </Text>
+            </View>
+            <Icon name="chevron-forward" size={22} color={Colors.surface} />
+          </TouchableOpacity>
+        ) : null}
+
         <View style={styles.summaryCard}>
           <View style={styles.summaryItem}>
             <Text style={styles.summaryNum}>{members.length}</Text>
@@ -838,6 +866,33 @@ const styles = StyleSheet.create({
   name: { fontSize: 28, fontWeight: '800', color: Colors.textPrimary, marginTop: 2 },
   iconBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: Colors.surface, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: Colors.border },
   headerActions: { flexDirection: 'row', gap: 10 },
+  emergencyBanner: {
+    marginHorizontal: 24,
+    marginTop: 4,
+    marginBottom: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: Colors.error,
+    boxShadow: '0px 6px 14px rgba(220,38,38,0.30)',
+    elevation: 4,
+  },
+  emergencyBannerEmoji: { fontSize: 26 },
+  emergencyBannerTitle: {
+    color: Colors.surface,
+    fontSize: 15,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  emergencyBannerBody: {
+    color: Colors.surface,
+    fontSize: 12.5,
+    opacity: 0.92,
+    marginTop: 2,
+  },
   summaryCard: {
     marginHorizontal: 24, padding: 18, backgroundColor: Colors.surface, borderRadius: 20,
     flexDirection: 'row', alignItems: 'center',
