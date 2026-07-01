@@ -73,7 +73,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 49, // bumped from 48 for v1.2.0 (49) — Notification cleanup + Leonidas polish: ghost "K" notifications killed via dismissNotificationAsync on request_location_refresh + silent_v2 channel arrivals; single-flight recoveryInProgress guard kills duplicate Leonidas recovery dispatches; engine/Leonidas boot effect made idempotent via useRef sentinel so flicker re-runs no longer churn patrol-started/patrol-stopped.  No architecture changes; location subsystem moves to maintenance mode after this.
+      versionCode: 50, // Build #50 — Fall Detection completely removed (expo-sensors package purged, ~14 files stripped of fall imports/UI/telemetry, backend SOSRequest.fall_detected field + fall_prefix push logic gone). SOS Emergency Experience overhauled: new dedicated live-incident cockpit at /alert/[id] with red ACTIVE banner, live map auto-refreshing every 15 s via memberStore, 🟢🟡🔴 tracking-status pill, Call 911 / Navigate / Call Member / Resolve actions. New POST /api/alerts/{id}/resolve endpoint cascades alert_resolved push to whole family group; any family member can resolve. Smart AppState-active auto-resume routes user to unresolved SOS on foreground unless already viewing it. SOSRequest locked with extra='forbid' to 422-reject legacy fall_detected payloads.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
