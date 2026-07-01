@@ -21,7 +21,7 @@
         "resourceClass": "m-medium"
       },
       "android": {
-        "buildType": "apk"
+        "buildType": "app-bundle"
       },
       "env": {
         "EXPO_PUBLIC_BACKEND_URL": "https://kinnectcare-production.up.railway.app",
@@ -39,13 +39,6 @@
       "env": {
         "EXPO_PUBLIC_BACKEND_URL": "https://kinnectcare-production.up.railway.app",
         "EXPO_PUBLIC_GOOGLE_MAPS_API_KEY": "AIzaSyBeIZ4yanf7KrSzOaGpGoqsoBWbnyBsc_I"
-      }
-    },
-    "production-apk": {
-      "extends": "production",
-      "distribution": "internal",
-      "android": {
-        "buildType": "apk"
       }
     }
   },
