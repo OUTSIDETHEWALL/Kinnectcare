@@ -10,7 +10,7 @@ import logging
 import uuid
 import asyncio
 from pathlib import Path
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -463,6 +463,9 @@ class LocationUpdate(BaseModel):
 
 
 class SOSRequest(BaseModel):
+    # Build 50: strict mode — reject legacy `fall_detected` (or any other
+    # unknown field) with 422 rather than silently dropping it.
+    model_config = ConfigDict(extra='forbid')
     member_id: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
