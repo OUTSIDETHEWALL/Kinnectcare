@@ -168,7 +168,6 @@ class TimezoneUpdate(BaseModel):
 #
 # Bypass list (always delivered, even in Quiet Hours):
 #   • sos                     — manual emergency button
-#   • fall_detected           — fall-detection countdown expired
 #   • request_location_refresh — silent data ping (already silent)
 #   • alert_resolved          — "they're OK now" confirmation push
 class QuietHoursPreference(BaseModel):
@@ -455,7 +454,6 @@ class SOSRequest(BaseModel):
     member_id: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
-    fall_detected: Optional[bool] = False
 
 
 # ========== Auth helpers ==========
@@ -541,7 +539,7 @@ async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
 
     v1.3.3 — Quiet Hours: if the recipient has a quiet-hours window
     active and the notification is NOT in the emergency bypass list,
-    the push is suppressed.  Bypass types: `sos`, `fall_detected`,
+    the push is suppressed.  Bypass types: `sos`,
     `request_location_refresh` (silent), `alert_resolved`.  Anything
     else (medication, activity, routine, missed-checkin, family-join,
     checkin) is gated.  We log the suppression at INFO so Diagnostics
@@ -560,7 +558,7 @@ async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
 
     # ----- Quiet Hours gate -----
     push_type = (data or {}).get("type") or ""
-    BYPASS_TYPES = {"sos", "fall_detected", "request_location_refresh", "alert_resolved"}
+    BYPASS_TYPES = {"sos", "request_location_refresh", "alert_resolved"}
     if push_type not in BYPASS_TYPES and _is_in_quiet_hours(user):
         logger.info(
             f"quiet-hours-suppress user={user_id} type={push_type or '(none)'} "
@@ -2571,8 +2569,7 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
 
     # Enhanced push: fan out to ALL users in the family group (every linked
     # family member receives the alert on their own devices).
-    fall_prefix = "Fall detected · " if data.fall_detected else ""
-    push_title = f"🆘 {fall_prefix}SOS — {member_name}"
+    push_title = f"🆘 SOS — {member_name}"
     triggered_by_line = (
         f"Triggered by {triggered_by_name}\n" if triggered_by_name and triggered_by_name != member_name else ""
     )
@@ -2588,7 +2585,6 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         "latitude": data.latitude,
         "longitude": data.longitude,
         "timestamp": timestamp_iso,
-        "fall_detected": bool(data.fall_detected),
         "channelId": "sos",
     }
     # ===== SOS BACKGROUND FANOUT =====
@@ -2677,7 +2673,6 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         ),
         # Fanout is now async-fire-and-forget; counts are reported via logs.
         "fanout_mode": "background",
-        "fall_detected": bool(data.fall_detected),
         "sms_mode": sms.mode(),  # "live" or "mock"
     }
 

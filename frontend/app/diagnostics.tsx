@@ -29,15 +29,6 @@ import * as Clipboard from 'expo-clipboard';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
 import { Platform } from 'react-native';
-import {
-  subscribeLiveState,
-  readLiveStateSync,
-  getPhases,
-  getSamples,
-  getEvents,
-  clearAllFallLogs,
-  armSampleCapture,
-} from '../src/fallTelemetry';
 import { getNotificationLog, clearNotificationLog } from '../src/notificationLog';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
@@ -490,25 +481,9 @@ export default function DiagnosticsScreen() {
     }
   }, []);
 
-  // v1.3.3 — Refresh trace (server-side), Notification log,
-  // Fall live state + persisted ring buffers.
+  // v1.3.3 — Refresh trace (server-side), Notification log.
   const [refreshTraces, setRefreshTraces] = useState<any[]>([]);
   const [notifLog, setNotifLog] = useState<any[]>([]);
-  const [fallLive, setFallLive] = useState<any>(readLiveStateSync());
-  const [fallPhases, setFallPhases] = useState<any[]>([]);
-  const [fallSamples, setFallSamples] = useState<any[]>([]);
-  const [fallEvents, setFallEvents] = useState<any[]>([]);
-  const [captureArmed, setCaptureArmed] = useState(false);
-  const [captureUntil, setCaptureUntil] = useState<number | null>(null);
-
-  useEffect(() => subscribeLiveState(setFallLive), []);
-
-  const refreshFallTelemetry = useCallback(async () => {
-    const [p, s, e] = await Promise.all([getPhases(), getSamples(), getEvents()]);
-    setFallPhases(p);
-    setFallSamples(s);
-    setFallEvents(e);
-  }, []);
 
   const refreshNotifLog = useCallback(async () => {
     const arr = await getNotificationLog();
@@ -525,31 +500,9 @@ export default function DiagnosticsScreen() {
   }, []);
 
   useEffect(() => {
-    refreshFallTelemetry();
     refreshNotifLog();
     refreshTraceData();
-    // Live tick — live phase/sample-count update every 500 ms.
-    const tick = setInterval(() => {
-      setFallLive(readLiveStateSync());
-    }, 500);
-    return () => clearInterval(tick);
-  }, [refreshFallTelemetry, refreshNotifLog, refreshTraceData]);
-
-  const onArmCapture = useCallback(() => {
-    armSampleCapture(30_000);
-    setCaptureArmed(true);
-    setCaptureUntil(Date.now() + 30_000);
-    setTimeout(() => {
-      setCaptureArmed(false);
-      setCaptureUntil(null);
-      refreshFallTelemetry();
-    }, 30_500);
-  }, [refreshFallTelemetry]);
-
-  const onClearFallLogs = useCallback(async () => {
-    await clearAllFallLogs();
-    refreshFallTelemetry();
-  }, [refreshFallTelemetry]);
+  }, [refreshNotifLog, refreshTraceData]);
 
   const onClearNotifLog = useCallback(async () => {
     await clearNotificationLog();
@@ -559,7 +512,7 @@ export default function DiagnosticsScreen() {
   const onClear = () => {
     Alert.alert(
       'Clear ALL Diagnostics?',
-      'This removes EVERY developer ring buffer from this device — engine log, dashboard log, card render log, Leonidas log, auth log, route log, push log, notification log, fall logs, and more. Cannot be undone.',
+      'This removes EVERY developer ring buffer from this device — engine log, dashboard log, card render log, Leonidas log, auth log, route log, push log, notification log, and more. Cannot be undone.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -578,11 +531,9 @@ export default function DiagnosticsScreen() {
               clearCardRenderLog(),
               leonidas.clearRecoveryLog(),
               clearNotificationLog(),
-              clearAllFallLogs(),
             ]);
             await reload();
             try { await refreshNotifLog(); } catch (_e) {}
-            try { await refreshFallTelemetry(); } catch (_e) {}
           },
         },
       ],
@@ -666,7 +617,7 @@ export default function DiagnosticsScreen() {
         </TouchableOpacity>
         <Text style={styles.clearAllHint}>
           Clears engine, dashboard, card-render, Leonidas, auth, route, push,
-          notifications, fall logs, and every other developer ring buffer in one tap.
+          notifications, and every other developer ring buffer in one tap.
         </Text>
 
         {/* =====================================================
@@ -1215,116 +1166,6 @@ export default function DiagnosticsScreen() {
             <Text style={styles.secondaryBtnText}>Clear card render & broadcast log</Text>
           </TouchableOpacity>
           </>)}
-        </View>
-
-        {/* =====================================================
-            v1.3.3 — Fall Detection live + persistent telemetry.
-            ===================================================== */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Fall Detection · live</Text>
-          </View>
-          <Text style={styles.sectionHint}>
-            Proves the multi-signal state machine is alive and receiving sensor events.
-            If "subscribed" is blank or "accelerometer" is unavailable, the detector
-            is NOT running and no real fall will ever fire — see Settings → Fall
-            Detection.
-          </Text>
-          <View style={styles.card} testID="diagnostics-fall-live">
-            <Text style={styles.entryLine}>
-              <Text style={styles.entryK}>enabled: </Text>{String(fallLive.enabled)}
-            </Text>
-            <Text style={styles.entryLine}>
-              <Text style={styles.entryK}>accelerometer: </Text>{String(fallLive.available)}
-              {'   '}
-              <Text style={styles.entryK}>gyroscope: </Text>{String(fallLive.gyroAvailable)}
-            </Text>
-            <Text style={styles.entryLine}>
-              <Text style={styles.entryK}>current phase: </Text>{fallLive.phase}
-            </Text>
-            <Text style={styles.entryLine}>
-              <Text style={styles.entryK}>AppState: </Text>{fallLive.appState}
-            </Text>
-            <Text style={styles.entryLine}>
-              <Text style={styles.entryK}>samples observed: </Text>{fallLive.sampleCount}
-              {'   '}
-              <Text style={styles.entryK}>last mag: </Text>{(fallLive.lastMag || 0).toFixed(2)} g
-            </Text>
-            <Text style={styles.entryLine}>
-              <Text style={styles.entryK}>peak (last 5 s): </Text>{(fallLive.peakMag5s || 0).toFixed(2)} g
-            </Text>
-            <Text style={styles.entryLine}>
-              <Text style={styles.entryK}>subscribed at: </Text>
-              {fallLive.subscribedAt ? fmt(new Date(fallLive.subscribedAt).toISOString()) : '— never'}
-            </Text>
-          </View>
-          <View style={styles.actionRow}>
-            <TouchableOpacity
-              testID="diagnostics-fall-arm"
-              style={styles.primaryBtn}
-              onPress={onArmCapture}
-              disabled={captureArmed}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.primaryBtnText}>
-                {captureArmed
-                  ? `⏱ Capturing… (${Math.max(0, Math.round(((captureUntil || 0) - Date.now()) / 1000))} s)`
-                  : '⏱ Arm 30 s sample capture'}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              testID="diagnostics-fall-clear"
-              style={styles.secondaryBtn}
-              onPress={onClearFallLogs}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.secondaryBtnText}>Clear fall logs</Text>
-            </TouchableOpacity>
-          </View>
-          <Text style={styles.sectionHint}>
-            Tap "Arm" then throw the phone within 30 s — every accelerometer sample
-            during the window is logged below.  Without arming, only phase
-            transitions are persisted (to save battery).
-          </Text>
-
-          {/* Phase transitions */}
-          <Text style={styles.subSectionLabel}>Phase transitions (last 20)</Text>
-          <View style={styles.card}>
-            {fallPhases.length === 0 ? (
-              <Text style={styles.muted}>— no transitions recorded.</Text>
-            ) : fallPhases.slice(0, 20).map((p, i) => (
-              <Text key={i} style={styles.entryLine}>
-                <Text style={styles.entryK}>{fmt(new Date(p.at).toISOString())}: </Text>
-                {p.phase}
-              </Text>
-            ))}
-          </View>
-
-          {/* Lifecycle events */}
-          <Text style={styles.subSectionLabel}>Events (last 20)</Text>
-          <View style={styles.card}>
-            {fallEvents.length === 0 ? (
-              <Text style={styles.muted}>— no events recorded.</Text>
-            ) : fallEvents.slice(0, 20).map((e, i) => (
-              <Text key={i} style={styles.entryLine}>
-                <Text style={styles.entryK}>{fmt(new Date(e.at).toISOString())}: </Text>
-                {e.kind}{e.detail ? ` (${e.detail})` : ''}
-              </Text>
-            ))}
-          </View>
-
-          {/* Captured sensor samples (only populated during armed capture) */}
-          <Text style={styles.subSectionLabel}>Captured samples (last 30)</Text>
-          <View style={styles.card}>
-            {fallSamples.length === 0 ? (
-              <Text style={styles.muted}>— no samples captured. Tap Arm and throw the phone.</Text>
-            ) : fallSamples.slice(0, 30).map((s, i) => (
-              <Text key={i} style={styles.entryLine}>
-                <Text style={styles.entryK}>{fmt(new Date(s.at).toISOString())}: </Text>
-                {s.mag.toFixed(2)} g  ({s.x.toFixed(2)}, {s.y.toFixed(2)}, {s.z.toFixed(2)})
-              </Text>
-            ))}
-          </View>
         </View>
 
         {/* =====================================================

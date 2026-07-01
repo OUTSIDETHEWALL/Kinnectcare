@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Modal, TextInput, ActivityIndicator, Switch, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Modal, TextInput, ActivityIndicator, Platform } from 'react-native';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -8,7 +8,6 @@ import Constants from 'expo-constants';
 import { useAuth } from '../src/AuthContext';
 import { APP_NAME, COMPANY_NAME } from '../src/legal';
 import { getBillingStatus, BillingStatus, api } from '../src/api';
-import { isFallEnabled, setFallEnabled, isFallAvailable } from '../src/fallDetector';
 import { getPushStatus, subscribePushStatus, PushStatus, registerForPushNotifications } from '../src/push';
 import { hasPinForUser, clearPin } from '../src/pinAuth';
 import { clearPinSetupDismissed } from '../src/pinSetupPrompt';
@@ -21,8 +20,6 @@ export default function SettingsScreen() {
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [fallOn, setFallOn] = useState<boolean>(true);
-  const [fallAvailable, setFallAvailable] = useState<boolean>(false);
   // Live push-registration status, surfaced in the UI so users can see why
   // notifications aren't firing without us asking them to look at device logs.
   const [pushStatus, setPushStatus] = useState<PushStatus>(getPushStatus());
@@ -89,15 +86,8 @@ export default function SettingsScreen() {
   useEffect(() => {
     (async () => {
       try { setBilling(await getBillingStatus()); } catch {}
-      try { setFallOn(await isFallEnabled()); } catch {}
-      try { setFallAvailable(await isFallAvailable()); } catch {}
     })();
   }, []);
-
-  const onToggleFall = async (v: boolean) => {
-    setFallOn(v);
-    await setFallEnabled(v);
-  };
 
   const planLabel =
     billing?.plan === 'family_plan'
@@ -263,46 +253,6 @@ export default function SettingsScreen() {
 
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Safety</Text>
-          <View style={styles.card}>
-            <View style={styles.fallRow} testID="settings-fall-row">
-              <View style={{ flex: 1, paddingRight: 12 }}>
-                <View style={styles.fallTitleRow}>
-                  <Text style={styles.fallIcon}>🚨</Text>
-                  <Text style={styles.fallTitle}>Fall Detection</Text>
-                </View>
-                <Text style={styles.fallBody}>
-                  Multi-signal fall detection (v1.4.0). Watches impact, orientation
-                  change, and post-fall stillness — all three must agree before a
-                  30-second "Are you okay?" countdown is shown.
-                </Text>
-                {!fallAvailable ? (
-                  <Text style={styles.fallUnavail}>
-                    Not available on this device — works on physical phones with accelerometers.
-                  </Text>
-                ) : null}
-              </View>
-              <Switch
-                testID="settings-fall-switch"
-                value={fallOn}
-                onValueChange={onToggleFall}
-                trackColor={{ false: Colors.border, true: Colors.primary }}
-                thumbColor={Colors.surface}
-              />
-            </View>
-            <Divider />
-            <NavRow
-              testID="settings-fall-test"
-              icon="🧪"
-              label="Test Fall Detection"
-              onPress={() => router.push('/fall-detection-test')}
-            />
-          </View>
-        </View>
-
-        {/* v1.3.3 — Quiet Hours.  App-level only; OS-DND inheritance
-            queued for v1.4.0 native build. */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Notifications</Text>
           <View style={styles.card}>
             <NavRow
               testID="settings-quiet-hours"
@@ -662,15 +612,6 @@ const styles = StyleSheet.create({
     marginTop: 10, alignItems: 'center', paddingVertical: 12,
   },
   modalSecondaryText: { color: Colors.textSecondary, fontSize: 15, fontWeight: '600' },
-  fallRow: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 16, paddingVertical: 14,
-  },
-  fallTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  fallIcon: { fontSize: 18 },
-  fallTitle: { fontSize: 15, fontWeight: '800', color: Colors.textPrimary },
-  fallBody: { fontSize: 12.5, color: Colors.textSecondary, marginTop: 4, lineHeight: 18 },
-  fallUnavail: { marginTop: 6, fontSize: 11, color: Colors.textTertiary, fontStyle: 'italic' },
   // Push-notification diagnostic row — surfaces registration status to user.
   pushRow: {
     flexDirection: 'row', alignItems: 'center',

@@ -16,19 +16,10 @@ function alertIcon(type: string) {
   return 'alert-circle-outline';
 }
 
-// SOS alerts (including fall-detection ones — they roll through /api/sos
-// so they're stored with type='sos' + a `fall_detected` flag in the
-// message) get an embedded mini-map. Medication / routine / missed-checkin
+// SOS alerts get an embedded mini-map. Medication / routine / missed-checkin
 // alerts do NOT — they're not location-sensitive.
 function shouldShowMap(a: Alert): boolean {
   return a.type === 'sos' && typeof a.latitude === 'number' && typeof a.longitude === 'number';
-}
-
-// Heuristic to tell fall-detection apart from manual SOS for label only.
-// Backend stores fall events as type='sos' with "Fall detected" prefix in
-// the message; we just check the message string.
-function isFallAlert(a: Alert): boolean {
-  return a.type === 'sos' && /fall detected/i.test(a.message || '');
 }
 
 // Open the device's native maps app for turn-by-turn navigation.
@@ -94,7 +85,7 @@ export default function Alerts() {
     if (alerts.length === 0) return;
     RNAlert.alert(
       'Clear all alerts?',
-      `This will permanently delete all ${alerts.length} alert${alerts.length === 1 ? '' : 's'} in your family group — including SOS, fall, medication and check-in history. This cannot be undone.`,
+      `This will permanently delete all ${alerts.length} alert${alerts.length === 1 ? '' : 's'} in your family group — including SOS, medication and check-in history. This cannot be undone.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -188,7 +179,7 @@ export default function Alerts() {
                     />
                     <View style={styles.mapHint}>
                       <Text style={styles.mapHintText}>
-                        {isFallAlert(a) ? '🚨 Fall location' : '🆘 SOS location'} · {(a.latitude as number).toFixed(4)}°, {(a.longitude as number).toFixed(4)}° · Tap for directions
+                        🆘 SOS location · {(a.latitude as number).toFixed(4)}°, {(a.longitude as number).toFixed(4)}° · Tap for directions
                       </Text>
                     </View>
                   </TouchableOpacity>

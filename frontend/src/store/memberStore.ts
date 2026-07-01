@@ -55,7 +55,7 @@
  *
  *  4. **No React context.**  Module-level state + `useSyncExternalStore`
  *     mirrors the pattern already established by
- *     `locationRefreshState.ts` and `fallTelemetry.ts`, so the rest of
+ *     `locationRefreshState.ts`, so the rest of
  *     the codebase reads naturally to any developer who knows those
  *     modules.
  *

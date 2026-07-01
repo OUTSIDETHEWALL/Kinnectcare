@@ -495,7 +495,6 @@ export async function registerForPushNotifications(): Promise<string | null> {
 //   medication refill    → 'med_<reminder_id>_refill'
 //   routine due          → 'rt_<reminder_id>_due'
 //   sos                  → 'sos_<alert_id>'    (per-alert is OK; SOSs are rare)
-//   fall_detected        → 'fall_<alert_id>'
 //   missed_checkin       → 'miss_<member_id>'  (per-member; auto-dedupes)
 function stableNotificationId(data: any): string | null {
   const t = data?.type;
@@ -511,7 +510,6 @@ function stableNotificationId(data: any): string | null {
   }
   if (t === 'routine' && rid) return `rt_${rid}_due`;
   if (t === 'sos' && aid) return `sos_${aid}`;
-  if (t === 'fall_detected' && aid) return `fall_${aid}`;
   if (t === 'missed_checkin' && mid) return `miss_${mid}`;
   return null;
 }
@@ -521,7 +519,7 @@ async function rePresentSticky(n: Notifications.Notification) {
   const content = n.request.content;
   const data: any = content.data || {};
   const t = data.type;
-  if (!t || !['medication', 'routine', 'sos', 'fall_detected'].includes(t)) return;
+  if (!t || !['medication', 'routine', 'sos'].includes(t)) return;
 
   // ============================================================
   //  CRITICAL: ONLY re-present when the app is in FOREGROUND.
@@ -569,7 +567,7 @@ async function rePresentSticky(n: Notifications.Notification) {
 
   const channelId =
     data.channelId ||
-    (t === 'sos' || t === 'fall_detected' ? 'sos' : t === 'routine' ? 'routines' : 'meds_v2');
+    (t === 'sos' ? 'sos' : t === 'routine' ? 'routines' : 'meds_v2');
   const cat = data.categoryIdentifier;
   const stableId = stableNotificationId(data);
 
@@ -604,7 +602,7 @@ async function rePresentSticky(n: Notifications.Notification) {
         sticky: true,        // can't be swiped away on Android
         autoDismiss: false,  // doesn't auto-dismiss on tap
         priority: Notifications.AndroidNotificationPriority.MAX,
-        color: (t === 'sos' || t === 'fall_detected') ? '#DC2626' : '#1B5E35',
+        color: t === 'sos' ? '#DC2626' : '#1B5E35',
       } as any,
       trigger: { channelId } as any,
     });

@@ -19,7 +19,7 @@
  * Format of each entry (JSON-stringified, line per event):
  *   {
  *     t:    1719456000123,        // unix ms
- *     type: 'sos' | 'medication' | 'missed_checkin' | 'fall_detected' |
+ *     type: 'sos' | 'medication' | 'missed_checkin' |
  *           'family_med_alert' | 'checkin' | string,
  *     loggedIn: true | false,
  *     hasPin: true | false | null,    // null = not yet checked

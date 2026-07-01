@@ -1,7 +1,7 @@
 /**
  * Alert detail screen — destination for notification-tap deep-links.
  *
- * Fix #3 of the v1.2 beta sprint: when a SOS / fall / missed-checkin /
+ * Fix #3 of the v1.2 beta sprint: when an SOS / missed-checkin /
  * medication-escalation push is tapped, the user lands HERE (after the
  * PIN gate clears in RootNav) instead of the generic alerts list.  The
  * notification's context — WHICH alert fired — is preserved across the
@@ -9,7 +9,7 @@
  * they were trying to respond to.
  *
  * Renders type-appropriate primary actions:
- *   SOS / fall_detected        → 📞 Call <member> · 📍 Directions · ✓ Mark resolved
+ *   SOS                        → 📞 Call <member> · 📍 Directions · ✓ Mark resolved
  *   missed_checkin             → 📞 Call <member> · ✓ Acknowledge
  *   medication / family_alert  → uses /(modals)/acknowledge instead
  *                                (this screen only ever sees critical /
@@ -53,8 +53,8 @@ function alertIcon(type: string): string {
   return 'alert-circle';
 }
 
-function isFallAlert(a: Alert): boolean {
-  return a.type === 'sos' && /fall detected/i.test(a.message || '');
+function isFallAlert(_a: Alert): boolean {
+  return false;
 }
 
 function openMaps(lat: number, lon: number, label: string) {

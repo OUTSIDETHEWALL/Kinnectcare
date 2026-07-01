@@ -13,7 +13,6 @@ import { logScreenRender } from '../../src/screenRenderLog';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, Reminder } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
-import { isFallEnabled } from '../../src/fallDetector';
 import MemberMap from '../../src/MemberMap';
 import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone, formatTimeAgo } from '../../src/timeFormat';
 import { TimePicker12 } from '../../src/TimePicker12';
@@ -43,7 +42,6 @@ export default function MemberDetail() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showCheckinSettings, setShowCheckinSettings] = useState(false);
-  const [fallOn, setFallOn] = useState<boolean>(true);
   // v1.3.2 — live refresh indicator wired to locationRefreshState.
   // Subscribes when `id` is set and unsubscribes on unmount.  The
   // 20-second forceTick keeps the "X min ago" timestamp accurate
@@ -73,10 +71,6 @@ export default function MemberDetail() {
     // re-syncs once the silent-push roundtrip completes.
     load().catch(() => {});
   }, [id, member?.last_seen]);
-
-  useEffect(() => {
-    isFallEnabled().then(setFallOn).catch(() => {});
-  }, []);
 
   const load = async () => {
     try {
@@ -140,7 +134,7 @@ export default function MemberDetail() {
     // never refetch in the background:
     //   1. 60 s poll while visible
     //   2. AppState 'active' transition
-    //   3. Any notification arrival (member check-in, fall, etc.)
+    //   3. Any notification arrival (member check-in, SOS, etc.)
     const pollId = setInterval(() => { load().catch(() => {}); }, 60_000);
     const appStateSub = AppState.addEventListener('change', (next) => {
       if (next === 'active') load().catch(() => {});
@@ -442,32 +436,6 @@ export default function MemberDetail() {
           </View>
         </View>
 
-        {/* Active Safety Features */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Active Safety</Text>
-          <View
-            testID="member-fall-badge"
-            style={[styles.featureCard, !fallOn && styles.featureCardOff]}
-          >
-            <View style={[styles.featureIcon, !fallOn && styles.featureIconOff]}>
-              <Text style={styles.featureIconText}>🚨</Text>
-            </View>
-            <View style={{ flex: 1, marginLeft: 12 }}>
-              <Text style={styles.featureTitle}>Fall Detection</Text>
-              <Text style={styles.featureBody}>
-                {fallOn
-                  ? 'Active — multi-signal pipeline (impact + orientation + stillness). 30 s grace period before automatic family alert.'
-                  : 'Off — turn on in Settings to detect falls automatically.'}
-              </Text>
-            </View>
-            <View style={[styles.featurePill, fallOn ? styles.featurePillOn : styles.featurePillOff]}>
-              <Text style={[styles.featurePillText, !fallOn && { color: Colors.textTertiary }]}>
-                {fallOn ? 'ACTIVE' : 'OFF'}
-              </Text>
-            </View>
-          </View>
-        </View>
-
         {/* Emergency Contact (SMS) */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
@@ -552,14 +520,14 @@ export default function MemberDetail() {
                 )}
                 <Text style={styles.ecValue}>{member.emergency_contact_phone}</Text>
                 <Text style={styles.ecHelp}>
-                  📱 Receives an SMS the moment {member?.name} triggers SOS or fall detection.
+                  📱 Receives an SMS the moment {member?.name} triggers an SOS.
                 </Text>
               </View>
             ) : (
               <View testID="ec-empty">
                 <Text style={styles.ecEmpty}>No emergency contact set</Text>
                 <Text style={styles.ecHelp}>
-                  Add a phone number so a designated person gets an SMS alert during SOS or fall detection.
+                  Add a phone number so a designated person gets an SMS alert during an SOS emergency.
                 </Text>
               </View>
             )}
@@ -919,20 +887,6 @@ const styles = StyleSheet.create({
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   legendDot: { width: 10, height: 10, borderRadius: 5 },
   legendText: { fontSize: 11, color: Colors.textSecondary, fontWeight: '600' },
-  featureCard: {
-    flexDirection: 'row', alignItems: 'center',
-    padding: 14, borderRadius: 14,
-    backgroundColor: Colors.surface, borderWidth: 1, borderColor: Colors.tertiary,
-    boxShadow: '0px 4px 12px rgba(27,94,53,0.08)' as any,
-  },
-  featureCardOff: { borderColor: Colors.border, opacity: 0.85 },
-  featureIcon: {
-    width: 44, height: 44, borderRadius: 22, backgroundColor: Colors.tertiary,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  featureIconOff: { backgroundColor: Colors.background },
-  featureIconText: { fontSize: 22 },
-  featureTitle: { fontSize: 14, fontWeight: '800', color: Colors.textPrimary },
   ecInput: {
     backgroundColor: Colors.background, borderRadius: 10, paddingHorizontal: 14,
     paddingVertical: 12, fontSize: 16, borderWidth: 1, borderColor: Colors.border,
@@ -959,11 +913,6 @@ const styles = StyleSheet.create({
   ecOptionSub: { fontSize: 12, color: Colors.textSecondary, marginTop: 2, lineHeight: 16 },
   ecEmpty: { fontSize: 14, color: Colors.textTertiary, fontStyle: 'italic' },
   ecHelp: { fontSize: 12, color: Colors.textSecondary, marginTop: 6, lineHeight: 17 },
-  featureBody: { fontSize: 12, color: Colors.textSecondary, marginTop: 2, lineHeight: 17 },
-  featurePill: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10, marginLeft: 8 },
-  featurePillOn: { backgroundColor: Colors.primary },
-  featurePillOff: { backgroundColor: Colors.border },
-  featurePillText: { fontSize: 10, fontWeight: '800', color: Colors.surface, letterSpacing: 0.6 },
 });
 
 function ComplianceChart({ history }: { history: any }) {

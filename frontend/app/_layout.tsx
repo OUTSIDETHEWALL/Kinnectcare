@@ -2,12 +2,10 @@ import { Stack, useRouter, useSegments } from 'expo-router';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from '../src/AuthContext';
-import { useEffect, useState, useRef } from 'react';
-import { View, ActivityIndicator, AppState, Platform } from 'react-native';
+import { useEffect, useState, useRef } from 'react';import { View, ActivityIndicator, AppState, Platform } from 'react-native';
 import { Colors } from '../src/theme';
 import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink, refreshPushTokenIfStale } from '../src/push';
 import { isOnboardingDone } from '../src/onboardingStore';
-import { FallDetectionOverlay } from '../src/FallDetectionOverlay';
 import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
 import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
 import { startBackgroundLocation, stopBackgroundLocation } from '../src/backgroundLocation';
@@ -250,7 +248,7 @@ function RootNav() {
       }
       return;
     }
-    if (t === 'sos' || t === 'missed_checkin' || t === 'fall_detected') {
+    if (t === 'sos' || t === 'missed_checkin') {
       // Fix #3 (v1.2 beta): deep-link straight to the SPECIFIC alert
       // (not the generic alerts list).  This preserves the user's
       // intent — they tapped the notification because THAT alert
@@ -273,7 +271,7 @@ function RootNav() {
     // This guarantees the notification channels (meds_v2, routines,
     // sos, ...) and categories (action buttons) exist on the device
     // before any push can arrive — fixing the #1 pre-launch safety
-    // bug where medication / check-in / fall-detected pushes were
+    // bug where medication / check-in / SOS pushes were
     // silently dropped when the app was killed or the user was
     // logged out, because the channels were only created
     // post-authentication.
@@ -786,7 +784,6 @@ function RootNav() {
       <Stack.Screen name="disclaimer" />
       <Stack.Screen name="upgrade" />
       <Stack.Screen name="sos-confirmation" />
-      <Stack.Screen name="fall-detection-test" />
       <Stack.Screen name="alert/[id]" />
     </Stack>
   );
@@ -798,7 +795,6 @@ export default function RootLayout() {
       <AuthProvider>
         <StatusBar style="dark" />
         <RootNav />
-        <FallDetectionOverlay />
       </AuthProvider>
     </SafeAreaProvider>
   );
