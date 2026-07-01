@@ -64,8 +64,6 @@ async def send_expo_push(
     for t in valid:
         msg: Dict[str, Any] = {
             "to": t,
-            "title": title[:200],
-            "body": body[:500],
             "priority": "high",
             "channelId": channel_id,
             "data": data,
@@ -81,12 +79,42 @@ async def send_expo_push(
             # push until the device wakes up — same behavior as any
             # production messaging app.
         }
+        # Build 50 — ghost-notification KILL at the FCM protocol level.
+        #
+        # FCM has a strict rule: any message that contains a
+        # `notification` block (which Expo constructs from any non-empty
+        # `title` or `body`) is treated as a NOTIFICATION message and
+        # renders on the tray automatically — even when the app is
+        # killed and even at IMPORTANCE_MIN (falls back to the app-name
+        # initial "K").  Only messages with EXCLUSIVELY a `data` block
+        # are true data-only wake-ups that never surface visually.
+        #
+        # Build 49's JS-side dismissNotificationAsync() only works when
+        # the JS runtime is alive to fire the listener.  On Joyce's
+        # phone during long idle periods (OS kills JS after 30-60 min of
+        # background per audit P4), the notification arrives, the OS
+        # draws the tray entry, and nothing dismisses it because there
+        # is no JS to receive the event.  That's the source of the 10
+        # ghost K notifications she saw over 2 hours today.
+        #
+        # Fix: OMIT title/body entirely when both are empty, so Expo's
+        # push service constructs a data-only FCM message.  FCM then
+        # wakes the app to run the JS handler without EVER rendering a
+        # tray entry — regardless of whether JS is currently alive.
+        # The refresh still happens (the data payload is delivered); it
+        # just stops being visible.
+        has_title = bool(title and title.strip())
+        has_body = bool(body and body.strip())
+        if has_title:
+            msg["title"] = title[:200]
+        if has_body:
+            msg["body"] = body[:500]
         # v1.3.0+ silent-push hardening: omit the sound key entirely
         # when caller passes a falsy value.  An empty-string sound was
         # being interpreted by Android FCM as "use default sound",
         # which made the request_location_refresh data push audibly
         # buzz on the receiving device — defeating the whole point.
-        if sound:
+        if sound and (has_title or has_body):
             msg["sound"] = sound
         if cat_id:
             msg["categoryId"] = cat_id

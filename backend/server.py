@@ -11,13 +11,13 @@ import uuid
 import asyncio
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import jwt
 import stripe
 from passlib.context import CryptContext
-from pydantic import field_validator, field_serializer
+from pydantic import field_validator, field_serializer, model_validator
 
 
 # Helper: when MongoDB returns a naive datetime, attach UTC tzinfo so
@@ -387,9 +387,68 @@ class CheckInCreate(BaseModel):
 
 
 class LocationUpdate(BaseModel):
-    latitude: float
-    longitude: float
+    """
+    Shape-agnostic location payload.
+
+    Build 50 (2026-06-30):
+      Transistor SDK 5.2.0's native Android transport has an edge-case path
+      (motionchange events + SQLite batch-replay after offline queueing) where
+      `locationTemplate` is silently bypassed and the SDK sends its default
+      nested shape:  { "coords": { "latitude": ..., "longitude": ... }, ... }
+
+      Rather than fighting the vendor's native code, this endpoint accepts
+      BOTH the intended flat shape AND the fallback nested shape.  The
+      validator normalises to flat lat/lon before the endpoint sees the
+      values, so update_member_location() downstream is unchanged.
+
+    Accepted shapes:
+      1. Flat  (JS-side callers, primary Transistor path):
+         { "latitude": 47.6, "longitude": -122.3, "location_name": "..." }
+      2. Nested (Transistor fallback path after offline queueing):
+         { "coords": { "latitude": 47.6, "longitude": -122.3 },
+           "accuracy": 15, "is_moving": true, ... }
+      3. Mixed  (extras + coords + top-level accuracy):
+         { "coords": { ... }, "latitude": 47.6, "longitude": -122.3, ... }
+         → flat values win, coords is ignored.
+
+    Extra/unknown fields (accuracy, speed, heading, timestamp, is_moving,
+    event, provider, source, extras, etc.) are accepted and ignored — we
+    only persist latitude/longitude/location_name into Mongo.
+    """
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     location_name: Optional[str] = None
+    # Nested Transistor default-shape passthrough.  Never persisted; only
+    # inspected by the validator below to pull lat/lon out if the top-level
+    # values are missing.
+    coords: Optional[Dict[str, Any]] = None
+    # Silently accept everything else Transistor sends so unknown fields
+    # don't trip validation on new SDK versions.
+    model_config = {"extra": "allow"}
+
+    @model_validator(mode="after")
+    def _normalize_coords(self) -> "LocationUpdate":
+        # If flat lat/lon are missing but nested `coords.{lat,lon}` are
+        # present, promote them.  This is the Transistor-fallback path.
+        if self.latitude is None or self.longitude is None:
+            c = self.coords or {}
+            if isinstance(c, dict):
+                lat_c = c.get("latitude")
+                lon_c = c.get("longitude")
+                if self.latitude is None and isinstance(lat_c, (int, float)):
+                    self.latitude = float(lat_c)
+                if self.longitude is None and isinstance(lon_c, (int, float)):
+                    self.longitude = float(lon_c)
+        # After promotion, BOTH must be numbers.  If either is still
+        # missing, we return a clear 422 with the same field-required
+        # error Pydantic would have produced pre-Build 50 — but now the
+        # trigger is a genuinely malformed body, not a legitimate
+        # Transistor upload with nested coords.
+        if self.latitude is None:
+            raise ValueError("latitude is required (top-level or coords.latitude)")
+        if self.longitude is None:
+            raise ValueError("longitude is required (top-level or coords.longitude)")
+        return self
 
 
 class SOSRequest(BaseModel):
