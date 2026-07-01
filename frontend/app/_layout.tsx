@@ -1,4 +1,4 @@
-import { Stack, useRouter, useSegments } from 'expo-router';
+import { Stack, useRouter, useSegments, usePathname } from 'expo-router';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from '../src/AuthContext';
@@ -24,6 +24,7 @@ function RootNav() {
   const { user, loading } = useAuth();
   const segments = useSegments();
   const router = useRouter();
+  const pathname = usePathname();
   const [onboardingChecked, setOnboardingChecked] = useState(false);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   // PIN gate state: whether THIS user has a PIN set on this device, and
@@ -319,6 +320,64 @@ function RootNav() {
     });
     return () => sub.remove();
   }, [user?.id]);
+
+  // ============================================================
+  //  Build 50 — Smart AppState-active resume to unresolved SOS
+  // ============================================================
+  //
+  //  When the app becomes foreground, if ANY unresolved SOS exists in
+  //  the user's family group, auto-navigate them to the incident
+  //  screen — UNLESS they're already viewing it.  If it's been resolved
+  //  in the meantime, we do nothing (never interrupt a foreground
+  //  session for a resolved incident).
+  //
+  //  Rules:
+  //    • Only fires on 'active' transitions (not on mount — the initial
+  //      deep-link routing already handles cold-start via notification).
+  //    • Skips when `pathname` already matches `/alert/<id>` for that
+  //      exact alert — they're either responding or reviewing.
+  //    • Fetches /alerts and picks the NEWEST unresolved SOS
+  //      (ordered by created_at desc).  If none, no-op.
+  //    • 3-second cooldown to prevent tight loops on rapid
+  //      background→foreground transitions.
+  // ============================================================
+  const smartResumeCooldownRef = useRef<number>(0);
+  useEffect(() => {
+    if (!user?.id) return;
+    const checkAndResume = async () => {
+      const now = Date.now();
+      if (now - smartResumeCooldownRef.current < 3000) return;
+      smartResumeCooldownRef.current = now;
+      try {
+        const res = await api.get('/alerts');
+        const list: any[] = res?.data || [];
+        // Newest unresolved SOS first.
+        const activeSos = list
+          .filter((a) => a?.type === 'sos' && !a?.resolved)
+          .sort((a, b) => {
+            const ta = a?.created_at ? new Date(a.created_at).getTime() : 0;
+            const tb = b?.created_at ? new Date(b.created_at).getTime() : 0;
+            return tb - ta;
+          })[0];
+        if (!activeSos?.id) return;
+        // If they're already on THIS alert's screen, don't yank them.
+        if (pathname && pathname.startsWith(`/alert/${activeSos.id}`)) {
+          return;
+        }
+        router.replace(`/alert/${activeSos.id}`);
+      } catch (_e) {
+        // Silent — the user can still tap the alerts tab manually.
+      }
+    };
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        // Debounce with a small delay so any parallel /me refresh has
+        // time to prime AuthContext before we call /alerts.
+        setTimeout(checkAndResume, 400);
+      }
+    });
+    return () => sub.remove();
+  }, [user?.id, pathname, router]);
 
   // ============================================================
   //  v1.2.2 — Cache "my member id" + foreground location refresh

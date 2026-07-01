@@ -227,6 +227,11 @@ export type Alert = {
   latitude?: number;
   longitude?: number;
   acknowledged: boolean;
+  // Build 50 — Explicit resolve fields for SOS incident-screen workflow.
+  resolved?: boolean;
+  resolved_at?: string | null;
+  resolved_by_user_id?: string | null;
+  resolved_by_name?: string | null;
   created_at: string;
 };
 

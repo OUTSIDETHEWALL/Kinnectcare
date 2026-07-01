@@ -355,11 +355,23 @@ class Alert(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     acknowledged: bool = False
+    # Build 50 — Explicit resolve fields for SOS incident-screen workflow.
+    # `resolved` flag drives the ACTIVE/RESOLVED banner on the incident
+    # screen and gates the AppState-active auto-navigation (we only
+    # redirect users to an unresolved incident).
+    resolved: bool = False
+    resolved_at: Optional[datetime] = None
+    resolved_by_user_id: Optional[str] = None
+    resolved_by_name: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @field_serializer("created_at", when_used='json')
     def _ser_created_at(self, v: datetime) -> str:
         return _to_utc_iso(v)
+
+    @field_serializer("resolved_at", when_used='json')
+    def _ser_resolved_at(self, v: Optional[datetime]) -> Optional[str]:
+        return _to_utc_iso(v) if v else None
 
 
 class CheckIn(BaseModel):
@@ -1971,6 +1983,78 @@ async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Alert not found")
     return {"ok": True}
+
+
+# =========================================================================
+# Build #50 — SOS Emergency Resolve endpoint.
+#
+# Called from the SOS incident screen's "✓ Resolve Emergency" button.
+# ANY member of the family group can resolve (per Build 50 spec — the
+# person on-scene is often not the account owner).  We:
+#   1. Mark the alert `resolved: true` + `acknowledged: true` and stamp
+#      `resolved_at`, `resolved_by_user_id`, `resolved_by_name`.
+#   2. Cascade an `alert_resolved` push notification to the ENTIRE
+#      family group (including the triggering user's other devices)
+#      so every caregiver's phone can dismiss the emergency banner.
+#      The push bypasses Quiet Hours (already in the BYPASS_TYPES set).
+#   3. Return the updated alert so the client can repaint immediately.
+#
+# Idempotent — re-resolving an already-resolved alert is a no-op and
+# returns 200 with the existing record (prevents duplicate resolved
+# pushes if the button is tapped twice on a slow connection).
+# =========================================================================
+@api_router.post("/alerts/{alert_id}/resolve")
+async def resolve_alert(alert_id: str, current=Depends(get_current_user)):
+    doc = await db.alerts.find_one(
+        {"id": alert_id, "family_group_id": current["family_group_id"]},
+        {"_id": 0},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    # Idempotent short-circuit — already resolved.
+    if doc.get("resolved"):
+        return {"ok": True, "alert": Alert(**doc).model_dump(mode="json"), "already_resolved": True}
+
+    resolver_name = current.get("full_name") or current.get("email") or "A family member"
+    now = datetime.now(timezone.utc)
+    updates = {
+        "resolved": True,
+        "resolved_at": now,
+        "resolved_by_user_id": current["id"],
+        "resolved_by_name": resolver_name,
+        "acknowledged": True,
+    }
+    await db.alerts.update_one(
+        {"id": alert_id, "family_group_id": current["family_group_id"]},
+        {"$set": updates},
+    )
+    doc.update(updates)
+
+    # Cascade "alert_resolved" push to the entire family group so every
+    # caregiver's device can clear the ACTIVE banner + refresh state.
+    member_name = doc.get("member_name") or "family member"
+    push_title = f"✅ SOS resolved — {member_name}"
+    push_body = f"{resolver_name} marked {member_name}'s SOS as resolved."
+    push_data = {
+        "type": "alert_resolved",
+        "alert_id": alert_id,
+        "member_id": doc.get("member_id"),
+        "member_name": member_name,
+        "resolved_by_user_id": current["id"],
+        "resolved_by_name": resolver_name,
+        "family_group_id": current["family_group_id"],
+        "resolved_at": _to_utc_iso(now),
+        "channelId": "sos",
+    }
+    try:
+        await push_to_family_group(
+            current["family_group_id"], push_title, push_body, push_data,
+        )
+    except Exception as e:
+        logger.warning(f"alert_resolved push fanout failed for {alert_id}: {e}")
+
+    return {"ok": True, "alert": Alert(**doc).model_dump(mode="json")}
 
 
 @api_router.delete("/alerts")
