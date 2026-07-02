@@ -14,6 +14,7 @@ import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, Reminder } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
 import MemberMap from '../../src/MemberMap';
+import { TrackingStatusPill } from '../../src/tracking/TrackingStatusPill';
 import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone, formatTimeAgo } from '../../src/timeFormat';
 import { TimePicker12 } from '../../src/TimePicker12';
 import { pickContact, isContactsPickerSupported } from '../../src/contactsPicker';
@@ -407,16 +408,30 @@ export default function MemberDetail() {
               <View style={styles.locPinBubble}><Text style={styles.locPinEmoji}>📍</Text></View>
               <View style={{ flex: 1, marginLeft: 14 }}>
                 <Text style={styles.locName}>{member.location_name || 'Unknown location'}</Text>
+                {/* Build 52 — status-centric location freshness. The
+                    pill is always visible (single source of truth
+                    shared with the SOS incident screen and dashboard
+                    cards); the timestamp is secondary detail; the
+                    "Refreshing…" spinner is a short-lived in-flight
+                    signal that supplements the pill when the app has
+                    just requested a fresh GPS ping. */}
+                <TrackingStatusPill
+                  hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
+                  lastSeenIso={member.last_seen}
+                  size="compact"
+                  style={styles.locStatusPill}
+                  testID="member-tracking-status"
+                />
                 {locationRefreshing ? (
                   <View style={styles.locFreshRow} testID="member-refreshing-banner">
                     <ActivityIndicator size="small" color={Colors.primary} />
-                    <Text style={styles.locFreshRefreshing}>Refreshing location…</Text>
+                    <Text style={styles.locFreshRefreshing}>Requesting fresh location…</Text>
                   </View>
-                ) : (
+                ) : member.last_seen ? (
                   <Text style={styles.locSub} testID="member-freshness">
-                    🕒 Last updated {member.last_seen ? formatTimeAgo(member.last_seen) : 'never'}
+                    Last updated {formatTimeAgo(member.last_seen)}
                   </Text>
-                )}
+                ) : null}
               </View>
             </View>
             <View style={{ marginTop: 12 }}>
@@ -788,7 +803,8 @@ const styles = StyleSheet.create({
   locPinBubble: { width: 48, height: 48, borderRadius: 24, backgroundColor: Colors.tertiary, alignItems: 'center', justifyContent: 'center' },
   locPinEmoji: { fontSize: 22 },
   locName: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
-  locSub: { fontSize: 13, color: Colors.textTertiary, marginTop: 2 },
+  locSub: { fontSize: 12, color: Colors.textTertiary, marginTop: 4 },
+  locStatusPill: { marginTop: 6 },
   locFreshRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
   locFreshRefreshing: { fontSize: 12, color: Colors.primary, fontWeight: '700' },
   refreshChip: {

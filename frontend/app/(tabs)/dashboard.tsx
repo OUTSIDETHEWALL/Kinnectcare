@@ -34,6 +34,7 @@ import { logCardRender } from '../../src/cardRenderLog';
 import { useAuth } from '../../src/AuthContext';
 import * as memberStore from '../../src/store/memberStore';
 import { useActiveEmergency } from '../../src/activeEmergency';
+import { TrackingStatusPill } from '../../src/tracking/TrackingStatusPill';
 
 export default function Dashboard() {
   const router = useRouter();
@@ -797,17 +798,29 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
             <Text style={styles.statusEmoji}>{dot}</Text>
           </View>
           <Text style={styles.memberMeta}>📍 {member.location_name || 'Unknown'}</Text>
+          {/* Build 52 — status-centric location freshness.  The pill is
+              the primary signal ("Tracking healthy" answers the caregiver's
+              actual question — can I trust this location?).  Timestamp
+              lives below as tiny secondary detail; the "Refreshing…"
+              spinner supplements when a fresh ping is in flight. */}
+          <TrackingStatusPill
+            hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
+            lastSeenIso={member.last_seen}
+            size="compact"
+            style={styles.cardStatusPill}
+            testID={`member-tracking-status-${member.id}`}
+          />
           {refreshing ? (
             <View style={styles.freshnessRow} testID={`member-refreshing-${member.id}`}>
               <ActivityIndicator size="small" color={Colors.primary} />
-              <Text style={styles.freshnessRefreshing}>Refreshing location…</Text>
+              <Text style={styles.freshnessRefreshing}>Requesting fresh location…</Text>
             </View>
           ) : ageLabel ? (
             <Text
               style={styles.freshnessLabel}
               testID={`member-freshness-${member.id}`}
             >
-              🕒 Updated {ageLabel}
+              Last updated {ageLabel}
             </Text>
           ) : null}
           {isSenior && sum && (
@@ -921,7 +934,8 @@ const styles = StyleSheet.create({
   memberName: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
   statusEmoji: { fontSize: 12 },
   memberMeta: { fontSize: 13, color: Colors.textTertiary, marginTop: 2 },
-  freshnessLabel: { fontSize: 11, color: Colors.textTertiary, marginTop: 2, fontWeight: '600' },
+  freshnessLabel: { fontSize: 11, color: Colors.textTertiary, marginTop: 2 },
+  cardStatusPill: { marginTop: 6 },
   freshnessRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
   freshnessRefreshing: { fontSize: 11, color: Colors.primary, fontWeight: '700' },
   refreshAllBtn: {

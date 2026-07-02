@@ -61,46 +61,13 @@ import { formatRelativeLocal } from '../../src/timeFormat';
 import * as memberStore from '../../src/store/memberStore';
 import { logResumeDecision, markAlertDismissed } from '../../src/resumeDiagnostics';
 import { setActiveEmergency } from '../../src/activeEmergency';
+import { TrackingStatusPill } from '../../src/tracking/TrackingStatusPill';
 
 // -------------------------------------------------------------------------
-// Tracking-status helper
+// (Tracking-status logic + component now lives in
+//  ../../src/tracking/TrackingStatusPill.tsx — the single source of
+//  truth every location-status surface in the app shares.)
 // -------------------------------------------------------------------------
-// Turns coord-availability + `last_seen` freshness into a caregiver-grade
-// traffic-light status.  Rules (Build 51 refinement):
-//
-//   🟢 Tracking healthy      — coords present AND last_seen ≤ 60 s ago
-//   🟡 Location updating…    — coords present AND last_seen 60 s – 5 min
-//   🟡 Last known location   — coords present but stale (>5 min) OR no
-//                              last_seen timestamp available
-//   🔴 Location unavailable  — RESERVED for the true "no coords at all"
-//                              case (member's device has never uploaded)
-//
-// The critical invariant: **the pill and MemberMap MUST derive from the
-// same canonical state**.  Callers pass in the same `hasCoords` /
-// `lastSeenIso` values they used to render the map, so the pill can
-// never say "unavailable" while a marker is visible on the map.
-// -------------------------------------------------------------------------
-type TrackingStatus = { color: string; bg: string; label: string; emoji: string };
-
-const STATUS_HEALTHY:  TrackingStatus = { color: '#166534', bg: '#DCFCE7', label: 'Tracking healthy',    emoji: '🟢' };
-const STATUS_UPDATING: TrackingStatus = { color: '#92400E', bg: '#FEF3C7', label: 'Location updating…', emoji: '🟡' };
-const STATUS_LAST_KNOWN: TrackingStatus = { color: '#92400E', bg: '#FEF3C7', label: 'Last known location', emoji: '🟡' };
-const STATUS_UNAVAILABLE: TrackingStatus = { color: Colors.error, bg: '#FEE2E2', label: 'Location unavailable', emoji: '🔴' };
-
-function trackingStatus(hasCoords: boolean, lastSeenIso: string | null | undefined): TrackingStatus {
-  if (!hasCoords) return STATUS_UNAVAILABLE;
-  const lastSeenMs = lastSeenIso ? new Date(lastSeenIso).getTime() : 0;
-  if (!lastSeenMs) {
-    // Coords exist (from the alert doc or memberStore) but we have no
-    // freshness signal — show yellow "Last known location" rather than
-    // red "unavailable", because the marker on the map IS valid data.
-    return STATUS_LAST_KNOWN;
-  }
-  const ageMs = Date.now() - lastSeenMs;
-  if (ageMs <= 60 * 1000)      return STATUS_HEALTHY;
-  if (ageMs <= 5 * 60 * 1000)  return STATUS_UPDATING;
-  return STATUS_LAST_KNOWN;
-}
 
 function openMaps(lat: number, lon: number, label: string) {
   const q = `${lat},${lon}`;
@@ -356,7 +323,6 @@ export default function AlertDetail() {
     || '';
   const memberLabel = alert.member_name || 'Family member';
   const resolved = !!alert.resolved;
-  const status = trackingStatus(hasCoords, effectiveLastSeen);
 
   return (
     <SafeAreaView style={styles.root} edges={['top', 'bottom']}>
@@ -397,14 +363,19 @@ export default function AlertDetail() {
           <Text style={styles.addressLine}>📍 {address}</Text>
         ) : null}
 
-        {/* Tracking-status traffic-light pill. */}
-        <View
+        {/* Tracking-status pill — shared component, guaranteed to
+            match every other screen's status computation. */}
+        <TrackingStatusPill
+          hasCoords={hasCoords}
+          lastSeenIso={effectiveLastSeen}
+          style={styles.trackingPillWrap}
           testID="tracking-status-pill"
-          style={[styles.trackingPill, { backgroundColor: status.bg }]}
-        >
-          <Text style={styles.trackingEmoji}>{status.emoji}</Text>
-          <Text style={[styles.trackingLabel, { color: status.color }]}>{status.label}</Text>
-        </View>
+        />
+        {effectiveLastSeen ? (
+          <Text style={styles.trackingSecondary} testID="tracking-status-secondary">
+            Last updated {formatRelativeLocal(effectiveLastSeen)}
+          </Text>
+        ) : null}
 
         {/* Live map — auto-refreshes coords every 15 s while unresolved. */}
         {hasCoords && (
@@ -530,13 +501,12 @@ const styles = StyleSheet.create({
   memberName: { fontSize: 30, fontWeight: '800', color: Colors.text, lineHeight: 36 },
   addressLine: { fontSize: 15, color: Colors.textSecondary, marginTop: 6, lineHeight: 21 },
 
-  trackingPill: {
-    flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start',
-    gap: 6, paddingHorizontal: 12, paddingVertical: 6,
-    borderRadius: 999, marginTop: 12,
+  trackingPillWrap: { marginTop: 12 },
+  trackingSecondary: {
+    marginTop: 4,
+    fontSize: 12,
+    color: Colors.textTertiary,
   },
-  trackingEmoji: { fontSize: 12 },
-  trackingLabel: { fontSize: 13, fontWeight: '800', letterSpacing: 0.3 },
 
   mapCard: { marginTop: 20, borderRadius: 14, overflow: 'hidden' },
   mapsBtn: {
