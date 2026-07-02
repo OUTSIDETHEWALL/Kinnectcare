@@ -580,6 +580,25 @@ export default function DiagnosticsScreen() {
     );
   }, []);
 
+  // Build 53 — Export bg_task_log dedicated action.  Copies ONLY the
+  // Transistor background-task ring buffer to clipboard so bug reports
+  // can paste a focused execution trace of what the headless engine
+  // actually did (rather than a big multi-log dump).
+  const onCopyBgTaskLog = useCallback(async () => {
+    try {
+      const raw = await readBgTaskLog();
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        bg_task_log_entries: raw.length,
+        bg_task_log: raw,
+      };
+      await Clipboard.setStringAsync(JSON.stringify(payload, null, 2));
+      Alert.alert('Copied', `bg_task_log copied (${raw.length} entries).`);
+    } catch (e: any) {
+      Alert.alert('Could not copy', e?.message || 'Try again.');
+    }
+  }, []);
+
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
@@ -1278,6 +1297,19 @@ export default function DiagnosticsScreen() {
             activeOpacity={0.85}
           >
             <Text style={styles.secondaryBtnText}>Refresh</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Build 53 — dedicated bg_task_log export.  Focused view of
+            the Transistor headless execution trace for remote debug. */}
+        <View style={styles.actionRow}>
+          <TouchableOpacity
+            testID="diagnostics-copy-bg-task-log"
+            style={styles.secondaryBtn}
+            onPress={onCopyBgTaskLog}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.secondaryBtnText}>📤  Export bg_task_log</Text>
           </TouchableOpacity>
         </View>
 

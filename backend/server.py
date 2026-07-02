@@ -32,7 +32,7 @@ def _to_utc_iso(v: Optional[datetime]) -> Optional[str]:
         v = v.replace(tzinfo=timezone.utc)
     return v.isoformat()
 
-from expo_push import send_expo_push
+from expo_push import send_expo_push, register_blank_drop_sink
 import billing
 import family_group as fg
 import sms
@@ -864,9 +864,17 @@ async def push_to_family_group(family_group_id: str, title: str, body: str, data
 
     Returns the total number of devices (push tokens) the notification was
     attempted on across all users in the group.
+
+    Build 53 — inject a source_tag into the outgoing data dict so the
+    blank-notification safety net can attribute any accidentally-blank
+    send back to a specific caller (defaults to the notification `type`,
+    which is already caller-specific in practice).
     """
     if not family_group_id:
         return 0
+    if isinstance(data, dict) and "_source_tag" not in data:
+        # Non-destructive — attach a lightweight breadcrumb.
+        data = {**data, "_source_tag": f"family:{data.get('type', 'unknown')}"}
     user_ids = await fg.list_group_user_ids(db, family_group_id)
     total = 0
     for uid in user_ids:
@@ -1888,6 +1896,21 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             status_code=403,
             detail="You can only update your own member location.",
         )
+    # Build 53 — Location Ingest diagnostic.  Capture the exact
+    # before/after last_seen values + the JWT identity that succeeded
+    # so we can prove whether Transistor's headless heartbeat is
+    # reaching us (and if not, whether JWT is the reason).  Written to
+    # a capped mongo collection with 24 h TTL.
+    prev_last_seen = None
+    try:
+        prev_doc = await db.members.find_one(
+            {"id": member_id, "family_group_id": current["family_group_id"]},
+            {"_id": 0, "last_seen": 1},
+        )
+        prev_last_seen = (prev_doc or {}).get("last_seen") if prev_doc else None
+    except Exception:
+        pass
+
     update = {"latitude": data.latitude, "longitude": data.longitude, "last_seen": datetime.now(timezone.utc)}
     if data.location_name:
         update["location_name"] = data.location_name
@@ -1895,6 +1918,28 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
     doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+    # Persist the ingest event (fire-and-forget, TTL 24 h so this
+    # collection self-cleans).  Fields chosen to answer:
+    #   • did JWT decode succeed? (current is populated → yes)
+    #   • whose device wrote? (user_id, member_id)
+    #   • how stale was last_seen before this write? (age of the row)
+    #   • what value did we just persist?
+    try:
+        await db.location_ingest_log.insert_one({
+            "at": datetime.now(timezone.utc),
+            "member_id": member_id,
+            "family_group_id": current["family_group_id"],
+            "writer_user_id": current["id"],
+            "is_self_write": is_self,
+            "is_owner_write": is_owner,
+            "prev_last_seen": prev_last_seen,
+            "new_last_seen": update["last_seen"],
+            "latitude_approx": round(data.latitude, 2) if data.latitude is not None else None,
+            "longitude_approx": round(data.longitude, 2) if data.longitude is not None else None,
+            "http_status": 200,
+        })
+    except Exception as _e:
+        pass
     # v1.2.6 diagnostic: every successful location write logs the
     # write-vs-read shape so we can correlate Railway logs against
     # the per-device kc_bg_task_log / kc_location_refresh_log
@@ -3297,6 +3342,11 @@ async def _ensure_alert_dedup_index():
         ("alerts",             "resolved_at", 30 * 86400,   {"resolved_at": {"$exists": True}}),
         # Medication notifications — 30 days after creation
         ("med_notifications",  "created_at", 30 * 86400,    None),
+        # Build 53 — Location ingest diagnostic log + blank-push drops.
+        # 24 h retention is enough for post-mortem within an active
+        # debugging session; nothing here is needed longer.
+        ("location_ingest_log", "at",         86400,        None),
+        ("blank_push_drops",    "at",         86400,        None),
     ]
     for coll_name, field, ttl_seconds, partial_filter in ttl_indexes:
         try:
@@ -3307,6 +3357,18 @@ async def _ensure_alert_dedup_index():
             logger.info(f"TTL index ensured: {coll_name}.{field} expireAfterSeconds={ttl_seconds}")
         except Exception as e:
             logger.warning(f"TTL index skipped for {coll_name}.{field}: {e}")
+
+    # Build 53 — wire expo_push's blank-drop ring buffer to a persistent
+    # Mongo collection so post-mortem diagnosis survives pod restart.
+    async def _persist_blank_drop(entry: dict) -> None:
+        try:
+            entry_copy = dict(entry)
+            entry_copy["at"] = datetime.now(timezone.utc)
+            await db.blank_push_drops.insert_one(entry_copy)
+        except Exception as e:
+            logger.warning(f"persist_blank_drop failed: {e}")
+    register_blank_drop_sink(_persist_blank_drop)
+    logger.info("blank_push_drops sink registered.")
 
 
 @app.on_event("startup")

@@ -368,6 +368,7 @@ export default function AlertDetail() {
         <TrackingStatusPill
           hasCoords={hasCoords}
           lastSeenIso={effectiveLastSeen}
+          screen="alert"
           style={styles.trackingPillWrap}
           testID="tracking-status-pill"
         />

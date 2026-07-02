@@ -34,6 +34,60 @@ def is_valid_expo_token(t: str) -> bool:
     return isinstance(t, str) and t.startswith("ExponentPushToken[") and t.endswith("]")
 
 
+# =========================================================================
+# Build 53 — Blank notification safety net.
+#
+# Rule: if a push would render on the tray (has_title OR has_body) but the
+# user-visible content is functionally empty (<3 non-whitespace chars
+# across both fields, whitespace-only, single glyph/emoji), DROP the send
+# and log the source_tag + payload so we can trace who called us with junk.
+#
+# Data-only pushes (both title AND body empty) are FINE — they never render.
+# =========================================================================
+def _would_render_blank(title: str, body: str) -> bool:
+    t = (title or "").strip()
+    b = (body or "").strip()
+    if not t and not b:
+        return False  # data-only push — never visible, never blank problem
+    if len(t) >= 3 or len(b) >= 3:
+        return False  # has meaningful content
+    return True       # would surface as icon-only "K" ghost
+
+
+# In-memory ring buffer of dropped blank pushes for the runtime.  Callers
+# can query it via `get_recent_blank_drops()` to see who's leaking.
+# Persisted MongoDB write is added at the server.py caller level (kept
+# out of this module so we don't need to import motor here).
+_BLANK_DROP_RING: List[Dict[str, Any]] = []
+_BLANK_DROP_MAX = 50
+
+# Optional MongoDB sink — server.py wires this up at import time so
+# every blank-drop is persisted for post-mortem.  Kept as a hook so this
+# module stays DB-agnostic.
+_mongo_sink = None
+
+
+def register_blank_drop_sink(fn):
+    """server.py calls this with an async fn(entry_dict) at startup."""
+    global _mongo_sink
+    _mongo_sink = fn
+
+
+def get_recent_blank_drops() -> List[Dict[str, Any]]:
+    return list(_BLANK_DROP_RING)
+
+
+def _record_blank_drop(entry: Dict[str, Any]) -> None:
+    _BLANK_DROP_RING.append(entry)
+    while len(_BLANK_DROP_RING) > _BLANK_DROP_MAX:
+        _BLANK_DROP_RING.pop(0)
+    logger.warning(
+        f"BLANK_PUSH_DROP: source={entry.get('source_tag')} "
+        f"title={entry.get('title')!r} body={entry.get('body')!r} "
+        f"tokens={entry.get('token_count')}"
+    )
+
+
 async def send_expo_push(
     tokens: List[str],
     title: str,
@@ -59,6 +113,30 @@ async def send_expo_push(
     data = data or {}
     cat_id = data.get("categoryIdentifier") or data.get("categoryId")
     channel_id = data.get("channelId") or "default"
+    source_tag = data.get("_source_tag") or "unknown"
+
+    # Build 53 — Blank notification safety net.  Reject any send where
+    # the OUTGOING message would surface visibly on the tray but has
+    # functionally empty content.  This is the last line of defence
+    # against ghost "K"-icon notifications regardless of which upstream
+    # caller misbehaved.
+    if _would_render_blank(title, body):
+        entry = {
+            "at": None,  # server.py sink stamps this
+            "source_tag": source_tag,
+            "title": title,
+            "body": body,
+            "channel_id": channel_id,
+            "data_keys": sorted(list(data.keys())),
+            "token_count": len(valid),
+        }
+        _record_blank_drop(entry)
+        if _mongo_sink is not None:
+            try:
+                await _mongo_sink(entry)
+            except Exception as e:
+                logger.warning(f"blank_drop mongo sink failed: {e}")
+        return []
 
     messages = []
     for t in valid:

@@ -43,6 +43,7 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ViewStyle, TextStyle } from 'react-native';
 import { Colors } from '../theme';
+import { logTrackingPillDecision } from './trackingPillDiagnostics';
 
 export type TrackingStatusKind = 'healthy' | 'updating' | 'last-known' | 'unavailable';
 
@@ -90,6 +91,13 @@ export type TrackingStatusPillProps = {
   hasCoords: boolean;
   lastSeenIso?: string | null;
   /**
+   * Which surface is rendering this pill.  Used only by the temporary
+   * decision-log diagnostic (Build 53) to attribute decisions to the
+   * calling screen.  Recommended values: 'alert' | 'member' |
+   * 'dashboard-card' | 'diagnostics' — but any string is accepted.
+   */
+  screen?: string;
+  /**
    * Compact ("dashboard card") vs. default ("detail screens").  Compact
    * uses smaller padding + font — appropriate for dense list rows.
    */
@@ -109,6 +117,7 @@ export type TrackingStatusPillProps = {
 export function TrackingStatusPill({
   hasCoords,
   lastSeenIso,
+  screen = 'unknown',
   size = 'default',
   autoTick = true,
   style,
@@ -128,6 +137,33 @@ export function TrackingStatusPill({
   const s = computeTrackingStatus(hasCoords, lastSeenIso);
   const containerStyle = size === 'compact' ? styles.pillCompact : styles.pill;
   const textStyle = size === 'compact' ? styles.labelCompact : styles.label;
+
+  // Build 53 — temporary decision log.  Each pill render records its
+  // inputs + chosen kind so we can post-mortem "why yellow when Joyce
+  // is fine".  Written best-effort to AsyncStorage; disabled behaviour
+  // change is zero.  Will be removed before RC.
+  useEffect(() => {
+    const ageMs = lastSeenIso ? Date.now() - new Date(lastSeenIso).getTime() : null;
+    const reason =
+      s.kind === 'unavailable'
+        ? 'no-coords'
+        : s.kind === 'healthy'
+        ? 'coords + last_seen ≤ 60 s'
+        : s.kind === 'updating'
+        ? 'coords + last_seen 60 s–5 min'
+        : lastSeenIso
+        ? 'coords + last_seen > 5 min'
+        : 'coords but no last_seen';
+    logTrackingPillDecision({
+      screen,
+      hasCoords,
+      lastSeenIso: lastSeenIso || null,
+      ageMs,
+      kind: s.kind,
+      reason,
+    });
+    // Only log when inputs change — not on every 20-s auto-tick re-render.
+  }, [screen, hasCoords, lastSeenIso, s.kind]);
 
   return (
     <View

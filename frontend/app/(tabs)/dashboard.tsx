@@ -806,6 +806,7 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
           <TrackingStatusPill
             hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
             lastSeenIso={member.last_seen}
+            screen="dashboard-card"
             size="compact"
             style={styles.cardStatusPill}
             testID={`member-tracking-status-${member.id}`}

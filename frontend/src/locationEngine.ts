@@ -610,6 +610,27 @@ export async function stop(): Promise<void> {
 /**
  * Update the JWT used by the native HTTP transport.  Logged.
  */
+/**
+ * Decode the `exp` claim from a JWT for diagnostic purposes. Returns
+ * null if the token isn't a well-formed JWT. Pure JS — no crypto,
+ * no verification (we're inspecting, not authenticating).
+ */
+function _jwtExpMs(jwt: string): number | null {
+  try {
+    const parts = jwt.split('.');
+    if (parts.length !== 3) return null;
+    // Base64URL → base64 → decode
+    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    // atob is available in RN Hermes; fallback for older envs.
+    // eslint-disable-next-line no-undef
+    const decoded = typeof atob === 'function' ? atob(payload) : Buffer.from(payload, 'base64').toString('utf8');
+    const claims = JSON.parse(decoded);
+    return typeof claims?.exp === 'number' ? claims.exp * 1000 : null;
+  } catch (_e) {
+    return null;
+  }
+}
+
 export async function setAuthToken(jwt: string): Promise<void> {
   const lib = bgGeo();
   if (!lib || !cachedConfig) {
@@ -620,6 +641,12 @@ export async function setAuthToken(jwt: string): Promise<void> {
     return;
   }
   cachedConfig.jwt = jwt;
+  // Build 53 — record the JWT's exp claim so post-mortem investigation
+  // can prove whether the SDK is holding a fresh vs expired token when
+  // an upload fails. Also gives us a lower-bound on "when will this
+  // silently start 401ing" if the JS never refreshes it.
+  const expMs = _jwtExpMs(jwt);
+  const minutesUntilExpiry = expMs ? Math.round((expMs - Date.now()) / 60000) : null;
   try {
     await lib.setConfig({
       authorization: {
@@ -627,10 +654,16 @@ export async function setAuthToken(jwt: string): Promise<void> {
         accessToken: jwt,
       },
     });
-    await logEvent('setAuthToken_ok');
+    await logEvent('setAuthToken_ok', {
+      jwt_exp_ms: expMs,
+      minutes_until_expiry: minutesUntilExpiry,
+      already_expired: expMs ? expMs < Date.now() : null,
+    });
   } catch (e: any) {
     await logEvent('setAuthToken_error', {
       error: String(e?.message || e),
+      jwt_exp_ms: expMs,
+      minutes_until_expiry: minutesUntilExpiry,
     });
   }
 }

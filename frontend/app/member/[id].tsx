@@ -418,6 +418,7 @@ export default function MemberDetail() {
                 <TrackingStatusPill
                   hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
                   lastSeenIso={member.last_seen}
+                  screen="member"
                   size="compact"
                   style={styles.locStatusPill}
                   testID="member-tracking-status"
