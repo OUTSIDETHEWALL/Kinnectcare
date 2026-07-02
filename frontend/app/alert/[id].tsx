@@ -65,28 +65,41 @@ import { setActiveEmergency } from '../../src/activeEmergency';
 // -------------------------------------------------------------------------
 // Tracking-status helper
 // -------------------------------------------------------------------------
-// Turns a `last_seen` timestamp + coord-availability into a caregiver-
-// grade traffic-light status.  Thresholds match the rest of the app's
-// staleness definition (60 s = fresh, > 5 min = stale).
+// Turns coord-availability + `last_seen` freshness into a caregiver-grade
+// traffic-light status.  Rules (Build 51 refinement):
+//
+//   🟢 Tracking healthy      — coords present AND last_seen ≤ 60 s ago
+//   🟡 Location updating…    — coords present AND last_seen 60 s – 5 min
+//   🟡 Last known location   — coords present but stale (>5 min) OR no
+//                              last_seen timestamp available
+//   🔴 Location unavailable  — RESERVED for the true "no coords at all"
+//                              case (member's device has never uploaded)
+//
+// The critical invariant: **the pill and MemberMap MUST derive from the
+// same canonical state**.  Callers pass in the same `hasCoords` /
+// `lastSeenIso` values they used to render the map, so the pill can
+// never say "unavailable" while a marker is visible on the map.
 // -------------------------------------------------------------------------
 type TrackingStatus = { color: string; bg: string; label: string; emoji: string };
 
-function trackingStatus(member: Member | null, hasCoords: boolean): TrackingStatus {
-  if (!hasCoords) {
-    return { color: Colors.error, bg: '#FEE2E2', label: 'Location unavailable', emoji: '🔴' };
-  }
-  const lastSeenMs = member?.last_seen ? new Date(member.last_seen).getTime() : 0;
+const STATUS_HEALTHY:  TrackingStatus = { color: '#166534', bg: '#DCFCE7', label: 'Tracking healthy',    emoji: '🟢' };
+const STATUS_UPDATING: TrackingStatus = { color: '#92400E', bg: '#FEF3C7', label: 'Location updating…', emoji: '🟡' };
+const STATUS_LAST_KNOWN: TrackingStatus = { color: '#92400E', bg: '#FEF3C7', label: 'Last known location', emoji: '🟡' };
+const STATUS_UNAVAILABLE: TrackingStatus = { color: Colors.error, bg: '#FEE2E2', label: 'Location unavailable', emoji: '🔴' };
+
+function trackingStatus(hasCoords: boolean, lastSeenIso: string | null | undefined): TrackingStatus {
+  if (!hasCoords) return STATUS_UNAVAILABLE;
+  const lastSeenMs = lastSeenIso ? new Date(lastSeenIso).getTime() : 0;
   if (!lastSeenMs) {
-    return { color: Colors.error, bg: '#FEE2E2', label: 'Location unavailable', emoji: '🔴' };
+    // Coords exist (from the alert doc or memberStore) but we have no
+    // freshness signal — show yellow "Last known location" rather than
+    // red "unavailable", because the marker on the map IS valid data.
+    return STATUS_LAST_KNOWN;
   }
   const ageMs = Date.now() - lastSeenMs;
-  if (ageMs <= 60 * 1000) {
-    return { color: '#166534', bg: '#DCFCE7', label: 'Tracking healthy', emoji: '🟢' };
-  }
-  if (ageMs <= 5 * 60 * 1000) {
-    return { color: '#92400E', bg: '#FEF3C7', label: 'Location updating…', emoji: '🟡' };
-  }
-  return { color: Colors.error, bg: '#FEE2E2', label: 'Location unavailable', emoji: '🔴' };
+  if (ageMs <= 60 * 1000)      return STATUS_HEALTHY;
+  if (ageMs <= 5 * 60 * 1000)  return STATUS_UPDATING;
+  return STATUS_LAST_KNOWN;
 }
 
 function openMaps(lat: number, lon: number, label: string) {
@@ -314,19 +327,36 @@ export default function AlertDetail() {
     );
   }
 
-  // Prefer LIVE coords from memberStore over the (potentially stale)
-  // snapshot stored on the alert doc at the moment of trigger.  Fall
-  // back to the alert's own coords if the store hasn't loaded yet.
-  const lat = (typeof liveMember?.latitude === 'number' ? liveMember.latitude : alert.latitude);
-  const lon = (typeof liveMember?.longitude === 'number' ? liveMember.longitude : alert.longitude);
+  // Canonical coord + freshness resolution.  Both the map and the
+  // tracking-status pill derive from these SAME variables so they
+  // can never disagree ("map shows a marker, pill says unavailable"
+  // was Bug #2 in Build #51 QA).  Priority:
+  //   1. liveMember (memberStore) — freshest, updated every 15 s via
+  //      auto-refresh loop and by any silent-push location upload.
+  //   2. alert.latitude/longitude — snapshot captured at SOS trigger.
+  //      When used as fallback, the effective "last seen" is the
+  //      alert's own created_at (that's when the coord was valid).
+  const liveLat = typeof liveMember?.latitude === 'number' ? liveMember.latitude : null;
+  const liveLon = typeof liveMember?.longitude === 'number' ? liveMember.longitude : null;
+  const usingLiveCoords = liveLat !== null && liveLon !== null;
+  const lat = usingLiveCoords ? liveLat : alert.latitude;
+  const lon = usingLiveCoords ? liveLon : alert.longitude;
   const hasCoords = typeof lat === 'number' && typeof lon === 'number';
+  // When we're using liveMember's coord, its `last_seen` drives freshness.
+  // When we're falling back to the alert doc's coord, that coord was
+  // captured at alert creation, so `alert.created_at` is the correct
+  // freshness stamp — NOT any live memberStore timestamp (which would
+  // otherwise make us claim "healthy" for the wrong data source).
+  const effectiveLastSeen: string | null | undefined = usingLiveCoords
+    ? liveMember?.last_seen
+    : alert.created_at;
   const address = liveMember?.location_name || null;
   const memberPhone = liveMember?.emergency_contact_phone
     || (params.member_phone as string | undefined)
     || '';
   const memberLabel = alert.member_name || 'Family member';
   const resolved = !!alert.resolved;
-  const status = trackingStatus(liveMember, hasCoords);
+  const status = trackingStatus(hasCoords, effectiveLastSeen);
 
   return (
     <SafeAreaView style={styles.root} edges={['top', 'bottom']}>
