@@ -408,13 +408,9 @@ export default function MemberDetail() {
               <View style={styles.locPinBubble}><Text style={styles.locPinEmoji}>📍</Text></View>
               <View style={{ flex: 1, marginLeft: 14 }}>
                 <Text style={styles.locName}>{member.location_name || 'Unknown location'}</Text>
-                {/* Build 52 — status-centric location freshness. The
-                    pill is always visible (single source of truth
-                    shared with the SOS incident screen and dashboard
-                    cards); the timestamp is secondary detail; the
-                    "Refreshing…" spinner is a short-lived in-flight
-                    signal that supplements the pill when the app has
-                    just requested a fresh GPS ping. */}
+                {/* Build 54 — health-first design.  The pill is the only
+                    tracking signal shown on the primary member surface;
+                    per-tick freshness lives in Diagnostics. */}
                 <TrackingStatusPill
                   hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
                   lastSeenIso={member.last_seen}
@@ -423,16 +419,6 @@ export default function MemberDetail() {
                   style={styles.locStatusPill}
                   testID="member-tracking-status"
                 />
-                {locationRefreshing ? (
-                  <View style={styles.locFreshRow} testID="member-refreshing-banner">
-                    <ActivityIndicator size="small" color={Colors.primary} />
-                    <Text style={styles.locFreshRefreshing}>Requesting fresh location…</Text>
-                  </View>
-                ) : member.last_seen ? (
-                  <Text style={styles.locSub} testID="member-freshness">
-                    Last updated {formatTimeAgo(member.last_seen)}
-                  </Text>
-                ) : null}
               </View>
             </View>
             <View style={{ marginTop: 12 }}>

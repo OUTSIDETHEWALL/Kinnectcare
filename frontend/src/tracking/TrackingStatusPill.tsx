@@ -60,27 +60,70 @@ export type TrackingStatus = {
 // ---------------------------------------------------------------------------
 
 const STATUS: Record<TrackingStatusKind, Omit<TrackingStatus, 'kind'>> = {
-  healthy:      { color: '#166534',       bg: '#DCFCE7', label: 'Tracking healthy',    emoji: '🟢' },
-  updating:     { color: '#92400E',       bg: '#FEF3C7', label: 'Location updating…', emoji: '🟡' },
-  'last-known': { color: '#92400E',       bg: '#FEF3C7', label: 'Last known location', emoji: '🟡' },
-  unavailable:  { color: Colors.error,    bg: '#FEE2E2', label: 'Location unavailable', emoji: '🔴' },
+  healthy:      { color: '#166534',       bg: '#DCFCE7', label: 'Tracking healthy',          emoji: '🟢' },
+  updating:     { color: '#92400E',       bg: '#FEF3C7', label: 'Tracking needs attention',  emoji: '🟡' },
+  'last-known': { color: '#92400E',       bg: '#FEF3C7', label: 'Tracking needs attention',  emoji: '🟡' },
+  unavailable:  { color: Colors.error,    bg: '#FEE2E2', label: 'Tracking offline',          emoji: '🔴' },
 };
 
-const FRESH_MS = 60 * 1000;              // ≤ 60 s → healthy
-const UPDATING_WINDOW_MS = 5 * 60 * 1000; // ≤ 5 min → updating
+// Build 54 — Health-based, NOT freshness-based.
+//
+//   🟢 Healthy   — has coords AND we haven't hit a hard-fail signal.
+//                  A phone sitting idle overnight is HEALTHY: absence of
+//                  motion is not evidence of failure.
+//   🟡 Attention — reserved for real failure evidence: explicit upload/auth
+//                  failure, or the local engine self-reports unhealthy.
+//                  In Build 54 the memberStore doesn't publish these yet,
+//                  so the pill effectively never turns yellow.  Kept as
+//                  an escape hatch for Build 55+ backend health signal.
+//   🔴 Offline   — no coords ever, OR last_seen older than 72 h (device
+//                  has been silent for 3+ days — this IS evidence), OR
+//                  the caller passes an explicit `isTrackingDisabled` /
+//                  permissions-revoked flag.
+//
+// This intentionally does NOT flip to Attention/Offline just because
+// time elapsed.  Charles's philosophy for Build 54: "Do not turn
+// yellow simply because someone hasn't moved."
+const OFFLINE_MS = 72 * 60 * 60 * 1000; // 72 h — 3-day silence = broken
+
+export type ComputeStatusOptions = {
+  /** Local caller only — true when the user has explicitly turned tracking off. */
+  isTrackingDisabled?: boolean;
+  /** Local caller only — true when foreground permissions are revoked. */
+  permissionsRevoked?: boolean;
+  /** Any surface can pass this when the backend/memberStore reports a real
+      upload or auth failure has occurred — flips the pill to Attention.
+      Kept optional so the default (no data-driven failure signal) simply
+      leaves the pill Healthy. */
+  hasKnownFailure?: boolean;
+};
 
 export function computeTrackingStatus(
   hasCoords: boolean,
   lastSeenIso: string | null | undefined,
   nowMs: number = Date.now(),
+  opts?: ComputeStatusOptions,
 ): TrackingStatus {
+  // Hard-fail signals first (only reach this branch when the caller
+  // actually knows something is wrong locally).
+  if (opts?.isTrackingDisabled || opts?.permissionsRevoked) {
+    return { kind: 'unavailable', ...STATUS.unavailable };
+  }
   if (!hasCoords) return { kind: 'unavailable', ...STATUS.unavailable };
+
+  // Real evidence of a problem (upload/auth failure surfaced by caller).
+  if (opts?.hasKnownFailure) {
+    return { kind: 'updating', ...STATUS.updating };
+  }
+
+  // Genuine long-silence = something IS broken.
   const lastSeenMs = lastSeenIso ? new Date(lastSeenIso).getTime() : 0;
-  if (!lastSeenMs) return { kind: 'last-known', ...STATUS['last-known'] };
-  const ageMs = nowMs - lastSeenMs;
-  if (ageMs <= FRESH_MS)             return { kind: 'healthy',    ...STATUS.healthy };
-  if (ageMs <= UPDATING_WINDOW_MS)   return { kind: 'updating',   ...STATUS.updating };
-  return { kind: 'last-known', ...STATUS['last-known'] };
+  if (lastSeenMs && nowMs - lastSeenMs > OFFLINE_MS) {
+    return { kind: 'unavailable', ...STATUS.unavailable };
+  }
+
+  // Default = Healthy.  Idle overnight, stationary, on a charger — all healthy.
+  return { kind: 'healthy', ...STATUS.healthy };
 }
 
 // ---------------------------------------------------------------------------
@@ -146,14 +189,10 @@ export function TrackingStatusPill({
     const ageMs = lastSeenIso ? Date.now() - new Date(lastSeenIso).getTime() : null;
     const reason =
       s.kind === 'unavailable'
-        ? 'no-coords'
+        ? (!hasCoords ? 'no-coords' : 'silent >72h or explicit-offline')
         : s.kind === 'healthy'
-        ? 'coords + last_seen ≤ 60 s'
-        : s.kind === 'updating'
-        ? 'coords + last_seen 60 s–5 min'
-        : lastSeenIso
-        ? 'coords + last_seen > 5 min'
-        : 'coords but no last_seen';
+        ? 'has-coords + not-silent-72h'
+        : 'known-failure-signal';
     logTrackingPillDecision({
       screen,
       hasCoords,

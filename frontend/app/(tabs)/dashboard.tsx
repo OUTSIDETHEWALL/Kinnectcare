@@ -546,7 +546,7 @@ export default function Dashboard() {
             <Text style={styles.name}>{user?.full_name?.split(' ')[0] || 'there'} 👋</Text>
           </View>
           <View style={styles.headerActions}>
-            <TouchableOpacity testID="dashboard-settings" onPress={() => router.push('/settings')} style={styles.iconBtn}>
+            <TouchableOpacity testID="dashboard-settings" onPress={() => router.push('/(tabs)/me')} style={styles.iconBtn}>
               <Icon name="settings" size={20} color={Colors.textSecondary} />
             </TouchableOpacity>
             <TouchableOpacity testID="dashboard-logout" onPress={logout} style={styles.iconBtn}>
@@ -798,11 +798,11 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
             <Text style={styles.statusEmoji}>{dot}</Text>
           </View>
           <Text style={styles.memberMeta}>📍 {member.location_name || 'Unknown'}</Text>
-          {/* Build 52 — status-centric location freshness.  The pill is
-              the primary signal ("Tracking healthy" answers the caregiver's
-              actual question — can I trust this location?).  Timestamp
-              lives below as tiny secondary detail; the "Refreshing…"
-              spinner supplements when a fresh ping is in flight. */}
+          {/* Build 54 — status-first design.  The tracking pill is the
+              only tracking signal shown on the dashboard card.  Timestamps
+              have been moved to Diagnostics; the pill stays green while
+              a silent refresh is in flight (background refresh is normal
+              operation, not a health issue). */}
           <TrackingStatusPill
             hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
             lastSeenIso={member.last_seen}
@@ -811,19 +811,6 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
             style={styles.cardStatusPill}
             testID={`member-tracking-status-${member.id}`}
           />
-          {refreshing ? (
-            <View style={styles.freshnessRow} testID={`member-refreshing-${member.id}`}>
-              <ActivityIndicator size="small" color={Colors.primary} />
-              <Text style={styles.freshnessRefreshing}>Requesting fresh location…</Text>
-            </View>
-          ) : ageLabel ? (
-            <Text
-              style={styles.freshnessLabel}
-              testID={`member-freshness-${member.id}`}
-            >
-              Last updated {ageLabel}
-            </Text>
-          ) : null}
           {isSenior && sum && (
             <View style={styles.medRow}>
               <View style={styles.medChip}>
