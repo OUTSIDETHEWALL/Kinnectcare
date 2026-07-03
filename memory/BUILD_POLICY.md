@@ -109,3 +109,60 @@ eas build --profile production --platform android --non-interactive --no-wait
 # Auto-submit variant (once play-service-account.json is populated):
 eas build --profile production --platform android --auto-submit
 ```
+
+---
+
+## 🧊 Build #56 — Feature Freeze (Release Candidate)
+
+_Effective: Build #56 (July 2026). Set by Charles (product owner)._
+
+**No new user-facing features may ship in Build #56 unless Charles explicitly
+approves them by name.** The build's charter is strictly:
+
+1. Bug fixes (beta blockers only — see definition below)
+2. UI polish
+3. Performance
+4. Store compliance (Play Console warnings, permission strings, target SDK, etc.)
+5. Beta readiness (crash triage, telemetry sanity, onboarding smoothness)
+
+### Definition of a **Beta Blocker**
+
+An issue is a Build #56 candidate ONLY if it meets ONE of these criteria:
+
+- Prevents a user from completing a **core workflow**:
+  - Sign up / Sign in
+  - Invite family
+  - Location tracking
+  - SOS
+  - Medication reminders
+  - Check-ins
+  - Subscriptions
+  - Notifications
+- Causes an **app crash** (JS or native)
+- Causes **data loss** (silent or visible)
+- Triggers **store rejection** (Google Play or App Store policy)
+
+Every other issue — cosmetic bug, low-frequency edge case, wording nit,
+"would be nicer if", missing empty state, minor perf smell — goes into
+`/app/memory/POST_BETA_BACKLOG.md`, **not** into this build.
+
+### Agent behaviour under freeze
+
+- If a bug report comes in, first classify it against the definition above.
+  If it's not a beta blocker, log it into `POST_BETA_BACKLOG.md` and STOP —
+  do not fix it in Build #56.
+- Do not propose new features "while you're in there" — resist scope creep.
+- Refactors are allowed ONLY when they're the minimal change required to
+  fix a blocker or clear a store-compliance warning.
+- The tracking/location engine remains in strict maintenance mode from
+  Build #50 — no touches without written approval.
+
+### Definition of Done for Build #56
+
+- Every open beta-blocker filed against Build #55 device testing has been
+  closed OR explicitly deferred (with reason) by Charles.
+- `POST_BETA_BACKLOG.md` reflects every deferred item.
+- No new routes, tabs, or persistent UI affordances have been added since
+  Build #55.
+- Pre-Build Approval Checkpoint (Rule 1) has been executed and Charles has
+  replied "Proceed".
