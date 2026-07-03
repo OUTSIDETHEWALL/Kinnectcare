@@ -300,6 +300,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     forgetSessionUnlock(user?.id);
+    // Build #55 — also clear the persistent 24 h PIN session on
+    // sign-out so a new user on the same device can't inherit the
+    // previous account's unlocked state.
+    try {
+      const { clearSession } = await import('./pinSession');
+      if (user?.id) await clearSession(user.id);
+    } catch (_e) {}
     await clearToken();
     await writeUserCache(null);
     setUser(null);

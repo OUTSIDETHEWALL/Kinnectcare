@@ -604,7 +604,7 @@ export default function DiagnosticsScreen() {
       <View style={styles.header}>
         <TouchableOpacity
           testID="diagnostics-back"
-          onPress={() => (router.canGoBack() ? router.back() : router.replace('/settings'))}
+          onPress={() => (router.canGoBack() ? router.back() : router.replace('/(tabs)/me'))}
           style={styles.backBtn}
           accessibilityLabel="Back"
         >

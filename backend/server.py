@@ -159,6 +159,16 @@ class TimezoneUpdate(BaseModel):
     timezone: str
 
 
+# Build #55 — partial profile update payload.
+# Accepts any subset of {full_name, timezone}; unset fields are left
+# untouched.  Frontend uses this from the Me tab's editable Account
+# rows.  We validate here rather than at the DB layer so callers get
+# a clean 400 instead of a Mongo write-time error.
+class ProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    timezone: Optional[str] = None
+
+
 # v1.3.3 — Quiet Hours preference.
 #
 # Stored as `user.quiet_hours = { enabled, start, end }`.  Times are
@@ -178,10 +188,17 @@ class QuietHoursPreference(BaseModel):
 
 class PreferencesResponse(BaseModel):
     quiet_hours: QuietHoursPreference
+    # Build #55 — Location Sharing (privacy) toggle.
+    # When disabled, the device stops all background location uploads
+    # entirely (see backgroundLocation.ts on the client).  Server-side
+    # this is just a preference stored on the user doc — the actual
+    # gate is on-device to prevent even collecting the coordinate.
+    location_sharing_enabled: bool = True
 
 
 class PreferencesUpdate(BaseModel):
     quiet_hours: Optional[QuietHoursPreference] = None
+    location_sharing_enabled: Optional[bool] = None
 
 
 class PushTokenRegister(BaseModel):
@@ -1528,6 +1545,35 @@ async def set_timezone(data: TimezoneUpdate, current=Depends(get_current_user)):
     return _user_response(current)
 
 
+# Build #55 — partial profile update endpoint.
+#
+# Serves the Me tab's inline edit-name / edit-timezone rows.  Accepts
+# any subset of {full_name, timezone}; anything else is ignored.
+# `full_name` is validated (2-80 chars, trimmed); `timezone` uses the
+# same ZoneInfo check as PUT /auth/timezone.  Both fields, if present,
+# are applied in a single Mongo update so partial failures are
+# impossible.
+@api_router.patch("/auth/me", response_model=UserResponse)
+async def update_profile(data: ProfileUpdate, current=Depends(get_current_user)):
+    set_doc: dict = {}
+    if data.full_name is not None:
+        name = str(data.full_name).strip()
+        if len(name) < 2 or len(name) > 80:
+            raise HTTPException(status_code=400, detail="Name must be 2–80 characters.")
+        set_doc["full_name"] = name
+        current["full_name"] = name
+    if data.timezone is not None:
+        try:
+            ZoneInfo(data.timezone)
+        except ZoneInfoNotFoundError:
+            raise HTTPException(status_code=400, detail="Invalid IANA timezone")
+        set_doc["timezone"] = data.timezone
+        current["timezone"] = data.timezone
+    if set_doc:
+        await db.users.update_one({"id": current["id"]}, {"$set": set_doc})
+    return _user_response(current)
+
+
 # ============================================================
 #  v1.3.3 — User preferences (Quiet Hours).
 # ============================================================
@@ -1538,14 +1584,22 @@ async def get_my_preferences(current=Depends(get_current_user)):
     container so we can add additional pref groups later without
     breaking the contract.
     """
-    user = await db.users.find_one({"id": current["id"]}, {"_id": 0, "quiet_hours": 1})
+    user = await db.users.find_one(
+        {"id": current["id"]},
+        {"_id": 0, "quiet_hours": 1, "location_sharing_enabled": 1},
+    )
     qh_raw = (user or {}).get("quiet_hours") or {}
     qh = QuietHoursPreference(
         enabled=bool(qh_raw.get("enabled", False)),
         start=str(qh_raw.get("start") or "22:00"),
         end=str(qh_raw.get("end") or "07:00"),
     )
-    return PreferencesResponse(quiet_hours=qh)
+    # Default to True (share) when the field has never been set — this
+    # preserves pre-Build-#55 behaviour for existing users.  New users
+    # can opt out from Me → Privacy at any time.
+    ls_raw = (user or {}).get("location_sharing_enabled")
+    location_sharing = True if ls_raw is None else bool(ls_raw)
+    return PreferencesResponse(quiet_hours=qh, location_sharing_enabled=location_sharing)
 
 
 @api_router.put("/me/preferences", response_model=PreferencesResponse)
@@ -1572,6 +1626,13 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
             "start": qh.start,
             "end": qh.end,
         }
+    if data.location_sharing_enabled is not None:
+        # Build #55 — record the user's opt-in/opt-out for location
+        # sharing.  The device does the actual gating (background
+        # location task refuses to upload when this is False); the
+        # server persists the preference so it survives reinstalls
+        # and syncs to a second device on the same account.
+        set_doc["location_sharing_enabled"] = bool(data.location_sharing_enabled)
     if set_doc:
         await db.users.update_one({"id": current["id"]}, {"$set": set_doc})
     return await get_my_preferences(current)

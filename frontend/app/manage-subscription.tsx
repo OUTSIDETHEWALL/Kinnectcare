@@ -144,7 +144,7 @@ export default function ManageSubscription() {
       <View style={styles.header}>
         <TouchableOpacity
           testID="subscription-back"
-          onPress={() => (router.canGoBack() ? router.back() : router.replace('/settings'))}
+          onPress={() => (router.canGoBack() ? router.back() : router.replace('/(tabs)/me'))}
           style={styles.backBtn}
           hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
         >

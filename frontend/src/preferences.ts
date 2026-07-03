@@ -16,6 +16,10 @@ export type QuietHoursPreference = {
 
 export type Preferences = {
   quiet_hours: QuietHoursPreference;
+  // Build #55 — Location Sharing (privacy) toggle.  When false, the
+  // background-location task stops uploading entirely (see
+  // backgroundLocation.ts) so no coordinate ever leaves the device.
+  location_sharing_enabled: boolean;
 };
 
 const DEFAULT_PREFS: Preferences = {
@@ -24,6 +28,7 @@ const DEFAULT_PREFS: Preferences = {
     start: '22:00',
     end: '07:00',
   },
+  location_sharing_enabled: true,
 };
 
 export async function getPreferences(): Promise<Preferences> {
@@ -36,6 +41,10 @@ export async function getPreferences(): Promise<Preferences> {
         start: typeof qh.start === 'string' ? qh.start : DEFAULT_PREFS.quiet_hours.start,
         end: typeof qh.end === 'string' ? qh.end : DEFAULT_PREFS.quiet_hours.end,
       },
+      location_sharing_enabled:
+        typeof r?.data?.location_sharing_enabled === 'boolean'
+          ? r.data.location_sharing_enabled
+          : DEFAULT_PREFS.location_sharing_enabled,
     };
   } catch (_e) {
     return DEFAULT_PREFS;
@@ -51,6 +60,10 @@ export async function updatePreferences(patch: Partial<Preferences>): Promise<Pr
       start: qh.start || DEFAULT_PREFS.quiet_hours.start,
       end: qh.end || DEFAULT_PREFS.quiet_hours.end,
     },
+    location_sharing_enabled:
+      typeof r?.data?.location_sharing_enabled === 'boolean'
+        ? r.data.location_sharing_enabled
+        : DEFAULT_PREFS.location_sharing_enabled,
   };
 }
 

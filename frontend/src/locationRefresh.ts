@@ -278,6 +278,14 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
   try {
     if (Platform.OS === 'web') return;
 
+    // Build #55 — respect the Location Sharing (privacy) opt-out from
+    // the Me tab.  If the user has flipped it off, don't upload a
+    // foreground fix either.  Silent no-op — no diagnostic log spam.
+    try {
+      const off = await AsyncStorage.getItem('@kinnship/location_sharing_off_v1');
+      if (off === '1') return;
+    } catch (_e) {}
+
     const now = Date.now();
     // v1.3.0 — silent-push pull bypasses the throttle once, because
     // a family member explicitly requested it.  Flag is set in

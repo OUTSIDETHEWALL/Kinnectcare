@@ -32,6 +32,29 @@ export const BG_LOCATION_TASK = 'kinnship/background-location-v1';
 export const SOS_ACTIVE_KEY = '@kinnship/sos_active_v1';
 export const BG_LOCATION_MEMBER_ID_KEY = '@kinnship/bg_location_member_id_v1';
 
+// Build #55 — Location Sharing (privacy) opt-out.  When present, the
+// OS-owned task refuses to upload; this is the on-device gate so
+// no coordinate ever leaves the phone.  Kept in AsyncStorage
+// (the ONLY channel the detached task can read) and mirrored from
+// the server preference each time the user toggles it.
+export const LOCATION_SHARING_DISABLED_KEY = '@kinnship/location_sharing_off_v1';
+
+export async function setLocationSharingEnabled(enabled: boolean): Promise<void> {
+  try {
+    if (enabled) await AsyncStorage.removeItem(LOCATION_SHARING_DISABLED_KEY);
+    else await AsyncStorage.setItem(LOCATION_SHARING_DISABLED_KEY, '1');
+  } catch (_e) {}
+}
+
+export async function isLocationSharingEnabled(): Promise<boolean> {
+  try {
+    const v = await AsyncStorage.getItem(LOCATION_SHARING_DISABLED_KEY);
+    return v !== '1';
+  } catch (_e) {
+    return true;
+  }
+}
+
 // Cadence settings — see the doc-block above for the rationale.
 // v1.2.9 — tighter cadence + accuracy.High instead of Balanced
 //
@@ -86,7 +109,8 @@ type BgTaskLogPhase =
   | 'no-member-id'
   | 'lock-held'
   | 'upload-ok'
-  | 'upload-fail';
+  | 'upload-fail'
+  | 'sharing-off';
 
 type BgTaskLogEntry = {
   t: number;
@@ -206,6 +230,18 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
   }
 
   const memberId = await readMemberId();
+  // Build #55 — respect the Location Sharing (privacy) opt-out.  When
+  // disabled we short-circuit BEFORE the network call so no coord
+  // ever leaves the device.  We still log the phase for Diagnostics
+  // parity, so a support tech can see "engine ticked, sharing off".
+  try {
+    const sharingOff =
+      (await AsyncStorage.getItem(LOCATION_SHARING_DISABLED_KEY)) === '1';
+    if (sharingOff) {
+      await appendBgLog({ t: now, phase: 'sharing-off', count: locs.length, memberId });
+      return;
+    }
+  } catch (_e) {}
   // v1.2.5 diagnostics: snapshot both the foreground key and the
   // cached user_id so each bg entry carries the writer identity AND
   // surfaces any divergence with the foreground member-id cache.

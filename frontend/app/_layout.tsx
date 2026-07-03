@@ -6,7 +6,8 @@ import { useEffect, useState, useRef } from 'react';import { View, ActivityIndic
 import { Colors } from '../src/theme';
 import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink, refreshPushTokenIfStale } from '../src/push';
 import { isOnboardingDone } from '../src/onboardingStore';
-import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
+import { hasPinForUser, isUnlockedNow, markUnlocked } from '../src/pinAuth';
+import { isSessionValid } from '../src/pinSession';
 import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
 import { startBackgroundLocation, stopBackgroundLocation } from '../src/backgroundLocation';
 import { refreshLocationIfStale, setMyMemberId, setMyUserId } from '../src/locationRefresh';
@@ -148,8 +149,25 @@ function RootNav() {
         // Existing PIN — gate behind unlock unless we've already
         // unlocked-this-session (e.g. after a fresh email login,
         // login.tsx calls markUnlocked).
-        if (!isUnlockedNow(user.id)) setNeedsPinUnlock(true);
-        else setNeedsPinUnlock(false);
+        //
+        // Build #55 — also honour the persistent 24 h PIN session
+        // (see src/pinSession.ts).  Rationale: without persistence,
+        // Android low-memory reclaim silently kills the JS process
+        // → in-memory `unlockedSessions` set clears → user is
+        // re-prompted for the PIN even though they unlocked 5
+        // minutes ago.  With this check, we re-mark the session as
+        // unlocked from the persisted timestamp so RootNav flows
+        // straight to the dashboard.  Foregrounding alone does NOT
+        // refresh the stamp — only a fresh unlock does.
+        if (isUnlockedNow(user.id)) {
+          setNeedsPinUnlock(false);
+        } else if (await isSessionValid(user.id)) {
+          if (cancelled) return;
+          markUnlocked(user.id);
+          setNeedsPinUnlock(false);
+        } else {
+          setNeedsPinUnlock(true);
+        }
         setNeedsPinSetup(false);
       } else {
         // No PIN yet — prompt unless the user previously tapped
@@ -921,7 +939,6 @@ function RootNav() {
       <Stack.Screen name="edit-medication/[reminderId]" options={{ presentation: 'modal' }} />
       <Stack.Screen name="check-in" />
       <Stack.Screen name="member/[id]" />
-      <Stack.Screen name="settings" />
       <Stack.Screen name="privacy-policy" />
       <Stack.Screen name="terms-of-service" />
       <Stack.Screen name="onboarding" />

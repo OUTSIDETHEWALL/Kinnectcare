@@ -34,6 +34,7 @@
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { clearSession, refreshUnlockTimestamp } from './pinSession';
 
 export const MAX_PIN_ATTEMPTS = 5;
 export const LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
@@ -115,6 +116,10 @@ export async function clearPin(userId: string): Promise<void> {
   if (!userId) return;
   await remove(keyForUser(userId));
   unlockedSessions.delete(userId);
+  // Build #55 \u2014 also drop the persistent 24 h session window when
+  // the PIN is removed, so the app can't fall back to a stale
+  // "already unlocked" state after the user disables PIN protection.
+  try { await clearSession(userId); } catch (_e) {}
 }
 
 export async function resetAttempts(userId: string): Promise<void> {
@@ -145,6 +150,13 @@ export async function verifyPin(userId: string, pin: string): Promise<VerifyResu
     rec.lockUntilMs = 0;
     await saveRecord(userId, rec);
     markUnlocked(userId);
+    // Build #55 — persist a 24 h rolling session so the caregiver
+    // doesn't get re-prompted every time Android reclaims the JS
+    // process.  Only an *actual* unlock (this branch or a biometric
+    // success) refreshes the timestamp — foregrounding alone does
+    // NOT, so a session can't be kept alive forever without an
+    // authenticated action.
+    try { await refreshUnlockTimestamp(userId); } catch (_e) {}
     return { ok: true };
   }
   // Wrong PIN

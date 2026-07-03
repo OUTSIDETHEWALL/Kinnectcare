@@ -27,9 +27,14 @@ import { Colors } from '../../src/theme';
 import { useAuth } from '../../src/AuthContext';
 import PinPad, { PinPadHandle } from '../../src/PinPad';
 import {
-  verifyPin, getAttemptState, MAX_PIN_ATTEMPTS, PIN_LENGTH,
+  verifyPin, getAttemptState, MAX_PIN_ATTEMPTS, PIN_LENGTH, markUnlocked,
 } from '../../src/pinAuth';
 import { performFullAppReset } from '../../src/appReset';
+import {
+  getBiometricCapability, isBiometricEnabledForUser, promptBiometric,
+  disableBiometricForUser,
+} from '../../src/biometrics';
+import { refreshUnlockTimestamp } from '../../src/pinSession';
 
 function formatLockMs(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -49,6 +54,15 @@ export default function PinLogin() {
   const [errorState, setErrorState] = useState(false);
   const [lockUntilMs, setLockUntilMs] = useState(0);
   const [remaining, setRemaining] = useState(MAX_PIN_ATTEMPTS);
+  // Build #55 — optional biometric unlock. If the user opted in from
+  // Me → Security AND the device has biometrics enrolled, we show a
+  // "Use Face ID / Fingerprint" button AND auto-prompt on first mount
+  // so caregivers can unlock in one look. Any biometric failure just
+  // routes back to the PIN pad — biometrics NEVER dead-end the user.
+  const [bioAvailable, setBioAvailable] = useState(false);
+  const [bioLabel, setBioLabel] = useState('Biometrics');
+  const [bioBusy, setBioBusy] = useState(false);
+  const bioAutoPromptedRef = useRef(false);
 
   // HARD GUARD: unauthenticated users must NEVER see this screen.
   // PIN unlock is a per-account secret; without an account there's
@@ -96,6 +110,69 @@ export default function PinLogin() {
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
   }, [lockUntilMs]);
+
+  // Build #55 — decide whether biometric unlock is available for this
+  // user on this device, and auto-prompt exactly ONCE per mount if it
+  // is.  Auto-prompt makes the common case ("I picked up my phone,
+  // it's really me") a single glance.  On cancel or failure we do
+  // NOT re-prompt — the user can hit the button or use the PIN pad.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!user?.id) return;
+      const enabled = await isBiometricEnabledForUser(user.id);
+      if (!enabled) return;
+      const cap = await getBiometricCapability();
+      if (cancelled) return;
+      if (!cap.supported || !cap.enrolled) {
+        // Device no longer has biometrics available (user removed
+        // all fingerprints, or switched to a device without the
+        // hardware).  Silently disable the preference so we don't
+        // keep trying — they can re-opt-in from Me → Security later.
+        await disableBiometricForUser(user.id);
+        return;
+      }
+      setBioAvailable(true);
+      setBioLabel(cap.typeLabel);
+      // Auto-prompt on first mount if the user isn't in lockout.
+      if (bioAutoPromptedRef.current) return;
+      bioAutoPromptedRef.current = true;
+      // Small delay so the PIN pad has finished painting when the
+      // native prompt covers it — feels less abrupt.
+      setTimeout(() => { if (!cancelled) void runBiometricUnlock(true); }, 250);
+    })();
+    return () => { cancelled = true; };
+  }, [user?.id]);
+
+  const runBiometricUnlock = async (isAuto: boolean) => {
+    if (!user?.id || bioBusy || busy) return;
+    if (lockUntilMs > Date.now()) return;
+    setBioBusy(true);
+    try {
+      const res = await promptBiometric(`Unlock Kinnship for ${user.full_name?.split(' ')[0] || 'you'}`);
+      if (res.ok) {
+        // Biometric success counts as a fresh unlock — same as PIN.
+        markUnlocked(user.id);
+        try { await refreshUnlockTimestamp(user.id); } catch (_e) {}
+        setHint('Unlocked!');
+        setHintTone('success');
+        setTimeout(() => router.replace('/(tabs)/dashboard'), 200);
+        return;
+      }
+      // Non-success — biometrics NEVER dead-end the user.  We just
+      // fall back to the PIN pad silently on cancel/fallback, and
+      // surface a hint on lockout so they know why.
+      if (res.reason === 'lockout') {
+        setHint(res.message || 'Biometrics locked — use your PIN.');
+        setHintTone('error');
+      } else if (!isAuto && res.reason === 'error') {
+        setHint('Could not read biometrics. Enter your PIN.');
+        setHintTone('error');
+      }
+    } finally {
+      setBioBusy(false);
+    }
+  };
 
   const onComplete = async (pin: string) => {
     if (!user?.id || busy) return;
@@ -224,6 +301,22 @@ export default function PinLogin() {
         </View>
 
         <View style={styles.footer}>
+          {bioAvailable ? (
+            <TouchableOpacity
+              testID="pin-login-biometric"
+              onPress={() => runBiometricUnlock(false)}
+              style={styles.bioBtn}
+              activeOpacity={0.85}
+              disabled={bioBusy || locked || busy}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              {bioBusy ? (
+                <ActivityIndicator color={Colors.primary} />
+              ) : (
+                <Text style={styles.bioBtnText}>Use {bioLabel}</Text>
+              )}
+            </TouchableOpacity>
+          ) : null}
           <TouchableOpacity
             testID="pin-login-fallback"
             onPress={goToEmailLogin}
@@ -321,5 +414,23 @@ const styles = StyleSheet.create({
     color: Colors.textTertiary,
     fontWeight: '500',
     textDecorationLine: 'underline',
+  },
+  bioBtn: {
+    marginBottom: 6,
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    minWidth: 220,
+    borderRadius: 14,
+    backgroundColor: Colors.tertiary,
+    borderWidth: 2,
+    borderColor: Colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 48,
+  },
+  bioBtnText: {
+    fontSize: 15,
+    color: Colors.primary,
+    fontWeight: '800',
   },
 });
