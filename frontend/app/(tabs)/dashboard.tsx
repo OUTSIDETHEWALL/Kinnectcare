@@ -797,7 +797,20 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
             <Text style={styles.memberName}>{member.name}, {member.age}</Text>
             <Text style={styles.statusEmoji}>{dot}</Text>
           </View>
-          <Text style={styles.memberMeta}>📍 {member.location_name || 'Unknown'}</Text>
+          {/* Build #57 — Location Sharing OFF renders a dedicated
+              privacy row (lock + honest copy) INSTEAD of the pin
+              + fake-location line.  The pill is also swapped for
+              the neutral 🔒 state.  Rationale: caregivers should
+              never see even the *shape* of a location field when
+              a family member has opted out — no "📍 Location Sharing
+              Off" clunky repeat, no green Tracking Healthy fallback. */}
+          {(member as any).location_sharing_enabled === false ? (
+            <Text style={styles.memberMetaPrivacy} testID={`member-privacy-off-${member.id}`}>
+              🔒 Location Sharing Off
+            </Text>
+          ) : (
+            <Text style={styles.memberMeta}>📍 {member.location_name || 'Unknown'}</Text>
+          )}
           {/* Build 54 — status-first design.  The tracking pill is the
               only tracking signal shown on the dashboard card.  Timestamps
               have been moved to Diagnostics; the pill stays green while
@@ -807,15 +820,17 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
               pill renders "🔒 Location sharing off" whenever the member
               has intentionally disabled sharing, no green/yellow/red
               confusion. */}
-          <TrackingStatusPill
-            hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
-            lastSeenIso={member.last_seen}
-            locationSharingEnabled={(member as any).location_sharing_enabled}
-            screen="dashboard-card"
-            size="compact"
-            style={styles.cardStatusPill}
-            testID={`member-tracking-status-${member.id}`}
-          />
+          {(member as any).location_sharing_enabled === false ? null : (
+            <TrackingStatusPill
+              hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
+              lastSeenIso={member.last_seen}
+              locationSharingEnabled={(member as any).location_sharing_enabled}
+              screen="dashboard-card"
+              size="compact"
+              style={styles.cardStatusPill}
+              testID={`member-tracking-status-${member.id}`}
+            />
+          )}
           {isSenior && sum && (
             <View style={styles.medRow}>
               <View style={styles.medChip}>
@@ -927,6 +942,15 @@ const styles = StyleSheet.create({
   memberName: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
   statusEmoji: { fontSize: 12 },
   memberMeta: { fontSize: 13, color: Colors.textTertiary, marginTop: 2 },
+  // Build #57 — Location Sharing Off row: neutral grey lock + honest
+  // copy, replaces the "📍 Location Name" line entirely so caregivers
+  // can't misread a private member as tracking-healthy.
+  memberMetaPrivacy: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#374151',
+    marginTop: 2,
+  },
   freshnessLabel: { fontSize: 11, color: Colors.textTertiary, marginTop: 2 },
   cardStatusPill: { marginTop: 6 },
   freshnessRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },

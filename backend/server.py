@@ -1678,16 +1678,28 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
             # before the user_id migration).  A user should only ever
             # have one member row linked to them, but if any legacy
             # duplicate exists we want to clear all of them.
+            #
+            # Build #57 — DROPPED the `family_group_id` constraint from
+            # the match query.  Root cause of the Build #56 device-QA
+            # bug: some legacy self-member docs carry a stale/None
+            # `family_group_id` that predates the family-group
+            # migration, so the previous query silently no-op'd.  A
+            # user id is globally unique — matching on user_id OR
+            # owner_id alone is safe and covers every doc that
+            # *could* leak location data for this user.
             try:
-                await db.members.update_many(
+                result = await db.members.update_many(
                     {
-                        "family_group_id": current.get("family_group_id"),
                         "$or": [
                             {"user_id": current["id"]},
                             {"owner_id": current["id"]},
                         ],
                     },
                     {"$set": member_update},
+                )
+                logger.info(
+                    f"[privacy] location_sharing={enabled} propagated to "
+                    f"{result.modified_count} member doc(s) for user={current['id']}"
                 )
             except Exception as e:
                 logger.error(f"[privacy] Failed to mirror location_sharing to member docs: {e}")
@@ -3890,4 +3902,87 @@ async def _purge_legacy_demo_data():
             )
     except Exception as e:
         logger.warning(f"_purge_legacy_demo_data skipped: {e}")
+
+
+@app.on_event("startup")
+async def _backfill_location_sharing_flag():
+    """Build #57 — one-time backfill.
+
+    Build #55 introduced ``users.location_sharing_enabled`` (default True).
+    Build #56 extended it to the member docs so family clients could render
+    a "🔒 Location Sharing Off" state without a second round-trip.  But
+    docs created before Build #56 don't have the field at all — which in
+    turn means the frontend renders the pill as "🟢 Tracking Healthy"
+    even for users who have flipped their preference OFF, because
+    Pydantic supplies the default True during response serialization.
+
+    This handler flips every member doc that's MISSING the field to
+    ``True`` (matching the default) so subsequent reads are unambiguous.
+    Docs that DO have the field are untouched.  Fully idempotent — after
+    the first run, `modified_count` will be 0 on every subsequent boot.
+    """
+    try:
+        res = await db.members.update_many(
+            {"location_sharing_enabled": {"$exists": False}},
+            {"$set": {"location_sharing_enabled": True}},
+        )
+        if res.modified_count:
+            logger.info(
+                f"Build #57 backfill: location_sharing_enabled set on "
+                f"{res.modified_count} pre-existing member doc(s)."
+            )
+        else:
+            logger.info("Build #57 backfill: no members needed migration.")
+    except Exception as e:
+        logger.warning(f"_backfill_location_sharing_flag skipped: {e}")
+
+
+@app.on_event("startup")
+async def _sync_user_sharing_pref_to_members():
+    """Build #57 — one-time consistency sweep.
+
+    Root cause of Charles's Build #56 device QA bug: some legacy
+    self-member docs were created before ``family_group_id`` was
+    added, so the Build #56 propagation query (which filtered on
+    that field) silently no-op'd for those users.  Result: user's
+    preference said OFF but their member doc still said ON.
+
+    This sweep runs once per boot and re-syncs every user's own
+    member doc(s) to the current ``users.location_sharing_enabled``
+    value, matched by user_id OR owner_id (no family_group_id
+    constraint, matching the new PUT /me/preferences query).  When
+    the preference is OFF we ALSO null the coord fields so no stale
+    location leaks.  Idempotent.
+    """
+    try:
+        # Users who have explicitly disabled sharing but whose member
+        # doc(s) still carry True (or missing the flag).
+        cursor = db.users.find(
+            {"location_sharing_enabled": False},
+            {"_id": 0, "id": 1},
+        )
+        n_users = 0
+        n_members = 0
+        async for u in cursor:
+            uid = u.get("id")
+            if not uid:
+                continue
+            n_users += 1
+            res = await db.members.update_many(
+                {"$or": [{"user_id": uid}, {"owner_id": uid}]},
+                {"$set": {
+                    "location_sharing_enabled": False,
+                    "latitude": None,
+                    "longitude": None,
+                    "location_name": "Location Sharing Off",
+                }},
+            )
+            n_members += res.modified_count
+        if n_users:
+            logger.info(
+                f"Build #57 consistency sweep: {n_users} users had sharing OFF; "
+                f"re-mirrored to {n_members} member doc(s)."
+            )
+    except Exception as e:
+        logger.warning(f"_sync_user_sharing_pref_to_members skipped: {e}")
 

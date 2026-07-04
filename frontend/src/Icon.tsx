@@ -19,6 +19,14 @@ const MAP: Record<string, string> = {
   'people': '👨‍👩‍👧',
   'people-outline': '👨‍👩‍👧',
   'person': '👤',
+  // Build #57 — Me tab used `person-circle-outline` from Build #56 but the
+  // emoji map had no entry, so it fell back to the "•" dot placeholder
+  // (root cause of the "tiny invisible dot" Charles saw on device).  Both
+  // aliases now point at the same filled-person glyph so the Me tab
+  // reads visually identical to Family (👨‍👩‍👧) and Alerts (🔔).
+  'person-circle': '👤',
+  'person-circle-outline': '👤',
+  'person-outline': '👤',
   'settings': '⚙️',
 
   // Status & alerts

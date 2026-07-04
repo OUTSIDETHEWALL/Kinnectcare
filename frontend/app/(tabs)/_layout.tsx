@@ -43,9 +43,14 @@ export default function TabsLayout() {
         name="me"
         options={{
           title: 'Me',
-          // Build #56 — outline profile icon (matches the Family / Alerts
-          // outline family, and reads cleaner than the filled silhouette).
-          tabBarIcon: ({ color, size }) => <Icon name="person-circle-outline" size={size + 2} color={color} />,
+          // Build #57 — switched from `person-circle-outline` to the
+          // filled `person` glyph.  Reason: our Icon component is an
+          // emoji-based drop-in replacement for Ionicons.  Any icon
+          // name it can't map falls back to a "•" dot — which is
+          // exactly what Charles saw on device.  `person` maps to
+          // 👤 (filled), matching the visual weight of Family (👨‍👩‍👧)
+          // and Alerts (🔔).
+          tabBarIcon: ({ color, size }) => <Icon name="person" size={size + 2} color={color} />,
         }}
       />
       <Tabs.Screen

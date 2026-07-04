@@ -214,6 +214,11 @@ export type Member = {
   checkin_interval_started_at?: string | null;
   emergency_contact_phone?: string | null;
   emergency_contact_name?: string | null;
+  // Build #56/57 — Privacy: mirrored from the user's location_sharing
+  // preference so family clients render a "🔒 Location sharing off"
+  // state directly from the /members payload.  Defaults true on legacy
+  // docs that never had the field (server-side).
+  location_sharing_enabled?: boolean;
 };
 
 export type Alert = {

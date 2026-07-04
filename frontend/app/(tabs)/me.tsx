@@ -46,6 +46,7 @@ import {
   setLocationSharingEnabled, isLocationSharingEnabled,
   stopBackgroundLocation, startBackgroundLocation,
 } from '../../src/backgroundLocation';
+import { fetchAll as refetchMembers } from '../../src/store/memberStore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ------ Small pieces ---------------------------------------------------
@@ -332,9 +333,19 @@ export default function MeScreen() {
         // returns will also see the sharing-off flag and short-
         // circuit — belt AND suspenders.
         try { await stopBackgroundLocation(); } catch (_e) {}
+      }
+      // Build #57 — force an immediate member-list refetch so the
+      // caregiver's dashboard flips to the sharing-off state in the
+      // same UI tick as the toggle, rather than waiting up to a full
+      // /members polling cycle.  Also broadcasts to any other screen
+      // subscribed to memberStore (member detail, family list) so the
+      // transition feels atomic.  Fire-and-forget; failure is
+      // non-fatal because the next scheduled poll will pick it up.
+      try { void refetchMembers(); } catch (_e) {}
+      if (!next) {
         Alert.alert(
           'Location sharing off',
-          'Your family will see “Location sharing disabled.” Turn it back on anytime.',
+          'Your family will see “Location sharing off.” Turn it back on anytime.',
         );
       }
     } catch (e: any) {
