@@ -33,7 +33,14 @@ Each entry should include:
 
 ## Open items
 
-_(none yet — waiting on Build #55 device-testing report)_
+### [P4] Redundant `db.users.update_one` in PUT /me/preferences
+- **Reported:** 2026-07-04 by testing_agent (Build #56 review)
+- **Where:** `/app/backend/server.py:~1694`
+- **Repro:** Reading `update_my_preferences`, a second identical `db.users.update_one({"id": ...}, {"$set": set_doc})` call happens after the location-sharing propagation block runs.
+- **Impact:** None visible — Mongo idempotent single-doc `$set`, both writes carry identical `set_doc`. Cheap, harmless, but noisy.
+- **Why deferred:** Not a beta blocker; doesn't affect UX, privacy, notifications, or any core workflow. Pure code hygiene.
+- **Fix cost estimate:** small (remove one line + confirm test still green)
+- **Suggested target build:** #57 or v1.1 clean-up sprint
 
 ---
 
