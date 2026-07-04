@@ -42,6 +42,15 @@ Each entry should include:
 - **Fix cost estimate:** small (remove one line + confirm test still green)
 - **Suggested target build:** #57 or v1.1 clean-up sprint
 
+### [P4] Wrong import path in test_build56_privacy_propagation.py
+- **Reported:** 2026-07-05 by testing_agent (Build #57 regression run)
+- **Where:** `/app/backend/tests/test_build56_privacy_propagation.py:295`
+- **Repro:** File uses `from backend.expo_push import ...` but pytest is configured to load tests with `/app` on the path, so the module resolves to `expo_push` directly. Test suite reports 12/13 pass; the failing case is import-only, no production code exercised.
+- **Impact:** None on production. Only cosmetic — makes the regression report noisier than it needs to be.
+- **Why deferred:** Not a beta blocker; the code the test *would* cover is separately validated in `expo_push.py` unit paths.
+- **Fix cost estimate:** small (change `backend.expo_push` → `expo_push`)
+- **Suggested target build:** #58 or first post-beta test-hygiene sweep
+
 ---
 
 ## Closed / merged items
