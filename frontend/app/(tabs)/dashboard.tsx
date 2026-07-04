@@ -802,10 +802,15 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
               only tracking signal shown on the dashboard card.  Timestamps
               have been moved to Diagnostics; the pill stays green while
               a silent refresh is in flight (background refresh is normal
-              operation, not a health issue). */}
+              operation, not a health issue).
+              Build #56 — locationSharingEnabled flows through so the
+              pill renders "🔒 Location sharing off" whenever the member
+              has intentionally disabled sharing, no green/yellow/red
+              confusion. */}
           <TrackingStatusPill
             hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
             lastSeenIso={member.last_seen}
+            locationSharingEnabled={(member as any).location_sharing_enabled}
             screen="dashboard-card"
             size="compact"
             style={styles.cardStatusPill}

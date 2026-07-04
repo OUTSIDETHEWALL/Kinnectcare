@@ -43,7 +43,9 @@ export default function TabsLayout() {
         name="me"
         options={{
           title: 'Me',
-          tabBarIcon: ({ color, size }) => <Icon name="person" size={size} color={color} />,
+          // Build #56 — outline profile icon (matches the Family / Alerts
+          // outline family, and reads cleaner than the filled silhouette).
+          tabBarIcon: ({ color, size }) => <Icon name="person-circle-outline" size={size + 2} color={color} />,
         }}
       />
       <Tabs.Screen

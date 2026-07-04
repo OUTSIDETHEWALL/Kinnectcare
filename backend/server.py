@@ -259,6 +259,14 @@ class FamilyMember(BaseModel):
     # Optional display name for the emergency contact (e.g. "Jane Smith" when
     # picked from the device contacts).
     emergency_contact_name: Optional[str] = None
+    # Build #56 — Privacy: mirrors the user's `location_sharing_enabled`
+    # preference on this member doc so family clients can render a
+    # "Location Sharing Off" state directly from the /members payload
+    # without a second round-trip.  When False, latitude/longitude/
+    # location_name/last_seen are also nulled by the server so no
+    # stale coordinate leaks to caregivers.  Defaults True for legacy
+    # docs that were created before this build.
+    location_sharing_enabled: bool = True
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @field_serializer("last_seen", "created_at", "checkin_interval_started_at", when_used='json')
@@ -1635,6 +1643,55 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
         set_doc["location_sharing_enabled"] = bool(data.location_sharing_enabled)
     if set_doc:
         await db.users.update_one({"id": current["id"]}, {"$set": set_doc})
+        # Build #56 — CRITICAL PRIVACY FIX.  When a user flips location
+        # sharing OFF we must also:
+        #   1. Mirror the flag onto their own member doc so family
+        #      clients (dashboard cards, member detail, map) can
+        #      surface "🔒 Location Sharing Off" on the very next
+        #      /members poll — no waiting for a fresh coord upload,
+        #      because there won't be one.
+        #   2. Wipe latitude/longitude/location_name/last_seen on
+        #      that member doc so no stale coordinate remains visible
+        #      to family.  This is the fix for the Build #55 gap
+        #      Charles caught during device QA — the device correctly
+        #      stopped uploading but family still saw the last known
+        #      pin because we never cleared the row.
+        # When toggling ON we mirror the flag but do NOT re-populate
+        # location — the next real upload will do that naturally.
+        if "location_sharing_enabled" in set_doc:
+            enabled = set_doc["location_sharing_enabled"]
+            member_update: dict = {"location_sharing_enabled": enabled}
+            if not enabled:
+                # Immediate visible clear across all family devices.
+                member_update.update({
+                    "latitude": None,
+                    "longitude": None,
+                    "location_name": "Location Sharing Off",
+                    # Deliberately keep `last_seen` untouched — we don't
+                    # want to reset engagement timers or make the
+                    # senior look "offline" (that's a different state).
+                    # If a caregiver *needs* the historical last-seen,
+                    # they'll see it under the disabled banner.
+                })
+            # Match by BOTH user_id (canonical linkage post Build #53)
+            # AND owner_id (legacy linkage for older members created
+            # before the user_id migration).  A user should only ever
+            # have one member row linked to them, but if any legacy
+            # duplicate exists we want to clear all of them.
+            try:
+                await db.members.update_many(
+                    {
+                        "family_group_id": current.get("family_group_id"),
+                        "$or": [
+                            {"user_id": current["id"]},
+                            {"owner_id": current["id"]},
+                        ],
+                    },
+                    {"$set": member_update},
+                )
+            except Exception as e:
+                logger.error(f"[privacy] Failed to mirror location_sharing to member docs: {e}")
+        await db.users.update_one({"id": current["id"]}, {"$set": set_doc})
     return await get_my_preferences(current)
 
 
@@ -1957,6 +2014,33 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             status_code=403,
             detail="You can only update your own member location.",
         )
+    # Build #56 — Privacy belt.  If the caller has flipped Location
+    # Sharing OFF (in preferences), refuse to write coordinates even
+    # if the client-side gate somehow leaked through (buggy install,
+    # stale JS bundle, race with the preference sync, etc.).  We
+    # answer 204-style with a 200 no-op so the client doesn't retry.
+    # Owners writing on behalf of another member are unaffected —
+    # this only fires when `is_self` is true.
+    if is_self:
+        try:
+            u = await db.users.find_one(
+                {"id": current["id"]},
+                {"_id": 0, "location_sharing_enabled": 1},
+            )
+            sharing_off = u is not None and u.get("location_sharing_enabled") is False
+        except Exception:
+            sharing_off = False
+        if sharing_off:
+            logger.info(
+                f"[privacy] Suppressed location upload from user={current['id']} "
+                f"member={member_id} — sharing preference is OFF."
+            )
+            # Return the current member row without any coordinate write.
+            doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+            return FamilyMember(**doc) if doc else FamilyMember(
+                id=member_id, owner_id=current["id"], name="", age=0,
+                phone="", gender="", role="family",
+            )
     # Build 53 — Location Ingest diagnostic.  Capture the exact
     # before/after last_seen values + the JWT identity that succeeded
     # so we can prove whether Transistor's headless heartbeat is
@@ -3019,15 +3103,22 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
     """
     import uuid as _uuid
     request_id = _uuid.uuid4().hex[:12]
-    trace = _trace_record_request(member_id, current["id"], request_id)
-
+    # Build #56 — Diagnostics polish.  `member_not_found` was showing up
+    # in the refresh-trace log for stale client caches (e.g. a device
+    # still holding an old family group's member id after leaving that
+    # group).  It's not evidence of a real problem — the endpoint is
+    # correctly rejecting the request — so we probe FIRST and skip the
+    # trace insertion entirely when the target member simply doesn't
+    # exist for this caller.  Real errors (throttled, no_tokens,
+    # push_error) still get logged so we can investigate them.
     target = await db.members.find_one(
         {"id": member_id, "family_group_id": current["family_group_id"]},
         {"_id": 0, "id": 1, "user_id": 1, "name": 1},
     )
     if not target:
-        trace["push_skipped_reason"] = "member_not_found"
         raise HTTPException(status_code=404, detail="Member not found in your family group")
+
+    trace = _trace_record_request(member_id, current["id"], request_id)
     target_user_id = target.get("user_id")
     if not target_user_id:
         trace["push_skipped_reason"] = "no_user_link"

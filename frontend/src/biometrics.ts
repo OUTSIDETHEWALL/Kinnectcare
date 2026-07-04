@@ -41,29 +41,46 @@ export type BiometricCapability = {
   supported: boolean;      // Hardware capable at all
   enrolled: boolean;       // User has at least one face/fingerprint registered
   typeLabel: string;       // Human-readable — "Face ID", "Fingerprint", "Biometrics"
+  // Build #56 — enumerate ALL enrolled biometric types so Me → Security
+  // can show one row per method (many Android phones ship both a
+  // face-unlock sensor AND a fingerprint reader — showing only one
+  // hides half the value).  Empty array on web / unsupported devices.
+  availableTypes: Array<'face' | 'fingerprint' | 'iris'>;
 };
+
+function _labelFor(kind: 'face' | 'fingerprint' | 'iris'): string {
+  if (kind === 'face') return Platform.OS === 'ios' ? 'Face ID' : 'Face Unlock';
+  if (kind === 'fingerprint') return Platform.OS === 'ios' ? 'Touch ID' : 'Fingerprint';
+  return 'Iris';
+}
+
+export function labelForBiometricType(kind: 'face' | 'fingerprint' | 'iris'): string {
+  return _labelFor(kind);
+}
 
 /** Detect whether the device supports biometric auth AND the user has enrolled at least one. */
 export async function getBiometricCapability(): Promise<BiometricCapability> {
   const LA = getLA();
-  if (!LA) return { supported: false, enrolled: false, typeLabel: 'Biometrics' };
+  if (!LA) return { supported: false, enrolled: false, typeLabel: 'Biometrics', availableTypes: [] };
   try {
     const hardware = await LA.hasHardwareAsync();
     const enrolled = await LA.isEnrolledAsync();
     let typeLabel = 'Biometrics';
+    const availableTypes: Array<'face' | 'fingerprint' | 'iris'> = [];
     try {
       const types = await LA.supportedAuthenticationTypesAsync();
-      if (types.includes(LA.AuthenticationType.FACIAL_RECOGNITION)) {
-        typeLabel = Platform.OS === 'ios' ? 'Face ID' : 'Face Unlock';
-      } else if (types.includes(LA.AuthenticationType.FINGERPRINT)) {
-        typeLabel = Platform.OS === 'ios' ? 'Touch ID' : 'Fingerprint';
-      } else if (types.includes(LA.AuthenticationType.IRIS)) {
-        typeLabel = 'Iris';
-      }
+      // Preserve enumeration order — most Android devices report
+      // fingerprint first when both are enrolled, which happens to be
+      // the label caregivers expect to see (fingerprint is more
+      // commonly used on Android than face unlock).
+      if (types.includes(LA.AuthenticationType.FINGERPRINT)) availableTypes.push('fingerprint');
+      if (types.includes(LA.AuthenticationType.FACIAL_RECOGNITION)) availableTypes.push('face');
+      if (types.includes(LA.AuthenticationType.IRIS)) availableTypes.push('iris');
+      if (availableTypes[0]) typeLabel = _labelFor(availableTypes[0]);
     } catch (_e) {}
-    return { supported: !!hardware, enrolled: !!enrolled, typeLabel };
+    return { supported: !!hardware, enrolled: !!enrolled, typeLabel, availableTypes };
   } catch (_e) {
-    return { supported: false, enrolled: false, typeLabel: 'Biometrics' };
+    return { supported: false, enrolled: false, typeLabel: 'Biometrics', availableTypes: [] };
   }
 }
 

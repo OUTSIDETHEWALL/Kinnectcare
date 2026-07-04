@@ -45,7 +45,7 @@ import { View, Text, StyleSheet, ViewStyle, TextStyle } from 'react-native';
 import { Colors } from '../theme';
 import { logTrackingPillDecision } from './trackingPillDiagnostics';
 
-export type TrackingStatusKind = 'healthy' | 'updating' | 'last-known' | 'unavailable';
+export type TrackingStatusKind = 'healthy' | 'updating' | 'last-known' | 'unavailable' | 'sharing-off';
 
 export type TrackingStatus = {
   kind: TrackingStatusKind;
@@ -64,6 +64,10 @@ const STATUS: Record<TrackingStatusKind, Omit<TrackingStatus, 'kind'>> = {
   updating:     { color: '#92400E',       bg: '#FEF3C7', label: 'Tracking needs attention',  emoji: '🟡' },
   'last-known': { color: '#92400E',       bg: '#FEF3C7', label: 'Tracking needs attention',  emoji: '🟡' },
   unavailable:  { color: Colors.error,    bg: '#FEE2E2', label: 'Tracking offline',          emoji: '🔴' },
+  // Build #56 — Privacy state.  Neutral grey pill, NOT red/yellow — the
+  // caregiver should immediately recognise this as an intentional
+  // privacy choice rather than a system failure.
+  'sharing-off': { color: '#374151',      bg: '#E5E7EB', label: 'Location sharing off',      emoji: '🔒' },
 };
 
 // Build 54 — Health-based, NOT freshness-based.
@@ -96,6 +100,14 @@ export type ComputeStatusOptions = {
       Kept optional so the default (no data-driven failure signal) simply
       leaves the pill Healthy. */
   hasKnownFailure?: boolean;
+  /**
+   * Build #56 — Privacy: when the member has explicitly turned Location
+   * Sharing OFF (via Me → Privacy), we render a neutral "🔒 Location
+   * sharing off" pill instead of ANY green/yellow/red state.  Caregivers
+   * should never see Tracking Healthy when the member has intentionally
+   * disabled sharing — that's misleading and undermines trust.
+   */
+  locationSharingEnabled?: boolean;
 };
 
 export function computeTrackingStatus(
@@ -104,6 +116,15 @@ export function computeTrackingStatus(
   nowMs: number = Date.now(),
   opts?: ComputeStatusOptions,
 ): TrackingStatus {
+  // Build #56 — Privacy takes precedence over EVERY other state.  If
+  // the member has flipped Location Sharing off, we do NOT compute
+  // freshness, we do NOT display a green Healthy pill, we do NOT
+  // surface stale coords.  The pill reads "Location sharing off" and
+  // that's it.  Default is `undefined` → treat as ON for backwards
+  // compatibility with older member docs missing the flag.
+  if (opts?.locationSharingEnabled === false) {
+    return { kind: 'sharing-off', ...STATUS['sharing-off'] };
+  }
   // Hard-fail signals first (only reach this branch when the caller
   // actually knows something is wrong locally).
   if (opts?.isTrackingDisabled || opts?.permissionsRevoked) {
@@ -134,6 +155,14 @@ export type TrackingStatusPillProps = {
   hasCoords: boolean;
   lastSeenIso?: string | null;
   /**
+   * Build #56 — mirrored from the member doc's `location_sharing_enabled`
+   * field.  When explicitly `false`, the pill renders "🔒 Location
+   * sharing off" and bypasses all freshness computation.  Default
+   * (`undefined`) is treated as sharing enabled (backwards-compatible
+   * with member docs created before this migration).
+   */
+  locationSharingEnabled?: boolean;
+  /**
    * Which surface is rendering this pill.  Used only by the temporary
    * decision-log diagnostic (Build 53) to attribute decisions to the
    * calling screen.  Recommended values: 'alert' | 'member' |
@@ -160,6 +189,7 @@ export type TrackingStatusPillProps = {
 export function TrackingStatusPill({
   hasCoords,
   lastSeenIso,
+  locationSharingEnabled,
   screen = 'unknown',
   size = 'default',
   autoTick = true,
@@ -177,7 +207,9 @@ export function TrackingStatusPill({
     return () => clearInterval(t);
   }, [autoTick]);
 
-  const s = computeTrackingStatus(hasCoords, lastSeenIso);
+  const s = computeTrackingStatus(hasCoords, lastSeenIso, undefined, {
+    locationSharingEnabled,
+  });
   const containerStyle = size === 'compact' ? styles.pillCompact : styles.pill;
   const textStyle = size === 'compact' ? styles.labelCompact : styles.label;
 

@@ -39,7 +39,7 @@ import { hasPinForUser, clearPin } from '../../src/pinAuth';
 import { clearPinSetupDismissed } from '../../src/pinSetupPrompt';
 import {
   getBiometricCapability, isBiometricEnabledForUser, enableBiometricForUser,
-  disableBiometricForUser, promptBiometric,
+  disableBiometricForUser, promptBiometric, labelForBiometricType,
 } from '../../src/biometrics';
 import { getPreferences, updatePreferences } from '../../src/preferences';
 import {
@@ -132,10 +132,16 @@ function EditableRow(props: {
 }
 
 function ReadRow({ label, value }: { label: string; value: string | null | undefined }) {
+  // Build #56 — consistent stacked layout: label ABOVE value.  Prior
+  // build put email/role on the same row as their label which read
+  // as crowded next to the stacked Name/Time zone rows.  Now every
+  // account field uses the same rhythm.
   return (
     <View style={styles.readRow}>
-      <Text style={styles.readLabel}>{label}</Text>
-      <Text style={styles.readValue}>{value || '—'}</Text>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.readLabel}>{label}</Text>
+        <Text style={styles.readValue} numberOfLines={1}>{value || '—'}</Text>
+      </View>
     </View>
   );
 }
@@ -157,6 +163,10 @@ export default function MeScreen() {
   const [pinOn, setPinOn] = useState<boolean>(false);
   const [bioSupported, setBioSupported] = useState(false);
   const [bioLabel, setBioLabel] = useState('Biometrics');
+  // Build #56 — enumerate ALL biometric types the device supports +
+  // has enrolled, so caregivers see "Fingerprint or Face Unlock"
+  // when both are set up (many Android phones ship both sensors).
+  const [bioTypes, setBioTypes] = useState<Array<'face' | 'fingerprint' | 'iris'>>([]);
   const [bioOn, setBioOn] = useState(false);
 
   // Location sharing preference
@@ -208,6 +218,7 @@ export default function MeScreen() {
         setPinOn(pin);
         setBioSupported(cap.supported && cap.enrolled);
         setBioLabel(cap.typeLabel);
+        setBioTypes(cap.availableTypes);
         setBioOn(bioEnabled && pin);
         // Server preference is the source of truth on mount; the
         // local flag mirrors it so the background task can see it.
@@ -595,8 +606,26 @@ export default function MeScreen() {
           {pinOn && bioSupported ? (
             <ToggleRow
               testID="me-biometrics"
-              icon={bioLabel === 'Face ID' || bioLabel === 'Face Unlock' ? '🙂' : '👆'}
-              label={`Unlock with ${bioLabel}`}
+              icon={
+                // Prefer the fingerprint glyph when fingerprint is one of
+                // the enrolled types (matches the physical sensor most
+                // Android caregivers rely on); fall back to the face
+                // glyph for face-only devices.
+                bioTypes.includes('fingerprint') ? '👆'
+                  : bioTypes.includes('face') ? '🙂'
+                  : '🔐'
+              }
+              label={(() => {
+                // Build #56 — honest labeling.  If BOTH Face and
+                // Fingerprint are enrolled, tell the user both work
+                // (a single OS prompt accepts either).  Otherwise
+                // name the specific method rather than a generic
+                // "Biometrics" wording.
+                const parts = bioTypes.map(labelForBiometricType);
+                if (parts.length === 0) return `Unlock with ${bioLabel}`;
+                if (parts.length === 1) return `Unlock with ${parts[0]}`;
+                return `Unlock with ${parts.slice(0, -1).join(', ')} or ${parts.slice(-1)[0]}`;
+              })()}
               secondary="A convenience option — your PIN still works."
               value={bioOn}
               onValueChange={onToggleBiometrics}

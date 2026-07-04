@@ -404,37 +404,56 @@ export default function MemberDetail() {
             </TouchableOpacity>
           </View>
           <View style={styles.locationCard}>
-            <View style={styles.locRow}>
-              <View style={styles.locPinBubble}><Text style={styles.locPinEmoji}>📍</Text></View>
-              <View style={{ flex: 1, marginLeft: 14 }}>
-                <Text style={styles.locName}>{member.location_name || 'Unknown location'}</Text>
-                {/* Build 54 — health-first design.  The pill is the only
-                    tracking signal shown on the primary member surface;
-                    per-tick freshness lives in Diagnostics. */}
-                <TrackingStatusPill
-                  hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
-                  lastSeenIso={member.last_seen}
-                  screen="member"
-                  size="compact"
-                  style={styles.locStatusPill}
-                  testID="member-tracking-status"
-                />
+            {((member as any).location_sharing_enabled === false) ? (
+              // Build #56 — Location Sharing Disabled banner replaces
+              // the entire pin/map surface.  Caregivers see an
+              // unambiguous privacy statement, not stale coords.
+              <View testID="member-sharing-disabled" style={styles.sharingOffBanner}>
+                <Text style={styles.sharingOffEmoji}>🔒</Text>
+                <Text style={styles.sharingOffTitle}>Location Sharing Off</Text>
+                <Text style={styles.sharingOffBody}>
+                  This family member has chosen not to share their location.
+                </Text>
               </View>
-            </View>
-            <View style={{ marginTop: 12 }}>
-              <MemberMap
-                latitude={member.latitude}
-                longitude={member.longitude}
-                memberName={member.name}
-                locationName={member.location_name || undefined}
-                memberId={member.id}
-                height={220}
-              />
-            </View>
-            <TouchableOpacity testID="member-get-directions" onPress={openDirections} activeOpacity={0.85} style={styles.directionsBtn}>
-              <Text style={styles.directionsEmoji}>🗺</Text>
-              <Text style={styles.directionsText}>Get Directions</Text>
-            </TouchableOpacity>
+            ) : (
+              <>
+                <View style={styles.locRow}>
+                  <View style={styles.locPinBubble}><Text style={styles.locPinEmoji}>📍</Text></View>
+                  <View style={{ flex: 1, marginLeft: 14 }}>
+                    <Text style={styles.locName}>{member.location_name || 'Unknown location'}</Text>
+                    {/* Build 54 — health-first design.  The pill is the only
+                        tracking signal shown on the primary member surface;
+                        per-tick freshness lives in Diagnostics.
+                        Build #56 — locationSharingEnabled prop is forwarded
+                        so the pill can flip to "🔒 Location sharing off"
+                        atomically with the banner above. */}
+                    <TrackingStatusPill
+                      hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
+                      lastSeenIso={member.last_seen}
+                      locationSharingEnabled={(member as any).location_sharing_enabled}
+                      screen="member"
+                      size="compact"
+                      style={styles.locStatusPill}
+                      testID="member-tracking-status"
+                    />
+                  </View>
+                </View>
+                <View style={{ marginTop: 12 }}>
+                  <MemberMap
+                    latitude={member.latitude}
+                    longitude={member.longitude}
+                    memberName={member.name}
+                    locationName={member.location_name || undefined}
+                    memberId={member.id}
+                    height={220}
+                  />
+                </View>
+                <TouchableOpacity testID="member-get-directions" onPress={openDirections} activeOpacity={0.85} style={styles.directionsBtn}>
+                  <Text style={styles.directionsEmoji}>🗺</Text>
+                  <Text style={styles.directionsText}>Get Directions</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         </View>
 
@@ -809,6 +828,17 @@ const styles = StyleSheet.create({
   directionsBtn: { marginTop: 12, height: 48, borderRadius: 14, backgroundColor: Colors.primary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   directionsEmoji: { fontSize: 16 },
   directionsText: { color: Colors.surface, fontSize: 15, fontWeight: '700' },
+  // Build #56 — Location Sharing Off state, shown in place of the pin
+  // + map when the member has intentionally disabled sharing.
+  sharingOffBanner: {
+    alignItems: 'center',
+    paddingVertical: 26,
+    paddingHorizontal: 20,
+    gap: 6,
+  },
+  sharingOffEmoji: { fontSize: 40, marginBottom: 6 },
+  sharingOffTitle: { fontSize: 17, fontWeight: '800', color: Colors.textPrimary, textAlign: 'center' },
+  sharingOffBody: { fontSize: 13.5, color: Colors.textSecondary, textAlign: 'center', lineHeight: 19, marginTop: 4, paddingHorizontal: 12 },
   // Settings card
   settingCard: { backgroundColor: Colors.surface, borderRadius: 16, padding: 14, borderWidth: 1, borderColor: Colors.border },
   settingLabel: { fontSize: 12, fontWeight: '700', color: Colors.textTertiary, textTransform: 'uppercase', letterSpacing: 0.5 },

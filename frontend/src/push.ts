@@ -225,6 +225,30 @@ Notifications.setNotificationHandler({
         };
       }
     } catch (_e) {}
+
+    // Build #56 — Blank notification defense (client-side belt).
+    //
+    // If a push somehow arrives with NO visible content (title and body
+    // both empty/whitespace) but ISN'T flagged as a known silent type
+    // (e.g. a legacy 'request_location_refresh' variant that dropped
+    // its type field, or a bad third-party pass-through), suppress it
+    // instead of letting the OS fall back to the app-initial "K"
+    // ghost.  Server-side we already reject this in expo_push.py; the
+    // client-side gate is defense in depth.
+    try {
+      const content: any = n?.request?.content || {};
+      const t = String(content?.title ?? '').trim();
+      const b = String(content?.body ?? '').trim();
+      if (t.length < 1 && b.length < 1) {
+        return {
+          shouldShowBanner: false,
+          shouldShowList: false,
+          shouldPlaySound: false,
+          shouldSetBadge: false,
+          priority: Notifications.AndroidNotificationPriority.MIN,
+        };
+      }
+    } catch (_e) {}
     return {
       shouldShowBanner: true,
       shouldShowList: true,
