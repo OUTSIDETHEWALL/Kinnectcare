@@ -3132,15 +3132,68 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
 
     trace = _trace_record_request(member_id, current["id"], request_id)
     target_user_id = target.get("user_id")
+    logger.info(
+        f"[refresh-pipeline] STAGE=request_received "
+        f"request_id={request_id} member_id={member_id} "
+        f"caller={current['id']} target_user_id={target_user_id!r}"
+    )
     if not target_user_id:
         trace["push_skipped_reason"] = "no_user_link"
+        logger.info(
+            f"[refresh-pipeline] STAGE=push_skipped reason=no_user_link "
+            f"request_id={request_id}"
+        )
         return {"ok": True, "skipped": "no_user_link", "request_id": request_id}
+
+    # Build #58 — CRITICAL PIPELINE FIX.
+    #
+    # Root cause of blank-K notifications correlating with Refresh
+    # Traces (Charles's device QA finding): the refresh push was being
+    # sent to every target regardless of whether that target had
+    # Location Sharing turned OFF.  The receiving device would:
+    #   1. Wake for the FCM message
+    #   2. Briefly draw the notification in the tray (OS default while
+    #      JS boots on cold-launched apps — Samsung/Xiaomi especially)
+    #   3. Fire the JS listener, which checks the on-device sharing
+    #      flag, and RETURNS EARLY — no GPS upload happens
+    #   4. Try to dismiss the tray entry — but the "blank K" is
+    #      already visible for ~1-3 s
+    # Net result: caregiver sees ghost K + zero benefit.
+    #
+    # Fix: short-circuit at the server BEFORE we send the push if the
+    # target has explicitly disabled sharing.  Nothing useful will
+    # happen if we do send it, and we're paying UX cost for no work.
+    try:
+        tgt_user = await db.users.find_one(
+            {"id": target_user_id},
+            {"_id": 0, "location_sharing_enabled": 1},
+        )
+        tgt_sharing_off = (
+            tgt_user is not None and tgt_user.get("location_sharing_enabled") is False
+        )
+    except Exception:
+        tgt_sharing_off = False
+    if tgt_sharing_off:
+        trace["push_skipped_reason"] = "target_sharing_off"
+        logger.info(
+            f"[refresh-pipeline] STAGE=push_skipped reason=target_sharing_off "
+            f"request_id={request_id} target_user_id={target_user_id}"
+        )
+        return {
+            "ok": True,
+            "skipped": "target_sharing_off",
+            "request_id": request_id,
+        }
 
     import time as _t
     now = _t.time()
     last = _REFRESH_PUSH_THROTTLE.get(member_id, 0)
     if (now - last) < 30:
         trace["push_skipped_reason"] = "throttled"
+        logger.info(
+            f"[refresh-pipeline] STAGE=push_skipped reason=throttled "
+            f"request_id={request_id} age_s={now - last:.1f}"
+        )
         return {"ok": True, "skipped": "throttled", "retry_in_s": int(30 - (now - last)), "request_id": request_id}
     _REFRESH_PUSH_THROTTLE[member_id] = now
 
@@ -3148,6 +3201,10 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
     tokens = (target_user or {}).get("push_tokens", []) or []
     if not tokens:
         trace["push_skipped_reason"] = "no_tokens"
+        logger.info(
+            f"[refresh-pipeline] STAGE=push_skipped reason=no_tokens "
+            f"request_id={request_id} target_user_id={target_user_id}"
+        )
         return {"ok": True, "sent_to": 0, "request_id": request_id}
 
     # Silent data-only push: empty title/body so the device's
@@ -3155,6 +3212,10 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
     # rendering a visible banner.  Frontend push.ts catches data.type
     # === 'request_location_refresh' and fires refreshLocationIfStale.
     try:
+        logger.info(
+            f"[refresh-pipeline] STAGE=push_sending "
+            f"request_id={request_id} tokens={len(tokens)} priority=normal channel=silent_v2"
+        )
         await send_expo_push(
             tokens=tokens,
             title="",
@@ -3171,12 +3232,29 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
                 "channelId": "silent_v2",
                 "_sentAt": now,
                 "_requestId": request_id,
+                "_source_tag": "refresh",
             },
             sound="",
+            # Build #58 — downgrade refresh pushes to "normal" priority.
+            # Previously ALL pushes used "high" which on Android (esp.
+            # Samsung / Xiaomi / One UI) forces FCM to aggressively wake
+            # the notification handler pre-JS-boot — the OS then draws
+            # a placeholder "K" tray entry that persists for 1-3 s
+            # before our JS listener can dismiss it.  Root cause of the
+            # blank-K notifications correlating with every Refresh
+            # Trace.  Silent refreshes don't need instant delivery —
+            # they can piggyback on the device's next FCM sync — so
+            # "normal" is a safe downgrade.  SOS / meds / check-ins /
+            # family alerts keep the default "high".
+            priority="normal",
         )
         trace["push_sent_at"] = int(_t.time() * 1000)
+        logger.info(
+            f"[refresh-pipeline] STAGE=push_sent "
+            f"request_id={request_id} tokens={len(tokens)}"
+        )
     except Exception as e:
-        logger.warning(f"request-location-refresh push failed: {e}")
+        logger.warning(f"[refresh-pipeline] STAGE=push_error request_id={request_id} error={type(e).__name__}: {e}")
         trace["push_skipped_reason"] = f"push_error:{type(e).__name__}"
     return {"ok": True, "sent_to": len(tokens), "request_id": request_id}
 

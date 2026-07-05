@@ -94,6 +94,7 @@ async def send_expo_push(
     body: str,
     data: Optional[Dict[str, Any]] = None,
     sound: str = "default",
+    priority: str = "high",
 ) -> List[str]:
     """Send a push notification to a list of Expo push tokens.
 
@@ -106,6 +107,14 @@ async def send_expo_push(
     Optional fields read from `data`:
         categoryIdentifier — iOS/Android notification category (for action buttons)
         channelId          — Android notification channel id (e.g. 'meds_v2', 'sos')
+
+    `priority`: Build #58 — configurable.  Historically hard-coded to
+    "high" which is correct for SOS / medications / user-visible
+    notifications.  Silent data-only pushes (refresh) should use
+    "normal" so FCM does NOT aggressively wake the OS notification
+    handler — root cause of the "blank K" tray flashes Charles saw
+    correlating with every Refresh Trace.  See
+    request_location_refresh below for the concrete change.
     """
     valid = [t for t in (tokens or []) if is_valid_expo_token(t)]
     if not valid:
@@ -142,7 +151,7 @@ async def send_expo_push(
     for t in valid:
         msg: Dict[str, Any] = {
             "to": t,
-            "priority": "high",
+            "priority": priority,
             "channelId": channel_id,
             "data": data,
             # NOTE: TTL intentionally OMITTED so Expo/FCM/APNs use their

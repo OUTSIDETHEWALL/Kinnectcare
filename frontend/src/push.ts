@@ -855,6 +855,10 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
       // `dismissNotificationAsync()` here removes that tray entry
       // within ~100 ms of arrival, so the user only ever sees a
       // brief blip (often imperceptible) instead of a sticky K.
+      //
+      // Build #58 — added STAGE=push_received / STAGE=gps_triggered
+      // log lines so we can correlate every leg of the pipeline in
+      // Diagnostics.  Complements the backend STAGE=push_sent line.
       try {
         const data: any = n?.request?.content?.data || {};
         const channelId: string | null =
@@ -864,6 +868,9 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
         const isSilentRefresh = data?.type === 'request_location_refresh';
         const isSilentChannel = channelId === 'silent_v2' || channelId === 'silent';
         if (isSilentRefresh || isSilentChannel) {
+          const reqId = data?._requestId || 'unknown';
+          // eslint-disable-next-line no-console
+          console.log(`[refresh-pipeline] STAGE=push_received request_id=${reqId} channel=${channelId} title=${JSON.stringify(n?.request?.content?.title ?? '')} body=${JSON.stringify(n?.request?.content?.body ?? '')}`);
           // Trigger the refresh BEFORE dismissing — never block work
           // on the cosmetic cleanup.
           if (isSilentRefresh) {
@@ -871,14 +878,19 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
             // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
             const { refreshLocationIfStale } = require('./locationRefresh');
             (global as any).__kc_force_loc_refresh = true;
-            refreshLocationIfStale('pull-request').catch(() => {});
+            // eslint-disable-next-line no-console
+            console.log(`[refresh-pipeline] STAGE=gps_triggered request_id=${reqId}`);
+            refreshLocationIfStale('pull-request').catch((e: any) => {
+              // eslint-disable-next-line no-console
+              console.log(`[refresh-pipeline] STAGE=gps_error request_id=${reqId} error=${e?.message || e}`);
+            });
           }
           // Dismiss the just-arrived tray entry.  Fire-and-forget;
           // any failure here is purely cosmetic.
           try {
-            const reqId = n?.request?.identifier;
-            if (reqId) {
-              Notifications.dismissNotificationAsync(reqId).catch(() => {});
+            const nId = n?.request?.identifier;
+            if (nId) {
+              Notifications.dismissNotificationAsync(nId).catch(() => {});
             }
           } catch (_e) {}
           return; // do not surface as a sticky/last notification
