@@ -51,6 +51,10 @@ Each entry should include:
 - **Fix cost estimate:** small (change `backend.expo_push` → `expo_push`)
 - **Suggested target build:** #58 or first post-beta test-hygiene sweep
 
+### [P4] Dead pre-v2 notification icon asset — RESOLVED (Build #58)
+- Was: `/app/frontend/assets/images/kinnship-notification-icon.png` (pre-v2 K placeholder)
+- Deleted in Build #58 after cache-bust rename to `-v2.png` was verified clean via grep.
+
 ---
 
 ## Closed / merged items

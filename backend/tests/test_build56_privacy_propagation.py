@@ -292,7 +292,7 @@ class TestLocationUploadPrivacyBelt:
 
 class TestBlankPushDefense:
     def test_would_render_blank_rules(self):
-        from backend.expo_push import _would_render_blank
+        from expo_push import _would_render_blank
 
         # Both empty → data-only, not blank.
         assert _would_render_blank("", "") is False
