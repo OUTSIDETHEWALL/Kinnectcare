@@ -1,5 +1,14 @@
 import { Tabs } from 'expo-router';
-import { Icon } from '../../src/Icon';
+// Build #58 — switched from our emoji-based Icon shim to the real
+// Ionicons vector font for the tab bar only.  Rationale: Charles's
+// device QA showed the Me tab emoji (👤) rendering visually mis-matched
+// against Family (👨‍👩‍👧) and Alerts (🔔) — emojis render at slightly
+// different sizes/weights across Android OEMs.  Real vector glyphs
+// render consistently, tint cleanly with the active/inactive color,
+// and are the filled variants Charles asked for by name.  The rest
+// of the app keeps using ../../src/Icon (which is emoji-based and
+// intentionally so, per the comment in that file).
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { Colors } from '../../src/theme';
 import { Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -36,28 +45,28 @@ export default function TabsLayout() {
         name="dashboard"
         options={{
           title: 'Family',
-          tabBarIcon: ({ color, size }) => <Icon name="people" size={size} color={color} />,
+          tabBarIcon: ({ color, size }) => <Ionicons name="people" size={size} color={color} />,
         }}
       />
       <Tabs.Screen
         name="me"
         options={{
           title: 'Me',
-          // Build #57 — switched from `person-circle-outline` to the
-          // filled `person` glyph.  Reason: our Icon component is an
-          // emoji-based drop-in replacement for Ionicons.  Any icon
-          // name it can't map falls back to a "•" dot — which is
-          // exactly what Charles saw on device.  `person` maps to
-          // 👤 (filled), matching the visual weight of Family (👨‍👩‍👧)
-          // and Alerts (🔔).
-          tabBarIcon: ({ color, size }) => <Icon name="person" size={size + 2} color={color} />,
+          // Build #58 — real Ionicons "person" (Ionicons v7+ default =
+          // filled variant, matching Family's filled `people`).  This
+          // is the icon Charles asked for by name.  Renders as a
+          // proper vector silhouette in the same weight as its
+          // neighbours; the earlier emoji `👤` looked out-of-place
+          // because Android OEMs render single-person emojis at a
+          // lighter weight than group emojis.
+          tabBarIcon: ({ color, size }) => <Ionicons name="person" size={size} color={color} />,
         }}
       />
       <Tabs.Screen
         name="alerts"
         options={{
           title: 'Alerts',
-          tabBarIcon: ({ color, size }) => <Icon name="notifications" size={size} color={color} />,
+          tabBarIcon: ({ color, size }) => <Ionicons name="notifications" size={size} color={color} />,
         }}
       />
     </Tabs>

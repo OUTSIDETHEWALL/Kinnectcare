@@ -73,7 +73,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 58, // Build 58 — REFRESH PIPELINE ROOT-CAUSE FIX. Charles reported that every blank-K notification correlated 1:1 with a Refresh Trace timestamp AND that GPS wasn't being uploaded even after the refresh push (`gps received +--`). Complete pipeline audit identified two compounding root causes: (1) refresh pushes were sent with `priority: "high"` (default for ALL Expo pushes) — on Android (esp. Samsung / Xiaomi / One UI) this forces FCM to aggressively wake the OS notification handler PRE-JS-boot; the OS draws a blank placeholder tray entry that persists for 1-3 s before our JS listener can dismiss it. (2) The refresh push was being sent to the target regardless of whether they had Location Sharing OFF — creating the "blank K + zero GPS work" pattern Charles observed. FIXES: (A) `send_expo_push()` gains a `priority` parameter; refresh pushes now use "normal" (SOS/meds/check-ins/family-alerts keep "high"). (B) Refresh endpoint short-circuits BEFORE sending push if the target user has `location_sharing_enabled: false` — no wake, no ghost notification, no wasted round-trip. (C) Comprehensive STAGE=* logging added across the entire pipeline: server-side `request_received`, `push_skipped` (with reason: no_user_link / no_tokens / throttled / target_sharing_off / push_error), `push_sending`, `push_sent`; client-side `push_received`, `gps_triggered`, `gps_error`. Every stage carries the same `request_id` so a caregiver-facing "Refresh Trace" can now be walked end-to-end. Charter compliance: still zero new user-facing features per Build #56 charter — only bug fixes and diagnostic hardening.
+      versionCode: 58, // Build 58 — REFRESH PIPELINE + PRIVACY COMPLETION + ICON HARDENING. Charter-compliant (still zero new features per Build #56 charter). (A) REFRESH PIPELINE ROOT-CAUSE FIX (P0): the blank "K" notifications correlated 1:1 with Refresh Traces + `gps received +--` because refresh pushes were sent with `priority: "high"` (Android FCM aggressively wakes the notification handler before JS boots, drawing a blank tray placeholder), AND because the push was sent even when the target had Location Sharing OFF (guaranteed wasted round-trip). Fixes: `send_expo_push()` accepts a `priority` param (SOS / meds / alerts unchanged at "high"); refresh endpoint uses `priority="normal"`; refresh endpoint short-circuits BEFORE sending when target user's `location_sharing_enabled=false` (returns `skipped:"target_sharing_off"`). Comprehensive `[refresh-pipeline] STAGE=* request_id=X` logs at every stage: request_received / push_skipped(reason=<no_user_link|no_tokens|throttled|target_sharing_off|push_error>) / push_sending / push_sent, plus client-side push_received / gps_triggered / gps_error. (B) COMPLETE LOCATION SHARING UI (P0): dashboard card's top-right health dot (🟢/🟡/🔴) is now overridden to 🔒 when sharing is off, and the small avatar-corner status dot ring switches to neutral grey. This is on top of the existing Build #57 wiring that already drops the "📍 Location Name" line and suppresses the Tracking pill when sharing is off — meaning caregivers now see ZERO green/yellow/red anywhere on the card while sharing is disabled. (C) ANDROID NOTIFICATION ICON HARDENING: Charles reported the generic "K" was STILL appearing in the tray after Build #56/#57 installs. Root cause: Android caches the notification-drawable ID from the initially-created channel; changing the PNG contents without changing the filename doesn't force a rebuild of the compiled drawable resource. Fix: renamed the asset to `kinnship-notification-icon-v2.png` and updated the expo-notifications config accordingly. New filename → new compiled drawable → new resource ID → Android is forced to re-register channels on next launch with the new (shield-checkmark) icon. (D) ME TAB ICON: switched from the emoji-based Icon shim (👤) to real Ionicons vector for the tab bar only. `people` (Family) / `person` (Me — filled variant in Ionicons v7+) / `notifications` (Alerts) — all filled, all matched weights, all consistently tinted by React Navigation.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
@@ -164,7 +164,17 @@ module.exports = ({ config }) => ({
       [
         'expo-notifications',
         {
-          icon: './assets/images/kinnship-notification-icon.png',
+          // Build #58 — filename bumped to *-v2.png to force EAS +
+          // Android to rebuild the notification drawable resource.
+          // Same shield-checkmark silhouette Charles approved in
+          // Build #56, but Android was still surfacing the old "K"
+          // in the tray — most likely because the previously
+          // installed AAB registered its channels with the old
+          // drawable and channels are sticky once created.  A new
+          // filename forces a fresh drawable AND a new channel
+          // registration on next launch (see `silent_v3`, `meds_v2`,
+          // etc. below).
+          icon: './assets/images/kinnship-notification-icon-v2.png',
           color: '#1B5E35',
           defaultChannel: 'default',
         },

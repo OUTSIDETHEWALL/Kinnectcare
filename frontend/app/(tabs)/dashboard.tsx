@@ -749,7 +749,21 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
   onPress: () => void; onCheckIn: () => void;
 }) {
   const initials = member.name.split(' ').map(s => s[0]).slice(0, 2).join('').toUpperCase();
-  const dot = member.status === 'healthy' ? '🟢' : member.status === 'warning' ? '🟡' : '🔴';
+  // Build #58 — Location Sharing overrides the health dot.  When a
+  // member has explicitly turned sharing OFF, the top-right glyph
+  // and the small dot behind the avatar both flip to a neutral lock
+  // (🔒 / grey) so the card can never read as "🟢 Tracking Healthy"
+  // for a member whose location isn't being shared at all.  Health
+  // status still lives underneath — we just don't paint it in a
+  // colour that could be misread as "location tracking is fine".
+  const sharingOff = (member as any).location_sharing_enabled === false;
+  const dot = sharingOff
+    ? '🔒'
+    : member.status === 'healthy'
+      ? '🟢'
+      : member.status === 'warning'
+        ? '🟡'
+        : '🔴';
 
   // v1.3.2 — live refresh indicator + relative "last updated" timestamp.
   // We subscribe to the locationRefreshState bus per-member and re-tick
@@ -790,7 +804,16 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
               <Text style={styles.avatarText}>{initials}</Text>
             </View>
           )}
-          <View style={[styles.statusDot, { backgroundColor: StatusColor(member.status) }]} />
+          <View style={[
+            styles.statusDot,
+            {
+              // Build #58 — health dot on the avatar corner also
+              // respects Location Sharing.  Grey ring when sharing
+              // is off (matches the top-right 🔒 glyph and the
+              // dedicated privacy row below).
+              backgroundColor: sharingOff ? '#9CA3AF' : StatusColor(member.status),
+            },
+          ]} />
         </View>
         <View style={{ flex: 1, marginLeft: 14 }}>
           <View style={styles.nameRow}>
