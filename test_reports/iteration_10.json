@@ -1,0 +1,48 @@
+{
+  "summary": "Kinnship Build #50 Phase 2 SOS backend verification. Ran a 7-test pytest suite against the public preview URL. 6/7 passed. NEW /api/alerts/{id}/resolve endpoint works correctly (happy path, idempotency, 404 for bogus id, 404 for cross-tenant). GET /api/alerts exposes the new resolved/resolved_at/resolved_by_* fields. Older /ack endpoint still works. Regression #1 (SOS clean payload) passes with no fall_detected leakage. ONE FAILURE: Regression #2 — POST /api/sos with legacy `fall_detected:true` payload returns 200 (silently accepted) instead of 422. Root cause: `SOSRequest` Pydantic model in server.py:465 lacks `model_config = ConfigDict(extra='forbid')`, so Pydantic v2's default behaviour drops unknown fields without raising. This contradicts the review request which stated the payload must be rejected with 422.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/sos",
+        "issue": "Legacy `fall_detected:true` payload is silently accepted (200) instead of returning 422. SOSRequest model at /app/backend/server.py:465 needs `model_config = ConfigDict(extra='forbid')` (import ConfigDict from pydantic) to reject unknown fields per the Build #50 purge spec. Field is not stored/echoed anywhere in the response, so the leak is only at request-validation semantics — clients running legacy code will not get the 422 signal to update."
+      },
+      {
+        "endpoint": "POST /api/alerts/{id}/resolve",
+        "issue": "Minor precision inconsistency: first resolve response returns resolved_at with microsecond precision from the in-memory doc (e.g. .123935), while the idempotent 2nd call returns the mongo-persisted value truncated to milliseconds (e.g. .123000). Not a functional bug (represents the same instant, no re-stamp occurs) but two calls on the same alert return slightly different resolved_at strings. Consider truncating to ms before echoing on the first call for a stable contract."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_build50_sos_resolve.py",
+    "/app/test_reports/pytest/iter10_results.xml"
+  ],
+  "action_items": [
+    "MAIN AGENT: Add `model_config = ConfigDict(extra='forbid')` to SOSRequest in /app/backend/server.py:465 (import ConfigDict from pydantic). This will make POST /api/sos return 422 for any legacy payload containing fall_detected (or any other unknown field) — matching the Build #50 purge spec confirmed by the user.",
+    "OPTIONAL: Normalize resolved_at to ms precision before serializing so the first resolve response matches the persisted (idempotent-branch) value."
+  ],
+  "critical_code_review_comments": [
+    "SOSRequest currently has no `extra='forbid'` — accepts any junk field silently.",
+    "Alert model correctly serializes resolved_at via @field_serializer('resolved_at') at server.py:372.",
+    "Resolve endpoint (server.py:2006-2057) is correctly family-scoped in both the find_one filter and the update_one filter — cross-tenant test confirmed 404 with no doc mutation.",
+    "Idempotent short-circuit at server.py:2016 correctly returns the persisted doc without re-stamping."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_build50_sos_resolve.py"
+  ],
+  "success_rate": {
+    "backend": "85.7% (6/7)",
+    "frontend": "not tested (per review request)"
+  },
+  "seed_data_creation": "Tests create disposable SOS alerts as Alice (family 5e214a2f-...) and clean them up in fixture teardown. Cross-tenant test inserts a synthetic alert under a foreign UUID family_group_id and deletes it in finally block.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Suite lives at /app/backend/tests/test_build50_sos_resolve.py. Run: `pytest backend/tests/test_build50_sos_resolve.py -v`. Uses Alice's long-lived JWT from /app/memory/test_credentials.md line 11. Hits public URL EXPO_PUBLIC_BACKEND_URL. Only failing case is TestSOSLegacyRejected — will flip to green once SOSRequest gains extra='forbid'.",
+  "rca_of_issue": "Bug: POST /api/sos accepts legacy `fall_detected` key with 200. Root cause: SOSRequest (BaseModel) has no model_config, so Pydantic v2 defaults to `extra='ignore'` — unknown fields are silently dropped instead of raising ValidationError. Reproduction: curl -X POST $URL/api/sos -H 'Authorization: Bearer <alice_jwt>' -H 'Content-Type: application/json' -d '{\"member_id\":null,\"latitude\":12.34,\"longitude\":56.78,\"fall_detected\":true}' → returns 200 (should be 422). Fix: `from pydantic import ConfigDict` (already imported for other models) and add `model_config = ConfigDict(extra='forbid')` inside class SOSRequest at server.py:465. Re-run the suite; test #2 will then pass."
+}

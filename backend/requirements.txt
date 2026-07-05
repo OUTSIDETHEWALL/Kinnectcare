@@ -1,0 +1,42 @@
+# =============================================================================
+# Kinnship Backend requirements (Railway production)
+# Pure-ASCII to be safe with Railpack's file parser (the previous version
+# contained an em-dash in a comment which may have tripped the builder).
+# =============================================================================
+
+# --- Web framework ---
+# rebuild-token: force-rebuild-jun4-v2
+# Bumping this comment is enough to invalidate Railway/Nixpacks pip
+# wheel cache so bcrypt==4.0.1 below is actually re-resolved.
+fastapi==0.110.1
+uvicorn[standard]==0.25.0
+python-multipart==0.0.28
+
+# --- Database ---
+motor==3.3.1
+pymongo==4.5.0
+
+# --- Validation / models ---
+pydantic==2.13.4
+email-validator==2.3.0
+
+# --- Config ---
+python-dotenv==1.2.2
+
+# --- Auth ---
+PyJWT==2.10.1
+passlib==1.7.4
+# bcrypt MUST stay <4.1.  Passlib 1.7.4 reads bcrypt.__about__.__version__
+# for version detection; bcrypt 4.1.0 (Oct 2023) removed the __about__
+# module entirely, breaking every CryptContext("bcrypt") call with:
+#   AttributeError: module 'bcrypt' has no attribute '__about__'.
+# 4.0.1 is the last release that still exposes __about__ and is fully
+# wire-compatible with newer bcrypt hashes - no DB migration needed.
+bcrypt==4.2.1
+# --- HTTP clients ---
+httpx==0.28.1
+requests==2.33.1
+
+# --- Third-party integrations ---
+stripe==15.1.0
+twilio==9.10.9

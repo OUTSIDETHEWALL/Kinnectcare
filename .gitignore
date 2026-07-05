@@ -1,95 +1,145 @@
-# =============================================================================
-# Kinnship Backend - .gitignore for Railway deployment
-# =============================================================================
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# --- Secrets (NEVER commit) ---
+# IDE and editors
+.idea/
+.vscode/
+
+# Dependencies
+node_modules/
+/node_modules
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# Testing
+/coverage
+
+# Next.js
+/.next/
+/out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Production builds
+/build
+dist/
+dist
+
+# Environment files (comprehensive coverage)
+
+*token.json*
+*credentials.json*
+
+# Logs and debug files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+dump.rdb
+
+# System files
+.DS_Store
+*.pem
+
+# Python
+__pycache__/
+*pyc*
+venv/
+.venv/
+
+# Development tools
+chainlit.md
+.chainlit
+.ipynb_checkpoints/
+.ac
+
+# Deployment
+.vercel
+
+# Data and databases
+agenthub/agents/youtube/db
+
+# Archive files and large assets
+**/*.zip
+**/*.tar.gz
+**/*.tar
+**/*.tgz
+*.pack
+*.deb
+*.dylib
+
+# Build caches
+.cache/
+
+memory/test_credentials.md
+
+
+# Mobile development
+android-sdk/
+
+# Environment & credential files
+# NEVER COMMIT THESE — they hold real Stripe, Twilio, and Google Maps API keys.
 .env
 .env.*
 *.env
-!.env.example
+backend/.env
+frontend/.env
+credentials.json
+*.pem
+*.key
+.credentials
+*token.json*
 
-# --- Python ---
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.egg
-*.egg-info/
-.eggs/
-build/
-dist/
-develop-eggs/
-downloads/
-eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-MANIFEST
+# Screenshot artefacts (large + regenerable from /api/screenshots route)
+frontend/screenshots/*.png
+frontend/screenshots/*.jpg
+frontend/screenshots/*.zip
 
-# --- Virtual environments ---
+# Build caches (Metro/Expo/Python/Node)
+**/.metro-cache/
+**/.expo/
+**/.expo-shared/
+**/__pycache__/
+node_modules/
 .venv/
-venv/
-env/
-ENV/
-# NOTE: .python-version is INTENTIONALLY NOT ignored — it pins the
-# runtime Python version for Railway/Railpack's auto-detection.  If
-# this file is missing from the repo, Railpack defaults to the latest
-# Python (currently 3.13) and bcrypt 4.0.1 has no 3.13 wheel, breaking
-# the build.  Do not add `.python-version` back to .gitignore.
-
-# --- Backups & temp files ---
-*.bak
-*.backup
-*.tmp
-*.swp
-*.swo
-*~
-requirements.local-full.txt.bak
-
-# --- Testing & coverage ---
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-coverage.xml
-*.cover
-.hypothesis/
-
-# --- IDE / Editor ---
-.vscode/
-.idea/
-*.iml
-.project
-.pydevproject
-.settings/
-
-# --- OS ---
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-desktop.ini
-
-# --- Logs ---
-*.log
-logs/
-
-# --- Local data dumps ---
-mongodump/
-*.bson
-*.tar.gz
-
-# --- Service account keys (if any get added later) ---
-*-service-account.json
-*-credentials.json
-firebase-adminsdk-*.json
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials

@@ -1,0 +1,41 @@
+{
+  "summary": "v1.3.3 backend smoke test — ALL 12 PYTEST CASES PASSED (12/12, 100%). Verified: (1) GET /api/diagnostics/refresh-traces returns the correct envelope {count:int, traces:list}, requires auth (401 without bearer), and honours the ?limit= query param. (2) GET /api/me/preferences returns the documented defaults {enabled:false, start:'22:00', end:'07:00'} for a freshly-OTP-signed-up user. (3) PUT /api/me/preferences correctly REJECTS '25:00' with HTTP 400, accepts a valid {enabled:true,start:'23:15',end:'06:45'} payload, and the value round-trips through a subsequent GET (Mongo persistence confirmed). (4) Quiet-Hours suppression gate in push_to_user() was exercised in-process against the live module: when QH window covers NOW and data.type='med_reminder', push_to_user returns 0, emits the INFO log 'quiet-hours-suppress user=<uid> type=med_reminder tokens=1', and the user's push_tokens array is left UNTOUCHED (no prune ran). (5) Emergency bypass verified: with the same QH window active, push_to_user(..., {'type':'sos'}) returns 1 (proceeded past the gate, attempted the token) and does NOT log 'quiet-hours-suppress'. (6) POST /api/members/{id}/request-location-refresh still returns 200 and the response now includes request_id (12-char hex); the matching trace row appears in GET /api/diagnostics/refresh-traces with all required keys (member_id, request_id, requested_at, requester_user_id, push_sent_at, push_skipped_reason, gps_received_at, gps_lat, gps_lon, push_sent_after_ms, gps_received_after_ms). (7) Cross-account isolation works: Bob's refresh trace is visible to Bob but NEVER appears in Alice's /diagnostics/refresh-traces result (and every trace Alice sees has requester_user_id == Alice's id). Cleanup: Alice's quiet_hours reset to disabled defaults and her push_tokens cleared; test members deleted; family_group still empty.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter9_v133.py",
+    "/app/test_reports/pytest/iter9_results.xml"
+  ],
+  "action_items": [
+    "No fixes required for v1.3.3 backend changes — all 12 pytest cases passed against the live preview backend.",
+    "Optional future hardening: PUT /api/me/preferences accepts a sub-second valid time string '00:00' but does NOT reject 'enabled' being non-bool or extra keys (Pydantic coerces). Low priority.",
+    "Optional: the in-memory _REFRESH_TRACE_LOG deque evaporates on pod restart (documented as intentional). When v1.4.0 lands native build, graduate to a Mongo collection so QA can inspect historical traces."
+  ],
+  "critical_code_review_comments": [
+    "server.py:474-531 push_to_user — quiet-hours gate placement is correct: it reads user doc ONCE (push_tokens + quiet_hours + timezone in one Mongo round-trip), short-circuits before any Expo network I/O, and logs the suppression at INFO. Bypass list lives next to the gate so future additions (e.g., 'panic_button') are obvious.",
+    "server.py:534-563 _is_in_quiet_hours — correctly handles cross-midnight windows (start>end) and fails-OPEN (returns False) on malformed input, which is the right default for a 'do-not-disturb'-style feature (better to deliver than silently swallow).",
+    "server.py:2715-2733 _REFRESH_TRACE_LOG — deque(maxlen=200) is a sensible bound for in-memory diagnostics; no risk of unbounded growth even if the scheduler hammers it.",
+    "server.py:2836-2875 diagnostics_refresh_traces — authorization predicate (caller is requester OR target member is in caller's family_group) is correct and verified by the cross-account isolation test. The fg_members set is built once per call from a tiny projection — O(N_members_in_my_group), which is fine.",
+    "server.py:2774-2775 — _trace_record_request runs BEFORE the family-group authorization check on line 2777, so even a 404'd request leaves a trace row. That's intentional (diagnostics should show 'I tried to refresh a member that's not mine' attempts) but worth flagging in case the team wants to make it 404-suppressed for noise reasons."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter9_v133.py (new — 12 pytest cases for v1.3.3)"
+  ],
+  "success_rate": {
+    "backend": "100% (12/12 pytest passed)",
+    "frontend": "n/a — backend-only iteration per E1 request"
+  },
+  "seed_data_creation": "Created TEST_QHTarget (member, under Alice, no user_id link) and TEST_BobMember (member, under Bob's OTP-signed-up family group). Bob himself was registered via OTP signup (email v133bob+<rand>@example.com). All test members deleted via DELETE /api/members/{id} in fixture teardown. Alice's user doc was momentarily mutated for the QH gate test (quiet_hours + push_tokens), then restored to {enabled:false, push_tokens:[]} in the test teardown_method. Verified post-run that GET /api/me/preferences for Alice returns defaults and GET /api/members returns [].",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "For v1.3.3 the diagnostics/refresh-traces deque is in-memory (in the LIVE uvicorn process, PID 2158 as of this run). If you re-run these tests AFTER a `sudo supervisorctl restart backend` the previous traces will be gone — that's expected. The QH gate tests work by importing /app/backend/server.py inside the pytest process and calling push_to_user() directly against the same MongoDB; this gives us caplog visibility on the 'quiet-hours-suppress' INFO line without having to grep the live uvicorn logs. If Mongo connection is slow on first import you may see a 5s delay on the first QH test. Bob's account stays in the DB after the run (OTP signup users are not cleaned up) — that's normal for the existing test pattern (see test_iter5_features.py). Alice's JWT in /app/memory/test_credentials.md is still valid (exp 1812226460 ≈ Oct 2027).",
+  "rca_of_issue": "n/a — no bugs found. v1.3.3 backend changes are correctly wired."
+}

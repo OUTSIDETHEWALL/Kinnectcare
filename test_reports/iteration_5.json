@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 5 (weekly compliance %, EAS projectId slot, KinnectCare logo as icon/splash/favicon/notif) fully verified. Backend pytest 15/15 PASS on iter5 suite + 17/17 PASS on iter3 regression against https://family-guard-37.preview.emergentagent.com. Frontend mobile-web (390x844): KinnectCare logo renders on landing screen (favicon path); fresh signup → dashboard → mark 1 medication taken → compliance-chip-{member_id} appears showing '📊 100% this week' with green successBg rgb(240,253,244); chip absent for the same member before any marks (null compliance). app.json + src/push.ts statically verified.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "global", "issues": ["RN-Web 'shadow*' deprecation warnings persist (carry-over from prior iterations); cosmetic only."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter5_features.py",
+    "/app/test_reports/pytest/iter5_results.xml"
+  ],
+  "action_items": [
+    "When deploying to production, set EAS_PROJECT_ID via either (a) eas.json after running `eas build:configure`, which writes extra.eas.projectId in app.json, or (b) set EXPO_PUBLIC_EAS_PROJECT_ID env var on builds (already supported by push.ts fallback). Current placeholder REPLACE_WITH_EAS_PROJECT_ID is correctly skipped at runtime.",
+    "Optional: migrate 'shadow*' styles to RN 0.76 boxShadow to silence RN-Web deprecation warnings (carry-over)."
+  ],
+  "critical_code_review_comments": [
+    "server.py /api/summary: weekly window computed as 7 local days inclusive (today - 6 days) start-of-day in user_tz → converted to UTC for marked_at >= filter. Only category=='medication' logs counted; routine marks correctly excluded — verified by routine-mark test (compliance unchanged).",
+    "server.py /api/summary: wk_compliance = round((taken/total)*100) when total>0 else None; weekly_logged = taken + missed. Both fields included in every member entry — verified.",
+    "Frontend dashboard.tsx MemberCard: conditional `sum.weekly_compliance_percent != null` correctly hides chip on null and shows it for any numeric value including 0; color toggled at >=80 boundary (success vs warning). testID `compliance-chip-{member.id}` present.",
+    "src/push.ts: projectId resolution order — process.env.EXPO_PUBLIC_EAS_PROJECT_ID → Constants.expoConfig.extra.eas.projectId → easConfig.projectId. Placeholder 'REPLACE_WITH_EAS_PROJECT_ID' is filtered out so getExpoPushTokenAsync() is called without projectId in dev (Expo Go fallback) and with real id once configured — correct production-safe pattern.",
+    "app.json: name='KinnectCare', icon/adaptiveIcon.foregroundImage/web.favicon/expo-splash-screen.image/expo-notifications.icon all reference ./assets/images/kinnectcare-logo.png (exists, 200KB). extra.eas.projectId slot present. iOS+Android bundleIdentifier='app.kinnectcare.client'. ✓",
+    "Logo file present at /app/frontend/assets/images/kinnectcare-logo.png (200 KB). Verified by viewing landing screen in mobile viewport — logo renders crisply inside white card.",
+    "MemberSummary type in src/api.ts updated to include weekly_compliance_percent?: number | null and weekly_logged?: number — types align with backend response."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (15/15 iter5 + 17/17 iter3 regression = 32/32)", "frontend": "100% on critical flows: signup w/ tz, chip absent at null, chip green at 100%, dashboard refresh on focus, KinnectCare logo on landing/welcome."},
+  "seed_data_creation": "Created fresh users v5test+{uuid}@kinnectcare.app, v5tz/v5log/v5ui/v5amb/v5fr+{uuid}@kinnectcare.app (password123, tz America/New_York or UTC). Each signup auto-seeds Gregory + James + 3 meds + 4 routines + 2 alerts. medication_logs populated via /mark.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All iter5 features pass end-to-end. NOTE: first frontend test run reported chip MISSING after marking because Metro had cached the previous bundle pre-restart; `sudo supervisorctl restart expo` cleared it and chip rendered correctly. If you see UI mismatches with backend, always try expo restart before reporting a bug. Amber (warning) state at <80% was confirmed via backend response (wcp=50 after 1 taken + 1 missed); visual amber screenshot not captured because dashboard testIDs ('member-back', 'member-checkin') collide between dashboard and check-in screen, complicating the navigate-back loop — code path is identical to green chip so confidence is high.",
+  "rca_of_issue": "N/A — no failures. Initial false negative (chip missing) was due to stale Metro web bundle; corrected by expo restart."
+}

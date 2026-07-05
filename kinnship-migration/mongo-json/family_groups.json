@@ -1,0 +1,2 @@
+{"_id":{"$oid":"6a076efbd53285f25203fbfb"},"id":"bd3e462a-86b3-4b1f-a011-b696aeff4497","name":"Charles's Family","owner_user_id":"f22dc043-2d4b-4aaf-8710-11880296383a","invite_code":"KINN-BEHUUY","created_at":{"$date":"2026-05-15T19:07:39.228Z"}}
+{"_id":{"$oid":"6a076fd776e4ae9ca886cb7c"},"id":"9c11ef7b-1503-48a8-8197-78eb027f74de","name":"My Renamed Family","owner_user_id":"3162c3d1-0916-471c-8d54-73f5c6713f3a","invite_code":"KINN-XFNDPH","created_at":{"$date":"2026-05-15T19:11:19.745Z"}}

@@ -1,0 +1,53 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+app-example
+
+# EAS / Play store secrets
+play-service-account*.json
+AuthKey_*.p8
+*.appstoreconnect.json
+
+# Firebase config (google-services.json)
+# Note: this file CONTAINS the FCM project_number and an api_key, but those
+# values are CLIENT-side identifiers that ship inside every published APK
+# anyway. It is safe to commit — and EAS Build requires it to be tracked by
+# git in order to upload it during prebuild. We commit it so Android FCM
+# can initialize properly.
+# google-services.json   ← DO NOT re-add this line
+GoogleService-Info.plist

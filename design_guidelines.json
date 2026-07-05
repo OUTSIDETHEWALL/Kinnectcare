@@ -1,0 +1,166 @@
+{
+  "theme": "LIGHT",
+  "archetype": "1_ORGANIC_AND_EARTHY",
+  "design_philosophy": "KinnectCare is a family safety and senior wellness mobile app. The design avoids the cold, clinical feel of traditional healthcare apps and the harsh tech-heavy look of tracking apps. Instead, it uses an 'Organic & Earthy' archetype to establish warmth, trust, and calm. Following E1's rules, it prioritizes extremely high contrast and legibility for users aged 35-75. The design relies on tactile, generous spacing (p-6 to p-8), rounded edges, skeuomorphic familiarity (where helpful), and clear typographic hierarchy.",
+  "colors": {
+    "primary": "#1B5E35",
+    "primary_active": "#113D22",
+    "secondary": "#2D8C55",
+    "tertiary": "#EAF3DE",
+    "background": "#F9F5F0",
+    "surface": "#FFFFFF",
+    "text_primary": "#062210",
+    "text_secondary": "#2B4734",
+    "text_tertiary": "#4D7359",
+    "border": "#E3EDE0",
+    "alert_error": "#B91C1C",
+    "alert_error_bg": "#FEF2F2",
+    "alert_warning": "#D97706",
+    "alert_warning_bg": "#FFFBEB",
+    "alert_success": "#15803D",
+    "alert_success_bg": "#F0FDF4",
+    "sos_button": "#DC2626"
+  },
+  "typography": {
+    "heading_font": "Work Sans",
+    "body_font": "Figtree",
+    "fallback": "System (San Francisco/Roboto)",
+    "scale": {
+      "h1": {
+        "size": 32,
+        "lineHeight": 40,
+        "weight": "700",
+        "letterSpacing": -0.5
+      },
+      "h2": {
+        "size": 24,
+        "lineHeight": 32,
+        "weight": "700",
+        "letterSpacing": -0.5
+      },
+      "h3": {
+        "size": 20,
+        "lineHeight": 28,
+        "weight": "600",
+        "letterSpacing": -0.3
+      },
+      "body_large": {
+        "size": 18,
+        "lineHeight": 28,
+        "weight": "400"
+      },
+      "body": {
+        "size": 16,
+        "lineHeight": 24,
+        "weight": "400"
+      },
+      "label": {
+        "size": 14,
+        "lineHeight": 20,
+        "weight": "600",
+        "letterSpacing": 0.5,
+        "textTransform": "uppercase"
+      }
+    }
+  },
+  "spacing_and_layout": {
+    "base_padding": 24,
+    "card_padding": 20,
+    "border_radius": {
+      "sm": 8,
+      "md": 12,
+      "lg": 16,
+      "xl": 24,
+      "pill": 9999
+    },
+    "shadows": {
+      "card": {
+        "shadowColor": "#1B5E35",
+        "shadowOffset": { "width": 0, "height": 4 },
+        "shadowOpacity": 0.06,
+        "shadowRadius": 12,
+        "elevation": 2
+      },
+      "floating_button": {
+        "shadowColor": "#DC2626",
+        "shadowOffset": { "width": 0, "height": 8 },
+        "shadowOpacity": 0.3,
+        "shadowRadius": 16,
+        "elevation": 8
+      }
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "Solid #1B5E35 background, White text, 56px height, 16px border-radius. Active state scales down 0.98. Used for major actions (Get Started, Confirm).",
+      "secondary": "Solid #EAF3DE background, #1B5E35 text, 56px height, 16px border-radius.",
+      "sos_emergency": "Circular floating button or massive bottom CTA. Solid #DC2626, White text, pulse animation or heavy shadow to stand out. Height 64px."
+    },
+    "cards": {
+      "base": "White (#FFFFFF) background, 24px border-radius, soft green-tinted shadow. Content inside must have 20px padding."
+    },
+    "status_dots": {
+      "healthy": "12px circle, #15803D (Green)",
+      "warning": "12px circle, #D97706 (Amber)",
+      "critical": "12px circle, #DC2626 (Red)"
+    },
+    "inputs": {
+      "text": "Background #F9F5F0, 12px border-radius, 16px padding, 16px font-size. Border 1px solid #E3EDE0. Focused state: 2px solid #2D8C55."
+    }
+  },
+  "accessibility_rules": {
+    "contrast": "Ensure all text meets minimum 4.5:1 contrast ratio. Primary text #062210 against #F9F5F0 or #FFFFFF easily passes.",
+    "touch_targets": "Minimum touch target size is 48x48. Buttons are 56px tall.",
+    "icons": "Use lucide-react-native. Icons should be recognizable (e.g., Pill for medication, Bell for alerts, Shield for safety).",
+    "test_ids": "All interactive elements must include 'testID' (React Native equivalent of data-testid). Use kebab-case."
+  },
+  "images": {
+    "splash_bg": {
+      "url": "https://images.unsplash.com/photo-1770520214803-9af048351642?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxNzV8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGdyZWVuJTIwYW5kJTIwd2hpdGUlMjBmbHVpZCUyMGJhY2tncm91bmR8ZW58MHx8fHwxNzc4NTQxNjg1fDA&ixlib=rb-4.1.0&q=85",
+      "description": "Abstract fluid green/white background for splash screen. Overlay with #F9F5F0 at 80% opacity for text legibility."
+    },
+    "avatar_james": {
+      "url": "https://images.unsplash.com/photo-1667312147803-4b2437b5485e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTV8MHwxfHNlYXJjaHwxfHxzZW5pb3IlMjBtYW4lMjBwb3J0cmFpdCUyMHNtaWxpbmclMjB3YXJtfGVufDB8fHx8MTc3ODU0MTY4MHww&ixlib=rb-4.1.0&q=85",
+      "description": "Senior James (78)"
+    },
+    "avatar_gregory": {
+      "url": "https://images.unsplash.com/photo-1592234789031-94bf65f630ed?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTN8MHwxfHNlYXJjaHwxfHx5b3VuZyUyMG1hbiUyMHNtaWxpbmclMjBwb3J0cmFpdCUyMHNpbmdsZXxlbnwwfHx8fDE3Nzg1NDE2ODV8MA&ixlib=rb-4.1.0&q=85",
+      "description": "Family Member Gregory (35)"
+    }
+  },
+  "screens": {
+    "splash": {
+      "layout": "Full screen centered content. Logo at top, big bold welcome text. Primary 'Get Started' CTA at bottom.",
+      "visuals": "Use splash_bg as ImageBackground with #F9F5F0/80 overlay."
+    },
+    "dashboard": {
+      "layout": "Header with 'Hello, [Name]' and settings icon. ScrollView. 'Your Family' horizontal or vertical list of member cards. 'Reminders' section. Big SOS button anchored at bottom or bottom tab bar.",
+      "cards": "Member card includes Avatar, Name, Age, Status Dot, and 'Last seen' text."
+    },
+    "alerts": {
+      "layout": "List view of alerts. Differentiate alerts by background tint (e.g., missed check-in in Red tint, low battery in Amber tint).",
+      "interaction": "Swipe to dismiss or explicit 'Acknowledge' button."
+    },
+    "check_in": {
+      "layout": "Success screen. Massive green checkmark in center (use tertiary green background for circle). 'You are checked in!' text.",
+      "visuals": "Animated checkmark if possible. Large 'Done' button."
+    },
+    "add_member": {
+      "layout": "Form layout in ScrollView. Generous spacing between inputs.",
+      "inputs": "Name, Age, Phone, Gender. Submit button at bottom."
+    },
+    "member_detail": {
+      "layout": "Header with Avatar and Name. Map preview snippet (or mock icon) for 'Location'. 'Last seen' timestamp. List of 'Care Reminders'."
+    }
+  },
+  "instructions_to_main_agent": [
+    "Build the app using React Native/Expo. Since there are no web CSS globals, use StyleSheet or NativeWind/Tailwind depending on setup.",
+    "Implement the colors exactly as specified. Do not introduce grays for text; use the dark green tints (text_primary, text_secondary) to keep the app feeling organic.",
+    "Ensure all text elements are readable (no tiny text). Use the provided font scale.",
+    "For the SOS button, make it highly prominent—it is a critical safety feature.",
+    "Mock the GPS map with a placeholder image or a simple view if react-native-maps is not configured.",
+    "Use lucide-react-native for all icons.",
+    "All interactive elements MUST have a testID prop (e.g. testID='login-button') for testing.",
+    "Use the provided image URLs via the Image component with a uri source."
+  ]
+}
