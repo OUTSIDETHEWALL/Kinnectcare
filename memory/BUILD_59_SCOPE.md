@@ -1,7 +1,51 @@
-# Build #59 — Scope (Pending Overnight QA of Build #58)
+# Build #59 — Scope (Closed Beta Readiness Release)
 
-Status: **NOT STARTED** — awaiting completion of Build #58 overnight QA.
-Rule: **Blocker-only build.** No new features. If more issues surface overnight, add them here before implementation begins.
+Status: **BACKEND REGRESSION 100% PASS (19/19 tests).** All 13 priority items implemented.
+Awaiting user device QA + Save-to-GitHub.
+
+---
+
+## ✅ Implemented in this build
+
+### Backend (unblocks device testing)
+- **P3 · Location Sharing per-account isolation** — `PUT /me/preferences` now matches on `user_id` ONLY (previously `$or` with `owner_id`, which was wiping rows the caregiver had created for OTHER people). Verified end-to-end: Charles-toggling-OFF no longer flips Joyce.
+- **P3 · One-time heal migration** — `_heal_cross_user_sharing_leaks` at startup restores any rows already incorrectly turned off by the previous buggy sweep.
+- **P4 · Stricter blank-push validator** — `expo_push._would_render_blank`: any visible push must have BOTH title AND body ≥3 chars; placeholder titles ("Update", "K", etc.) are rejected.
+- **P2 · OTP delivery status tracking** — `_deliver_otp_and_record` writes delivery status back to Mongo; new `GET /auth/otp-status?email=X` polling endpoint so client can show a real error banner if Resend fails instead of silent inbox.
+- **P5 · Stripe live-refresh fallback** — if stored `current_period_end` is missing/stale, `build_status_payload` fetches fresh from `stripe.Subscription.retrieve()` → renewal date always correct even if webhook is broken.
+
+### Backend + Frontend (invitation UX rewrite)
+- **P1 · New invitation flow (`add-member.tsx`)** — one-screen form: Name / Email / Relationship (with suggestion chips) / Family or Senior. Single "Send Invitation" CTA. Success modal with delivered/backup-code branching.
+- **P1 · Invitation email redesign** — Kinnship-green branded HTML template, single unmissable "✓ Accept Invitation" button that opens `kinnship://invite/{token}`, secondary "Install from Google Play" button (configurable via `KINNSHIP_PLAY_STORE_URL` env var), manual code demoted to backup-only footer.
+- **P1 · Deep-link route `app/invite/[token].tsx`** — one-tap accept for logged-in users (calls `/family-group/join`), automatic hand-off to signup for logged-out users (pre-fills invite_token + email).
+- **P5 · Extended `FamilyInviteCreate` model** — accepts optional `relationship` + `role` fields carried through to acceptance so joiner never re-types.
+
+### Frontend polish
+- **P6 · Medication chip hidden when 0/0** — MemberCard skips the medication row entirely when `medication_total === 0`.
+- **P7 · Immediate refresh after member delete** — new `memberStore.remove()` evicts locally so dashboard re-renders instantly on next paint (no ~60s wait).
+- **P8 · Auto-refresh dashboard after invite acceptance** — invites fetched alongside members on every dashboard load / pull-to-refresh / focus.
+- **P10 · Custom Kinnship SVG tab icons** — new `KinnshipTabIcon` (react-native-svg). Shared shield outer frame + per-tab glyph (three-people, single-person, bell). Active = `#1B5E35`, inactive = `#8FA697` (muted grey-green — never plain grey). Identical geometry iOS↔Android.
+- **P11 · Pending Invitation badge** — dashboard shows a yellow "🟡 Invitation Pending" card for each unsent invite, with cancel action and expiry date.
+- **P12 · Configurable Play Store URL** — `KINNSHIP_PLAY_STORE_URL` env var; defaults to `https://play.google.com/store/apps/details?id=app.kinnship`.
+
+---
+
+## 📋 Regression Test Report
+`/app/test_reports/iteration_17.json` — 19/19 pass, 0 blockers, 0 regressions.
+
+---
+
+## 🚦 Before shipping
+
+- [x] Backend regression via testing_agent — 19/19 pass
+- [x] Lint clean on all new files (add-member.tsx, invite/[token].tsx, KinnshipTabIcon.tsx, dashboard.tsx, (tabs)/_layout.tsx, member/[id].tsx, memberStore.ts, server.py, family_group.py, billing.py, expo_push.py)
+- [ ] User device QA (Charles / Joyce two-account flow, invite email, deep link)
+- [ ] Save to GitHub → verify lands on `main` (NOT a `conflict_*` branch)
+- [ ] Railway auto-deploy verified
+- [ ] `KINNSHIP_PLAY_STORE_URL` env var set on Railway (optional — default is fine)
+- [ ] Stripe webhook endpoint verified in Dashboard → `POST /api/billing/webhook`
+- [ ] EAS build: `.aab`, `production` profile only (per BUILD_POLICY.md)
+- [ ] Google Play Internal Testing upload
 
 ---
 
