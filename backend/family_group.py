@@ -979,26 +979,87 @@ def build_router(
 
     @router.get("/invites")
     async def list_invites(current=Depends(get_current_user)):
-        """List all invites for the current user's family group."""
+        """List all invites for the current user's family group.
+
+        Build #61 — hardened against the "ghost pending" bug where an
+        invite whose recipient DID successfully join the family (via
+        Path A ``/family-group/join``, Path B ``verify-otp`` signup, or
+        the deep-link auto-consume) still appeared as ``pending`` on
+        the caregiver's dashboard forever.  Root cause of the ghost
+        state: any code path that got as far as marking the joiner a
+        member but NOT as far as calling ``accept_invite`` (e.g. a
+        Build #59 build where the ensure_self_member_row helper hadn't
+        yet shipped, or any future path where a race causes the
+        bookkeeping step to be skipped) leaves the invite in a
+        permanently-inconsistent state.
+
+        Fix: self-heal on read.  For every ``pending`` invite:
+          1. If ``users`` already has a user with the invitee's email
+             sitting inside this family group → the person is
+             already in.  Auto-transition to ``accepted``.
+          2. Else if the invite is past its ``expires_at`` → transition
+             to ``expired``.
+          3. Otherwise leave it truly pending.
+
+        The response reflects the corrected state so the client's
+        ``status === 'pending'`` filter naturally hides the ghost.
+        """
         gid = await ensure_family_group(db, current)
         cursor = db.family_invites.find(
             {"family_group_id": gid}, {"_id": 0}
         ).sort("created_at", -1)
         rows = await cursor.to_list(200)
-        # Auto-transition any obviously-stale pending rows to `expired`
-        # on read so the client sees consistent state without a cron.
-        # Mongo returns datetimes as TZ-naive (BSON has no tzinfo) so we
-        # promote them to UTC-aware before comparing — otherwise this
-        # crashes with "can't compare offset-naive and offset-aware
-        # datetimes".
+
+        # Build #61 — pre-fetch every user email currently in this
+        # family group so we can detect ghost pendings in one query
+        # rather than one per invite.  Only care about pending rows,
+        # so short-circuit when there are none.
+        member_emails: set[str] = set()
+        if any(r.get("status") == "pending" for r in rows):
+            async for u in db.users.find(
+                {"family_group_id": gid},
+                {"_id": 0, "email": 1},
+            ):
+                em = (u.get("email") or "").lower().strip()
+                if em:
+                    member_emails.add(em)
+
         now = datetime.now(timezone.utc)
         cleaned = []
         for r in rows:
+            status = r.get("status")
             exp = r.get("expires_at")
             if isinstance(exp, datetime) and exp.tzinfo is None:
                 exp = exp.replace(tzinfo=timezone.utc)
+
+            # Case 1 — invitee already joined this family via ANY path.
+            # Self-heal to accepted and stamp a synthetic accepted_at
+            # so downstream analytics have a timestamp.
+            if status == "pending":
+                iv_email = (r.get("invitee_email") or "").lower().strip()
+                if iv_email and iv_email in member_emails:
+                    try:
+                        await db.family_invites.update_one(
+                            {"id": r["id"], "status": "pending"},
+                            {"$set": {
+                                "status": "accepted",
+                                "accepted_at": now,
+                            }},
+                        )
+                        logger.info(
+                            f"[invite-heal] auto-marked accepted for {iv_email} "
+                            f"(id={r['id']}, group={gid}) — invitee is already "
+                            f"a family member"
+                        )
+                    except Exception as e:
+                        logger.warning(f"[invite-heal] auto-accept failed: {e}")
+                    r["status"] = "accepted"
+                    r["accepted_at"] = now
+                    status = "accepted"
+
+            # Case 2 — pending but expired.
             if (
-                r.get("status") == "pending"
+                status == "pending"
                 and isinstance(exp, datetime)
                 and now > exp
             ):
@@ -1009,6 +1070,7 @@ def build_router(
                 except Exception:
                     pass
                 r["status"] = "expired"
+
             cleaned.append(_public_invite(r))
         return {"invites": cleaned, "count": len(cleaned)}
 

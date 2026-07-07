@@ -125,10 +125,47 @@ export default function Dashboard() {
         // every dashboard load.  Kept out of the Promise.all above so
         // an invites-endpoint hiccup can never block the primary
         // /members render path.
+        //
+        // Build #61 — client-side belt over the backend suspenders in
+        // list_invites().  If for ANY reason a "pending" invite comes
+        // back for a recipient whose account is already in the family
+        // (stale row from a pre-hotfix build, race between /join and
+        // list_invites, dashboard reading its own cached response,
+        // etc.), silently hide the ghost pending card so the caregiver
+        // never sees a "Pending" pill for someone they can literally
+        // see in their family right now on the same screen.
         listFamilyInvites()
-          .then((r) => setPendingInvites(
-            (r?.invites || []).filter((iv) => iv.status === 'pending')
-          ))
+          .then((r) => {
+            const memberEmails = new Set(
+              (m?.data || []).map((mm: Member) =>
+                (mm.user_id ? String(mm.name || '').toLowerCase() : ''),
+              ),
+            );
+            // Better source: look up email via /members won't have it —
+            // dashboard members[] doesn't carry an email column.  We rely
+            // on invite.invitee_email + the backend's server-side heal.
+            // If the backend has correctly transitioned the row to
+            // "accepted", the .filter below already excludes it.  This
+            // Set-based hide is a NAME-based safety net for the rare
+            // pre-hotfix rows that still say "pending" AND the caregiver
+            // has a member with the same display name.
+            void memberEmails;
+            setPendingInvites(
+              (r?.invites || []).filter((iv) => {
+                if (iv.status !== 'pending') return false;
+                // Name-collision safety net: hide any pending invite
+                // whose invitee_name matches an existing member.  This
+                // is best-effort because members[] doesn't expose
+                // email — the primary heal is server-side.
+                const invName = (iv.invitee_name || '').trim().toLowerCase();
+                if (!invName) return true;
+                const nameClash = (m?.data || []).some(
+                  (mm: Member) => (mm.name || '').trim().toLowerCase() === invName,
+                );
+                return !nameClash;
+              }),
+            );
+          })
           .catch(() => { /* non-fatal */ });
         // Capture full raw response + status + Date header BEFORE any
         // mutation.  This is the immutable record of "what the API
