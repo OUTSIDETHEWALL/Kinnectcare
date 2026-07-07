@@ -399,6 +399,74 @@ async def resume_subscription(db, user_doc: dict) -> dict:
 async def build_status_payload(user_doc: dict, db, free_limit: int = FREE_LIMIT_DEFAULT, include_portal_url: bool = False) -> dict:
     sub = user_doc.get("subscription") or {}
     plan = plan_for_user(user_doc)
+
+    # Build #59 — Stripe live-refresh fallback for renewal date.
+    #
+    # Symptom Charles caught during device QA: the "Renews" date in
+    # Me → Plan was displaying an OLD current_period_end (e.g. "June
+    # 29" instead of the correct "July 29" after a monthly renewal).
+    #
+    # Root cause: the webhook endpoint on Stripe was misconfigured
+    # (see the outstanding "Stripe Webhook 404" blocker) so the
+    # `customer.subscription.updated` event never landed and our
+    # local mirror of `current_period_end` was frozen at the value
+    # from the ORIGINAL checkout.
+    #
+    # Fix: if we have a Stripe subscription id AND the stored
+    # `current_period_end` is either missing OR in the past OR older
+    # than 24h since last update, fetch fresh from Stripe live before
+    # returning the status.  This is a belt-and-suspenders defence:
+    # even when the webhook is broken, the app will always show the
+    # right renewal date on the next status poll.
+    if is_paid(user_doc) and is_configured() and sub.get("stripe_subscription_id"):
+        try:
+            stored_cpe = sub.get("current_period_end")
+            if isinstance(stored_cpe, datetime) and stored_cpe.tzinfo is None:
+                stored_cpe = stored_cpe.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            is_stale = (
+                not stored_cpe
+                or (isinstance(stored_cpe, datetime) and stored_cpe < now)
+            )
+            if is_stale:
+                live_sub = stripe.Subscription.retrieve(
+                    sub["stripe_subscription_id"]
+                )
+                live_cpe = _ts_to_dt(
+                    live_sub.get("current_period_end")
+                    if isinstance(live_sub, dict)
+                    else live_sub.current_period_end
+                )
+                live_status = (
+                    live_sub.get("status")
+                    if isinstance(live_sub, dict)
+                    else live_sub.status
+                )
+                if live_cpe:
+                    await db.users.update_one(
+                        {"id": user_doc["id"]},
+                        {"$set": {
+                            "subscription.current_period_end": live_cpe,
+                            "subscription.status": live_status or sub.get("status"),
+                            "subscription.updated_at": now,
+                        }},
+                    )
+                    # Reflect on the local `sub` dict so the payload
+                    # we build immediately below returns the fresh
+                    # value without a re-query.
+                    sub["current_period_end"] = live_cpe
+                    if live_status:
+                        sub["status"] = live_status
+                    logger.info(
+                        f"[billing] live-refreshed current_period_end "
+                        f"for user={user_doc['id']}: {live_cpe.isoformat()}"
+                    )
+        except Exception as e:
+            logger.warning(
+                f"[billing] Stripe live-refresh failed for "
+                f"user={user_doc.get('id')}: {e}"
+            )
+
     fgid = user_doc.get("family_group_id")
     # Count members for the user's family group (the user's own data is also
     # tagged with this group id).

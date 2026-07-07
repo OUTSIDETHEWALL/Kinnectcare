@@ -432,6 +432,8 @@ export type FamilyInvite = {
   invitee_name: string;
   invitee_email: string;
   inviter_name: string;
+  relationship?: string | null;
+  role?: 'senior' | 'family' | null;
   status: 'pending' | 'accepted' | 'expired' | 'revoked';
   created_at?: string;
   expires_at?: string;
@@ -442,6 +444,8 @@ export type FamilyInvite = {
 export async function sendFamilyInvite(payload: {
   name: string;
   email: string;
+  relationship?: string;
+  role?: 'senior' | 'family';
 }): Promise<{ ok: boolean; delivered: boolean; invite: FamilyInvite }> {
   const r = await api.post('/family-group/invite', payload);
   return r.data;

@@ -10,7 +10,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
-import { api, Member, MemberSummary, getBillingStatus, BillingStatus } from '../../src/api';
+import { api, Member, MemberSummary, getBillingStatus, BillingStatus, FamilyInvite, listFamilyInvites, revokeFamilyInvite } from '../../src/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { geocodeLabelForCoord } from '../../src/locationRefresh';
 import {
@@ -48,6 +48,11 @@ export default function Dashboard() {
   const members = memberStore.useAllMembers();
   const [summary, setSummary] = useState<MemberSummary[]>([]);
   const [billing, setBilling] = useState<BillingStatus | null>(null);
+  // Build #59 — pending invitations surfaced on the dashboard so a
+  // caregiver can see who they've invited but who hasn't accepted
+  // yet ("🟡 Invitation Pending").  Fetched alongside /members and
+  // refreshed on the same cadence.
+  const [pendingInvites, setPendingInvites] = useState<FamilyInvite[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   // Build 50 hotfix — banner surfaces stale-but-unresolved emergencies
@@ -115,6 +120,16 @@ export default function Dashboard() {
           getBillingStatus().catch(() => null),
         ]);
         mRes = m;
+        // Build #59 — fire the invites fetch in parallel too so the
+        // "Invitation Pending" section stays in sync with members on
+        // every dashboard load.  Kept out of the Promise.all above so
+        // an invites-endpoint hiccup can never block the primary
+        // /members render path.
+        listFamilyInvites()
+          .then((r) => setPendingInvites(
+            (r?.invites || []).filter((iv) => iv.status === 'pending')
+          ))
+          .catch(() => { /* non-fatal */ });
         // Capture full raw response + status + Date header BEFORE any
         // mutation.  This is the immutable record of "what the API
         // returned to this device at this exact moment in time".
@@ -652,6 +667,30 @@ export default function Dashboard() {
           </View>
         )}
 
+        {/* Build #59 — Pending Invitations section.  Renders any
+            invites the caregiver has sent but the invitee hasn't
+            accepted yet.  Each row shows the invitee's name, email,
+            and expiry, plus a "Cancel" affordance to revoke a
+            mis-sent invite.  Refreshes automatically on every
+            dashboard load and pull-to-refresh. */}
+        {pendingInvites.length > 0 && (
+          <View style={styles.pendingSection} testID="pending-invites-section">
+            <Text style={styles.subSection}>🟡 Invitation Pending</Text>
+            {pendingInvites.map((iv) => (
+              <PendingInviteCard
+                key={iv.id}
+                invite={iv}
+                onCancel={async () => {
+                  try {
+                    await revokeFamilyInvite(iv.id);
+                    setPendingInvites((prev) => prev.filter((x) => x.id !== iv.id));
+                  } catch (_e) { /* non-fatal, keep card */ }
+                }}
+              />
+            ))}
+          </View>
+        )}
+
         {billing && billing.plan === 'free' && members.length > 0 && (
           <TouchableOpacity
             testID="dashboard-upgrade-banner"
@@ -743,6 +782,75 @@ export default function Dashboard() {
     </SafeAreaView>
   );
 }
+
+// Build #59 — Pending Invitation card.  Renders next to real
+// members but is visually distinct (amber accent, "Pending" pill)
+// so caregivers can tell at a glance who hasn't accepted yet.
+function PendingInviteCard({
+  invite, onCancel,
+}: {
+  invite: FamilyInvite;
+  onCancel: () => Promise<void> | void;
+}) {
+  const initials = (invite.invitee_name || '?')
+    .split(' ').map((s) => s[0]).slice(0, 2).join('').toUpperCase();
+  const expLabel = invite.expires_at
+    ? new Date(invite.expires_at).toLocaleDateString(undefined, {
+        month: 'short', day: 'numeric',
+      })
+    : null;
+  return (
+    <View
+      testID={`pending-invite-${invite.id}`}
+      style={styles.pendingCard}
+    >
+      <View style={styles.pendingAvatarWrap}>
+        <View style={styles.pendingAvatar}>
+          <Text style={styles.pendingAvatarText}>{initials}</Text>
+        </View>
+        <Text style={styles.pendingDot}>🟡</Text>
+      </View>
+      <View style={{ flex: 1, marginLeft: 14 }}>
+        <Text style={styles.pendingName}>
+          {invite.invitee_name}
+          {invite.relationship ? (
+            <Text style={styles.pendingRelation}>  ·  {invite.relationship}</Text>
+          ) : null}
+        </Text>
+        <Text style={styles.pendingMeta} numberOfLines={1}>
+          {invite.invitee_email}
+        </Text>
+        <View style={styles.pendingStatusRow}>
+          <View style={styles.pendingBadge}>
+            <Text style={styles.pendingBadgeText}>Invitation Pending</Text>
+          </View>
+          {expLabel ? (
+            <Text style={styles.pendingExp}>Expires {expLabel}</Text>
+          ) : null}
+        </View>
+      </View>
+      <TouchableOpacity
+        testID={`pending-invite-cancel-${invite.id}`}
+        onPress={() => {
+          RNAlert.alert(
+            'Cancel invitation?',
+            `${invite.invitee_name} won't be able to accept this invitation anymore. You can send a new one later.`,
+            [
+              { text: 'Keep', style: 'cancel' },
+              { text: 'Cancel invite', style: 'destructive', onPress: () => { onCancel(); } },
+            ],
+          );
+        }}
+        style={styles.pendingCancelBtn}
+        activeOpacity={0.7}
+      >
+        <Icon name="close" size={20} color={Colors.textSecondary} />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+
 
 function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
   member: Member; sum?: MemberSummary; isSenior?: boolean;
@@ -854,7 +962,13 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
               testID={`member-tracking-status-${member.id}`}
             />
           )}
-          {isSenior && sum && (
+          {/* Build #59 — hide the medication chip row entirely when
+              there's no medication schedule at all.  Previously the
+              row rendered "0/0 taken" for seniors with no meds set
+              up, which read as broken data.  Rule: only surface the
+              chips when the senior actually has at least one
+              scheduled medication for today. */}
+          {isSenior && sum && sum.medication_total > 0 && (
             <View style={styles.medRow}>
               <View style={styles.medChip}>
                 <Text style={styles.medChipEmoji}>💊</Text>
@@ -1071,4 +1185,42 @@ const styles = StyleSheet.create({
     borderWidth: 2, borderColor: Colors.border,
   },
   sosCardCancelText: { color: Colors.textPrimary, fontSize: 16, fontWeight: '800' },
+
+  // Build #59 — Pending Invitations styling.  Amber accents so the
+  // section reads as "waiting on someone" without being alarming.
+  pendingSection: { marginTop: 6, paddingHorizontal: 20 },
+  pendingCard: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#FFFCF0',
+    borderRadius: 16, padding: 14,
+    marginBottom: 10,
+    borderWidth: 1, borderColor: '#F4E7B0',
+  },
+  pendingAvatarWrap: { position: 'relative', width: 54, height: 54 },
+  pendingAvatar: {
+    width: 54, height: 54, borderRadius: 27,
+    backgroundColor: '#FBE9A6',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: '#F4E7B0',
+  },
+  pendingAvatarText: { fontSize: 18, fontWeight: '800', color: '#8B6D0F' },
+  pendingDot: { position: 'absolute', bottom: -2, right: -2, fontSize: 16 },
+  pendingName: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
+  pendingRelation: { fontSize: 13, color: Colors.textSecondary, fontWeight: '600' },
+  pendingMeta: { fontSize: 13, color: Colors.textSecondary, marginTop: 2 },
+  pendingStatusRow: {
+    flexDirection: 'row', alignItems: 'center',
+    marginTop: 6, gap: 10,
+  },
+  pendingBadge: {
+    paddingHorizontal: 10, paddingVertical: 4,
+    borderRadius: 999, backgroundColor: '#F5D66B',
+  },
+  pendingBadgeText: { fontSize: 11, fontWeight: '800', color: '#5C4712', letterSpacing: 0.3 },
+  pendingExp: { fontSize: 11, color: Colors.textTertiary, fontWeight: '600' },
+  pendingCancelBtn: {
+    width: 36, height: 36, borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center',
+    marginLeft: 6,
+  },
 });

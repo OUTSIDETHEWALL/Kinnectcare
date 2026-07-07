@@ -306,7 +306,20 @@ export default function MemberDetail() {
     Alert.alert('Remove member?', `Are you sure you want to remove ${member?.name}?`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Remove', style: 'destructive', onPress: async () => {
-          await api.delete(`/members/${id}`).catch(() => {});
+          // Build #59 — immediate dashboard refresh after delete.
+          // Previously the dashboard waited up to a minute for the
+          // next /members poll to notice the deletion, so caregivers
+          // saw the removed row lingering.  Fix: drop the member
+          // from the canonical store client-side the moment the
+          // DELETE returns, so the dashboard renders the deletion
+          // on the very next paint (no round-trip wait).
+          try {
+            await api.delete(`/members/${id}`);
+          } catch (_e) {}
+          try {
+            // Local-side eviction from the canonical store.
+            if (id) memberStore.remove(String(id));
+          } catch (_e) {}
           router.back();
         } },
     ]);

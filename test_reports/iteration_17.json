@@ -1,0 +1,48 @@
+{
+  "summary": "Build #59 backend-only regression + focused feature verification. Wrote /app/backend/tests/test_build59_backend.py — 19 new tests across all six spec areas — ALL PASS. Ran prior Build #55-58 regression suites (test_build55_me_profile_prefs.py + test_build56_privacy_propagation.py + test_build57_privacy_indicator.py + test_build58_refresh_pipeline.py) — 42/42 PASS (1 deselected pre-existing stale-import, documented since iter14). No frontend testing (per request — user is handling manually). P1 (CRITICAL location-sharing per-account isolation) — verified end-to-end with fresh OTP-signed-up Caregiver A + Senior B sharing the same family_group_id via INV- token flow. A created a member row 'TEST_B59 Senior-B-created-by-A' (owner_id=A, NO user_id link — represents Joyce-added-by-Charles). A then toggled PUT /api/me/preferences {location_sharing_enabled:false}: backend log emitted exactly `[privacy] location_sharing=False propagated to 0 member doc(s) for user=<A>` — the query now strictly matches user_id=A only, so the owner_id=A-but-user_id!=A row was correctly IGNORED. From B's authenticated GET /api/members perspective, that row's location_sharing_enabled remained True and location_name did NOT flip to 'Location Sharing Off'. Regression bug fully resolved. Symmetrical B-side toggle also verified <=1 propagation count. P2 (OTP status) — /api/auth/otp-status?email=<never-requested> returns {status:'pending'} (no 404, anti-enumeration honored); malformed email 'nope' correctly returns 400; after POST /auth/request-otp + 2s wait, status transitions to one of pending/delivered/failed with correct shape (transport field present when delivered or failed). P3 (blank push rule) — direct import of expo_push._would_render_blank verified: ('','')→False (data-only OK for silent refresh); ('Hi', valid body)→True; (valid title,'OK')→True; ('Update','Hello')→True; ('Kinnship','Test')→True; ('K',anything)→True; meaningful title+body→False. P4 (billing status free-tier) — GET /api/billing/status returns plan='free' with plan_label=null, current_period_end=null, interval=null; all four required fields present. P5 (family invite w/ new metadata) — POST /api/family-group/invite with relationship='Mom' + role='senior' returns 200; both fields persist on the invite doc and appear verbatim in GET /api/family-group/invites; role='bogus' is silently coerced to null (not rejected) exactly as spec'd; PUBLIC GET /api/family-group/verify-invite/{INV-token} (no auth header) returns valid=true with correct family_name + inviter_name + code_type='per-invite'. P6 (heal migration) — `Build #59 heal: no cross-user sharing leaks to fix.` present at startup (log lines 660 + 683). SUMMARY OF BLOCKERS: NONE. Build #59 is Closed-Beta-ready from a backend-regression perspective.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "backend/tests/test_build56_privacy_propagation.py::TestBlankPushDefense::test_would_render_blank_rules", "issue": "Pre-existing stale import path 'from backend.expo_push import _would_render_blank'. Deselected since iter14. Not a Build #59 regression. Build #59 tests in test_build59_backend.py cover this rule fully via a working import path (tries both 'expo_push' and 'backend.expo_push'). POST_BETA_BACKLOG."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_build59_backend.py",
+    "/app/test_reports/pytest/iter17_build59.xml",
+    "/app/test_reports/pytest/iter17_regression.xml"
+  ],
+  "action_items": [
+    "POST_BETA_BACKLOG: fix stale 'from backend.expo_push import _would_render_blank' import in test_build56_privacy_propagation.py:295 (Build #59 test file already handles both import paths — use that pattern).",
+    "OPTIONAL: consider surfacing get_recent_blank_drops() ring buffer via an admin-only endpoint (e.g. GET /api/admin/blank-drops) so runtime blank-push leaks can be observed remotely without shell access. Not required for beta."
+  ],
+  "critical_code_review_comments": [
+    "server.py:1782-1786 — PUT /me/preferences update_many filter is now STRICTLY {user_id: current['id']} — no $or, no owner_id fallback. This is the exact fix for the P1 cross-user leak, and my P1 test confirmed the propagated count is 0 when the toggler has no self-row (as opposed to >=2 in the pre-fix behavior where owner_id=A rows would also match).",
+    "server.py:4110-4137 — _heal_cross_user_sharing_leaks migration runs at startup, finds rows where owner_id!=user_id AND location_sharing_enabled=false, flips them back to true. Log confirms it ran and found nothing to fix. Safe idempotent belt-and-suspenders.",
+    "expo_push.py:47-67 — _would_render_blank: rule tightened per spec. Both title AND body must be >=3 non-whitespace chars; placeholder titles ('update','notification','alert','kinnship','k') + short (<8 chars) body still fails; data-only (both empty) explicitly allowed for silent refresh path. All six branches verified by direct unit tests.",
+    "family_group.py:769-772 — role sanitization is `if role not in (None, 'senior', 'family'): role = None`. Silent coerce, not 4xx — matches spec verbatim. Verified with role='bogus' → 200 + role:null.",
+    "family_group.py:525-576 — verify-invite-public correctly resolves both INV- and KINN- codes, returns friendly {valid,family_name,inviter_name,code_type} without leaking emails/phones/alerts. NO auth dependency in the signature — verified via curl with no Authorization header.",
+    "billing.py:406-461 — Stripe live-refresh block is wrapped in try/except and gated on `is_configured()`, so free-tier / no-key-configured pods (like this one) fall through to the stored value cleanly. Free-tier GET /billing/status returns the expected shape with all four required keys present.",
+    "server.py:4155-4198 — _heal_cross_user_sharing_leaks reads members where owner_id != user_id AND location_sharing_enabled=false. Sensible narrow query, will only fire on the specific corruption pattern from the pre-Build-#59 bug."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_build59_backend.py (new — 19 tests, 6 test classes matching P1-P6 spec)",
+    "/app/test_reports/pytest/iter17_build59.xml (new — junit report for Build #59 tests)",
+    "/app/test_reports/pytest/iter17_regression.xml (new — junit report for Build #55-58 regression)",
+    "/app/test_reports/iteration_17.json (this file)"
+  ],
+  "success_rate": {
+    "backend": "100% (19/19 Build #59 tests pass + 42/42 prior regression tests pass; 1 pre-existing deselect documented in iter14)",
+    "frontend": "N/A — backend-only run per user request"
+  },
+  "seed_data_creation": "Created 4 disposable OTP-signed-up test users (all prefixed 'test-b59-*@example.com') during the run: (1) module-scope user_a caregiver — used for TestP4/TestP5; (2) module-scope invitee for P5 invite persistence checks (invite NOT accepted, still pending); (3) class-scope user_a_isolated for the P1 critical isolation test; (4) class-scope user_b_isolated who joined A's family group via the INV- token flow. A also created a member row 'TEST_B59 Senior-B-created-by-A' owned by A (age=72, phone=5555550190) to reproduce the exact pre-fix Charles/Joyce scenario. Users left in DB (harmless — free-tier with no data). Additional bogus-role invite (invitee 'test-b59-bogusrole-*@example.com') created and left pending. No production data touched.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Build #59 test suite: /app/backend/tests/test_build59_backend.py (19 tests across TestP6HealMigration, TestP4BillingStatus, TestP2OtpStatus, TestP5FamilyInvite, TestP1LocationSharingIsolation, TestP3BlankPushRule, TestP3RefreshPushNotDropped). Run with: `python -m pytest backend/tests/test_build59_backend.py -v` from /app. For full backend regression add the four prior suites with the same deselect flag documented in iter14. The OTP helper `_grep_otp_code` in the new test file polls /var/log/supervisor/backend.err.log for `Code for <email>: NNNNNN` — this is currently the only OTP-delivery observation channel because Resend/SMTP are not configured on this pod (verified: OTP status API returns 'pending' for the freshly-requested emails, which is one of the three acceptable states per spec). If OTP delivery is later wired up, the helper still works — it grep-matches the same log line the server emits at code-generation time (BEFORE any delivery attempt).",
+  "rca_of_issue": "No open bugs. P1 root cause (from Build #58 → #59): PUT /api/me/preferences used `$or:[{user_id:A},{owner_id:A}]` in its update_many filter, which caused caregiver A's toggle to also flip location_sharing_enabled on every member row A had ever created (owner_id=A) — including rows representing OTHER people (Joyce, etc.). Fix (server.py:1783): filter is now `{user_id: current['id']}` ONLY. A member row represents 'me' iff its user_id points at me; owner_id represents who created the row, which is irrelevant to whose privacy preference it should mirror. Verified fix via a fresh-user reproduction of the exact Charles/Joyce scenario: A created a member for B (owner_id=A, user_id unset), then A toggled off — the propagated count was 0 (not >=1), and B's view of the row remained unchanged (location_sharing_enabled=True, location_name != 'Location Sharing Off'). Complementary defense: _heal_cross_user_sharing_leaks migration at startup un-corrupts any legacy rows from before the fix (log shows 0 fixed, i.e. no historical corruption on this pod)."
+}

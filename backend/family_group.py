@@ -88,6 +88,12 @@ class FamilyGroupMemberRemove(BaseModel):
 class FamilyInviteCreate(BaseModel):
     name: str
     email: EmailStr
+    # Build #59 — optional metadata so the invite email can be
+    # personalized ("Charles has invited you as a family member")
+    # and so the accepted-invite flow can auto-fill the joiner's
+    # role / relationship instead of asking again on their end.
+    relationship: Optional[str] = None  # e.g. "Mom", "Dad", "Aunt", "Spouse"
+    role: Optional[str] = None          # "senior" | "family" | None
 
 
 # ---------- Helpers ----------
@@ -185,53 +191,66 @@ async def accept_invite(db, invite_id: str, accepted_by_user_id: str) -> None:
 
 def _invite_email_body(
     *, inviter_name: str, group_name: str, token: str, invitee_name: str,
-    expires_at: datetime,
+    expires_at: datetime, relationship: Optional[str] = None,
 ) -> Tuple[str, str, str]:
     """Build (subject, plain-text body, HTML body) for the invite email.
 
     Modern mail clients (Gmail, Apple Mail, Outlook) render the HTML
     version; plain-text clients and screen readers fall back to text.
-    Both versions carry the same content so accessibility doesn't
-    suffer.
+
+    Build #59 — completely redesigned for one-tap onboarding:
+      • A single, unmissable "Accept Invitation" button that opens
+        the app via the ``kinnship://invite/{token}`` deep link when
+        Kinnship is already installed.
+      • Immediately below: a Google Play Store button (configurable
+        via the ``KINNSHIP_PLAY_STORE_URL`` env var) so first-time
+        users are one tap away from installing.
+      • The manual invite code becomes a small "backup only" footer
+        instead of the visual hero — because most users should never
+        need to type it.
 
     The possessive form always appends `'s` (e.g. "Charles" → "Charles's",
     "Bob" → "Bob's") — modern Chicago Manual of Style.
     """
     inviter_possessive = f"{inviter_name}'s"
-    subject = f"You're invited to join {inviter_possessive} Family on Kinnship"
+    rel_line = f" as their {relationship}" if relationship else ""
+    subject = f"{inviter_name} invited you to join Kinnship"
     exp_str = expires_at.strftime("%B %d, %Y")
+
+    # Deep link back into the app (see /app/frontend/app.json → scheme).
+    accept_url = f"kinnship://invite/{token}"
+
+    # Universal HTTPS acceptance URL — used both as a fallback for
+    # email clients that strip custom schemes AND as the "Install"
+    # target.  The Play Store URL is configurable so we can flip
+    # between Internal Testing and Closed Beta without a rebuild.
+    play_store_url = (
+        os.environ.get("KINNSHIP_PLAY_STORE_URL")
+        or "https://play.google.com/store/apps/details?id=app.kinnship"
+    )
 
     # ---- Plain-text version (fallback) ----
     text_body = (
         f"Hi {invitee_name},\n\n"
-        f"{inviter_name} has invited you to join {inviter_possessive} Family "
-        f"on Kinnship — the family safety and senior wellness app that keeps "
-        f"loved ones connected and protected.\n\n"
-        f"WHAT KINNSHIP DOES\n"
-        f"  • One-tap SOS alerts that notify your whole family\n"
-        f"  • Daily check-ins so loved ones know you're okay\n"
-        f"  • Automatic fall detection on your phone\n"
-        f"  • Medication reminders with family follow-up\n"
-        f"  • Location sharing during emergencies only\n\n"
-        f"YOUR PERSONAL INVITE CODE\n\n"
-        f"    {token}\n\n"
-        f"HOW TO JOIN (about 3 minutes)\n"
-        f"  1. Download Kinnship\n"
-        f"     • iPhone: search 'Kinnship' on the App Store\n"
-        f"     • Android: search 'Kinnship' on Google Play\n"
-        f"  2. Open the app and tap Sign Up\n"
-        f"  3. Enter your email and verify with the 6-digit code we send\n"
-        f"  4. On the \"Family invite code\" field, enter: {token}\n"
-        f"  5. You're in — you'll join {inviter_possessive} family automatically.\n\n"
-        f"This invite expires on {exp_str}.  If you didn't expect this email, "
-        f"you can safely ignore it — no account will be created.\n\n"
-        f"Welcome to the Kinnship family,\n"
+        f"{inviter_name} has invited you to join {inviter_possessive} "
+        f"family on Kinnship{rel_line} — the family safety and senior "
+        f"wellness app.\n\n"
+        f"ACCEPT INVITATION\n"
+        f"  Tap this link on your phone:\n"
+        f"  {accept_url}\n\n"
+        f"DON'T HAVE KINNSHIP YET?\n"
+        f"  Install it from Google Play, then re-open this email and\n"
+        f"  tap the Accept Invitation link above:\n"
+        f"  {play_store_url}\n\n"
+        f"BACKUP INVITE CODE (only if the button doesn't work):\n"
+        f"  {token}\n\n"
+        f"This invite expires on {exp_str}.  If you didn't expect this "
+        f"email, you can safely ignore it — no account will be created.\n\n"
+        f"Welcome to the family,\n"
         f"— The Kinnship team"
     )
 
     # ---- HTML version (primary, used by modern clients) ----
-    # Table-based layout for max email-client compatibility (Outlook
-    # especially).  Inline styles only — no external stylesheets.
     html_body = f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>{subject}</title></head>
@@ -241,67 +260,73 @@ def _invite_email_body(
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="560" style="max-width:560px;background-color:#ffffff;border-radius:14px;box-shadow:0 2px 8px rgba(27,94,53,0.08);overflow:hidden;">
 
       <!-- Header band -->
-      <tr><td style="background-color:#1B5E35;padding:32px 32px 26px 32px;text-align:center;">
-        <div style="color:#ffffff;font-size:28px;font-weight:700;letter-spacing:-0.5px;line-height:1;">Kinnship</div>
-        <div style="color:#a5d6a7;font-size:13px;margin-top:6px;letter-spacing:0.8px;text-transform:uppercase;">Family safety · Senior wellness</div>
+      <tr><td style="background-color:#1B5E35;padding:36px 32px 30px 32px;text-align:center;">
+        <div style="color:#ffffff;font-size:32px;font-weight:800;letter-spacing:-0.5px;line-height:1;">Kinnship</div>
+        <div style="color:#a5d6a7;font-size:13px;margin-top:8px;letter-spacing:0.8px;text-transform:uppercase;">Family safety · Senior wellness</div>
       </td></tr>
 
       <!-- Greeting + intro -->
-      <tr><td style="padding:32px 32px 8px 32px;">
-        <p style="margin:0 0 18px 0;font-size:17px;color:#1a1a1a;">Hi {invitee_name},</p>
-        <p style="margin:0 0 24px 0;font-size:16px;color:#333;">
+      <tr><td style="padding:36px 32px 8px 32px;">
+        <p style="margin:0 0 14px 0;font-size:18px;color:#1a1a1a;">Hi {invitee_name},</p>
+        <p style="margin:0 0 24px 0;font-size:17px;color:#333;line-height:1.55;">
           <strong>{inviter_name}</strong> has invited you to join
-          <strong>{inviter_possessive} Family</strong> on Kinnship — the family
-          safety and senior wellness app that keeps loved ones connected and protected.
+          <strong>{inviter_possessive} family</strong> on Kinnship{rel_line}.
         </p>
       </td></tr>
 
-      <!-- Invite code box (most visually prominent element) -->
-      <tr><td style="padding:0 32px 24px 32px;">
+      <!-- Primary CTA: Accept Invitation (deep link) -->
+      <tr><td style="padding:8px 32px 8px 32px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-          <tr><td style="background-color:#f1f8e9;border:2px solid #1B5E35;border-radius:12px;padding:24px 16px;text-align:center;">
-            <div style="font-size:11px;color:#558b2f;font-weight:700;letter-spacing:1.5px;margin-bottom:10px;text-transform:uppercase;">Your personal invite code</div>
-            <div style="font-family:'SFMono-Regular',Consolas,Menlo,'Courier New',monospace;font-size:30px;font-weight:700;color:#1B5E35;letter-spacing:4px;">{token}</div>
-            <div style="font-size:11px;color:#777;margin-top:10px;">Single-use · Expires {exp_str}</div>
+          <tr><td align="center">
+            <a href="{accept_url}"
+               style="display:inline-block;background-color:#1B5E35;color:#ffffff;font-size:19px;font-weight:700;text-decoration:none;padding:18px 40px;border-radius:14px;box-shadow:0 4px 12px rgba(27,94,53,0.28);">
+              ✓ Accept Invitation
+            </a>
+          </td></tr>
+          <tr><td align="center" style="padding-top:10px;font-size:13px;color:#666;">
+            Tap on your phone to open Kinnship and join automatically.
           </td></tr>
         </table>
       </td></tr>
 
-      <!-- What Kinnship does -->
-      <tr><td style="padding:0 32px 8px 32px;">
-        <h3 style="margin:0 0 14px 0;font-size:15px;color:#1B5E35;font-weight:700;letter-spacing:0.3px;">WHAT YOU'LL GET</h3>
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="font-size:15px;color:#333;line-height:1.7;">
-          <tr><td style="padding:3px 0;"><strong>🆘 One-tap SOS</strong> — alerts your whole family in seconds</td></tr>
-          <tr><td style="padding:3px 0;"><strong>✅ Daily check-ins</strong> — peace of mind for everyone</td></tr>
-          <tr><td style="padding:3px 0;"><strong>🏥 Fall detection</strong> — automatic alerts if you slip</td></tr>
-          <tr><td style="padding:3px 0;"><strong>💊 Medication reminders</strong> — never miss a dose</td></tr>
-          <tr><td style="padding:3px 0;"><strong>📍 Location sharing</strong> — only during emergencies</td></tr>
+      <!-- Secondary CTA: Install from Play Store (fallback) -->
+      <tr><td style="padding:28px 32px 8px 32px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+          <tr><td align="center" style="padding-bottom:12px;font-size:14px;color:#666;">
+            Don't have Kinnship yet?
+          </td></tr>
+          <tr><td align="center">
+            <a href="{play_store_url}"
+               style="display:inline-block;background-color:#ffffff;color:#1B5E35;font-size:15px;font-weight:700;text-decoration:none;padding:13px 30px;border:2px solid #1B5E35;border-radius:12px;">
+              Install from Google Play
+            </a>
+          </td></tr>
+          <tr><td align="center" style="padding-top:8px;font-size:12px;color:#888;">
+            After installing, come back here and tap <strong>Accept Invitation</strong> above.
+          </td></tr>
         </table>
       </td></tr>
 
-      <!-- How to join -->
-      <tr><td style="padding:24px 32px 8px 32px;">
-        <h3 style="margin:0 0 14px 0;font-size:15px;color:#1B5E35;font-weight:700;letter-spacing:0.3px;">HOW TO JOIN (3 MINUTES)</h3>
-        <ol style="margin:0;padding-left:22px;font-size:15px;color:#333;line-height:1.8;">
-          <li>Download <strong>Kinnship</strong> from the App Store (iPhone) or Google Play (Android).</li>
-          <li>Open the app and tap <strong>Sign Up</strong>.</li>
-          <li>Enter your email and verify with the 6-digit code we send.</li>
-          <li>On the <strong>Family invite code</strong> field, enter:
-            <span style="display:inline-block;background-color:#f1f8e9;color:#1B5E35;font-family:'SFMono-Regular',Consolas,Menlo,monospace;font-weight:700;padding:2px 8px;border-radius:5px;letter-spacing:1px;">{token}</span></li>
-          <li>You're in! You'll join {inviter_possessive} family automatically.</li>
-        </ol>
+      <!-- Backup invite code (small, unobtrusive) -->
+      <tr><td style="padding:32px 32px 8px 32px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+          <tr><td style="background-color:#fafbfa;border:1px dashed #cfd6cf;border-radius:10px;padding:14px 16px;">
+            <div style="font-size:11px;color:#888;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px;">Backup code (only if the button doesn't work)</div>
+            <div style="font-family:'SFMono-Regular',Consolas,Menlo,'Courier New',monospace;font-size:18px;font-weight:700;color:#333;letter-spacing:2px;">{token}</div>
+          </td></tr>
+        </table>
       </td></tr>
 
       <!-- Expiry/ignore note -->
-      <tr><td style="padding:24px 32px 28px 32px;">
-        <p style="margin:0;font-size:13px;color:#666;border-top:1px solid #e8eae8;padding-top:18px;line-height:1.6;">
-          This invite expires on <strong>{exp_str}</strong>. If you didn't expect this email
-          you can safely ignore it — no account will be created.
+      <tr><td style="padding:20px 32px 30px 32px;">
+        <p style="margin:0;font-size:13px;color:#666;line-height:1.55;">
+          This invitation expires on <strong>{exp_str}</strong>. If you didn't expect
+          this email, you can safely ignore it — no account will be created.
         </p>
       </td></tr>
 
       <!-- Footer -->
-      <tr><td style="background-color:#fafbfa;padding:20px 32px;text-align:center;border-top:1px solid #e8eae8;">
+      <tr><td style="background-color:#fafbfa;padding:22px 32px;text-align:center;border-top:1px solid #e8eae8;">
         <p style="margin:0;font-size:12px;color:#999;">Welcome to the Kinnship family,</p>
         <p style="margin:4px 0 0 0;font-size:12px;color:#999;">— The Kinnship team</p>
       </td></tr>
@@ -310,7 +335,6 @@ def _invite_email_body(
 </table>
 </body>
 </html>"""
-
     return subject, text_body, html_body
 
 
@@ -742,6 +766,10 @@ def build_router(
 
         name = (data.name or "").strip()
         email = (data.email or "").strip().lower()
+        relationship = (data.relationship or "").strip() or None
+        role = (data.role or "").strip().lower() or None
+        if role not in (None, "senior", "family"):
+            role = None
         if not name or len(name) > 80:
             raise HTTPException(400, "Name must be 1-80 characters")
         if not email or "@" not in email:
@@ -771,6 +799,10 @@ def build_router(
             "inviter_name": inviter_name,
             "invitee_name": name,
             "invitee_email": email,
+            # Build #59 — optional per-invite metadata carried through
+            # to acceptance so the joiner never has to re-type it.
+            "relationship": relationship,
+            "role": role,
             "status": "pending",
             "created_at": now,
             "expires_at": expires,
@@ -796,6 +828,7 @@ def build_router(
                     token=token,
                     invitee_name=name,
                     expires_at=expires,
+                    relationship=relationship,
                 )
                 invite_from = (
                     os.environ.get("RESEND_INVITE_FROM")
@@ -883,6 +916,8 @@ def _public_invite(inv: dict) -> dict:
         "invitee_name": inv.get("invitee_name"),
         "invitee_email": inv.get("invitee_email"),
         "inviter_name": inv.get("inviter_name"),
+        "relationship": inv.get("relationship"),
+        "role": inv.get("role"),
         "status": inv.get("status"),
         "created_at": _iso(inv.get("created_at")),
         "expires_at": _iso(inv.get("expires_at")),

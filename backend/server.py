@@ -1150,20 +1150,54 @@ async def _deliver_otp_email(to_email: str, code: str, purpose: str) -> bool:
     return False
 
 
-def _deliver_otp_email_sync(to_email: str, code: str, purpose: str) -> None:
+def _deliver_otp_email_sync(to_email: str, code: str, purpose: str) -> tuple[bool, str]:
     """Synchronous wrapper — required because FastAPI's BackgroundTasks
     runs in a threadpool, not the asyncio loop, so we can't directly
     schedule the async coroutine there.
 
     Same preference order as _deliver_otp_email above.
+
+    Build #59 — now returns (delivered: bool, transport: str) so the
+    background wrapper can persist a `delivered` audit stamp on the
+    otp_codes row.  transport is one of: "resend", "smtp", "none".
     """
     if _send_otp_via_resend(to_email, code, purpose):
-        return
+        return True, "resend"
     if _send_otp_via_smtp(to_email, code, purpose):
-        return
-    logger.warning(
-        f"[OTP] No email transport configured.  Code for {to_email}: {code}"
+        return True, "smtp"
+    logger.error(
+        f"[OTP] DELIVERY FAILED — no transport succeeded for {to_email}.  "
+        f"Fallback code (visible in logs only): {code}"
     )
+    return False, "none"
+
+
+async def _deliver_otp_and_record(to_email: str, code: str, purpose: str) -> None:
+    """Background task: deliver the OTP via whichever transport is
+    available, then record the delivery status back onto the otp_codes
+    document so the client can poll for it.
+
+    Records:
+        delivered: bool
+        delivery_transport: "resend" | "smtp" | "none"
+        delivery_attempted_at: datetime (UTC)
+    """
+    import asyncio
+    loop = asyncio.get_event_loop()
+    delivered, transport = await loop.run_in_executor(
+        None, _deliver_otp_email_sync, to_email, code, purpose
+    )
+    try:
+        await db.otp_codes.update_one(
+            {"email": to_email},
+            {"$set": {
+                "delivered": delivered,
+                "delivery_transport": transport,
+                "delivery_attempted_at": datetime.now(timezone.utc),
+            }},
+        )
+    except Exception as e:
+        logger.warning(f"[OTP] failed to record delivery status for {to_email}: {e}")
 
 
 @api_router.post("/auth/request-otp")
@@ -1249,12 +1283,15 @@ async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, reque
             rec["invite_code"] = data.invite_code.strip().upper()
 
     await db.otp_codes.update_one({"email": email}, {"$set": rec}, upsert=True)
-    # Fire-and-forget SMTP send so we return to the client immediately.
-    # The mongo record is already written above, so the user CAN
-    # already verify their code as soon as the email arrives —
-    # whether that's 200ms or 8 seconds later. The HTTP response
-    # is no longer gated on Gmail's mood.
-    background_tasks.add_task(_deliver_otp_email_sync, email, code, purpose)
+    # Fire-and-forget delivery via background task.  The mongo record is
+    # already written above, so the user CAN already verify their code
+    # as soon as the email arrives — whether that's 200ms or 8 seconds
+    # later.  The HTTP response is no longer gated on the SMTP handshake.
+    # Build #59 — the background task now ALSO records delivery status
+    # on the otp_codes row so the client can poll /auth/otp-status and
+    # show a real error message if delivery fails, instead of the user
+    # sitting forever staring at an empty inbox.
+    background_tasks.add_task(_deliver_otp_and_record, email, code, purpose)
     return {
         "ok": True,
         "message": (
@@ -1272,6 +1309,47 @@ async def resend_otp(data: OtpRequest, background_tasks: BackgroundTasks, reques
     to make the client intent explicit and to surface clearer 429s.
     """
     return await request_otp(data, background_tasks, request)
+
+
+@api_router.get("/auth/otp-status")
+async def otp_status(email: str):
+    """Build #59 — client-side polling endpoint for OTP delivery status.
+
+    After posting /auth/request-otp, the mobile client can poll this
+    every ~2 seconds for up to ~15 seconds to check whether delivery
+    actually succeeded.  If ``delivery_attempted_at`` is set and
+    ``delivered`` is False, the client shows a real error banner
+    ("We couldn't send your login code — please check the email
+    address or try again in a minute.") instead of leaving the user
+    staring at an empty inbox.
+
+    We DELIBERATELY do NOT confirm whether an account exists for the
+    email — the response shape is identical for known and unknown
+    addresses, matching the anti-enumeration guarantee of
+    /auth/request-otp.  If no OTP was requested at all, we still
+    respond with the "pending" shape (never 404) so a probe attacker
+    can't tell the difference between "no code requested" and
+    "code requested but hasn't been attempted yet".
+    """
+    e = (email or "").lower().strip()
+    if not e or "@" not in e:
+        raise HTTPException(status_code=400, detail="Invalid email")
+    rec = await db.otp_codes.find_one(
+        {"email": e},
+        {"_id": 0, "delivered": 1, "delivery_transport": 1, "delivery_attempted_at": 1},
+    )
+    if not rec or rec.get("delivery_attempted_at") is None:
+        return {"status": "pending"}
+    if rec.get("delivered"):
+        return {"status": "delivered", "transport": rec.get("delivery_transport")}
+    return {
+        "status": "failed",
+        "transport": rec.get("delivery_transport", "none"),
+        "message": (
+            "We couldn't send your login code. Please double-check "
+            "your email address and try again."
+        ),
+    }
 
 
 @api_router.post("/auth/verify-otp", response_model=TokenResponse)
@@ -1673,28 +1751,37 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
                     # If a caregiver *needs* the historical last-seen,
                     # they'll see it under the disabled banner.
                 })
-            # Match by BOTH user_id (canonical linkage post Build #53)
-            # AND owner_id (legacy linkage for older members created
-            # before the user_id migration).  A user should only ever
-            # have one member row linked to them, but if any legacy
-            # duplicate exists we want to clear all of them.
+            # Build #59 — CRITICAL FIX for the caregiver location-sharing
+            # cross-contamination bug.  Root cause:
             #
-            # Build #57 — DROPPED the `family_group_id` constraint from
-            # the match query.  Root cause of the Build #56 device-QA
-            # bug: some legacy self-member docs carry a stale/None
-            # `family_group_id` that predates the family-group
-            # migration, so the previous query silently no-op'd.  A
-            # user id is globally unique — matching on user_id OR
-            # owner_id alone is safe and covers every doc that
-            # *could* leak location data for this user.
+            #   When Caregiver A (Charles) adds Senior B (Joyce) via
+            #   POST /members, Joyce's member row is stamped with
+            #   `owner_id = charles_id` (see create_member).  The
+            #   previous `$or: [{user_id: A}, {owner_id: A}]` query
+            #   would then match BOTH:
+            #     • Charles's own personal row  (user_id == charles)
+            #     • Joyce's row                 (owner_id == charles)
+            #
+            #   → toggling Charles's location OFF also wiped Joyce's
+            #     location.  This was the P3 blocker reported for
+            #     Build #59.
+            #
+            # Fix: match STRICTLY on user_id — a user's own personal
+            # member row is the ONLY row that represents "me" and is
+            # the ONLY row that should mirror my privacy preference.
+            # Rows I created for others (owner_id == me but user_id
+            # != me) belong to those other people and must NEVER be
+            # touched by my own toggle.
+            #
+            # If any legacy self-row was created without a user_id
+            # (pre-user_id migration), the Build #57 backfill sweep
+            # at startup takes care of it.  We deliberately do NOT
+            # try to catch that legacy case here — better to under-
+            # match by one legacy doc than over-match into someone
+            # else's privacy.
             try:
                 result = await db.members.update_many(
-                    {
-                        "$or": [
-                            {"user_id": current["id"]},
-                            {"owner_id": current["id"]},
-                        ],
-                    },
+                    {"user_id": current["id"]},
                     {"$set": member_update},
                 )
                 logger.info(
@@ -4017,20 +4104,18 @@ async def _backfill_location_sharing_flag():
 
 @app.on_event("startup")
 async def _sync_user_sharing_pref_to_members():
-    """Build #57 — one-time consistency sweep.
+    """Build #59 — one-time consistency sweep (per-account isolation).
 
-    Root cause of Charles's Build #56 device QA bug: some legacy
-    self-member docs were created before ``family_group_id`` was
-    added, so the Build #56 propagation query (which filtered on
-    that field) silently no-op'd for those users.  Result: user's
-    preference said OFF but their member doc still said ON.
+    Re-syncs every user's own personal member row(s) to the current
+    ``users.location_sharing_enabled`` value.  MATCH IS user_id ONLY
+    (not owner_id) — matching on owner_id would incorrectly wipe
+    location on rows this user created FOR OTHER PEOPLE (their
+    parents, spouse, etc.).  That was the exact P3 blocker fixed in
+    Build #59: Charles turning sharing OFF was also wiping Joyce's
+    location because Joyce's row had owner_id=charles.
 
-    This sweep runs once per boot and re-syncs every user's own
-    member doc(s) to the current ``users.location_sharing_enabled``
-    value, matched by user_id OR owner_id (no family_group_id
-    constraint, matching the new PUT /me/preferences query).  When
-    the preference is OFF we ALSO null the coord fields so no stale
-    location leaks.  Idempotent.
+    When the preference is OFF we also null the coord fields so no
+    stale location leaks.  Idempotent.
     """
     try:
         # Users who have explicitly disabled sharing but whose member
@@ -4047,7 +4132,7 @@ async def _sync_user_sharing_pref_to_members():
                 continue
             n_users += 1
             res = await db.members.update_many(
-                {"$or": [{"user_id": uid}, {"owner_id": uid}]},
+                {"user_id": uid},
                 {"$set": {
                     "location_sharing_enabled": False,
                     "latitude": None,
@@ -4063,4 +4148,79 @@ async def _sync_user_sharing_pref_to_members():
             )
     except Exception as e:
         logger.warning(f"_sync_user_sharing_pref_to_members skipped: {e}")
+
+
+@app.on_event("startup")
+async def _heal_cross_user_sharing_leaks():
+    """Build #59 — one-time heal for the Build #56–58 location-sharing
+    cross-contamination bug.
+
+    Prior sweeps used ``$or: [{user_id: X}, {owner_id: X}]`` which
+    over-matched: any member row that Caregiver X had created for
+    another person (e.g. Joyce's row created by Charles) got its
+    ``location_sharing_enabled`` incorrectly flipped to False and
+    coords wiped.
+
+    Heal condition:
+        member.user_id is set (has a real linked account)
+        AND member.user_id != member.owner_id  (row belongs to
+             someone OTHER than the caregiver who created it)
+        AND member.location_sharing_enabled is False
+        AND linked users.location_sharing_enabled is True (the
+             actual owner of the row never asked to disable)
+      → set member.location_sharing_enabled = True and unset the
+        "Location Sharing Off" placeholder so real coords stream in
+        on the next upload.
+
+    Idempotent.  Only runs once per boot; if there's nothing to heal,
+    no writes happen.
+    """
+    try:
+        cursor = db.members.find(
+            {
+                "location_sharing_enabled": False,
+                "user_id": {"$ne": None, "$exists": True},
+            },
+            {"_id": 0, "id": 1, "user_id": 1, "owner_id": 1},
+        )
+        candidates = []
+        async for m in cursor:
+            uid = m.get("user_id")
+            oid = m.get("owner_id")
+            if not uid or uid == oid:
+                continue  # legit self-toggle; not a cross-user leak
+            candidates.append(m)
+
+        if not candidates:
+            logger.info("Build #59 heal: no cross-user sharing leaks to fix.")
+            return
+
+        healed = 0
+        for m in candidates:
+            uid = m["user_id"]
+            u = await db.users.find_one(
+                {"id": uid}, {"_id": 0, "location_sharing_enabled": 1}
+            )
+            if not u:
+                continue
+            user_pref = u.get("location_sharing_enabled")
+            # None/missing => default True.  Only heal if the linked
+            # user's own preference says they want sharing ON.
+            if user_pref is False:
+                continue
+            await db.members.update_one(
+                {"id": m["id"]},
+                {
+                    "$set": {"location_sharing_enabled": True},
+                    "$unset": {"location_name": ""},
+                },
+            )
+            healed += 1
+
+        logger.info(
+            f"Build #59 heal: repaired {healed} cross-user "
+            f"location-sharing leak(s) out of {len(candidates)} candidates."
+        )
+    except Exception as e:
+        logger.warning(f"_heal_cross_user_sharing_leaks skipped: {e}")
 

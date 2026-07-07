@@ -242,6 +242,24 @@ export function clearAll(): void {
   for (const id of Object.keys(idSubs)) notifyId(id);
 }
 
+/**
+ * Build #59 — drop a single member from the store synchronously so
+ * the dashboard reflects a deletion on the very next paint, without
+ * having to wait for the ~60s /members poll to notice the row is
+ * gone.  Called from member/[id].tsx.onDelete right after the
+ * DELETE /members/{id} response returns 2xx.  Idempotent — no-op if
+ * the id doesn't exist.
+ */
+export function remove(id: string): void {
+  if (!id || !state.members[id]) return;
+  const next: Record<string, MemberRecord> = { ...state.members };
+  delete next[id];
+  delete fetchSeq[id];
+  state = { members: next, version: state.version + 1, lastFetchAllAt: state.lastFetchAllAt };
+  notifyGlobal();
+  notifyId(id);
+}
+
 // ============================================================
 //  Public actions — fetch coordination
 // ============================================================

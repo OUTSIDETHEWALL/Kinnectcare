@@ -49,9 +49,22 @@ def _would_render_blank(title: str, body: str) -> bool:
     b = (body or "").strip()
     if not t and not b:
         return False  # data-only push — never visible, never blank problem
-    if len(t) >= 3 or len(b) >= 3:
-        return False  # has meaningful content
-    return True       # would surface as icon-only "K" ghost
+    # Build #59 — stricter rule.  Any push that renders visibly on the
+    # tray MUST have BOTH a meaningful title (>=3 chars) AND a
+    # meaningful body (>=3 chars).  Historical rule allowed one-or-the-
+    # other, which let single-word pushes like title="Update" body=""
+    # slip through and render as the icon-only "K" ghost when Android's
+    # notification layout collapses the empty line.  If a caller only
+    # has a title, they're building a bad notification — reject.
+    if len(t) < 3 or len(b) < 3:
+        return True  # visible push with missing/tiny title OR body
+    # Also reject obvious placeholder / low-info titles.  These are
+    # bugs from callers that forgot to fill in real content but did
+    # pass the char-count check.
+    placeholder_titles = {"update", "notification", "alert", "kinnship", "k"}
+    if t.lower() in placeholder_titles and len(b) < 8:
+        return True
+    return False  # has meaningful content
 
 
 # In-memory ring buffer of dropped blank pushes for the runtime.  Callers
