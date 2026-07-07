@@ -3536,6 +3536,231 @@ api_router.include_router(fg.build_router(db, get_current_user, push_to_user=pus
 
 app.include_router(api_router)
 
+
+# ============================================================================
+# Build #60 — Public invite landing page (NOT under /api prefix).
+#
+# This route serves plain HTML at ``https://<railway>/invite/{token}``.  It's
+# the URL the Kinnship invite email now points its big green "Accept
+# Invitation" button at (see family_group._invite_email_body).  The page's
+# only job is to route the recipient into the app REGARDLESS of whether
+# Kinnship is already installed on their phone:
+#
+#   • Installed  → the tiny <script> immediately redirects to the
+#                  ``kinnship://invite/{token}`` custom scheme, which
+#                  expo-router picks up and forwards to /app/invite/[token].
+#                  A JavaScript setTimeout is the standard "did the custom
+#                  scheme succeed?" pattern — if the browser is still on
+#                  this page after 1500ms, the app clearly didn't open, so
+#                  fall through to the Play Store CTA.
+#
+#   • Not installed → the visible Play Store button is the primary CTA.
+#                     We also auto-redirect after 4 seconds so a 75-year-
+#                     old user who taps the email button and just stares
+#                     at the screen still ends up at Play Store on their
+#                     own with no additional taps.
+#
+# The invite token is embedded twice: once in the ``kinnship://`` URL for
+# the scheme handoff, and once in the Play Store ``?referrer=`` query so
+# the newly-installed app can pick it up via Google Play Install Referrer
+# on first launch (native module integration deferred to a follow-up).
+#
+# Why this lives INSIDE server.py rather than as a static file: it needs
+# to embed the token dynamically, and we don't want a second hosting
+# surface (S3/CDN) for a 40-line HTML string that runs once per invite.
+# ============================================================================
+
+from fastapi.responses import HTMLResponse  # noqa: E402
+
+
+@app.get("/invite/{token}", response_class=HTMLResponse, include_in_schema=False)
+async def invite_landing_page(token: str):
+    """HTML bridge: tries the custom scheme, falls back to Play Store.
+
+    Serves regardless of whether the token is valid — an invalid token
+    still needs to open the app so the app can show a friendly
+    "Invitation not valid" message rather than a browser 404.  If we
+    404'd invalid tokens here, we'd break the semantic contract that
+    every email link goes SOMEWHERE.
+    """
+    # Sanitize — keep only the alnum + hyphen chars an invite token can
+    # ever legitimately contain.  Prevents HTML injection via crafted
+    # URL like /invite/<script>alert(1)</script>.
+    safe = "".join(ch for ch in (token or "") if ch.isalnum() or ch == "-")[:64]
+
+    play_store_url = (
+        os.environ.get("KINNSHIP_PLAY_STORE_URL")
+        or "https://play.google.com/store/apps/details?id=app.kinnship.client"
+    )
+    # Play Store install-referrer carries the token so a fresh install
+    # can auto-resume the invite on first launch (native referrer
+    # capture wired up in a follow-up build).
+    referrer = f"invite_token%3D{safe}"
+    if "?" in play_store_url:
+        play_store_url_with_referrer = f"{play_store_url}&referrer={referrer}"
+    else:
+        play_store_url_with_referrer = f"{play_store_url}?referrer={referrer}"
+
+    app_scheme_url = f"kinnship://invite/{safe}"
+
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Accept your Kinnship invitation</title>
+<style>
+  * {{ box-sizing: border-box; }}
+  html, body {{ margin: 0; padding: 0; height: 100%; }}
+  body {{
+    font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background: #f4f6f4;
+    color: #1a1a1a;
+    -webkit-text-size-adjust: 100%;
+  }}
+  .wrap {{
+    min-height: 100%;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 32px 20px;
+  }}
+  .card {{
+    width: 100%; max-width: 460px;
+    background: #fff; border-radius: 20px;
+    box-shadow: 0 4px 20px rgba(27,94,53,0.10);
+    overflow: hidden;
+  }}
+  .header {{
+    background: #1B5E35; color: #fff;
+    text-align: center; padding: 32px 24px 26px;
+  }}
+  .brand {{
+    font-size: 30px; font-weight: 800; letter-spacing: -0.5px;
+  }}
+  .tagline {{
+    color: #a5d6a7; font-size: 12px;
+    letter-spacing: 1px; text-transform: uppercase;
+    margin-top: 6px;
+  }}
+  .body {{ padding: 28px 24px 20px; }}
+  h1 {{
+    margin: 0 0 12px; font-size: 22px; text-align: center;
+    color: #1B5E35; font-weight: 800;
+  }}
+  p {{
+    margin: 8px 0; font-size: 16px; line-height: 1.5;
+    color: #333; text-align: center;
+  }}
+  .btn {{
+    display: block; width: 100%; margin: 20px 0 8px;
+    padding: 18px 20px;
+    background: #1B5E35; color: #fff;
+    font-size: 18px; font-weight: 800; letter-spacing: 0.3px;
+    text-align: center; text-decoration: none;
+    border-radius: 16px;
+    box-shadow: 0 4px 14px rgba(27,94,53,0.28);
+  }}
+  .btn-secondary {{
+    display: block; width: 100%; margin: 12px 0 8px;
+    padding: 14px 20px;
+    background: #fff; color: #1B5E35;
+    font-size: 15px; font-weight: 700;
+    text-align: center; text-decoration: none;
+    border: 2px solid #1B5E35; border-radius: 14px;
+  }}
+  .code-hint {{
+    margin-top: 22px; padding: 12px 14px;
+    background: #fafbfa; border: 1px dashed #cfd6cf;
+    border-radius: 10px;
+  }}
+  .code-hint-label {{
+    font-size: 11px; color: #888;
+    letter-spacing: 1px; text-transform: uppercase;
+    margin-bottom: 4px; text-align: center;
+  }}
+  .code {{
+    font-family: "SFMono-Regular",Consolas,Menlo,monospace;
+    font-size: 16px; font-weight: 800; color: #333;
+    letter-spacing: 2px; text-align: center;
+  }}
+  .footer {{
+    text-align: center; font-size: 12px; color: #999;
+    padding: 16px 24px 22px;
+  }}
+  .status {{
+    font-size: 13px; color: #666; text-align: center;
+    margin-top: 8px;
+  }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="header">
+      <div class="brand">Kinnship</div>
+      <div class="tagline">Family safety · Senior wellness</div>
+    </div>
+    <div class="body">
+      <h1>Welcome to the family</h1>
+      <p>Tap the button below to open the Kinnship app.
+         We'll finish setting you up in about a minute.</p>
+
+      <a id="openBtn" class="btn" href="{app_scheme_url}">
+        Open Kinnship &nbsp;→
+      </a>
+      <p class="status" id="status">Opening the app…</p>
+
+      <a id="installBtn" class="btn-secondary" href="{play_store_url_with_referrer}">
+        Don't have Kinnship? Install from Google Play
+      </a>
+
+      <div class="code-hint">
+        <div class="code-hint-label">Backup invitation code</div>
+        <div class="code">{safe}</div>
+      </div>
+    </div>
+    <div class="footer">
+      Having trouble? Reply to your invitation email and we'll help.
+    </div>
+  </div>
+</div>
+
+<script>
+  (function() {{
+    var scheme = "{app_scheme_url}";
+    var store  = "{play_store_url_with_referrer}";
+    var status = document.getElementById("status");
+
+    // 1) Immediately try the custom scheme.  On Android Chrome this
+    //    either opens the installed app (success) or does nothing
+    //    (fail, scheme unhandled).  We can't detect success directly
+    //    from JavaScript — the standard pattern is to schedule a
+    //    fallback and rely on the page being backgrounded (which
+    //    indicates the app opened) to cancel it.
+    var didBackground = false;
+    document.addEventListener("visibilitychange", function() {{
+      if (document.hidden) didBackground = true;
+    }});
+
+    // Attempt the scheme after a tiny delay so the browser has
+    // rendered the visible fallback first (important — if the scheme
+    // fails silently on iOS Safari the user still sees something).
+    setTimeout(function() {{ window.location.href = scheme; }}, 120);
+
+    // 2) If the page is still foreground after 2.5s, the app clearly
+    //    didn't open.  Auto-redirect to Play Store.
+    setTimeout(function() {{
+      if (!didBackground) {{
+        if (status) status.textContent = "Kinnship isn't installed yet — taking you to Google Play…";
+        window.location.href = store;
+      }}
+    }}, 2500);
+  }})();
+</script>
+</body>
+</html>"""
+    return HTMLResponse(content=html, status_code=200)
+
 app.add_middleware(
     CORSMiddleware, allow_credentials=True, allow_origins=["*"],
     allow_methods=["*"], allow_headers=["*"],

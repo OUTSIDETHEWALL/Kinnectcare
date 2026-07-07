@@ -296,6 +296,53 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         api.put('/auth/timezone', { timezone: tz }).catch(() => {});
       }
     } catch (_e) {}
+
+    // Build #60 — auto-consume pending invite after successful auth.
+    //
+    // If the user landed here via a deep link (kinnship://invite/{token})
+    // or via the /invite/{token} HTTPS landing page BEFORE they had an
+    // account — signed up, went through OTP verification — the invite
+    // token was persisted to AsyncStorage by RootNav's deep-link handler
+    // in _layout.tsx and NOT necessarily passed to /auth/request-otp
+    // (that only happens when the invite is entered on the signup form).
+    // Auto-consume it here so the join happens as part of "getting into
+    // the app for the first time" rather than as a separate manual
+    // step the user has to discover.
+    //
+    // Idempotent contract:
+    //   • If the server already accepted the invite as part of
+    //     verify-otp (invite_code was stashed on the OTP record),
+    //     the /join call returns 200 already_member: true — harmless.
+    //   • If the token was already consumed or expired, we get 404
+    //     and silently clear.  User is still signed in; they can
+    //     enter another code via /(auth)/join-family later.
+    //   • If the user is joining a family they're already in
+    //     (e.g. logging back in on a new device with a stale link),
+    //     already_member: true — harmless.
+    //
+    // We never surface a failure alert here — that would panic the
+    // user right after a successful sign-in, which is the worst
+    // possible time.  Instead the /(tabs)/dashboard will render as
+    // solo, the caregiver's Pending Invitation card stays orange,
+    // and the user can re-attempt via manual code if needed.
+    try {
+      const { getPendingInvite, clearPendingInvite } = await import('./pendingInvite');
+      const pending = await getPendingInvite();
+      if (pending?.token) {
+        try {
+          await api.post('/family-group/join', { invite_code: pending.token });
+        } catch (_e) { /* 404 / already-member — harmless */ }
+        await clearPendingInvite();
+        // Re-fetch the user so RootNav sees the new family_group_id
+        // and the dashboard poll picks up the freshly-created
+        // self-member row from ensure_self_member_row.
+        try {
+          const meRes = await api.get('/auth/me');
+          setUser(meRes.data);
+          await writeUserCache(meRes.data);
+        } catch (_e) {}
+      }
+    } catch (_e) { /* pendingInvite module or storage failure — non-fatal */ }
   };
 
   const logout = async () => {

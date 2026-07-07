@@ -2,7 +2,7 @@ import { Stack, useRouter, useSegments, usePathname } from 'expo-router';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from '../src/AuthContext';
-import { useEffect, useState, useRef } from 'react';import { View, ActivityIndicator, AppState, Platform } from 'react-native';
+import { useEffect, useState, useRef } from 'react';import { View, ActivityIndicator, AppState, Platform, Linking } from 'react-native';
 import { Colors } from '../src/theme';
 import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink, refreshPushTokenIfStale } from '../src/push';
 import { isOnboardingDone } from '../src/onboardingStore';
@@ -22,6 +22,7 @@ import {
 } from '../src/disclaimerStore';
 import { logResumeDecision, isAlertDismissed } from '../src/resumeDiagnostics';
 import { setActiveEmergency } from '../src/activeEmergency';
+import { setPendingInvite, clearPendingInvite } from '../src/pendingInvite';
 
 function RootNav() {
   const { user, loading } = useAuth();
@@ -108,6 +109,119 @@ function RootNav() {
       try { sub.remove(); } catch (_e) {}
     };
   }, []);
+
+  // ==========================================================================
+  // Build #60 — Deep-link → pending-invite → auto-join wiring.
+  //
+  // The single source of truth for "the user tapped Accept Invitation
+  // somewhere and we need to route them into the family group" lives
+  // here in RootNav so BOTH the cold-start (app was not running when
+  // they tapped) and the warm-start (app was in background) paths
+  // share exactly one implementation.
+  //
+  // What we do:
+  //   1. On mount, check Linking.getInitialURL() — this returns the
+  //      URL that launched the app (or null on regular launches).
+  //   2. Register a Linking.addEventListener('url', ...) for any
+  //      subsequent link taps while the app is running.
+  //   3. For every URL that matches kinnship://invite/{token} or the
+  //      https-landing-page equivalent, extract the token and:
+  //         a. persist it to AsyncStorage via setPendingInvite — so
+  //            even if the app quits before the user finishes
+  //            signing up, we still remember what to join.
+  //         b. if the user is ALREADY authenticated, immediately
+  //            POST /family-group/join and refresh — this is the
+  //            "existing user taps invite from a family member"
+  //            scenario.  Otherwise the auto-consume in
+  //            AuthContext.verifyOtp will pick it up as soon as
+  //            they finish signing up.
+  //         c. push the client at /invite/{token} so the invite/
+  //            [token].tsx screen renders the friendly "Welcome to
+  //            the family, tap Accept" preview.
+  //
+  // The token extraction regex tolerates:
+  //   • kinnship://invite/INV-XXXXX
+  //   • kinnship://invite/INV-XXXXX?anything
+  //   • kinnship:/invite/INV-XXXXX  (some Android intents drop a slash)
+  //   • https://<host>/invite/INV-XXXXX  (Universal-link path)
+  const inviteRouteRef = useRef(false); // guard: avoid double-navigation on cold start
+  useEffect(() => {
+    const extractInviteToken = (url: string | null): string | null => {
+      if (!url) return null;
+      // Case-insensitive match; the token itself must match the
+      // KINN- or INV- prefix and alnum body.
+      const m = url.match(/(?:kinnship:\/{1,2}|https?:\/\/[^/]+\/)invite\/((?:INV|KINN)-[A-Z0-9]+)/i);
+      return m ? m[1].toUpperCase() : null;
+    };
+
+    const consumeInviteUrl = async (url: string | null) => {
+      const token = extractInviteToken(url);
+      if (!token) return;
+      // Persist first — the safest thing we can do.  Everything below
+      // is best-effort.
+      await setPendingInvite(token);
+
+      // If we already have an authenticated user, join immediately so
+      // the caregiver's dashboard sees the new member on the very
+      // next poll.  If not, verifyOtp() will consume this later.
+      if (user) {
+        try {
+          await api.post('/family-group/join', { invite_code: token });
+          await clearPendingInvite();
+          // Force re-fetch of /auth/me + members list so RootNav sees
+          // the new family_group_id and the dashboard re-renders.
+          try {
+            const meRes = await api.get('/auth/me');
+            // AuthContext's setUser is not exposed here, but a poll
+            // via refreshUser gives the same effect.  We invoke it
+            // via the context.
+            // (Handled by the effect that re-reads /auth/me on family
+            // membership change.)
+            void meRes;
+          } catch (_e) {}
+        } catch (_e) {
+          // 404 / already-member / expired — leave the token in
+          // storage so the user can still enter it manually via
+          // /(auth)/join-family if they want.  Non-fatal.
+        }
+      }
+
+      // Route the user to /invite/{token} — the friendly preview
+      // screen decides whether to auto-accept (logged-in) or hand
+      // off to signup (logged-out).  On cold start we defer until
+      // the layout has mounted (~100ms).
+      if (!inviteRouteRef.current) {
+        inviteRouteRef.current = true;
+        setTimeout(() => {
+          try { router.push(`/invite/${token}` as any); } catch (_e) {}
+        }, 250);
+      }
+    };
+
+    // 1) Cold start — was the app launched via a link?
+    (async () => {
+      try {
+        const initial = await Linking.getInitialURL();
+        if (initial) await consumeInviteUrl(initial);
+      } catch (_e) { /* non-fatal */ }
+    })();
+
+    // 2) Warm start — user taps a link while the app is running.
+    const sub = Linking.addEventListener('url', ({ url }) => {
+      void consumeInviteUrl(url);
+    });
+    return () => {
+      try { sub.remove(); } catch (_e) {}
+    };
+    // We intentionally run this once at mount + when `user` transitions
+    // from null → set (so a pending invite persisted across sign-up
+    // gets auto-joined the moment the user logs in).  Router / api are
+    // stable references from expo-router / axios and don't need to
+    // trigger this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  // ==========================================================================
 
   // Re-evaluate the PIN gate whenever the auth user changes. If the
   // user has a PIN saved AND they haven't unlocked-this-session yet,

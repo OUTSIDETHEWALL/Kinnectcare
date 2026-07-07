@@ -330,16 +330,27 @@ def _invite_email_body(
     exp_str = expires_at.strftime("%B %d, %Y")
 
     # Deep link back into the app (see /app/frontend/app.json → scheme).
-    accept_url = f"kinnship://invite/{token}"
-
-    # Universal HTTPS acceptance URL — used both as a fallback for
-    # email clients that strip custom schemes AND as the "Install"
-    # target.  The Play Store URL is configurable so we can flip
-    # between Internal Testing and Closed Beta without a rebuild.
-    play_store_url = (
-        os.environ.get("KINNSHIP_PLAY_STORE_URL")
-        or "https://play.google.com/store/apps/details?id=app.kinnship"
-    )
+    # Build #60 — the PRIMARY button in the email now points at the
+    # HTTPS landing page served by the backend at ``/invite/{token}``.
+    # That page tries ``kinnship://invite/{token}`` first (works
+    # instantly if the app is installed), and falls back to the Play
+    # Store (with install-referrer carrying the token) if not.  This
+    # is what closes the "fresh install can't accept an invite" gap:
+    # HTTPS always resolves in the user's mail client; ``kinnship://``
+    # does not.
+    web_base = (
+        os.environ.get("KINNSHIP_WEB_BASE")
+        or os.environ.get("BACKEND_BASE_URL")
+        or "https://kinnectcare-production.up.railway.app"
+    ).rstrip("/")
+    accept_url = f"{web_base}/invite/{token}"
+    # NOTE: since Build #60 the primary CTA points at the HTTPS
+    # landing page (accept_url), which itself tries kinnship://…
+    # and falls back to Play Store.  We no longer bake the raw
+    # scheme URL or Play Store URL into the email at all — both
+    # live behind the landing page.  Kept the import site of
+    # KINNSHIP_PLAY_STORE_URL / KINNSHIP_WEB_BASE in one place (the
+    # /invite/{token} route in server.py) to avoid config drift.
 
     # ---- Plain-text version (fallback) ----
     text_body = (
@@ -347,15 +358,15 @@ def _invite_email_body(
         f"{inviter_name} has invited you to join {inviter_possessive} "
         f"family on Kinnship{rel_line} — the family safety and senior "
         f"wellness app.\n\n"
-        f"ACCEPT INVITATION\n"
+        f"ACCEPT INVITATION (one tap — no code typing)\n"
         f"  Tap this link on your phone:\n"
         f"  {accept_url}\n\n"
-        f"DON'T HAVE KINNSHIP YET?\n"
-        f"  Install it from Google Play, then re-open this email and\n"
-        f"  tap the Accept Invitation link above:\n"
-        f"  {play_store_url}\n\n"
-        f"BACKUP INVITE CODE (only if the button doesn't work):\n"
-        f"  {token}\n\n"
+        f"  If Kinnship is already installed, it opens right up.  If\n"
+        f"  not, we'll send you to the Play Store to install it, and\n"
+        f"  then finish setting you up automatically after install.\n\n"
+        f"BACKUP: MANUAL INVITE CODE (only if the link doesn't work)\n"
+        f"  {token}\n"
+        f"  Open Kinnship → tap \"Join a Family\" → type the code above.\n\n"
         f"This invite expires on {exp_str}.  If you didn't expect this "
         f"email, you can safely ignore it — no account will be created.\n\n"
         f"Welcome to the family,\n"
@@ -386,7 +397,12 @@ def _invite_email_body(
         </p>
       </td></tr>
 
-      <!-- Primary CTA: Accept Invitation (deep link) -->
+      <!-- Primary CTA: Accept Invitation — HTTPS landing page.
+           This URL works everywhere the email client can open a
+           link: installed app is launched via custom-scheme redirect
+           on the landing page, and if not installed the page auto-
+           forwards to Play Store with the invite token as install
+           referrer.  Zero manual typing required either way. -->
       <tr><td style="padding:8px 32px 8px 32px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
           <tr><td align="center">
@@ -396,35 +412,24 @@ def _invite_email_body(
             </a>
           </td></tr>
           <tr><td align="center" style="padding-top:10px;font-size:13px;color:#666;">
-            Tap on your phone to open Kinnship and join automatically.
+            One tap — Kinnship opens automatically. If it's not
+            installed yet, we'll take you to Google Play.
           </td></tr>
         </table>
       </td></tr>
 
-      <!-- Secondary CTA: Install from Play Store (fallback) -->
-      <tr><td style="padding:28px 32px 8px 32px;">
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-          <tr><td align="center" style="padding-bottom:12px;font-size:14px;color:#666;">
-            Don't have Kinnship yet?
-          </td></tr>
-          <tr><td align="center">
-            <a href="{play_store_url}"
-               style="display:inline-block;background-color:#ffffff;color:#1B5E35;font-size:15px;font-weight:700;text-decoration:none;padding:13px 30px;border:2px solid #1B5E35;border-radius:12px;">
-              Install from Google Play
-            </a>
-          </td></tr>
-          <tr><td align="center" style="padding-top:8px;font-size:12px;color:#888;">
-            After installing, come back here and tap <strong>Accept Invitation</strong> above.
-          </td></tr>
-        </table>
-      </td></tr>
-
-      <!-- Backup invite code (small, unobtrusive) -->
+      <!-- Backup invite code — the primary Accept button above now
+           handles both installed and not-installed cases via the HTTPS
+           landing page, so the "Install from Play Store" secondary
+           button became redundant.  We keep ONLY the manual code here
+           as an emergency fallback for the rare case where the
+           landing page can't run (corp email, ancient browser, etc.). -->
       <tr><td style="padding:32px 32px 8px 32px;">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
           <tr><td style="background-color:#fafbfa;border:1px dashed #cfd6cf;border-radius:10px;padding:14px 16px;">
-            <div style="font-size:11px;color:#888;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px;">Backup code (only if the button doesn't work)</div>
+            <div style="font-size:11px;color:#888;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px;">Backup code (only if the button above doesn&apos;t work)</div>
             <div style="font-family:'SFMono-Regular',Consolas,Menlo,'Courier New',monospace;font-size:18px;font-weight:700;color:#333;letter-spacing:2px;">{token}</div>
+            <div style="font-size:11px;color:#888;margin-top:6px;">Install Kinnship, tap &quot;Join a Family,&quot; then enter this code.</div>
           </td></tr>
         </table>
       </td></tr>

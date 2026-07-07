@@ -34,6 +34,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Colors } from '../../src/theme';
 import { api, joinFamilyGroup } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
+import { setPendingInvite, clearPendingInvite } from '../../src/pendingInvite';
 
 type VerifyResult = {
   valid: boolean;
@@ -66,6 +67,15 @@ export default function InviteAcceptScreen() {
         setVerifying(false);
         return;
       }
+      // Build #60 — persist the token BEFORE we do anything else, so
+      // that even if the user closes this screen or the app crashes
+      // between here and successful sign-in, AuthContext.verifyOtp
+      // will still auto-consume it after they finish authenticating.
+      // Belt-and-suspenders with the RootNav deep-link handler in
+      // _layout.tsx: this catches the case where the invite/[token]
+      // screen is entered from anywhere OTHER than a deep link
+      // (e.g. an in-app router.push from the welcome screen).
+      try { await setPendingInvite(token); } catch (_e) {}
       try {
         const r = await api.get(`/family-group/verify-invite/${token}`);
         if (!cancelled) setVerify(r.data);
@@ -108,6 +118,10 @@ export default function InviteAcceptScreen() {
     setJoinError(null);
     try {
       await joinFamilyGroup(token);
+      // Build #60 — clear the pending-invite token now that the join
+      // succeeded, so we don't try to re-consume it on a subsequent
+      // launch.
+      try { await clearPendingInvite(); } catch (_e) {}
       setJoined(true);
       // Land on dashboard once everything's synced.
       setTimeout(() => router.replace('/(tabs)/dashboard'), 1200);
