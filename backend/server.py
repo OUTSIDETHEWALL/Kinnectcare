@@ -243,6 +243,15 @@ class FamilyMember(BaseModel):
     phone: str
     gender: str
     role: str
+    # Build #59 hotfix — surface the caregiver-supplied "Mom" / "Spouse"
+    # / "Sister" label captured on the invitation form (see
+    # /app/frontend/app/add-member.tsx and the ``relationship`` field
+    # on ``FamilyInviteCreate``).  ``ensure_self_member_row`` persists
+    # this to the DB, and adding it here lets the /members response
+    # include it so cards on the dashboard can render the relation
+    # inline.  Optional / defaults None to preserve backward-compat
+    # with any legacy rows that never carried the field.
+    relationship: Optional[str] = None
     status: str = "healthy"
     last_seen: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     location_name: Optional[str] = "Home"
