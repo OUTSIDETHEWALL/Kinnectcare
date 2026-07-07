@@ -189,6 +189,118 @@ async def accept_invite(db, invite_id: str, accepted_by_user_id: str) -> None:
     )
 
 
+async def ensure_self_member_row(
+    db,
+    user: dict,
+    group_id: str,
+    invite_doc: Optional[dict] = None,
+) -> dict:
+    """Build #59 hotfix — guarantee a self-member row exists for ``user``
+    in ``group_id``.  Idempotent, safe to call multiple times.
+
+    Root cause this closes:
+      The invitation acceptance path (both ``POST /family-group/join``
+      for existing users and the ``verify-otp`` signup path for new
+      users) previously assumed a ``members`` row already existed for
+      the joiner — either because they'd used Kinnship in a solo group
+      before joining (Path A), or because the caregiver had pre-created
+      a placeholder members row for them via the old
+      "Add Family Member" form which was later name-matched and bound
+      to their ``user_id`` (Path B).  Build #59 rewired
+      ``add-member.tsx`` to ONLY send an invitation without any
+      pre-created row, so Path B's auto-bind heuristic now always
+      finds zero candidates.  Result: after accepting an invite, the
+      joiner had no member row anywhere and was invisible on both
+      dashboards even though ``users.family_group_id`` was set
+      correctly and ``family_invites.status`` was ``accepted``.
+
+    Behaviour:
+      1. If a row already exists in ``group_id`` with
+         ``user_id == user.id``, do nothing and return it — the row
+         may have been created by a name-match auto-bind on signup or
+         by an earlier call to this helper, and we must never
+         clobber caregiver-filled fields like age / phone.
+      2. Otherwise INSERT a minimal row keyed to the joiner with
+         schema-compatible sentinels for demographic fields
+         (age=0, phone="", gender="") that the joiner can fill in
+         later via the Me tab.  Pull ``role`` and ``relationship``
+         from the invite when available so the caregiver's intent
+         (e.g. "Mom" / "senior") is preserved end-to-end.
+
+    Returns the members document (either pre-existing or freshly
+    inserted).  The response is a plain ``dict`` (no ``_id``) matching
+    the shape the ``/members`` endpoint returns to clients.
+    """
+    if not user or not group_id:
+        return {}
+    uid = user.get("id")
+    if not uid:
+        return {}
+
+    # Idempotency: return the existing row unchanged.
+    existing = await db.members.find_one(
+        {"family_group_id": group_id, "user_id": uid},
+        {"_id": 0},
+    )
+    if existing:
+        return existing
+
+    role = None
+    relationship = None
+    if invite_doc:
+        role = (invite_doc.get("role") or "").strip().lower() or None
+        if role not in ("senior", "family"):
+            role = None
+        relationship = (invite_doc.get("relationship") or "").strip() or None
+    if not role:
+        # Sensible default when the invite didn't specify — most
+        # invitees are adult family members / caregivers, not seniors.
+        role = "family"
+
+    # Mirror the joiner's location-sharing preference — defaults True
+    # to satisfy caregivers who invited someone specifically to share
+    # location; the joiner can opt out from Me → Location Sharing.
+    loc_pref = user.get("location_sharing_enabled")
+    if loc_pref is None:
+        loc_pref = True
+
+    display_name = (user.get("full_name") or "").strip() or "Family member"
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": uid,
+        "owner_id": uid,  # joiner owns their own row
+        "family_group_id": group_id,
+        "name": display_name,
+        # Placeholder demographics — the joiner fills these in later
+        # via the Me tab.  Schema-compatible with the FamilyMember
+        # response model so /members serves this row unchanged.
+        "age": 0,
+        "phone": "",
+        "gender": "",
+        "role": role,
+        "relationship": relationship,
+        "status": "healthy",
+        "location_name": None,
+        "latitude": None,
+        "longitude": None,
+        "last_seen": datetime.now(timezone.utc),
+        "location_sharing_enabled": bool(loc_pref),
+        # Default check-in cadence for seniors so the caregiver's
+        # dashboard shows *something* to nudge for a first check-in.
+        "daily_checkin_time": "09:00" if role == "senior" else None,
+        "created_at": datetime.now(timezone.utc),
+    }
+    await db.members.insert_one(doc)
+    # Strip the Mongo _id in case the driver injected one.
+    doc.pop("_id", None)
+    logger.info(
+        f"[invite-accept] self-member row auto-created for user={uid} "
+        f"in group={group_id} (role={role}, relationship={relationship!r})"
+    )
+    return doc
+
+
 def _invite_email_body(
     *, inviter_name: str, group_name: str, token: str, invitee_name: str,
     expires_at: datetime, relationship: Optional[str] = None,
@@ -638,6 +750,19 @@ def build_router(
                 "family_group_role": "member",
             }},
         )
+        # Build #59 hotfix — guarantee a self-member row exists for
+        # the joiner in the target group.  Idempotent: if the joiner
+        # already had a members row that got re-tagged by
+        # transfer_data_to_group above, this is a no-op.  Otherwise
+        # it inserts a fresh row so the joiner is immediately visible
+        # on the caregiver's /members dashboard on the NEXT poll (no
+        # sign-out / restart required — the client just re-fetches
+        # /members and sees the new row).  See ensure_self_member_row
+        # docstring for the full failure-mode analysis.
+        try:
+            await ensure_self_member_row(db, current, target["id"], accepted_invite)
+        except Exception as e:
+            logger.warning(f"ensure_self_member_row (join path) skipped: {e}")
         # Cleanup old solo group if it has no users left
         if old_gid and old_gid != target["id"]:
             remaining = await db.users.count_documents({"family_group_id": old_gid})

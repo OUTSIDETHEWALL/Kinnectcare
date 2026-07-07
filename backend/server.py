@@ -1490,6 +1490,25 @@ async def verify_otp(data: OtpVerify):
                         )
             except Exception as e:
                 logger.warning(f"member-link auto-bind skipped: {e}")
+            # Build #59 hotfix — ensure a self-member row EXISTS.
+            #
+            # The auto-bind above only helps when a caregiver had
+            # pre-created a placeholder members row via the OLD
+            # add-member flow (Build #58 and earlier).  Build #59
+            # rewired add-member.tsx to send an invitation ONLY,
+            # without pre-creating any row, so the auto-bind is
+            # almost always a no-op now.  This call is the safety
+            # net: idempotent (returns the auto-bound row if one
+            # exists, or inserts a fresh row if not).  Without it,
+            # the joiner would be invisible on both dashboards
+            # after signup — the exact user-reported symptom that
+            # motivated this hotfix.
+            try:
+                await fg.ensure_self_member_row(
+                    db, doc, target_group["id"], accepted_invite
+                )
+            except Exception as e:
+                logger.warning(f"ensure_self_member_row (signup path) skipped: {e}")
             # If they used a per-recipient INV- token, mark it accepted
             # and notify the inviter via push.  Best-effort — never fail
             # signup just because the bookkeeping push misfires.
