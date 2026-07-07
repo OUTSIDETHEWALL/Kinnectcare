@@ -73,7 +73,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 61, // Build 61 — INVITATION FINAL POLISH + BLANK NOTIFICATION KILL. Two device-QA findings from Build 60 addressed together. (P1 GHOST INVITATION PENDING) Backend self-heal in GET /family-group/invites: for every pending invite whose invitee_email matches a user already in db.users with this family_group_id, auto-transition to "accepted" on read.  Fixes the legacy rows from pre-Build-#59 attempts where the join succeeded but accept_invite never got called.  Client-side belt in dashboard.tsx drops any pending invite whose invitee_name matches an existing member's name.  Combined, once either device opens the dashboard after Railway redeploys this fix, the ghost card is permanently gone from the DB. (P2 BLANK NOTIFICATIONS) Root cause: silent location-refresh push (channelId=silent_v2, priority=normal, empty title/body) STILL renders a mute status-bar icon on Samsung One UI / Xiaomi MIUI / OnePlus OxygenOS even at IMPORTANCE_MIN.  Combined with the previous 30s per-member throttle, each dashboard load generated a silent push every ~30-60s — status bar filled with K fallback icons.  Fix: throttle bumped 30s → 5 minutes per member.  Plus a full push-outbound audit log on every send_expo_push (source_tag, type, channel, priority, title/body previews at INFO) so Railway grep of "[push-outbound]" traces every notification origin. (P3 NOTIFICATION ICON) Verified: assets/images/kinnship-notification-icon-v2.png is already fully compliant (96x96 RGBA, pure white on transparent — exactly per Android spec).  The K seen in QA was the silent-refresh push rendering with the default fallback, not an icon-resource issue.  New regression suite test_build61_invite_ghost_heal.py — 3 cases: ghost-pending is auto-healed on read, real pendings for non-members are left alone, /invite/{token} HTML landing page still renders correctly (Build 60 guard). 13/13 tests pass.
+      versionCode: 61, // Build 61 — INVITATION FINAL POLISH + BLANK NOTIFICATION KILL + REAL SHIELD NOTIFICATION ICON. Three device-QA findings from Build 60 addressed. (P1 GHOST INVITATION PENDING) Backend self-heal in GET /family-group/invites auto-transitions any pending invite whose invitee_email is already a member of the family to "accepted" on read.  Plus client-side name-clash belt in dashboard.tsx.  Ghost card permanently gone from DB after next dashboard focus. (P2 BLANK NOTIFICATIONS) Refresh push throttle bumped 30s → 5 min per member, and a comprehensive [push-outbound] audit log now traces every send_expo_push at INFO with source_tag, type, channel, priority, and title/body previews so any future phantom push can be pinpointed in Railway logs. (P3 REAL SHIELD ICON) Investigation of Charles's Build 60 QA revealed TWO things: (a) the app's LAUNCHER icon `kinnship-icon-1024.png` is literally a green square with a white letter "K" — that IS the "K" being shown, not a fallback, and (b) the prior notification icon `kinnship-notification-icon-v2.png` was technically monochrome but rendered as an unrecognizable white blob at status-bar size.  Generated a proper monochrome shield-with-checkmark asset `kinnship-notification-icon-shield.png` (192×192 RGBA, pure white on transparent, alpha-thresholded at 90 to eliminate mid-grey OEM-render inconsistency, recognizable shield outline + bold checkmark that reads clearly at 24-32px).  New filename forces Android to rebuild the drawable resource on first launch of the new AAB.  Backend regression: 13/13 tests pass.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
@@ -164,17 +164,29 @@ module.exports = ({ config }) => ({
       [
         'expo-notifications',
         {
-          // Build #58 — filename bumped to *-v2.png to force EAS +
-          // Android to rebuild the notification drawable resource.
-          // Same shield-checkmark silhouette Charles approved in
-          // Build #56, but Android was still surfacing the old "K"
-          // in the tray — most likely because the previously
-          // installed AAB registered its channels with the old
-          // drawable and channels are sticky once created.  A new
-          // filename forces a fresh drawable AND a new channel
-          // registration on next launch (see `silent_v3`, `meds_v2`,
-          // etc. below).
-          icon: './assets/images/kinnship-notification-icon-v2.png',
+          // Build #61 — new recognizable shield-with-checkmark
+          // notification icon.  Prior asset (kinnship-notification-
+          // icon-v2.png) was technically monochrome but the SHAPE
+          // was just an unrecognizable white blob — combined with
+          // the app's launcher icon being literally a green square
+          // with a white "K", Android status bar was rendering an
+          // unhelpful glyph on every silent notification.
+          //
+          // New asset requirements met:
+          //   • 192x192 canvas (covers up to xxxhdpi)
+          //   • Pure white (255,255,255) on fully transparent bg
+          //   • Post-threshold at alpha=90: no ambiguous mid-grey
+          //     antialias pixels (some OEM firmwares treat those
+          //     as color and refuse to tint them — resulting in a
+          //     grey blob on the status bar)
+          //   • Recognizable shield outline + bold checkmark inside
+          //     — reads correctly at 24-32px status-bar size
+          //
+          // The old -v2.png is kept in the tree for the reminder-
+          // preview UI (see NotificationPreview component) but the
+          // status-bar / lockscreen resource comes from the new
+          // -shield.png.
+          icon: './assets/images/kinnship-notification-icon-shield.png',
           color: '#1B5E35',
           defaultChannel: 'default',
         },
