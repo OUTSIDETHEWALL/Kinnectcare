@@ -137,6 +137,22 @@ async def send_expo_push(
     channel_id = data.get("channelId") or "default"
     source_tag = data.get("_source_tag") or "unknown"
 
+    # Build #62 — comprehensive outbound-push audit log.
+    # Every push (visible AND silent) is logged with source_tag,
+    # channel, priority, title/body previews, type — so on Railway
+    # we can grep for "[push-outbound]" and trace exactly which
+    # subsystem originated any given tray notification.  This is the
+    # instrumentation we needed when Charles reported the phantom-K
+    # notifications on Build #60/61 QA.
+    _t_preview = (title or "")[:40].replace("\n", " ")
+    _b_preview = (body or "")[:60].replace("\n", " ")
+    logger.info(
+        f"[push-outbound] source={source_tag!r} type={data.get('type', '?')!r} "
+        f"channel={channel_id!r} priority={priority!r} "
+        f"tokens={len(valid)} "
+        f"title={_t_preview!r} body={_b_preview!r}"
+    )
+
     # Build 53 — Blank notification safety net.  Reject any send where
     # the OUTGOING message would surface visibly on the tray but has
     # functionally empty content.  This is the last line of defence

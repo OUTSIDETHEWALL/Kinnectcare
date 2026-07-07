@@ -3303,13 +3303,39 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
     import time as _t
     now = _t.time()
     last = _REFRESH_PUSH_THROTTLE.get(member_id, 0)
-    if (now - last) < 30:
+    # Build #62 — aggressive throttle bump from 30s → 5 minutes.
+    #
+    # Root cause of Charles's Build #61 QA finding ("blank K
+    # notifications, one per minute, forever"): silent refresh
+    # pushes over `channelId: silent_v2` at IMPORTANCE_MIN STILL
+    # render a mute status-bar icon on Samsung One UI / Xiaomi MIUI
+    # / OnePlus OxygenOS — those OEMs treat IMPORTANCE_MIN as
+    # "show icon but no expanded content".  When the throttle was
+    # 30s and both dashboards + background poll were exercising the
+    # refresh endpoint, target devices got a fresh silent push every
+    # ~30-60s → status bar filled up with mystery K icons.
+    #
+    # The refresh is a NICE-TO-HAVE — it just prompts the target's
+    # GPS to upload sooner than its next natural poll (which fires
+    # every ~5min anyway).  Bumping to 5min means: at worst the
+    # requester waits until the target's next natural upload
+    # cycle, which is fine — the trace log below already shows
+    # the actual GPS timestamp so the user knows when to expect
+    # the update.
+    REFRESH_THROTTLE_S = 300  # 5 minutes
+    if (now - last) < REFRESH_THROTTLE_S:
         trace["push_skipped_reason"] = "throttled"
         logger.info(
             f"[refresh-pipeline] STAGE=push_skipped reason=throttled "
-            f"request_id={request_id} age_s={now - last:.1f}"
+            f"request_id={request_id} age_s={now - last:.1f} "
+            f"throttle_window_s={REFRESH_THROTTLE_S}"
         )
-        return {"ok": True, "skipped": "throttled", "retry_in_s": int(30 - (now - last)), "request_id": request_id}
+        return {
+            "ok": True,
+            "skipped": "throttled",
+            "retry_in_s": int(REFRESH_THROTTLE_S - (now - last)),
+            "request_id": request_id,
+        }
     _REFRESH_PUSH_THROTTLE[member_id] = now
 
     target_user = await db.users.find_one({"id": target_user_id}, {"push_tokens": 1})
