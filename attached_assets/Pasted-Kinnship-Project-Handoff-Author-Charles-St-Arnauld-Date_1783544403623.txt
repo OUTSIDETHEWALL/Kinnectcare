@@ -1,0 +1,347 @@
+Kinnship Project Handoff
+
+Author: Charles St. Arnauld
+Date: July 2026
+
+Introduction
+
+Hello,
+
+My name is Charles. I am the sole founder of Kinnship, a family safety and senior wellness application.
+
+I have no formal software engineering background. Kinnship has been built over the last several months using AI-assisted development with ChatGPT acting as my technical advisor and Emergent performing the majority of the implementation.
+
+The application is now feature complete for Version 1.0.
+
+My goal is not to add new features.
+
+My goal is to stabilize the product, prepare it for beta, and eventually launch.
+
+I am evaluating Replit because I am looking for a partner that emphasizes root-cause analysis, disciplined debugging, and production readiness over rapid feature development.
+
+Current Status
+
+The application is already functioning in production-like environments.
+
+Backend
+Python
+FastAPI
+Railway deployment
+MongoDB Atlas
+Mobile
+React Native
+Expo
+Android
+OTA updates
+Google Play Internal Testing
+Infrastructure
+Stripe subscriptions
+Push notifications
+GPS tracking
+OTP authentication
+Email invitations
+Family groups
+Medication reminders
+Daily check-ins
+
+This is not a prototype.
+
+This is a nearly complete production application.
+
+What I Need
+
+I am not looking for someone to rewrite the application.
+
+I am not looking to migrate frameworks.
+
+I am not looking to redesign the architecture unless you believe there is a compelling engineering reason.
+
+Instead, I need someone willing to:
+
+Read the existing code.
+Understand the architecture.
+Identify root causes.
+Explain confidence levels before making changes.
+Verify fixes using live evidence whenever possible.
+Reduce technical debt.
+Help prepare the application for public beta.
+Why I Am Considering Leaving Emergent
+
+Emergent helped build Kinnship from an idea into a working application, and I appreciate that work.
+
+However, during the stabilization phase, our debugging process has become increasingly frustrating.
+
+Over approximately the last two weeks:
+
+Multiple builds were produced that did not resolve the reported issue.
+Significant time and money were spent chasing symptoms rather than confirming root causes.
+Unit tests frequently passed while physical-device testing immediately failed.
+I lost confidence that enough investigation was occurring before code changes were proposed.
+
+This is not meant as criticism of the developers.
+
+It is simply why I am evaluating a different workflow.
+
+Development Philosophy Going Forward
+
+These are the engineering principles I want every future repair to follow.
+
+Rule 1
+
+No code changes until the suspected root cause has been explained.
+
+Rule 2
+
+Every repair should include:
+
+Why this bug happens
+Confidence level
+How to verify the diagnosis
+How to verify the repair
+Rule 3
+
+If confidence is low...
+
+Say so.
+
+I would rather hear
+
+"I don't know yet."
+
+than
+
+"This should fix it."
+
+Rule 4
+
+Whenever possible...
+
+Use
+
+live HTTP requests
+Railway logs
+MongoDB data
+
+instead of assumptions.
+
+Rule 5
+
+No feature work until beta.
+
+The application is feature complete.
+
+Everything from this point forward is reliability.
+
+Current Beta Roadmap
+Sprint 1 — Beta Blockers
+
+These are the highest priorities.
+
+1. Family Invitation Reliability
+
+Current goal:
+
+A user should be able to
+
+receive invitation
+tap Accept
+install app if necessary
+complete OTP
+immediately appear in the family
+
+No manual invite codes.
+
+No delayed synchronization.
+
+2. Member Visibility
+
+Users occasionally fail to appear on the family dashboard after joining.
+
+A code review suggests silent exception handling around ensure_self_member_row() may be contributing, but I want this verified against production data before changes are made.
+
+3. Location Synchronization (Highest New Priority)
+
+This is currently my biggest concern.
+
+Observed behavior
+
+Joyce's live GPS tracking worked perfectly for over a week.
+
+I removed Joyce from the family.
+
+I re-invited her.
+
+She accepted.
+
+She appeared again.
+
+Immediately afterward:
+
+Her location became permanently stale.
+
+Her phone reports:
+
+Tracking healthy
+
+Charles' phone continues showing Joyce's previous location.
+
+Even when Joyce is physically standing beside Charles.
+
+This strongly suggests the issue may be tied to the invitation/member recreation flow rather than GPS itself.
+
+I would like this investigated before any location code is modified.
+
+Questions I want answered:
+
+Is the GPS updater writing to the wrong member record?
+Is a new member ID being created?
+Is the dashboard reading stale records?
+Is there a synchronization issue between users and members?
+4. OTP Reliability
+
+One request.
+
+One email.
+
+Every time.
+
+No duplicates.
+
+No storms.
+
+5. Push Notifications
+
+Resolve:
+
+blank notifications
+ghost notifications
+notification timing
+notification reliability
+6. Android Notification Icon
+
+Currently some devices still display a generic "K" rather than the Kinnship shield.
+
+Determine whether this is:
+
+deployment
+cached resources
+Android behavior
+build configuration
+7. Profile Synchronization
+
+Current issues observed:
+
+Joyce sometimes displays:
+
+Age = 0
+Missing demographic information
+
+Determine why profile synchronization is incomplete.
+
+Technical Debt
+
+After beta blockers are resolved, I would like to begin improving maintainability.
+
+Not rewriting.
+
+Refactoring.
+
+Examples:
+
+Split large backend files (especially server.py) into logical modules.
+Remove obsolete migration code.
+Remove dead code.
+Improve logging.
+Improve diagnostics.
+Improve error reporting.
+Improve documentation.
+
+The goal is to make the codebase easier to maintain without changing application behavior.
+
+Existing Code Review
+
+An independent code review identified several additional architectural and reliability concerns, including:
+
+Silent exception handling around member creation
+OTP lifecycle ordering
+Invitation state consistency
+Duplicate member race conditions
+Cross-group data consistency
+Medication scheduler resilience
+Timezone handling
+Subscription reconciliation
+
+These findings are already documented and prioritized. I can provide the complete analysis for review.
+
+What I'm Asking From Replit
+
+Before writing code, I would appreciate your assessment.
+
+Specifically:
+
+1. Architecture Review
+
+Do you believe the application's overall architecture is fundamentally sound?
+
+Or would you recommend structural changes?
+
+2. Repair Estimate
+
+Based on the repository and the known issues:
+
+What is your best estimate for:
+
+debugging effort
+cleanup effort
+beta readiness
+
+I understand estimates are only estimates.
+
+I simply want an honest engineering opinion.
+
+3. Cost Estimate
+
+Based on your experience:
+
+What would you expect this stabilization effort to cost using Replit?
+
+I'm not asking for guarantees.
+
+I'm trying to compare that estimate against continuing with my current workflow.
+
+4. Transition
+
+If I move development to Replit:
+
+Would you recommend:
+
+completing all remaining debugging here
+continuing to use Railway
+continuing to use MongoDB Atlas
+continuing Expo/React Native
+
+Or would you recommend changing any part of the stack?
+
+If so, why?
+
+Final Thoughts
+
+I have invested an enormous amount of time, energy, and money into Kinnship.
+
+I'm committed to seeing it succeed.
+
+I'm not looking for the fastest developer.
+
+I'm looking for the most disciplined debugging process.
+
+My priority is simple:
+
+Build trust.
+
+If a family installs Kinnship to help protect someone they love, I want them to feel confident that it works reliably.
+
+If you believe Replit is the right place to finish this journey, I'd appreciate your honest assessment—and if your assessment is that I should not move, I'd rather hear that than be told what I want to hear.
+
+Thank you for taking the time to review the project.
+
+— Charles St. Arnauld
