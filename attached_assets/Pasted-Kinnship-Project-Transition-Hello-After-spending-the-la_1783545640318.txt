@@ -1,0 +1,77 @@
+Kinnship Project Transition
+
+Hello,
+
+After spending the last couple of days talking with you and having you audit the Kinnship codebase, I've made my decision.
+
+I'd like Replit to take over as the primary development platform for Kinnship.
+
+This wasn't a decision I made lightly.
+
+Emergent helped me build Kinnship from an idea into a real application, and I'm grateful for that. But Kinnship has entered a different phase of its life. I'm no longer building features—I'm preparing a production application for public beta. That requires a different mindset, and your approach to debugging has given me confidence.
+
+The biggest difference I've seen is your insistence on understanding the code before proposing a fix. That's exactly what I've been looking for.
+
+Going forward, I want us to follow one simple rule:
+
+No code changes until the suspected root cause has been explained, confidence has been stated, and there is a plan to verify both the diagnosis and the repair.
+
+I don't expect perfection. Bugs happen. What I want is a disciplined engineering process.
+
+Credentials
+
+Before we begin, I'd like to know exactly what credentials and secrets you will need.
+
+Please give me a complete list, in the order you recommend providing them.
+
+For example:
+
+GitHub repository access
+MongoDB Atlas connection string
+JWT secret
+Railway environment variables
+Stripe keys
+Expo credentials
+Google Play credentials
+Any other required secrets
+
+Please also let me know whether you recommend providing these one at a time as we need them, or all at once so you can fully test the application.
+
+If there are credentials that you do not need, please tell me that as well. I prefer to follow the principle of least privilege whenever possible.
+
+My Development Philosophy
+
+Version 1.0 is feature complete.
+
+Our priorities are now:
+
+Reliability
+Stability
+Root-cause debugging
+Technical debt reduction
+Beta readiness
+
+No new features until public beta.
+
+Next Steps
+
+Over the next day or two I'm going to review the available Replit plans and decide which paid plan makes the most sense for this project.
+
+I'm also taking a short break before we begin.
+
+That part isn't optional.
+
+My wife, Joyce, has officially ordered me to take a day off. 😊
+
+I've been pushing extremely hard between driving Uber to fund development and spending long days working on Kinnship. Today I'm running a headache and a fever, and she reminded me that if I burn myself out, nobody benefits.
+
+So I'm going to listen to her, rest for a day or two, and come back ready to focus on getting Kinnship across the finish line.
+
+When I return, I'd like our first session to be focused entirely on establishing our workflow, reviewing the highest-priority beta blockers, and deciding the order we'll tackle them.
+
+I'm looking forward to working together.
+
+Thank you for taking the time to understand my project before suggesting changes. That gave me confidence that this is the right direction.
+
+— Charles St. Arnauld
+Founder, Kinnship
