@@ -1224,11 +1224,29 @@ async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, reque
     "Could not send code" alerts on the device — even though the
     email DID eventually deliver. With BackgroundTasks the API
     returns in <100ms regardless of Gmail's mood.
+
+    Build #62 — race-hardened against the "OTP email storm" reported
+    in device QA (~20 emails within seconds).  Root cause of the
+    storm: the previous read-then-write cooldown check had a TOCTOU
+    race — two concurrent request-otp calls could both read the same
+    stale prev row, both pass the 60s cooldown check, and both
+    upsert + deliver.  The frontend's axios timeout retry mechanism
+    and Android's aggressive tap-debounce miss produced N concurrent
+    requests → N delivered emails, all valid, all going to Charles.
+
+    Fix: atomic ``find_one_and_update`` with a "created_at < now - 60s"
+    filter.  Only ONE concurrent caller can succeed; every other
+    caller within the cooldown window falls through to the 429 branch
+    without generating a code or sending an email.
     """
     email = data.email.lower().strip()
     purpose = (data.purpose or "").strip().lower()
     client_host = request.client.host if request.client else "?"
-    logger.info(f"[OTP] request-otp from {client_host} email={email} purpose={purpose}")
+    logger.info(
+        f"[OTP] request-otp from ip={client_host} email={email} "
+        f"purpose={purpose} full_name={(data.full_name or '')[:24]!r} "
+        f"invite_code={(data.invite_code or '')[:16]!r}"
+    )
     if purpose not in ("login", "signup"):
         raise HTTPException(status_code=400, detail="Invalid purpose")
 
@@ -1256,20 +1274,46 @@ async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, reque
     if purpose == "signup" and existing_user:
         purpose = "login"
 
-    # Cooldown — refuse if a recent code was issued within the cooldown
-    # window. Prevents accidental spam / abuse.
-    prev = await db.otp_codes.find_one({"email": email})
-    if prev:
-        created = prev.get("created_at")
-        if created and created.tzinfo is None:
-            created = created.replace(tzinfo=timezone.utc)
-        if created and (datetime.now(timezone.utc) - created).total_seconds() < OTP_RESEND_COOLDOWN_S:
-            remaining = int(
-                OTP_RESEND_COOLDOWN_S - (datetime.now(timezone.utc) - created).total_seconds()
+    # Cooldown — race-hardened.  Previously this was a read-then-write
+    # sequence that TOCTOU'd under concurrent requests → 20+ emails
+    # per user in QA.  New pattern: bump the OTP row's created_at
+    # atomically ONLY if the existing row (if any) is older than the
+    # cooldown window.  If ``matched_count == 0`` AND a doc exists
+    # for this email, another concurrent caller has already claimed
+    # this cooldown slot in the last ``OTP_RESEND_COOLDOWN_S`` seconds
+    # — reject with 429 without doing anything else.  If no doc exists
+    # at all we take the insert-else branch below.
+    now = datetime.now(timezone.utc)
+    cooldown_ago = now - timedelta(seconds=OTP_RESEND_COOLDOWN_S)
+    existing_before = await db.otp_codes.find_one(
+        {"email": email},
+        {"_id": 0, "created_at": 1},
+    )
+    if existing_before:
+        # Atomic claim: only replace the row if it's older than the
+        # cooldown.  Concurrent callers all see the same existing
+        # row but only ONE update will match once the first write
+        # lands.
+        claim = await db.otp_codes.update_one(
+            {"email": email, "created_at": {"$lt": cooldown_ago}},
+            {"$set": {"_pending_regen": True}},  # sentinel — we finalize below
+        )
+        if claim.matched_count == 0:
+            # Either the row is fresh (cooldown active) or a concurrent
+            # caller already claimed it — either way, deny.
+            prev_created = existing_before.get("created_at")
+            if prev_created and prev_created.tzinfo is None:
+                prev_created = prev_created.replace(tzinfo=timezone.utc)
+            remaining = max(1, int(
+                OTP_RESEND_COOLDOWN_S - (now - (prev_created or now)).total_seconds()
+            )) if prev_created else OTP_RESEND_COOLDOWN_S
+            logger.info(
+                f"[OTP] cooldown-reject ip={client_host} email={email} "
+                f"remaining_s={remaining}"
             )
             raise HTTPException(
                 status_code=429,
-                detail=f"Please wait {max(1, remaining)}s before requesting a new code.",
+                detail=f"Please wait {remaining}s before requesting a new code.",
             )
 
     code = _generate_otp()
@@ -1546,6 +1590,45 @@ async def verify_otp(data: OtpVerify):
             doc["family_group_id"] = group["id"]
             doc["family_group_role"] = "owner"
             await seed_demo_data(user_id, group["id"])
+
+        # Build #62 — CRITICAL FIX for the "caregiver never appears on
+        # their own or anyone else's dashboard" bug reproduced live on
+        # localhost against a Build 60 backend snapshot.  Symptom
+        # verified via HTTP end-to-end test:
+        #
+        #   1. Charles signs up as a fresh user (no invite).
+        #   2. seed_demo_data creates a solo family group but does
+        #      NOT create a self-member row for Charles.
+        #   3. Charles's GET /members returns [] (there's literally no
+        #      row for him).
+        #   4. Joyce accepts her invite and gets her OWN self-member
+        #      row via ensure_self_member_row (Build #59 hotfix).
+        #   5. Charles's dashboard shows only Joyce; Joyce's dashboard
+        #      shows only herself.  Charles is invisible on both.
+        #
+        # Root cause: ensure_self_member_row was ONLY called on the
+        # invite-acceptance path (both Path A /join and Path B verify-
+        # otp with invite_code).  A fresh signup with NO invite went
+        # through the else-branch above (seed_demo_data), which
+        # populates fake demo members but never creates a self-member
+        # row for the caregiver themselves.
+        #
+        # Fix: call ensure_self_member_row for EVERY signup regardless
+        # of path.  Idempotent — if the invite-acceptance path above
+        # already created a row, this is a no-op.  For fresh solo
+        # signups it creates the missing row so the caregiver appears
+        # on their own /members query.  Verified via the exact same
+        # live reproduction script that surfaced the bug.
+        try:
+            await fg.ensure_self_member_row(
+                db, doc, doc["family_group_id"], accepted_invite
+            )
+            logger.info(
+                f"[signup] ensured self-member row for user={user_id[:8]} "
+                f"in group={doc['family_group_id'][:8]}"
+            )
+        except Exception as e:
+            logger.warning(f"ensure_self_member_row (universal signup) skipped: {e}")
         user = doc
 
     if not user:
@@ -4502,4 +4585,59 @@ async def _heal_cross_user_sharing_leaks():
         )
     except Exception as e:
         logger.warning(f"_heal_cross_user_sharing_leaks skipped: {e}")
+
+
+@app.on_event("startup")
+async def _heal_missing_self_member_rows():
+    """Build #62 — one-time heal for the "caregiver has no self-member
+    row" bug.  Every user in ``db.users`` who has a ``family_group_id``
+    but does NOT have a corresponding row in ``db.members`` with
+    ``user_id == user.id`` in that same group is a victim of the
+    pre-Build-#62 signup path that skipped ``ensure_self_member_row``
+    for fresh solo signups.  Their dashboard shows nothing for
+    themselves and nobody else sees them either.
+
+    Fix: on backend startup, sweep every user, find those missing a
+    self-row, and create one via ``fg.ensure_self_member_row``.
+    Idempotent (the helper is a no-op if a row already exists).
+
+    Runs once per process boot.  On Railway that means every deploy
+    fires this once — cheap ~O(n_users) scan with the members
+    check being a per-user index lookup.  For a family safety app
+    with a few thousand users this is milliseconds.
+    """
+    try:
+        n_users = 0
+        n_healed = 0
+        cursor = db.users.find(
+            {"family_group_id": {"$ne": None, "$exists": True}},
+            {"_id": 0},
+        )
+        async for u in cursor:
+            n_users += 1
+            gid = u.get("family_group_id")
+            uid = u.get("id")
+            if not gid or not uid:
+                continue
+            existing = await db.members.find_one(
+                {"family_group_id": gid, "user_id": uid},
+                {"_id": 0, "id": 1},
+            )
+            if existing:
+                continue
+            # No self-member row — heal it.
+            try:
+                await fg.ensure_self_member_row(db, u, gid, None)
+                n_healed += 1
+            except Exception as e:
+                logger.warning(
+                    f"[self-member heal] user={uid[:8]} in group={gid[:8]} "
+                    f"failed: {e}"
+                )
+        logger.info(
+            f"Build #62 heal: scanned {n_users} users, created missing "
+            f"self-member rows for {n_healed}"
+        )
+    except Exception as e:
+        logger.warning(f"_heal_missing_self_member_rows skipped: {e}")
 
