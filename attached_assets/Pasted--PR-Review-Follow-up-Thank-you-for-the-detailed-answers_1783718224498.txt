@@ -1,0 +1,63 @@
+## PR Review Follow-up
+
+Thank you for the detailed answers. This is exactly the kind of engineering discussion I was hoping we'd establish.
+
+Your response clarified something important.
+
+The retry loop is not actually solving the underlying recovery problem—it is solving one specific transient condition. That's a worthwhile improvement, but it is fundamentally a bounded workaround rather than a complete recovery mechanism.
+
+The key piece of new information is this:
+
+> `memberStore` already exposes `subscribeMember()`, which fires whenever member data changes, including after `fetchAll()` writes new data.
+
+That changes the architectural picture considerably.
+
+If the infrastructure already exists to notify consumers when the member store changes, then the application already has an event capable of telling the boot sequence, "the member you're waiting for now exists."
+
+From an engineering perspective, that is a much stronger recovery mechanism than polling for a fixed amount of time.
+
+The advantages are significant:
+
+* Recovery is driven by actual state changes rather than arbitrary timing.
+* It naturally handles both short and long delays.
+* It would allow the engine to recover without requiring the user to restart the application.
+* It removes the need to guess retry counts or retry intervals.
+
+I also appreciate that you recognized the additional implementation complexity. Holding the boot sequence open while managing subscriptions, cancellation, and cleanup is a larger structural change than adding a retry loop. That makes it a reasonable candidate for a separate PR if we choose to keep changes small.
+
+However, I no longer view the retry loop as the ideal endpoint.
+
+I now see two reasonable paths forward:
+
+### Option A
+
+Merge the current PR as an incremental reliability improvement, with its limitations clearly documented, and immediately create a follow-on engineering task for an event-driven recovery implementation.
+
+### Option B
+
+Pause this PR, replace the retry loop with the subscriber-based recovery approach now, and make Sprint 1 the complete solution for Path 2.
+
+At this point, I lean toward **Option B**.
+
+Not because the retry loop is incorrect—it isn't—but because the investigation uncovered infrastructure that appears specifically designed to support this kind of state-driven recovery.
+
+If we already have the mechanism available, I'd rather solve the problem using the application's own event model than introduce timing-based recovery that we already know cannot handle the full failure space.
+
+Before making that decision, I'd like one final investigation:
+
+Please prototype the `subscribeMember()` approach on a new branch or commit (without closing this PR yet) and compare it against the retry-loop implementation.
+
+Specifically, I'd like a short engineering comparison covering:
+
+* complexity
+* code size
+* regression risk
+* lifecycle management
+* cleanup requirements
+* expected reliability
+* testability
+* long-term maintainability
+
+Once we have that comparison, we'll decide whether to evolve this PR into the event-driven solution or merge the retry implementation and schedule the subscriber approach as Sprint 2.
+
+The important outcome from this discussion is that we've identified what appears to be the more architecturally correct recovery mechanism. Whether we implement it now or next should be an engineering decision based on complexity and risk, not because we didn't know it existed.
