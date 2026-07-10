@@ -1,0 +1,158 @@
+# Kinnship Engineering Task — Sprint 1 Final Implementation
+
+## Status
+
+I believe the investigation phase is complete.
+
+Over the past several reviews we have established the following with high confidence:
+
+### Confirmed Facts
+
+* The active production code path on Android Build 61 is the **Path B (Transistor)** background tracking boot sequence.
+* The legacy Path A (`expo-location`) shutdown branch is not executed on production Android builds because `locationEngine.isAvailable()` routes execution to the Transistor path.
+* The authentication flow creates a race condition between the initial `setUser()` and completion of the invite/member creation process.
+* The `if (!me)` branch in Path B is reachable.
+* The idempotency guard prevents repeated boot attempts after the first execution.
+* A transient condition can leave the engine stopped until a future user session.
+
+At this point I do not believe additional investigation is the best use of time.
+
+The project should transition from investigation to implementation.
+
+---
+
+# Sprint 1 Objective
+
+Implement the smallest production-safe repair for **Path B only**.
+
+This repair should address the confirmed silent failure mode while preserving existing behavior everywhere else.
+
+---
+
+# Engineering Principles
+
+Please continue following our engineering workflow:
+
+Observe
+
+↓
+
+Gather Evidence
+
+↓
+
+Root Cause
+
+↓
+
+Explain Root Cause
+
+↓
+
+Implement Smallest Safe Repair
+
+↓
+
+Branch
+
+↓
+
+Pull Request
+
+↓
+
+Verification
+
+---
+
+# Repair Requirements
+
+Before modifying code, please answer one final engineering question:
+
+**Where is the smallest correct place to fix this behavior?**
+
+Specifically:
+
+* Why is the chosen repair location preferable to modifying `memberStore.fetchAll()`?
+* Why does this approach minimize regression risk?
+* What assumptions does it make?
+
+Once that explanation is complete, proceed with implementation.
+
+---
+
+# Implementation Goals
+
+The repair should:
+
+* Eliminate silent engine shutdown caused by transient conditions.
+* Preserve legitimate engine shutdown when a member truly does not exist.
+* Preserve existing behavior for healthy users.
+* Avoid unnecessary architectural changes.
+* Keep the implementation as small and isolated as reasonably possible.
+
+If a retry mechanism is required, explain why an event-driven approach could not reasonably be implemented within the scope of Sprint 1.
+
+If an event-driven approach can be implemented with comparable complexity and lower long-term risk, explain whether it is preferable before choosing the retry solution.
+
+---
+
+# Scope
+
+This sprint is limited to the active Path B boot sequence.
+
+Do not modify unrelated systems.
+
+Do not refactor `memberStore` unless you conclude it is absolutely necessary to safely implement this repair.
+
+Do not combine unrelated bug fixes.
+
+One bug.
+
+One branch.
+
+One Pull Request.
+
+---
+
+# Deliverables
+
+Please provide:
+
+1. Final root cause summary.
+2. Explanation of why the chosen repair location is correct.
+3. Description of any alternatives considered.
+4. Git branch.
+5. Pull Request.
+6. Verification plan.
+7. Regression risk assessment.
+
+---
+
+# Verification Plan
+
+The Pull Request should explain how the repair will be validated.
+
+Specifically verify:
+
+* Existing users continue to boot normally.
+* Legitimate member removal still stops the engine.
+* Transient member lookup failures no longer silently disable tracking.
+* No regression in normal GPS startup.
+* No regression in family synchronization.
+
+---
+
+# Success Criteria
+
+Sprint 1 will be considered successful when:
+
+* The confirmed Path B failure mode has been addressed.
+* The repair is isolated.
+* Existing functionality is preserved.
+* The implementation is supported by evidence.
+* A clean Pull Request is ready for review.
+
+At that point I will review the PR before approving the merge.
+
+If the repair only modifies JavaScript/TypeScript application code, we will deploy it as an **OTA update** rather than producing a new Android build.
