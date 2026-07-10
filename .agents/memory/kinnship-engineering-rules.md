@@ -13,6 +13,15 @@ Feature development is largely complete for beta. The focus has shifted entirely
 
 **No new major features until public beta opens.**
 
+## Sprint history
+
+### Sprint 1 — complete (July 10, 2026)
+**Fix:** GPS Failure Path 2 — engine stopping permanently when member row temporarily absent at boot.
+**Root cause:** `setUser(u)` in `verifyOtp` (AuthContext line 284) fires the engine boot effect before the `/family-group/join` POST at line 333 creates the member row. `fetchAll()` returns empty; engine stops; idempotency guard prevents recovery for the session.
+**Repair:** Subscriber-based wait in `frontend/app/_layout.tsx`. When `fetchAll()` finds no row, subscribe to `memberStore.subscribeMember()` and await up to 90 s. `cancelWait` handle in IIFE scope gives the cleanup function deterministic immediate teardown. Merged to main via PR #3.
+**OTA eligible:** TypeScript only, no native changes.
+**Next:** Install OTA on both test devices, run overnight test, review diagnostics. Then move to next highest-confidence GPS failure path (Path 9 — Leonidas stop-without-restart, or Path 12 — silent start failure / unconditional boot flag).
+
 ## Engineering process (mandatory for every fix)
 
 For every issue, in order:
@@ -30,18 +39,30 @@ For every issue, in order:
 Speculative fixes are not acceptable. Low confidence must be stated explicitly.
 "I don't know yet" is acceptable. "This should work" is not.
 
+## Git workflow — transition note
+
+**Commit `3d4b18e` ("Update yarn dependencies", July 10 2026) is the final direct commit to `main`.**
+It landed during the migration to the protected-branch workflow: a `gitPush` call resolved to the branch's tracking upstream (`origin/main`) instead of creating a new remote branch. The content is correct — the `yarn.lock` update was required to publish the Sprint 1 OTA. The commit is left in place. Do not revert, rebase, or force-push it. Engineering decision by Charles, July 10 2026.
+
+---
+
 ## Git workflow
 
-- GitHub main is the single source of truth
-- All changes go through a pull request — never commit directly to main
-- Branch naming: `fix/<short-description>`
+- GitHub `main` is the production record and the authoritative changelog for the entire project
+- **Every change — code, documentation, engineering notes, memory updates, dependency changes — arrives through a Pull Request.** No exceptions.
+- Direct commits to `main` are never permitted for any reason, by any actor
+- Branch naming: `fix/<short-description>`, `docs/<short-description>`, `chore/<short-description>`
 - PR description must follow the engineering process format
 - **No force-pushes to any branch without Charles's explicit written approval**
 - Charles reviews and approves every merge
+- The history of `main` should tell the story of Kinnship's evolution — every PR title and description is part of that record
 
-**Why:** Charles stated this explicitly and it is a trust boundary. Violating it would end the engagement.
+**Why:** Charles stated this explicitly on July 10, 2026. The PR log is the authoritative record of what changed, why, and when. Direct commits destroy that record and make the history untrustworthy.
 
-**How to apply:** Before any `git push --force` or `git push --force-with-lease`, stop and get written approval from Charles in the chat first.
+**How to apply:**
+- Before any work: create a branch. Before any push to `main`: stop — open a PR instead.
+- Before any `git push --force` or `git push --force-with-lease`: stop and get written approval from Charles in the chat first.
+- Memory and documentation updates follow the same rule as code — branch, PR, approval, merge.
 
 ## Known polish backlog (not yet assigned to tasks)
 
