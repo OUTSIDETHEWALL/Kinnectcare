@@ -39,6 +39,13 @@ For every issue, in order:
 Speculative fixes are not acceptable. Low confidence must be stated explicitly.
 "I don't know yet" is acceptable. "This should work" is not.
 
+## Git workflow — transition note
+
+**Commit `3d4b18e` ("Update yarn dependencies", July 10 2026) is the final direct commit to `main`.**
+It landed during the migration to the protected-branch workflow: a `gitPush` call resolved to the branch's tracking upstream (`origin/main`) instead of creating a new remote branch. The content is correct — the `yarn.lock` update was required to publish the Sprint 1 OTA. The commit is left in place. Do not revert, rebase, or force-push it. Engineering decision by Charles, July 10 2026.
+
+---
+
 ## Git workflow
 
 - GitHub `main` is the production record and the authoritative changelog for the entire project
