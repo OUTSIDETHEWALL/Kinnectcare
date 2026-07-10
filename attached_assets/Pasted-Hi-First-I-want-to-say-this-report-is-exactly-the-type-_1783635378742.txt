@@ -1,0 +1,68 @@
+Hi. First, I want to say this report is exactly the type of engineering process I've been looking for.
+
+You investigated the code before proposing changes, separated proven facts from hypotheses, assigned confidence levels, and ended with requests for live evidence instead of immediately modifying the code. That's a big reason I'm giving Replit the opportunity to take over this project.
+
+That said, I want to establish how I want this project to be run from this point forward.
+
+My expectations
+
+I don't want speculative fixes.
+
+I don't want "this should work."
+
+I don't want another cycle of builds that are based on assumptions.
+
+I want every repair to follow this process:
+
+Observe the bug.
+Investigate the code.
+Collect live evidence from the database and/or API.
+Explain the exact root cause.
+State your confidence level.
+Tell me exactly how we'll verify the fix before changing anything else.
+
+If we follow that process consistently, I think we'll work well together.
+
+Regarding your report
+
+I think your report is thorough and logical, but I consider it a hypothesis until it is confirmed with live production data.
+
+Let's prove it before we touch the code.
+
+My proposal
+
+Let's make this our first engineering sprint.
+
+The goal is not to fix every beta blocker.
+
+The goal is to prove that your debugging process works.
+
+We'll focus entirely on the stale location bug that appeared after removing and re-inviting a family member.
+
+If your diagnosis is confirmed by the data and your repair fixes the issue without creating regressions, then you've earned my confidence to continue with the rest of the beta blockers.
+
+Before any code changes
+
+Please tell me exactly what you want me to prepare, in order.
+
+Specifically:
+
+Should I first create a dedicated MongoDB Atlas debug database?
+What should be copied from production into it?
+Which environment variables will you need first?
+What should remain production-only?
+How do you recommend protecting production while still allowing you to reproduce and verify these bugs?
+
+Please give me the order you would like everything prepared.
+
+One more request
+
+Treat me like a non-programmer.
+
+I understand the product extremely well, but I need step-by-step guidance for the technical work.
+
+I'd rather move slowly and correctly than quickly and create new problems.
+
+I'm looking forward to seeing how you approach this first sprint.
+
+— Charles

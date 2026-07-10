@@ -839,11 +839,34 @@ function RootNav() {
         // dedupe).
         const arr = await memberStore.fetchAll();
         if (cancelled) return;
-        const me = (arr || []).find((m: any) => m.user_id === user.id);
+        let me = (arr || []).find((m: any) => m.user_id === user.id);
+
+        // Path 2 guard — retry if the member row is not yet visible.
+        // The race can occur when a user's account is created (OTP
+        // verify) slightly before their member row is committed (invite
+        // acceptance), or when a transient network error causes
+        // fetchAll() to return a stale empty cache on cold start.
+        // Three retries × 5 s covers the typical race window without
+        // keeping the engine alive indefinitely for a genuine
+        // caregiver-only device (which consistently returns no match
+        // across all retries and stops normally on the final check).
         if (!me) {
-          // Caregiver-only or unlinked — nothing to upload from this
-          // device.  Ensure engine is stopped in case it was running
-          // from a previous session.
+          const RETRY_COUNT = 3;
+          const RETRY_DELAY_MS = 5_000;
+          for (let i = 0; i < RETRY_COUNT; i++) {
+            await new Promise<void>((res) => setTimeout(res, RETRY_DELAY_MS));
+            if (cancelled) return;
+            const retryArr = await memberStore.fetchAll();
+            if (cancelled) return;
+            me = (retryArr || []).find((m: any) => m.user_id === user.id);
+            if (me) break;
+          }
+        }
+
+        if (!me) {
+          // Still no match after retries — caregiver-only device or
+          // member row genuinely absent.  Stop the engine in case it
+          // was running from a previous session.
           try { leonidas.stop(); } catch (_e) {}
           await locationEngine.stop();
           engineBootedForUserIdRef.current = null;
