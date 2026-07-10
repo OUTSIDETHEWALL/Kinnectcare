@@ -41,16 +41,21 @@ Speculative fixes are not acceptable. Low confidence must be stated explicitly.
 
 ## Git workflow
 
-- GitHub main is the single source of truth
-- All changes go through a pull request — never commit directly to main
-- Branch naming: `fix/<short-description>`
+- GitHub `main` is the production record and the authoritative changelog for the entire project
+- **Every change — code, documentation, engineering notes, memory updates, dependency changes — arrives through a Pull Request.** No exceptions.
+- Direct commits to `main` are never permitted for any reason, by any actor
+- Branch naming: `fix/<short-description>`, `docs/<short-description>`, `chore/<short-description>`
 - PR description must follow the engineering process format
 - **No force-pushes to any branch without Charles's explicit written approval**
 - Charles reviews and approves every merge
+- The history of `main` should tell the story of Kinnship's evolution — every PR title and description is part of that record
 
-**Why:** Charles stated this explicitly and it is a trust boundary. Violating it would end the engagement.
+**Why:** Charles stated this explicitly on July 10, 2026. The PR log is the authoritative record of what changed, why, and when. Direct commits destroy that record and make the history untrustworthy.
 
-**How to apply:** Before any `git push --force` or `git push --force-with-lease`, stop and get written approval from Charles in the chat first.
+**How to apply:**
+- Before any work: create a branch. Before any push to `main`: stop — open a PR instead.
+- Before any `git push --force` or `git push --force-with-lease`: stop and get written approval from Charles in the chat first.
+- Memory and documentation updates follow the same rule as code — branch, PR, approval, merge.
 
 ## Known polish backlog (not yet assigned to tasks)
 
