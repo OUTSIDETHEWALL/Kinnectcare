@@ -13,6 +13,15 @@ Feature development is largely complete for beta. The focus has shifted entirely
 
 **No new major features until public beta opens.**
 
+## Sprint history
+
+### Sprint 1 — complete (July 10, 2026)
+**Fix:** GPS Failure Path 2 — engine stopping permanently when member row temporarily absent at boot.
+**Root cause:** `setUser(u)` in `verifyOtp` (AuthContext line 284) fires the engine boot effect before the `/family-group/join` POST at line 333 creates the member row. `fetchAll()` returns empty; engine stops; idempotency guard prevents recovery for the session.
+**Repair:** Subscriber-based wait in `frontend/app/_layout.tsx`. When `fetchAll()` finds no row, subscribe to `memberStore.subscribeMember()` and await up to 90 s. `cancelWait` handle in IIFE scope gives the cleanup function deterministic immediate teardown. Merged to main via PR #3.
+**OTA eligible:** TypeScript only, no native changes.
+**Next:** Install OTA on both test devices, run overnight test, review diagnostics. Then move to next highest-confidence GPS failure path (Path 9 — Leonidas stop-without-restart, or Path 12 — silent start failure / unconditional boot flag).
+
 ## Engineering process (mandatory for every fix)
 
 For every issue, in order:

@@ -1,0 +1,90 @@
+PR #3 Review — Approved
+
+Thank you for investigating the cleanup concern rather than assuming the original implementation was sufficient.
+
+After reviewing the updated implementation and your explanation, I believe this PR is now ready to merge.
+
+Cleanup Review
+
+My primary concern was the lifecycle of the temporary subscription.
+
+Originally, cleanup relied on a future event (either another store update or the timeout) before the subscription was actually removed. While the maximum lifetime was bounded by the 90-second timeout, cleanup was not deterministic.
+
+The revised implementation addresses that concern cleanly.
+
+By introducing a cancelWait handle and calling it directly from the effect cleanup, the subscription, timer, and waiting Promise are now torn down immediately when the effect is cancelled.
+
+That gives every exit path deterministic cleanup:
+
+Successful member discovery
+Timeout
+Effect cancellation
+Component unmount
+Sign-out
+Dependency change
+
+The combination of the existing settled guard together with the explicit cancelWait teardown also provides good protection against race conditions during shutdown.
+
+Architecture
+
+I also agree with the decision to keep this repair inside the boot effect rather than modifying memberStore.fetchAll().
+
+The store should remain responsible for retrieving member data.
+
+The boot effect is responsible for deciding what the absence of a member row means for the location engine.
+
+That separation of responsibility feels correct and minimizes regression risk for other consumers of the store.
+
+Scope
+
+This PR remains appropriately scoped.
+
+One bug
+One branch
+One Pull Request
+No unrelated refactoring
+No backend changes
+No native changes
+
+That aligns with the engineering workflow we've established.
+
+Deployment
+
+Because this change only modifies React Native / TypeScript application logic, this should be deployed as an OTA update rather than requiring a new Android build.
+
+No new AAB should be necessary.
+
+Expected Results
+
+Following deployment, I expect:
+
+Existing users with healthy member rows should experience no behavioral change.
+Users encountering the member-row race during onboarding should recover automatically instead of silently remaining stopped.
+Temporary /members failures should no longer permanently disable the location engine for the remainder of the session.
+Legitimate cases where no member row exists should still stop the engine after the waiting period.
+Regression risk should remain low because the normal startup path has not been modified.
+Not Expected to Change
+
+This PR is not expected to resolve:
+
+Android background execution limitations.
+Leonidas restart behavior.
+Other documented GPS failure paths.
+Native Android lifecycle issues.
+
+Those remain separate engineering tasks.
+
+Approval
+
+I believe this PR satisfies the engineering standards we've been working toward:
+
+Evidence before implementation.
+Root cause identified.
+Small, isolated repair.
+Deterministic cleanup.
+Low regression risk.
+Clear verification strategy.
+
+Please merge PR #3.
+
+After the OTA is published, we'll install it on both test devices, run at least one full overnight test, review diagnostics, and then move on to the next highest-confidence GPS reliability issue.
