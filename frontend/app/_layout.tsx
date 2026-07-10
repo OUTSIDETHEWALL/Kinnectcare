@@ -809,6 +809,11 @@ function RootNav() {
   useEffect(() => {
     let cancelled = false;
     let unsubscribeToken: (() => void) | null = null;
+    // Holds a direct teardown handle for the member-row subscriber
+    // block so the cleanup function can resolve it immediately on
+    // sign-out / effect re-run rather than waiting for the next
+    // store write or the 90 s timeout to fire it.
+    let cancelWait: (() => void) | null = null;
 
     (async () => {
       if (!user?.id) {
@@ -865,18 +870,20 @@ function RootNav() {
             const settle = (value: any) => {
               if (settled) return;
               settled = true;
+              cancelWait = null; // disarm before teardown
               clearTimeout(waitTimer);
               unsubStore();
               resolve(value);
             };
             const waitTimer = setTimeout(() => settle(null), WAIT_TIMEOUT_MS);
             const unsubStore = memberStore.subscribeMember((m: any) => {
-              // If the effect was cleaned up while we were waiting
-              // (sign-out, component unmount), resolve null so the
-              // IIFE can exit on the cancelled guard below.
               if (cancelled) { settle(null); return; }
               if (m.user_id === user.id) settle(m);
             });
+            // Expose teardown to the effect cleanup function so it can
+            // resolve the Promise immediately on sign-out rather than
+            // waiting for the next store write or the 90 s timeout.
+            cancelWait = () => settle(null);
           });
           if (cancelled) return;
         }
@@ -921,6 +928,11 @@ function RootNav() {
 
     return () => {
       cancelled = true;
+      // If the boot sequence is mid-wait for the member row, resolve
+      // the subscriber Promise immediately rather than leaving the
+      // subscription live until the next store write or the 90 s
+      // timeout.
+      if (cancelWait) { cancelWait(); cancelWait = null; }
       if (unsubscribeToken) {
         unsubscribeToken();
         unsubscribeToken = null;
