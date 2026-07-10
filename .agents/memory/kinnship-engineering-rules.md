@@ -58,6 +58,19 @@ These were identified during the July 9, 2026 design review and are awaiting tas
 - "All clear!" green checkmark icon is visually inconsistent with design system
 - "Check In" vs "Check in" capitalization inconsistency between list and detail
 
+## Bug severity classification (required on every diagnosis)
+
+Every bug must be classified before a fix is proposed:
+
+- **Critical** — Safety, security, data integrity, or anything that could cause a family to lose trust (e.g. SOS doesn't fire, GPS silently stops, member disappears from dashboard, data loss)
+- **High** — Core functionality broken but not safety-related (e.g. check-in doesn't record, notifications not delivered)
+- **Medium** — Incorrect behavior that has a workaround
+- **Low** — Cosmetic or polish (e.g. age=0 placeholder, capitalization inconsistency)
+
+Priority order: Critical → High → Medium → Low. Polish backlog is addressed after stability is confirmed.
+
+**Why:** Charles stated this explicitly on July 10, 2026. Objective classification prevents emotional prioritization.
+
 ## Communication preferences
 
 - Evidence-first always — investigate before proposing changes
