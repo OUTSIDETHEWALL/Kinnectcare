@@ -839,11 +839,52 @@ function RootNav() {
         // dedupe).
         const arr = await memberStore.fetchAll();
         if (cancelled) return;
-        const me = (arr || []).find((m: any) => m.user_id === user.id);
+        let me = (arr || []).find((m: any) => m.user_id === user.id);
+
+        // Path 2 guard — if the member row is not yet visible on cold
+        // start, subscribe to store change notifications and wait for it
+        // to appear rather than stopping the engine immediately.
+        //
+        // Why this works: any subsequent fetchAll() — including the
+        // dashboard's 60 s poll — writes incoming members through
+        // upsertMany(), which fires subscribeMember() callbacks.  When
+        // the backend finally has our member row (whether that takes 5 s
+        // or 75 s), the next poll delivers it here and boot continues
+        // without requiring a sign-out or app restart.
+        //
+        // WAIT_TIMEOUT_MS is set to 90 s: one full dashboard poll cycle
+        // (60 s) plus a 30 s buffer.  A genuine caregiver-only device
+        // (no member row in the backend) waits at most 90 s before the
+        // engine stops normally — identical to the pre-fix outcome, just
+        // slightly delayed.  The device is otherwise fully functional
+        // during the wait; no UI is blocked.
         if (!me) {
-          // Caregiver-only or unlinked — nothing to upload from this
-          // device.  Ensure engine is stopped in case it was running
-          // from a previous session.
+          const WAIT_TIMEOUT_MS = 90_000;
+          me = await new Promise<any>((resolve) => {
+            let settled = false;
+            const settle = (value: any) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(waitTimer);
+              unsubStore();
+              resolve(value);
+            };
+            const waitTimer = setTimeout(() => settle(null), WAIT_TIMEOUT_MS);
+            const unsubStore = memberStore.subscribeMember((m: any) => {
+              // If the effect was cleaned up while we were waiting
+              // (sign-out, component unmount), resolve null so the
+              // IIFE can exit on the cancelled guard below.
+              if (cancelled) { settle(null); return; }
+              if (m.user_id === user.id) settle(m);
+            });
+          });
+          if (cancelled) return;
+        }
+
+        if (!me) {
+          // Timed out — caregiver-only device or genuinely absent
+          // member row.  Stop the engine in case it was running from a
+          // previous session.
           try { leonidas.stop(); } catch (_e) {}
           await locationEngine.stop();
           engineBootedForUserIdRef.current = null;
