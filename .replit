@@ -1,7 +1,12 @@
-modules = ["python-3.12", "nodejs-20"]
+modules = ["python-3.12", "nodejs-20", "postgresql-16"]
 [agent]
 expertMode = true
 
 [nix]
 channel = "stable-25_05"
 packages = ["cargo", "libiconv", "libxcrypt", "rustc"]
+
+[userenv]
+
+[userenv.shared]
+EXPO_PUBLIC_BACKEND_URL = "https://kinnectcare-production.up.railway.app"

@@ -143,3 +143,9 @@ credentials.json
 *.pem
 *.key
 .credentials
+
+# .env.production is intentionally tracked — it contains only the public
+# Railway URL (not a secret) and is required by @expo/env so Metro/
+# babel-preset-expo can inline EXPO_PUBLIC_* at bundle time.
+!.env.production
+!frontend/.env.production
