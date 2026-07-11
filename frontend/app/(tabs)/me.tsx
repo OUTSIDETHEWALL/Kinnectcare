@@ -27,6 +27,7 @@ import {
 import { useRouter, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Constants from 'expo-constants';
+import * as Updates from 'expo-updates';
 import { Icon } from '../../src/Icon';
 import { Colors } from '../../src/theme';
 import { useAuth } from '../../src/AuthContext';
@@ -458,14 +459,27 @@ export default function MeScreen() {
   }
   const pushCopy = pushStatusCopy(pushStatus);
 
-  const versionLine = useMemo(() => {
+  const buildInfo = useMemo(() => {
     const cfg = Constants.expoConfig as any;
-    const appVersion = (cfg?.version as string | undefined) || '—';
+    const appVersion = (cfg?.version as string) || '—';
     const buildNumber = Platform.OS === 'ios'
       ? (cfg?.ios?.buildNumber as string | number | undefined)
       : (cfg?.android?.versionCode as number | undefined);
-    const buildStr = buildNumber === undefined || buildNumber === null ? '—' : String(buildNumber);
-    return `Kinnship v${appVersion} (${buildStr})`;
+    const buildStr = buildNumber != null ? String(buildNumber) : '—';
+
+    // expo-updates fields (sync, available in both embedded and OTA builds)
+    const updateId: string | null = Updates.updateId ?? null;
+    const runtimeVersion: string = Updates.runtimeVersion ?? '—';
+    const channel: string = Updates.channel ?? '—';
+    const isEmbedded: boolean = Updates.isEmbeddedLaunch ?? true;
+
+    // Human-readable status so Charles can immediately tell what's running.
+    const otaStatus = isEmbedded ? 'Embedded' : 'Installed';
+    // Full UUID kept as a separate diagnostic field; truncated to first 8
+    // chars so it fits on one line and can be cross-referenced in Railway logs.
+    const otaId = !isEmbedded && updateId ? `${updateId.slice(0, 8)}…` : null;
+
+    return { appVersion, buildStr, otaStatus, otaId, runtimeVersion, channel, isEmbedded };
   }, []);
 
   return (
@@ -681,6 +695,35 @@ export default function MeScreen() {
           />
         </View>
 
+        {/* Software — version identification so we always know exactly what's running */}
+        <SectionLabel>Software</SectionLabel>
+        <View style={styles.card} testID="me-software-card">
+          <ReadRow
+            label="App Version · Build"
+            value={`${buildInfo.appVersion}  ·  Build ${buildInfo.buildStr}`}
+          />
+          <ReadRow
+            label="OTA Status"
+            value={buildInfo.otaStatus}
+          />
+          {buildInfo.otaId ? (
+            <ReadRow
+              label="OTA ID"
+              value={buildInfo.otaId}
+            />
+          ) : null}
+          <ReadRow
+            label="Runtime Version"
+            value={buildInfo.runtimeVersion}
+          />
+          {buildInfo.channel !== '—' ? (
+            <ReadRow
+              label="Channel"
+              value={buildInfo.channel}
+            />
+          ) : null}
+        </View>
+
         {/* Session */}
         <TouchableOpacity testID="me-sign-out" style={styles.signOutBtn} onPress={confirmLogout} activeOpacity={0.85}>
           <Icon name="log-out-outline" size={20} color={Colors.error} />
@@ -696,7 +739,6 @@ export default function MeScreen() {
 
         {/* Footer */}
         <Text style={styles.footer}>{APP_NAME} · © {new Date().getFullYear()} {COMPANY_NAME}</Text>
-        <Text style={styles.versionFooter} testID="me-version">{versionLine}</Text>
       </ScrollView>
 
       {/* -------- Modals -------- */}
