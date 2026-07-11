@@ -5,3 +5,8 @@ expertMode = true
 [nix]
 channel = "stable-25_05"
 packages = ["cargo", "libiconv", "libxcrypt", "rustc"]
+
+[userenv]
+
+[userenv.shared]
+EXPO_PUBLIC_BACKEND_URL = "https://kinnectcare-production.up.railway.app"
