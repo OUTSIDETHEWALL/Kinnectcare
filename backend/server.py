@@ -1561,7 +1561,11 @@ async def verify_otp(data: OtpVerify):
                     db, doc, target_group["id"], accepted_invite
                 )
             except Exception as e:
-                logger.warning(f"ensure_self_member_row (signup path) skipped: {e}")
+                logger.error(
+                    f"ensure_self_member_row (signup path) FAILED — "
+                    f"user={user_id[:8]} group={target_group.get('id', '')[:8]}: {e}",
+                    exc_info=True,
+                )
             # If they used a per-recipient INV- token, mark it accepted
             # and notify the inviter via push.  Best-effort — never fail
             # signup just because the bookkeeping push misfires.
@@ -1628,7 +1632,11 @@ async def verify_otp(data: OtpVerify):
                 f"in group={doc['family_group_id'][:8]}"
             )
         except Exception as e:
-            logger.warning(f"ensure_self_member_row (universal signup) skipped: {e}")
+            logger.error(
+                f"ensure_self_member_row (universal signup) FAILED — "
+                f"user={user_id[:8]} group={doc.get('family_group_id', '')[:8]}: {e}",
+                exc_info=True,
+            )
         user = doc
 
     if not user:
@@ -4630,9 +4638,9 @@ async def _heal_missing_self_member_rows():
                 await fg.ensure_self_member_row(db, u, gid, None)
                 n_healed += 1
             except Exception as e:
-                logger.warning(
-                    f"[self-member heal] user={uid[:8]} in group={gid[:8]} "
-                    f"failed: {e}"
+                logger.error(
+                    f"[self-member heal] user={uid[:8]} in group={gid[:8]} FAILED: {e}",
+                    exc_info=True,
                 )
         logger.info(
             f"Build #62 heal: scanned {n_users} users, created missing "
