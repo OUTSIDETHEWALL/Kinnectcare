@@ -53,6 +53,41 @@ if [[ -z "$MESSAGE" ]]; then
 fi
 
 # ═════════════════════════════════════════════════════════════
+hdr "Step 0 — Git state verification"
+# ═════════════════════════════════════════════════════════════
+# WHY: OTAs must always be published from a clean, up-to-date
+# main branch so that repository history, production code, and
+# the deployed OTA are perfectly synchronised. Publishing from
+# a feature branch means unreviewed code reaches devices before
+# it is merged — even if that code works, it severs the audit
+# trail that lets us reason about what is actually running in
+# production. All four checks must pass or the script aborts.
+
+# Check 1 — must be on main
+CURRENT_BRANCH=$(git -C "$FRONTEND_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+if [[ "$CURRENT_BRANCH" != "main" ]]; then
+  fail "Current branch is '${CURRENT_BRANCH}', not 'main'.\n\n   OTAs may only be published from main.\n   Merge your PR first, then:\n     git checkout main && git pull origin main"
+fi
+ok "On branch: main"
+
+# Check 2 — working tree must be clean
+GIT_STATUS=$(git -C "$FRONTEND_DIR" status --porcelain 2>/dev/null)
+if [[ -n "$GIT_STATUS" ]]; then
+  fail "Working tree is not clean. Commit or stash all changes before publishing.\n\n${GIT_STATUS}"
+fi
+ok "Working tree clean"
+
+# Check 3 — local main must match origin/main
+git -C "$FRONTEND_DIR" fetch origin --quiet 2>/dev/null \
+  || warn "Could not reach origin to verify sync — continuing with local state only"
+LOCAL_SHA=$(git -C "$FRONTEND_DIR" rev-parse HEAD 2>/dev/null || echo "local_unknown")
+REMOTE_SHA=$(git -C "$FRONTEND_DIR" rev-parse origin/main 2>/dev/null || echo "remote_unknown")
+if [[ "$LOCAL_SHA" != "$REMOTE_SHA" ]]; then
+  fail "Local main (${LOCAL_SHA:0:7}) is not up to date with origin/main (${REMOTE_SHA:0:7}).\n\n   Run: git pull origin main\n   Then verify the PR is already merged before retrying."
+fi
+ok "main is up to date with origin/main (${LOCAL_SHA:0:7})"
+
+# ═════════════════════════════════════════════════════════════
 hdr "Step 1 — .env.production file"
 # ═════════════════════════════════════════════════════════════
 # WHY: @expo/env (Expo SDK 50+) reads EXPO_PUBLIC_* ONLY from
