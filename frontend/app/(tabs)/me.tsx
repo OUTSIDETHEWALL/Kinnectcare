@@ -916,19 +916,14 @@ export default function MeScreen() {
         autoCapitalize="none"
         keyboardType="phone-pad"
       />
-      <EditModal
+      <GenderPickerModal
         visible={genderOpen}
-        title="Gender"
-        subtitle="Shown on your family profile card."
-        placeholder="e.g. Female, Male, Non-binary"
         value={genderDraft}
-        onChangeText={(t) => { setGenderDraft(t); setGenderErr(null); }}
+        onSelect={(v) => { setGenderDraft(v); setGenderErr(null); }}
         onCancel={() => !genderBusy && setGenderOpen(false)}
         onSave={saveGender}
         busy={genderBusy}
         error={genderErr}
-        maxLength={40}
-        autoCapitalize="words"
       />
       <EditModal
         visible={tzOpen}
@@ -1004,6 +999,96 @@ export default function MeScreen() {
     </SafeAreaView>
   );
 }
+
+// ------ GenderPickerModal ---------------------------------------------
+
+const GENDER_OPTIONS = ['Male', 'Female', 'Non-binary', 'Prefer not to say'] as const;
+
+function GenderPickerModal(props: {
+  visible: boolean;
+  value: string;
+  onSelect: (v: string) => void;
+  onCancel: () => void;
+  onSave: () => void;
+  busy: boolean;
+  error: string | null;
+}) {
+  return (
+    <Modal visible={props.visible} transparent animationType="fade" onRequestClose={props.onCancel}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modalCard}>
+          <Text style={styles.modalTitle}>Gender</Text>
+          <Text style={styles.modalSubtitle}>Shown on your family profile card.</Text>
+          <View style={{ marginTop: 12 }}>
+            {GENDER_OPTIONS.map((opt) => {
+              const selected = props.value === opt;
+              return (
+                <TouchableOpacity
+                  key={opt}
+                  onPress={() => props.onSelect(opt)}
+                  disabled={props.busy}
+                  activeOpacity={0.7}
+                  style={[genderPickerStyles.option, selected && genderPickerStyles.optionSelected]}
+                >
+                  <Text style={[genderPickerStyles.optionText, selected && genderPickerStyles.optionTextSelected]}>
+                    {opt}
+                  </Text>
+                  {selected ? <Text style={genderPickerStyles.check}>✓</Text> : null}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+          {props.error ? <Text style={styles.modalError}>{props.error}</Text> : null}
+          <TouchableOpacity
+            style={[styles.modalPrimary, (props.busy || !props.value) && { opacity: 0.6 }]}
+            onPress={props.onSave}
+            disabled={props.busy || !props.value}
+            activeOpacity={0.85}
+          >
+            {props.busy
+              ? <ActivityIndicator color={Colors.surface} />
+              : <Text style={styles.modalPrimaryText}>Save</Text>}
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.modalSecondary} onPress={props.onCancel} disabled={props.busy} activeOpacity={0.7}>
+            <Text style={styles.modalSecondaryText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const genderPickerStyles = StyleSheet.create({
+  option: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 13,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    marginBottom: 6,
+    backgroundColor: Colors.background,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  optionSelected: {
+    backgroundColor: Colors.tertiary,
+    borderColor: Colors.primary,
+  },
+  optionText: {
+    flex: 1,
+    fontSize: 15,
+    color: Colors.textPrimary,
+  },
+  optionTextSelected: {
+    fontWeight: '700',
+    color: Colors.primary,
+  },
+  check: {
+    fontSize: 16,
+    color: Colors.primary,
+    fontWeight: '700',
+  },
+});
 
 // ------ EditModal ------------------------------------------------------
 
