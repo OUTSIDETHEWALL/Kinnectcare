@@ -39,19 +39,40 @@ fi
 
 hdr "Pre-flight checks"
 
-# ── 1. EXPO_PUBLIC_BACKEND_URL must be set ──────────────────
-if [[ -z "${EXPO_PUBLIC_BACKEND_URL:-}" ]]; then
-  fail "EXPO_PUBLIC_BACKEND_URL is not set.\n\n   Metro inlines this variable at bundle time. A missing value produces\n   baseURL = \"undefined/api\" and breaks every API call on every device.\n\n   Fix: ensure EXPO_PUBLIC_BACKEND_URL is set in the Replit environment\n   or export it before running this script:\n\n     export EXPO_PUBLIC_BACKEND_URL=https://kinnectcare-production.up.railway.app\n"
+# ── 1. .env.production must exist and contain the backend URL ──
+#
+# IMPORTANT: shell environment variables are NOT read by Metro.
+# @expo/env (Expo SDK 50+) loads EXPO_PUBLIC_* exclusively from
+# .env files via dotenv, then inlines them at bundle time.
+# A shell-only export is silently ignored by the bundler.
+# The source of truth is frontend/.env.production.
+
+ENV_FILE="$(dirname "$0")/../.env.production"
+ENV_FILE="$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  fail ".env.production not found at: ${ENV_FILE}\n\n   This file is required — Metro will not pick up EXPO_PUBLIC_* from\n   the shell environment. Create the file with:\n\n     echo 'EXPO_PUBLIC_BACKEND_URL=https://kinnectcare-production.up.railway.app' > frontend/.env.production\n"
 fi
-ok "EXPO_PUBLIC_BACKEND_URL is set: ${EXPO_PUBLIC_BACKEND_URL}"
+ok ".env.production exists: ${ENV_FILE}"
+
+# Extract the value directly from the file (source of truth for Metro)
+FILE_URL=$(grep -E '^EXPO_PUBLIC_BACKEND_URL=' "$ENV_FILE" | cut -d'=' -f2- | tr -d '[:space:]')
+
+if [[ -z "$FILE_URL" ]]; then
+  fail "EXPO_PUBLIC_BACKEND_URL is not set in .env.production\n\n   Metro bundles this value from the file, not from the shell.\n   Add to ${ENV_FILE}:\n\n     EXPO_PUBLIC_BACKEND_URL=https://kinnectcare-production.up.railway.app\n"
+fi
+ok "EXPO_PUBLIC_BACKEND_URL in .env.production: ${FILE_URL}"
+
+# Use the file value as the URL for downstream checks
+EXPO_PUBLIC_BACKEND_URL="$FILE_URL"
 
 # ── 2. Must point to the expected Railway domain ────────────
 EXPECTED_DOMAIN="kinnectcare-production.up.railway.app"
 if [[ "${EXPO_PUBLIC_BACKEND_URL}" != https://* ]]; then
-  fail "EXPO_PUBLIC_BACKEND_URL must start with https://\n   Got: ${EXPO_PUBLIC_BACKEND_URL}"
+  fail "EXPO_PUBLIC_BACKEND_URL must start with https://\n   Got: ${EXPO_PUBLIC_BACKEND_URL}\n   File: ${ENV_FILE}"
 fi
 if [[ "${EXPO_PUBLIC_BACKEND_URL}" != *"${EXPECTED_DOMAIN}"* ]]; then
-  fail "EXPO_PUBLIC_BACKEND_URL does not contain the expected Railway domain.\n   Expected domain : ${EXPECTED_DOMAIN}\n   Got             : ${EXPO_PUBLIC_BACKEND_URL}\n\n   If the Railway URL has changed, update EXPECTED_DOMAIN in this script."
+  fail "EXPO_PUBLIC_BACKEND_URL does not contain the expected Railway domain.\n   Expected domain : ${EXPECTED_DOMAIN}\n   Got             : ${EXPO_PUBLIC_BACKEND_URL}\n   File            : ${ENV_FILE}\n\n   If the Railway URL has changed, update EXPECTED_DOMAIN in this script."
 fi
 ok "URL points to expected Railway domain"
 

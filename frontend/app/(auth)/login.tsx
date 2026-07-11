@@ -69,14 +69,9 @@ export default function Login() {
           "We couldn't reach the Kinnship servers. Please check your Wi-Fi or cellular signal and try again.",
         );
       } else if (!status) {
-        // DIAGNOSTIC BUILD — exposes the exact URL and error code so we
-        // can confirm what the bundle is actually calling.
-        // Remove this block once connectivity is confirmed restored.
-        const diagUrl = `${e?.config?.baseURL ?? '(no baseURL)'}${e?.config?.url ?? ''}`;
-        const diagCode = e?.code ?? e?.message ?? 'unknown';
         Alert.alert(
-          'No connection [diag]',
-          `URL: ${diagUrl}\nCode: ${diagCode}\n\nCheck your connection and try again.`,
+          'No connection',
+          `We couldn't reach the Kinnship servers (${e?.message || 'unknown error'}). Please check your connection and try again.`,
         );
       } else {
         Alert.alert('Could not send code', detail || `Server returned ${status}. Please try again.`);
