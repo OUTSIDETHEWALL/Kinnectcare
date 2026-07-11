@@ -1,27 +1,31 @@
 ---
 name: EAS Update env var requirement
-description: EXPO_PUBLIC_* variables must be present in the shell environment when running eas update — eas.json build profile env section is NOT applied automatically for eas update.
+description: EXPO_PUBLIC_* vars must come from a .env.production file — shell env vars are silently ignored by @expo/env and Metro's babel transform. Metro's FileStore cache must also be cleared when env vars change.
 ---
 
 ## Rule
 
-When running `eas update` from the Replit shell, every `EXPO_PUBLIC_*` variable used in the frontend code must be explicitly present in the shell environment. Setting them only in `eas.json`'s `build.<profile>.env` section is NOT sufficient for `eas update` — that section is applied for `eas build` only.
+`EXPO_PUBLIC_*` variables for OTA builds MUST be provided via `frontend/.env.production`. Shell environment variables are explicitly ignored by `@expo/env` (Expo SDK 50+) and never reach Metro's babel transform.
 
-**Why:** Metro bundler (which `eas update` invokes) inlines `process.env.EXPO_PUBLIC_*` at bundle time by reading the build process's environment. If the variable is absent, Metro inlines `undefined`, making e.g. `baseURL = "undefined/api"`. Every HTTP request then fails with Axios "Network Error" before leaving the device. This caused a full production outage on both test devices.
+**Why (three-layer failure, all confirmed from source):**
+
+1. **`@expo/env` reads only from `.env` files.** Source at `node_modules/@expo/env/build/index.js` line 197-203: values already in `process.env` (from the shell) are skipped when building the set that gets injected into Metro's transform context. Shell vars set inline (`EXPO_PUBLIC_BACKEND_URL=value npx eas update`) or via Replit env manager are silently ignored.
+
+2. **Production inlining uses babel-preset-expo, not the Metro serializer.** Source at `node_modules/@expo/metro-config/build/serializer/environmentVariableSerializerPlugin.js` line 62-65: in production mode (`!options.dev`) the serializer explicitly returns early with a log message "in favor of babel-preset-expo inlining with source maps." The actual substitution of `process.env.EXPO_PUBLIC_BACKEND_URL` happens at babel transform time.
+
+3. **Metro's FileStore cache (`.metro-cache/`) preserves stale transforms.** The project's `metro.config.js` uses a custom `FileStore` at `.metro-cache/`. If source files haven't changed, Metro serves cached babel-transformed modules even when the env var value changed. Two "fix" OTAs produced identical bundle hashes because Metro never re-ran babel. Clearing `.metro-cache/` forces a full re-transform.
 
 **How to apply:**
-- `EXPO_PUBLIC_BACKEND_URL` is now saved as a Replit shared env var (set 2026-07-11). It is automatically available in all future shell sessions.
-- The correct `eas update` command pattern is:
-  ```bash
-  cd frontend && EXPO_TOKEN=<token> npx eas update --channel production --message "<msg>" --non-interactive
-  ```
-  The `EXPO_PUBLIC_BACKEND_URL` env var is now always present from the Replit environment — no need to pass it inline anymore.
-- Before publishing any OTA, verify the env var is set: `printenv | grep EXPO_PUBLIC`
 
-## Verification note
-
-HBC (Hermes bytecode) does NOT store strings as raw UTF-8 bytes. Binary verification with `grep`, `strings`, or Python `bytes.in()` will ALWAYS return False even when the URL is correctly inlined. This is not evidence the URL is missing — it reflects HBC's internal string table format. The only reliable verification is behavioral (does the app connect?).
+- `frontend/.env.production` is the canonical location. It is committed (not gitignored — the root `.gitignore` has a `!frontend/.env.production` exception).
+- Before any OTA publish, clear the Metro cache: `rm -rf frontend/.metro-cache`
+- The `publish-ota.sh` script validates the file (not shell env) and should be used for all future OTA publishes: `cd frontend && bash scripts/publish-ota.sh "your message"`
+- The script currently does NOT auto-clear the cache. If env vars change, clear manually first.
 
 ## Incident
 
-First Sprint 2 OTA (update group 4f35b82d) was published without `EXPO_PUBLIC_BACKEND_URL` in the shell. Metro inlined `undefined`. Both Charles and Joyce's devices showed "No connection" on every API call. Fixed OTA published as update group a22e9706 with env var correctly set and saved to Replit env vars.
+Sprint 2 OTA connectivity outage: all devices called `undefined/api/auth/request-otp` with `ERR_NETWORK`. Confirmed via diagnostic OTA that showed raw URL in the error dialog. Root cause was missing `.env.production` combined with stale Metro cache. Fixed in OTA `5b547265` (bundle hash `entry-f77defb0…`) which had a different hash from all prior broken OTAs, confirming full re-transformation.
+
+## Verification method
+
+After a cache-clear publish, confirm the new bundle has a DIFFERENT hash from the previous one. Identical hashes = Metro served cache = env var not picked up. The bundle hash appears in the `eas update` output under "android bundles" and "ios bundles".
