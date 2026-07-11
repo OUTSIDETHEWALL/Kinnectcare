@@ -767,7 +767,11 @@ def build_router(
         try:
             await ensure_self_member_row(db, current, target["id"], accepted_invite)
         except Exception as e:
-            logger.warning(f"ensure_self_member_row (join path) skipped: {e}")
+            logger.error(
+                f"ensure_self_member_row (join path) FAILED — "
+                f"user={current.get('id','?')[:8]} group={target.get('id','')[:8]}: {e}",
+                exc_info=True,
+            )
         # Cleanup old solo group if it has no users left
         if old_gid and old_gid != target["id"]:
             remaining = await db.users.count_documents({"family_group_id": old_gid})
