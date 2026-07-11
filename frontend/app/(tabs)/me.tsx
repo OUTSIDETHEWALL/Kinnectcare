@@ -187,6 +187,31 @@ export default function MeScreen() {
   const [tzBusy, setTzBusy] = useState(false);
   const [tzErr, setTzErr] = useState<string | null>(null);
 
+  // Profile — member record fields (age, phone, gender)
+  // These are separate from the user-account fields above.
+  // The member row is created with sentinel values (age=0, phone="",
+  // gender="") when the user joins via invite; this section lets them
+  // fill in their own details which family members see on their card.
+  const [myMemberId, setMyMemberId] = useState<string | null>(null);
+  const [myMemberAge, setMyMemberAge] = useState<number>(0);
+  const [myMemberPhone, setMyMemberPhone] = useState<string>('');
+  const [myMemberGender, setMyMemberGender] = useState<string>('');
+
+  const [ageOpen, setAgeOpen] = useState(false);
+  const [ageDraft, setAgeDraft] = useState('');
+  const [ageBusy, setAgeBusy] = useState(false);
+  const [ageErr, setAgeErr] = useState<string | null>(null);
+
+  const [phoneOpen, setPhoneOpen] = useState(false);
+  const [phoneDraft, setPhoneDraft] = useState('');
+  const [phoneBusy, setPhoneBusy] = useState(false);
+  const [phoneErr, setPhoneErr] = useState<string | null>(null);
+
+  const [genderOpen, setGenderOpen] = useState(false);
+  const [genderDraft, setGenderDraft] = useState('');
+  const [genderBusy, setGenderBusy] = useState(false);
+  const [genderErr, setGenderErr] = useState<string | null>(null);
+
   // Delete-account modal
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
@@ -229,6 +254,31 @@ export default function MeScreen() {
       })();
       return () => { cancelled = true; };
     }, [user?.id])
+  );
+
+  // Load the caller's own member record so we can show/edit age, phone, gender.
+  // Uses the same kc_my_member_id_v1 key written by the location engine.
+  // Runs on every focus so edits on another screen (e.g. caregiver patching
+  // their own card) are reflected immediately.
+  useFocusEffect(
+    React.useCallback(() => {
+      let cancelled = false;
+      (async () => {
+        try {
+          const mid = await AsyncStorage.getItem('kc_my_member_id_v1');
+          if (!mid || cancelled) return;
+          setMyMemberId(mid);
+          const r = await api.get(`/members/${mid}`);
+          if (cancelled) return;
+          setMyMemberAge(r.data.age ?? 0);
+          setMyMemberPhone(r.data.phone ?? '');
+          setMyMemberGender(r.data.gender ?? '');
+        } catch (_e) {
+          // Non-fatal — member row may not yet exist for brand-new accounts.
+        }
+      })();
+      return () => { cancelled = true; };
+    }, [])
   );
 
   // ---- Handlers ----
@@ -281,6 +331,63 @@ export default function MeScreen() {
     } finally {
       setTzBusy(false);
     }
+  };
+
+  // ---- Profile edit handlers ----
+
+  const openEditAge = () => {
+    setAgeDraft(myMemberAge && myMemberAge > 0 ? String(myMemberAge) : '');
+    setAgeErr(null);
+    setAgeOpen(true);
+  };
+  const saveAge = async () => {
+    const n = parseInt(ageDraft.trim(), 10);
+    if (isNaN(n) || n < 1 || n > 120) { setAgeErr('Please enter a valid age between 1 and 120.'); return; }
+    if (!myMemberId) { setAgeErr('Profile not loaded — please reopen this tab.'); return; }
+    setAgeBusy(true); setAgeErr(null);
+    try {
+      const r = await api.put(`/members/${myMemberId}`, { age: n });
+      setMyMemberAge(r.data.age);
+      setAgeOpen(false);
+    } catch (e: any) {
+      setAgeErr(e?.response?.data?.detail || e?.message || 'Could not update age.');
+    } finally { setAgeBusy(false); }
+  };
+
+  const openEditPhone = () => {
+    setPhoneDraft(myMemberPhone || '');
+    setPhoneErr(null);
+    setPhoneOpen(true);
+  };
+  const savePhone = async () => {
+    const v = phoneDraft.trim();
+    if (!myMemberId) { setPhoneErr('Profile not loaded — please reopen this tab.'); return; }
+    setPhoneBusy(true); setPhoneErr(null);
+    try {
+      const r = await api.put(`/members/${myMemberId}`, { phone: v });
+      setMyMemberPhone(r.data.phone ?? '');
+      setPhoneOpen(false);
+    } catch (e: any) {
+      setPhoneErr(e?.response?.data?.detail || e?.message || 'Could not update phone number.');
+    } finally { setPhoneBusy(false); }
+  };
+
+  const openEditGender = () => {
+    setGenderDraft(myMemberGender || '');
+    setGenderErr(null);
+    setGenderOpen(true);
+  };
+  const saveGender = async () => {
+    const v = genderDraft.trim();
+    if (!myMemberId) { setGenderErr('Profile not loaded — please reopen this tab.'); return; }
+    setGenderBusy(true); setGenderErr(null);
+    try {
+      const r = await api.put(`/members/${myMemberId}`, { gender: v });
+      setMyMemberGender(r.data.gender ?? '');
+      setGenderOpen(false);
+    } catch (e: any) {
+      setGenderErr(e?.response?.data?.detail || e?.message || 'Could not update gender.');
+    } finally { setGenderBusy(false); }
   };
 
   const onToggleBiometrics = async (next: boolean) => {
@@ -508,6 +615,30 @@ export default function MeScreen() {
             onEdit={openEditTimezone}
           />
         </View>
+
+        {/* Profile — member fields visible to your family */}
+        {myMemberId ? (
+          <>
+            <SectionLabel>Profile</SectionLabel>
+            <View style={styles.card}>
+              <EditableRow
+                label="Age"
+                value={myMemberAge && myMemberAge > 0 ? `${myMemberAge} years` : 'Not set'}
+                onEdit={openEditAge}
+              />
+              <EditableRow
+                label="Phone"
+                value={myMemberPhone || 'Not set'}
+                onEdit={openEditPhone}
+              />
+              <EditableRow
+                label="Gender"
+                value={myMemberGender || 'Not set'}
+                onEdit={openEditGender}
+              />
+            </View>
+          </>
+        ) : null}
 
         {/* Plan */}
         <SectionLabel>Plan</SectionLabel>
@@ -756,6 +887,50 @@ export default function MeScreen() {
         autoCapitalize="words"
       />
       <EditModal
+        visible={ageOpen}
+        title="Your age"
+        subtitle="Shown to your family on your profile card."
+        placeholder="e.g. 72"
+        value={ageDraft}
+        onChangeText={(t) => { setAgeDraft(t.replace(/[^0-9]/g, '')); setAgeErr(null); }}
+        onCancel={() => !ageBusy && setAgeOpen(false)}
+        onSave={saveAge}
+        busy={ageBusy}
+        error={ageErr}
+        maxLength={3}
+        autoCapitalize="none"
+        keyboardType="numeric"
+      />
+      <EditModal
+        visible={phoneOpen}
+        title="Phone number"
+        subtitle="Shown to your family and used for emergency contact."
+        placeholder="e.g. +1 555 000 0100"
+        value={phoneDraft}
+        onChangeText={(t) => { setPhoneDraft(t); setPhoneErr(null); }}
+        onCancel={() => !phoneBusy && setPhoneOpen(false)}
+        onSave={savePhone}
+        busy={phoneBusy}
+        error={phoneErr}
+        maxLength={30}
+        autoCapitalize="none"
+        keyboardType="phone-pad"
+      />
+      <EditModal
+        visible={genderOpen}
+        title="Gender"
+        subtitle="Shown on your family profile card."
+        placeholder="e.g. Female, Male, Non-binary"
+        value={genderDraft}
+        onChangeText={(t) => { setGenderDraft(t); setGenderErr(null); }}
+        onCancel={() => !genderBusy && setGenderOpen(false)}
+        onSave={saveGender}
+        busy={genderBusy}
+        error={genderErr}
+        maxLength={40}
+        autoCapitalize="words"
+      />
+      <EditModal
         visible={tzOpen}
         title="Edit time zone"
         placeholder="e.g. America/New_York"
@@ -845,6 +1020,7 @@ function EditModal(props: {
   maxLength: number;
   autoCapitalize: 'none' | 'sentences' | 'words' | 'characters';
   subtitle?: string;
+  keyboardType?: 'default' | 'numeric' | 'phone-pad' | 'email-address';
 }) {
   return (
     <Modal visible={props.visible} transparent animationType="fade" onRequestClose={props.onCancel}>
@@ -861,6 +1037,7 @@ function EditModal(props: {
             autoCorrect={false}
             editable={!props.busy}
             maxLength={props.maxLength}
+            keyboardType={props.keyboardType ?? 'default'}
             style={styles.modalInput}
           />
           {props.error ? <Text style={styles.modalError}>{props.error}</Text> : null}
