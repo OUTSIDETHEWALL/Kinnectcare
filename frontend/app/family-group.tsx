@@ -31,6 +31,8 @@ import {
   FamilyInvite,
 } from '../src/api';
 import { useAuth } from '../src/AuthContext';
+import { setMyMemberId } from '../src/locationRefresh';
+import * as memberStore from '../src/store/memberStore';
 import { APP_NAME } from '../src/legal';
 
 export default function FamilyGroupScreen() {
@@ -206,6 +208,22 @@ export default function FamilyGroupScreen() {
     }
   };
 
+  // After any group change (join or leave), the cached kc_my_member_id_v1
+  // key in AsyncStorage still points to the old group's member row.
+  // The RootNav effect that refreshes it only fires on user.id changes —
+  // group switches don't trigger it.  Re-fetch the member list here so
+  // the location engine immediately targets the correct row in the new group.
+  const refreshMyMemberId = async () => {
+    try {
+      const arr = await memberStore.fetchAll();
+      const me = (arr as any[]).find((m: any) => m.user_id === user?.id);
+      await setMyMemberId(me ? me.id : null);
+    } catch (_e) {
+      // Non-fatal — the location engine will recover on the next foreground
+      // transition when RootNav re-runs its member-fetch effect.
+    }
+  };
+
   const submitJoin = async () => {
     const code = joinCode.trim().toUpperCase();
     if (!code) {
@@ -220,6 +238,7 @@ export default function FamilyGroupScreen() {
       setJoinCode('');
       await refreshUser?.();
       await load();
+      await refreshMyMemberId();
       Alert.alert('Joined!', 'You are now part of this family.');
     } catch (e: any) {
       setJoinError(e?.response?.data?.detail || e?.message || 'Failed to join');
@@ -250,6 +269,7 @@ export default function FamilyGroupScreen() {
               await leaveFamilyGroup();
               await refreshUser?.();
               await load();
+              await refreshMyMemberId();
             } catch (e: any) {
               Alert.alert('Error', e?.response?.data?.detail || 'Failed to leave');
             } finally {

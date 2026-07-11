@@ -1639,6 +1639,89 @@ async def verify_otp(data: OtpVerify):
             )
         user = doc
 
+    # === EXISTING USER + INVITE CODE on signup path ===
+    #
+    # Joyce reinstalls, enters her INV- code in join-family.tsx, which
+    # routes her through the signup screen (passing invite_code to
+    # request-otp).  The OTP is stored with purpose=signup and the
+    # invite_code.  But if Joyce already has an account the
+    # `if purpose == "signup" and not user:` block above is skipped —
+    # so the invite_code would be silently ignored and she would land in
+    # her old solo group with no family visible.
+    #
+    # This block catches that case: existing user + signup purpose +
+    # invite_code present → treat it as a join, identical to
+    # POST /family-group/join, so the account ends up in the right group.
+    if purpose == "signup" and user and rec.get("invite_code"):
+        try:
+            _ei_code = rec["invite_code"]
+            _ei_target, _ei_accepted = await fg.resolve_invite_code(db, _ei_code)
+            if _ei_target and _ei_target["id"] != user.get("family_group_id"):
+                _old_gid = user.get("family_group_id")
+                _can_join = True
+                # Owner of a populated group cannot silently leave it.
+                if _old_gid:
+                    _old_grp = await db.family_groups.find_one(
+                        {"id": _old_gid}, {"_id": 0, "owner_user_id": 1}
+                    )
+                    if _old_grp and _old_grp.get("owner_user_id") == user["id"]:
+                        _co = await db.users.count_documents(
+                            {"family_group_id": _old_gid, "id": {"$ne": user["id"]}}
+                        )
+                        if _co > 0:
+                            _can_join = False
+                            logger.warning(
+                                f"verify-otp join-existing: skipped — user={user['id'][:8]} "
+                                f"is owner of populated group {_old_gid[:8]}"
+                            )
+                if _can_join:
+                    await fg.transfer_data_to_group(db, user["id"], _ei_target["id"])
+                    await db.users.update_one(
+                        {"id": user["id"]},
+                        {"$set": {
+                            "family_group_id": _ei_target["id"],
+                            "family_group_role": "member",
+                        }},
+                    )
+                    user = dict(user)
+                    user["family_group_id"] = _ei_target["id"]
+                    user["family_group_role"] = "member"
+                    # Clean up the old solo group if it is now empty.
+                    if _old_gid and _old_gid != _ei_target["id"]:
+                        _remaining = await db.users.count_documents(
+                            {"family_group_id": _old_gid}
+                        )
+                        if _remaining == 0:
+                            await db.family_groups.delete_one({"id": _old_gid})
+                    try:
+                        await fg.ensure_self_member_row(
+                            db, user, _ei_target["id"], _ei_accepted
+                        )
+                    except Exception as _esm_err:
+                        logger.error(
+                            f"ensure_self_member_row (login+invite path) FAILED — "
+                            f"user={user['id'][:8]} group={_ei_target.get('id','')[:8]}: "
+                            f"{_esm_err}",
+                            exc_info=True,
+                        )
+                    if _ei_accepted:
+                        try:
+                            await fg.accept_invite(db, _ei_accepted["id"], user["id"])
+                        except Exception as _ai_err:
+                            logger.warning(
+                                f"accept_invite bookkeeping (login+invite): {_ai_err}"
+                            )
+                    logger.info(
+                        f"verify-otp: existing user {user['id'][:8]} joined "
+                        f"group {_ei_target['id'][:8]} via invite on login+signup path"
+                    )
+        except Exception as _join_err:
+            logger.error(
+                f"verify-otp join-existing: unexpected error for "
+                f"user={user.get('id','?')[:8]}: {_join_err}",
+                exc_info=True,
+            )
+
     if not user:
         # purpose=login but the user doesn't exist (or signup race) —
         # surface the same vague error as a bad code so we don't leak
