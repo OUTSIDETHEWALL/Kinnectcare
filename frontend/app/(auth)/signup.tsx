@@ -26,11 +26,34 @@ export default function Signup() {
   // public /verify-invite endpoint by the time they land here, so we
   // bake the code into the form (and pre-fill the email for per-invite
   // INV codes that carry the address they were issued to).
-  const params = useLocalSearchParams<{ invite_token?: string; email?: string }>();
+  const params = useLocalSearchParams<{
+    invite_token?: string;
+    email?: string;
+    family_name?: string;
+    inviter_name?: string;
+  }>();
   const [name, setName] = useState('');
   const [email, setEmail] = useState(String(params?.email || ''));
   const [inviteCode, setInviteCode] = useState(String(params?.invite_token || ''));
   const [loading, setLoading] = useState(false);
+
+  // Invite-flow detection.  When the user arrives from join-family.tsx
+  // (after previewing the family card) we know:
+  //   • invite_token — the code, already verified against the backend
+  //   • email        — pre-filled for per-recipient INV- codes; empty
+  //                    for family-wide KINN- codes
+  //   • family_name  — the target family's display name
+  //   • inviter_name — who sent the invite (optional)
+  //
+  // In invite-flow mode we:
+  //   1. Streamline the title / subtitle to carry family context.
+  //   2. Hide the invite-code field (already confirmed, passed silently).
+  //   3. Hide the email field when it's pre-filled (INV- codes).
+  //   4. Hide the "Already have an account?" link (wrong audience).
+  const isInviteFlow = !!(params?.invite_token || '').trim();
+  const emailPreFilled = !!(params?.email || '').trim();
+  const familyName = String(params?.family_name || '');
+  const inviterName = String(params?.inviter_name || '');
 
   const onSubmit = async () => {
     const nameTrim = (name || '').trim();
@@ -96,43 +119,68 @@ export default function Signup() {
           <TouchableOpacity testID="signup-back" onPress={() => router.back()} style={styles.back}>
             <Icon name="arrow-back" size={28} color={Colors.textPrimary} />
           </TouchableOpacity>
-          <Text style={styles.title}>Create your account</Text>
-          <Text style={styles.subtitle}>
-            No password to remember — we'll email you a 6-digit code instead.
+          <Text style={styles.title}>
+            {isInviteFlow ? 'Almost there!' : 'Create your account'}
           </Text>
 
+          {isInviteFlow ? (
+            <View style={styles.familyBanner}>
+              <Text style={styles.familyBannerLabel}>You're joining</Text>
+              <Text style={styles.familyBannerName}>
+                {familyName || 'your family'}
+              </Text>
+              {!!inviterName && (
+                <Text style={styles.familyBannerInviter}>
+                  Invited by {inviterName}
+                </Text>
+              )}
+            </View>
+          ) : (
+            <Text style={styles.subtitle}>
+              No password to remember — we'll email you a 6-digit code instead.
+            </Text>
+          )}
+
           <Field
-            label="Full name"
+            label="Your name"
             value={name}
             onChangeText={setName}
             placeholder="Jane Smith"
             testID="signup-name"
             autoCapitalize="words"
           />
-          <Field
-            label="Email"
-            value={email}
-            onChangeText={setEmail}
-            placeholder="you@example.com"
-            keyboardType="email-address"
-            autoCapitalize="none"
-            autoCorrect={false}
-            textContentType="emailAddress"
-            autoComplete="email"
-            testID="signup-email"
-          />
-          <Field
-            label="Family invite code (optional)"
-            value={inviteCode}
-            onChangeText={(v: string) => setInviteCode(v.toUpperCase())}
-            placeholder="KINN-XXXXXX"
-            autoCapitalize="characters"
-            testID="signup-invite-code"
-          />
-          {inviteCode.trim() ? (
-            <Text style={styles.inviteHint}>
-              👨‍👩‍👧 You'll join an existing family and see their members & alerts immediately.
-            </Text>
+
+          {(!isInviteFlow || !emailPreFilled) ? (
+            <Field
+              label="Email"
+              value={email}
+              onChangeText={setEmail}
+              placeholder="you@example.com"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              autoCorrect={false}
+              textContentType="emailAddress"
+              autoComplete="email"
+              testID="signup-email"
+            />
+          ) : null}
+
+          {!isInviteFlow ? (
+            <>
+              <Field
+                label="Family invite code (optional)"
+                value={inviteCode}
+                onChangeText={(v: string) => setInviteCode(v.toUpperCase())}
+                placeholder="KINN-XXXXXX"
+                autoCapitalize="characters"
+                testID="signup-invite-code"
+              />
+              {inviteCode.trim() ? (
+                <Text style={styles.inviteHint}>
+                  👨‍👩‍👧 You'll join an existing family and see their members & alerts immediately.
+                </Text>
+              ) : null}
+            </>
           ) : null}
 
           <TouchableOpacity
@@ -159,15 +207,18 @@ export default function Signup() {
             .
           </Text>
 
-          <TouchableOpacity
-            testID="signup-to-login"
-            onPress={() => router.replace('/(auth)/login')}
-            style={{ marginTop: 18, alignItems: 'center' }}
-          >
-            <Text style={styles.link}>
-              Already have an account? <Text style={{ fontWeight: '700', color: Colors.primary }}>Sign in</Text>
-            </Text>
-          </TouchableOpacity>
+          {!isInviteFlow ? (
+            <TouchableOpacity
+              testID="signup-to-login"
+              onPress={() => router.replace('/(auth)/login')}
+              style={{ marginTop: 18, alignItems: 'center' }}
+            >
+              <Text style={styles.link}>
+                Already have an account?{' '}
+                <Text style={{ fontWeight: '700', color: Colors.primary }}>Sign in</Text>
+              </Text>
+            </TouchableOpacity>
+          ) : null}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -213,4 +264,31 @@ const styles = StyleSheet.create({
   },
   agreementLink: { color: Colors.primary, fontWeight: '700', textDecorationLine: 'underline' },
   inviteHint: { fontSize: 12, color: Colors.success, marginTop: 8, lineHeight: 18 },
+  familyBanner: {
+    marginTop: 12,
+    marginBottom: 4,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    borderRadius: 14,
+    backgroundColor: Colors.tertiary,
+    alignItems: 'center',
+  },
+  familyBannerLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Colors.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  familyBannerName: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: Colors.primary,
+    marginTop: 4,
+  },
+  familyBannerInviter: {
+    fontSize: 14,
+    color: Colors.textSecondary,
+    marginTop: 4,
+  },
 });

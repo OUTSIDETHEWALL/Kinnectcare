@@ -89,6 +89,8 @@ export default function JoinFamilyByCode() {
       params: {
         invite_token: normalized,
         email: preview.invitee_email || '',
+        family_name: preview.family_name || '',
+        inviter_name: preview.inviter_name || '',
       },
     } as any);
   }
