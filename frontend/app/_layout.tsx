@@ -626,22 +626,43 @@ function RootNav() {
     // task tick) so a slow /members fetch doesn't leave the bg log
     // without a writer identity field for the first few minutes.
     setMyUserId(user.id).catch(() => {});
-    (async () => {
+    // Resolve and cache the caller's member row ID.
+    //
+    // Retries once after 2 s to cover the race between verify-otp
+    // completing (which writes ensure_self_member_row on the backend
+    // and returns the JWT) and the first member-list fetch landing
+    // here.  Without the retry, a fresh invite-path join can hit
+    // GET /members before the DB write commits — returning an empty
+    // list, leaving kc_my_member_id_v1 null, and hiding the Profile
+    // section on the Me tab until the next app restart.
+    //
+    // Build 47 note preserved: routing through the canonical store
+    // both resolves the member ID AND hydrates the store before
+    // Dashboard mounts, so the first paint reads real data.
+    async function resolveMyMemberId(attempt: number): Promise<void> {
       try {
-        // Build 47 — route through the canonical store.  This both
-        // resolves "my member id" AND hydrates the store before
-        // Dashboard mounts, so the first paint reads canonical data
-        // and Leonidas's first patrol has a real last_seen instead
-        // of falling back to the engine log.
         const arr = await memberStore.fetchAll();
         if (cancelled) return;
-        const me = (arr as any[]).find((m) => m.user_id === user.id);
-        await setMyMemberId(me ? me.id : null);
+        const me = (arr as any[]).find((m: any) => m.user_id === user!.id);
+        if (me) {
+          await setMyMemberId(me.id);
+        } else if (attempt < 2) {
+          // Row absent — ensure_self_member_row may not have committed
+          // yet.  Wait 2 s and try once more before giving up.
+          await new Promise<void>((res) => setTimeout(res, 2000));
+          if (!cancelled) await resolveMyMemberId(attempt + 1);
+        } else {
+          // Second attempt also found nothing — user genuinely has no
+          // member row (edge case).  Dashboard's own fetch is the
+          // safety net; the next /auth/me refresh will retry this
+          // effect if user.id changes.
+          await setMyMemberId(null);
+        }
       } catch (_e) {
-        // Network failure here is OK — dashboard's mount effect is
-        // the safety net and the next /auth/me success will retry.
+        // Network failure is OK — next /auth/me success will retry.
       }
-    })();
+    }
+    resolveMyMemberId(1);
     return () => { cancelled = true; };
   }, [user?.id]);
 
