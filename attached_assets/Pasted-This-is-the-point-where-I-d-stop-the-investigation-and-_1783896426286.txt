@@ -1,0 +1,143 @@
+This is the point where I'd stop the investigation and consolidate everything into one direction. Replit has now responded to both of your messages, and I think you have a coherent plan.
+
+There is one thing I would ask Replit to be careful about: the `removeClippedSubviews` explanation is plausible and documented by React Native, but I'd avoid stating it as absolute fact until it's verified on Joyce's phone. The real proof is that PR #15 makes the missing sections reappear.
+
+Here's the single write-up I'd send.
+
+---
+
+## 📨 Tell Replit
+
+Excellent work today. I think we've reached an important transition point in the project.
+
+The first end-to-end onboarding regression was a major success. We successfully completed account deletion, invitation, installation, OTP, PIN setup, permissions, family creation, Tracking Healthy, and GPS synchronization. Compared to where we were even yesterday, onboarding reliability has improved dramatically.
+
+I now want our priorities to shift.
+
+### Priority 1 — Streamline onboarding
+
+From this point forward, I want us to focus less on bug hunting and more on making onboarding effortless.
+
+The goal is:
+
+> Make onboarding so simple that a non-technical 65-year-old can complete it comfortably without assistance.
+
+For every screen in the onboarding flow, ask:
+
+* Does this screen truly need to exist?
+* Can this information already be inferred?
+* Can two screens become one?
+* Can we remove a confirmation?
+* Can we reduce taps?
+
+The "Almost there" screen in PR #13 is exactly the kind of improvement I'm looking for. Continue thinking in that direction.
+
+---
+
+### Priority 2 — Me tab rendering
+
+I verified during testing that Joyce scrolled completely to the bottom of the Me tab.
+
+The page ends at Legal.
+
+There is no Profile section.
+
+There is no Software section.
+
+Charles's phone shows both sections.
+
+Both phones are running OTA `019f537a`.
+
+So this is a confirmed rendering problem.
+
+Your explanation regarding `removeClippedSubviews` is reasonable and matches React Native documentation, but I'd like to treat it as a hypothesis until we verify it on Joyce's device.
+
+The verification is simple:
+
+If PR #15 makes the missing sections appear, we've confirmed the root cause.
+
+---
+
+### Priority 3 — Profile race
+
+I agree with PR #14.
+
+The retry for resolving `myMemberId` after onboarding is the correct approach.
+
+That bug directly affects the first-time user experience.
+
+---
+
+### Priority 4 — SOS notification
+
+I appreciate that you investigated `transfer_data_to_group()` instead of assuming it was responsible.
+
+The TTL explanation makes sense.
+
+A one-hour TTL for resolved SOS notifications is appropriate.
+
+---
+
+### Merge / deployment plan
+
+Let's keep this simple.
+
+Merge:
+
+* PR #14
+* PR #15
+* PR #13
+
+Publish **one OTA** from a clean, up-to-date `main` branch.
+
+Then merge:
+
+* PR #12
+
+Deploy Railway.
+
+That gives us one frontend update and one backend deployment.
+
+---
+
+### Next regression
+
+After the OTA is installed on both phones we will run another complete onboarding regression from scratch.
+
+Success criteria remain:
+
+* Delete account
+* Remove family member
+* Fresh invite
+* Install
+* Join family
+* Tracking Healthy
+* GPS correct
+* Profile section visible
+* Software section visible
+* Onboarding feels natural and requires as few decisions as possible
+
+When Joyce can comfortably complete this process without coaching, we'll consider onboarding Green.
+
+---
+
+One last observation.
+
+Today felt very different from previous sessions.
+
+Earlier this week we were fixing infrastructure:
+
+* OTA delivery
+* Backend connectivity
+* Railway
+* Environment variables
+* Logging
+
+Today we were discussing:
+
+* screen flow
+* rendering
+* user experience
+* onboarding
+
+That's exactly the transition I was hoping we'd reach. The foundation is becoming stable, and now we can focus on building an experience that people enjoy using. I think that's the right direction for Kinnship from here forward.
