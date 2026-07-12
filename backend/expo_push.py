@@ -136,6 +136,12 @@ async def send_expo_push(
     cat_id = data.get("categoryIdentifier") or data.get("categoryId")
     channel_id = data.get("channelId") or "default"
     source_tag = data.get("_source_tag") or "unknown"
+    # Optional TTL (seconds) injected via data["_ttl"].  None = omit the
+    # field and let FCM/APNs use their default (~28-day) redelivery window.
+    # Callers that send time-sensitive status notifications (e.g. SOS
+    # resolved) should set a short TTL so a delayed delivery doesn't
+    # confuse the recipient.
+    _ttl = data.get("_ttl")
 
     # Build #62 — comprehensive outbound-push audit log.
     # Every push (visible AND silent) is logged with source_tag,
@@ -183,18 +189,23 @@ async def send_expo_push(
             "priority": priority,
             "channelId": channel_id,
             "data": data,
-            # NOTE: TTL intentionally OMITTED so Expo/FCM/APNs use their
-            # default redelivery window (~28 days for FCM, 4 weeks for APNs
-            # tokens).  An earlier version of this file set ttl=0 which
-            # told FCM "drop if device not immediately reachable" — that
-            # silently dropped medication/check-in/family-alert pushes
-            # whenever the recipient phone was in Doze, on a poor cell
-            # connection, or had screen off long enough to throttle the
-            # FCM socket. SOS happened to work because caregivers were
-            # typically active when SOS fired.  We now let FCM hold the
-            # push until the device wakes up — same behavior as any
-            # production messaging app.
+            # NOTE: TTL intentionally OMITTED BY DEFAULT so Expo/FCM/APNs
+            # use their default redelivery window (~28 days for FCM, 4
+            # weeks for APNs tokens).  An earlier version of this file set
+            # ttl=0 which told FCM "drop if device not immediately
+            # reachable" — that silently dropped medication/check-in/family-
+            # alert pushes whenever the recipient phone was in Doze, on a
+            # poor cell connection, or had screen off long enough to throttle
+            # the FCM socket. SOS happened to work because caregivers were
+            # typically active when SOS fired.  We now let FCM hold the push
+            # until the device wakes up — same behaviour as any production
+            # messaging app.
+            #
+            # Callers may override via data["_ttl"] (seconds) for
+            # notifications whose value decays quickly (e.g. SOS resolved).
         }
+        if _ttl is not None:
+            msg["ttl"] = int(_ttl)
         # Build 50 — ghost-notification KILL at the FCM protocol level.
         #
         # FCM has a strict rule: any message that contains a
