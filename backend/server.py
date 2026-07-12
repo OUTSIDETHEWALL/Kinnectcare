@@ -2540,6 +2540,14 @@ async def resolve_alert(alert_id: str, current=Depends(get_current_user)):
         "family_group_id": current["family_group_id"],
         "resolved_at": _to_utc_iso(now),
         "channelId": "sos",
+        # TTL: SOS-resolved notifications lose all value after 1 hour.
+        # Without a TTL, FCM holds undelivered pushes for up to 28 days
+        # and can replay them when a device comes back online or a user
+        # reinstalls — producing confusing stale "SOS resolved" banners
+        # hours or days after the event (observed in the field: Charles
+        # received a duplicate during Joyce's onboarding 5 h after the
+        # original SOS was cleared).
+        "_ttl": 3600,
     }
     try:
         await push_to_family_group(
