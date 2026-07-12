@@ -591,7 +591,10 @@ export default function MeScreen() {
 
   return (
     <SafeAreaView style={styles.root} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.body}>
+      <ScrollView
+        contentContainerStyle={styles.body}
+        removeClippedSubviews={false}
+      >
         <Text style={styles.title}>Me</Text>
 
         {/* Account — editable */}
