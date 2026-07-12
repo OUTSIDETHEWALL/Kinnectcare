@@ -210,37 +210,69 @@ echo "  URL     : ${PARSED_URL}"
 echo "  Message : ${MESSAGE}"
 echo ""
 
-# Capture output so we can extract bundle hashes and OTA group ID
-EAS_OUT_FILE=/tmp/ota_publish_output.txt
+# WHY --json with stdout-only redirect:
+#   eas update --json writes a JSON array to stdout (one object per platform)
+#   and all progress/spinner output to stderr.
+#   Redirecting only stdout (>) leaves stderr on the terminal so progress is
+#   visible during the publish. The JSON file is then parsed in Step 8 for
+#   reliable per-platform update IDs — no text scraping needed.
+EAS_JSON_FILE=/tmp/ota_publish_output.json
 cd "$FRONTEND_DIR"
 npx eas update \
   --channel production \
   --message "$MESSAGE" \
-  --non-interactive 2>&1 | tee "$EAS_OUT_FILE"
+  --non-interactive \
+  --json \
+  >"$EAS_JSON_FILE" \
+  || fail "eas update failed — see output above"
+
+# Echo the raw JSON so it appears in the terminal log for traceability
+cat "$EAS_JSON_FILE"
 
 # ═════════════════════════════════════════════════════════════
 hdr "Step 8 — Post-publish summary"
 # ═════════════════════════════════════════════════════════════
-# Extract key identifiers from eas output for verification log.
-GROUP_ID=$(grep -o 'Update group ID.*' "$EAS_OUT_FILE" \
-           | head -1 | awk '{print $NF}' || echo "unknown")
-ANDROID_HASH=$(grep -o 'entry-[a-f0-9]*\.hbc' "$EAS_OUT_FILE" \
-               | grep android || grep -o 'entry-[a-f0-9]*\.hbc' "$EAS_OUT_FILE" \
-               | head -1 || echo "unknown")
-IOS_HASH=$(grep -o 'entry-[a-f0-9]*\.hbc' "$EAS_OUT_FILE" \
-           | grep ios || grep -o 'entry-[a-f0-9]*\.hbc' "$EAS_OUT_FILE" \
-           | tail -1 || echo "unknown")
+# Parse the JSON with node to extract the group ID and per-platform
+# update IDs. These are different values:
+#   Group ID   — EAS engineering reference (not visible on device)
+#   Android ID — what appears in Me → Software → OTA ID on Android
+#   iOS ID     — what appears in Me → Software → OTA ID on iOS
+GROUP_ID="unknown"
+ANDROID_ID="unknown"
+IOS_ID="unknown"
+
+eval "$(node -e "
+  try {
+    const raw = require('fs').readFileSync('${EAS_JSON_FILE}', 'utf8');
+    // The JSON array may be preceded by spinner/progress lines from stderr
+    // mixed in via the 2>&1 redirect; find the first '[' to start parsing.
+    const start = raw.indexOf('[');
+    const updates = JSON.parse(start >= 0 ? raw.slice(start) : raw);
+    const android = updates.find(u => u.platform === 'android') || {};
+    const ios     = updates.find(u => u.platform === 'ios')     || {};
+    const group   = android.group || ios.group || 'unknown';
+    console.log('GROUP_ID=\"'   + group                + '\"');
+    console.log('ANDROID_ID=\"' + (android.id || 'unknown') + '\"');
+    console.log('IOS_ID=\"'     + (ios.id     || 'unknown') + '\"');
+  } catch(e) {
+    process.stderr.write('JSON parse failed: ' + e.message + '\n');
+    console.log('GROUP_ID=\"unknown\"');
+    console.log('ANDROID_ID=\"unknown\"');
+    console.log('IOS_ID=\"unknown\"');
+  }
+")"
 
 echo ""
 ok "OTA published"
 echo ""
-echo "  OTA group ID    : ${GROUP_ID}"
-echo "  Android bundle  : ${ANDROID_HASH}"
-echo "  iOS bundle      : ${IOS_HASH}"
+echo -e "  ${CYAN}EAS Update Group ID${NC}  (engineering reference, not visible on device)"
+echo "  ${GROUP_ID}"
 echo ""
-info "If this bundle hash matches any previous OTA, Metro may have"
-info "served a stale cache despite step 6. Re-run the script to confirm."
+echo -e "  ${CYAN}Expected in Me → Software → OTA ID${NC}"
+echo -e "  Android : ${ANDROID_ID:0:8}…   (full: ${ANDROID_ID})"
+echo -e "  iOS     : ${IOS_ID:0:8}…   (full: ${IOS_ID})"
 echo ""
 ok "Next: force-kill both apps, relaunch twice to download + apply."
-ok "Verify on device: Me → Software → OTA ID shows ${GROUP_ID:0:8}…"
+ok "Android — Me → Software → OTA ID should show: ${ANDROID_ID:0:8}…"
+ok "iOS     — Me → Software → OTA ID should show: ${IOS_ID:0:8}…"
 ok "Verify connectivity: tap 'Email me a code' — must succeed."

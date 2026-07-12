@@ -579,14 +579,25 @@ export default function MeScreen() {
     const runtimeVersion: string = Updates.runtimeVersion ?? '—';
     const channel: string = Updates.channel ?? '—';
     const isEmbedded: boolean = Updates.isEmbeddedLaunch ?? true;
+    // createdAt is the UTC timestamp of when this specific update was published to EAS.
+    const createdAt: Date | null = (Updates as any).createdAt ?? null;
 
     // Human-readable status so Charles can immediately tell what's running.
     const otaStatus = isEmbedded ? 'Embedded' : 'Installed';
     // Full UUID kept as a separate diagnostic field; truncated to first 8
-    // chars so it fits on one line and can be cross-referenced in Railway logs.
+    // chars so it fits on one line and can be cross-referenced in EAS/Railway logs.
     const otaId = !isEmbedded && updateId ? `${updateId.slice(0, 8)}…` : null;
+    // Format publish time as "YYYY-MM-DD HH:mm UTC" so it's immediately legible
+    // when testing multiple OTAs in a day without needing to decode a timestamp.
+    const otaPublished = !isEmbedded && createdAt instanceof Date
+      ? createdAt.getUTCFullYear() + '-' +
+        String(createdAt.getUTCMonth() + 1).padStart(2, '0') + '-' +
+        String(createdAt.getUTCDate()).padStart(2, '0') + '  ' +
+        String(createdAt.getUTCHours()).padStart(2, '0') + ':' +
+        String(createdAt.getUTCMinutes()).padStart(2, '0') + ' UTC'
+      : null;
 
-    return { appVersion, buildStr, otaStatus, otaId, runtimeVersion, channel, isEmbedded };
+    return { appVersion, buildStr, otaStatus, otaId, otaPublished, runtimeVersion, channel, isEmbedded };
   }, []);
 
   return (
@@ -833,8 +844,12 @@ export default function MeScreen() {
         <SectionLabel>Software</SectionLabel>
         <View style={styles.card} testID="me-software-card">
           <ReadRow
-            label="App Version · Build"
-            value={`${buildInfo.appVersion}  ·  Build ${buildInfo.buildStr}`}
+            label="App Version"
+            value={`${buildInfo.appVersion} (Build ${buildInfo.buildStr})`}
+          />
+          <ReadRow
+            label="Runtime"
+            value={buildInfo.runtimeVersion}
           />
           <ReadRow
             label="OTA Status"
@@ -846,10 +861,12 @@ export default function MeScreen() {
               value={buildInfo.otaId}
             />
           ) : null}
-          <ReadRow
-            label="Runtime Version"
-            value={buildInfo.runtimeVersion}
-          />
+          {buildInfo.otaPublished ? (
+            <ReadRow
+              label="Published"
+              value={buildInfo.otaPublished}
+            />
+          ) : null}
           {buildInfo.channel !== '—' ? (
             <ReadRow
               label="Channel"
