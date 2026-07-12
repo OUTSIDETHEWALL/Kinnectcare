@@ -1,0 +1,94 @@
+Excellent work today. I think we're in a very good place overall.
+
+The infrastructure is becoming stable, onboarding completed successfully end-to-end, and we're now focusing on product polish rather than chasing major failures.
+
+I do want to tighten up one part of our engineering workflow.
+
+OTA verification
+
+We keep confusing the OTA Update Group ID with the OTA ID displayed in the app.
+
+As Charles, I don't have access to the Update Group ID from EAS once the OTA is published. The only thing I can verify from the phones is what appears in:
+
+Me → Software → OTA ID
+
+That is my source of truth.
+
+Going forward, every OTA publish should end with two reported values:
+
+EAS Update Group ID (engineering reference)
+Expected OTA ID prefix that should appear in the Software panel on the phones
+
+Example:
+
+OTA published
+
+Group ID:
+792a013e-24cd-...
+
+Expected Software panel OTA ID:
+019f5888...
+
+That allows me to immediately confirm whether both devices are actually running the newest code.
+
+Please update the publish workflow so we always report both values. I never want to have to guess whether my phone is current.
+
+Current status
+
+My phone is now showing:
+
+OTA ID: 019f5888...
+
+If that is the newest OTA, great.
+
+From now on I expect every new OTA to have a new OTA ID visible in the Software panel, and that visible ID should always be included in your deployment summary.
+
+Engineering workflow
+
+I think we've developed a workflow that is working well.
+
+Small isolated PRs
+Merge into main
+Single OTA from clean main
+Regression testing
+Repeat
+
+Let's keep following that process.
+
+Current priority
+
+Infrastructure is no longer the focus.
+
+The priorities are now:
+
+Finish onboarding simplification.
+Verify Joyce's missing Profile and Software sections are fixed.
+Continue polishing the first-time user experience.
+Keep regression testing until Joyce can complete onboarding comfortably without coaching.
+
+I think today marked the transition from infrastructure work to product refinement, and I'd like to stay focused there.
+
+I have one more suggestion that I think will save you a lot of confusion over the coming weeks.
+
+Instead of just displaying:
+
+OTA ID
+
+I'd expand the Software card slightly to something like:
+
+App Version
+1.2.0 (Build 61)
+
+Runtime
+1.2.0
+
+OTA Status
+Installed
+
+OTA ID
+019f5888...
+
+Published
+2026-07-12 18:42 UTC
+
+That last line ("Published") could come from the OTA manifest if available, or from metadata you include at publish time. When you're testing multiple OTAs in a day, seeing when the installed update was published is often just as valuable as seeing its ID. It makes it immediately obvious whether you're looking at today's OTA or one from several hours ago. I think that would make the Software panel an even better diagnostic tool.
