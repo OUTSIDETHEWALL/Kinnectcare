@@ -19,7 +19,7 @@
  * The legacy /settings route is removed as of this build; every entry
  * point in the app now lands here.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Modal,
   TextInput, ActivityIndicator, Platform, Switch, Pressable,
@@ -170,6 +170,48 @@ export default function MeScreen() {
   // when both are set up (many Android phones ship both sensors).
   const [bioTypes, setBioTypes] = useState<Array<'face' | 'fingerprint' | 'iris'>>([]);
   const [bioOn, setBioOn] = useState(false);
+
+  // OTA update check state — used by the always-visible "Check for update" row
+  // in the Account card so Joyce can trigger a forced check even when the
+  // Software / Advanced sections are not reachable due to clipping bugs.
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const onCheckForUpdate = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      Alert.alert('Not available', 'OTA updates can only be checked on a native build.');
+      return;
+    }
+    setIsCheckingUpdate(true);
+    try {
+      const r = await Updates.checkForUpdateAsync();
+      if (r?.isAvailable) {
+        const fetchRes = await Updates.fetchUpdateAsync();
+        Alert.alert(
+          'Update downloaded',
+          fetchRes?.isNew
+            ? 'A new bundle was downloaded. Tap "Reload now" to apply it immediately, or it will activate on the next app launch.'
+            : 'Up to date — no newer bundle was found.',
+          [
+            { text: 'Later', style: 'cancel' },
+            ...(fetchRes?.isNew
+              ? [{ text: 'Reload now', onPress: () => Updates.reloadAsync().catch(() => {}) }]
+              : []),
+          ],
+        );
+      } else {
+        Alert.alert(
+          'Up to date',
+          `No newer bundle is available on this channel.\n\nRuntime: ${Updates.runtimeVersion ?? '—'}\nChannel: ${Updates.channel ?? '—'}`,
+        );
+      }
+    } catch (e: any) {
+      Alert.alert(
+        'Update check failed',
+        `${e?.message || 'Unknown error'}\n\nRuntime: ${Updates.runtimeVersion ?? '—'}\nChannel: ${Updates.channel ?? '—'}`,
+      );
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  }, []);
 
   // Location sharing preference
   const [locSharing, setLocSharing] = useState<boolean>(true);
@@ -627,6 +669,29 @@ export default function MeScreen() {
             label="Time zone"
             value={(user as any)?.timezone || 'UTC'}
             onEdit={openEditTimezone}
+          />
+          {/* ── OTA diagnostics ─────────────────────────────────────────
+              These three rows are intentionally placed in the Account card
+              so they are ALWAYS visible on first screen, regardless of any
+              clipping or rendering bugs affecting sections lower on the page.
+              They let us read Joyce's runtime version, channel, and current
+              OTA directly from her screen without her needing to scroll.
+              Once the removeClippedSubviews fix is confirmed working on all
+              devices, this block can be removed (the full Software card below
+              already shows the same info in the correct location).
+          ─────────────────────────────────────────────────────────────── */}
+          <ReadRow label="Runtime" value={buildInfo.runtimeVersion} />
+          <ReadRow label="Channel" value={buildInfo.channel} />
+          <ReadRow
+            label="OTA"
+            value={buildInfo.otaId ?? 'Embedded (no OTA installed)'}
+          />
+          <NavRow
+            testID="me-check-for-update"
+            icon="🔄"
+            label={isCheckingUpdate ? 'Checking for update…' : 'Check for update'}
+            onPress={onCheckForUpdate}
+            disabled={isCheckingUpdate}
           />
         </View>
 
