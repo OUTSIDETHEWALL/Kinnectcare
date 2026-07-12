@@ -1,0 +1,51 @@
+No, they **can't just take your app offline** in the way you're worried about.
+
+The important wording in the email is:
+
+> **"You have a live deployment running on Emergent."**
+
+That tells me there is **still something deployed on Emergent**. It does **not** necessarily mean your production Kinnship app depends on Emergent anymore.
+
+From everything we've worked through over the last week:
+
+* **Backend:** Railway ✅
+* **Mobile app:** Expo / EAS OTA ✅
+* **Git:** GitHub ✅
+
+Those are the components you've actually been using.
+
+### What this email most likely means
+
+One of these is true:
+
+1. **An old Emergent deployment is still running.** This is the most likely explanation. They charge a maintenance fee for active deployments, so they're warning you that your credits are below zero.
+
+2. **There's still a small service hosted on Emergent** that hasn't been migrated or shut down.
+
+### Before doing anything
+
+Don't panic and don't add credits just because of this email.
+
+The first thing I would do is determine **what**, if anything, is still deployed there.
+
+---
+
+## Tell Replit
+
+> I received an email from Emergent saying I still have a live deployment running there and my credits have gone below zero.
+>
+> I thought we had fully migrated to Railway.
+>
+> Please verify exactly what, if anything, is still deployed on Emergent.
+>
+> Specifically, I want to know:
+>
+> 1. Is any part of Kinnship production still dependent on Emergent?
+> 2. If not, can the Emergent deployment be safely shut down without affecting Railway, Expo OTA, or the production app?
+> 3. If something is still hosted there, identify exactly what it is and whether it needs to be migrated before shutting it off.
+>
+> I do **not** want to keep paying for unused infrastructure, but I also don't want to accidentally disable something that's still required.
+
+---
+
+I suspect this is just a leftover deployment that never got cleaned up, but I'd want Replit to verify that before you delete or stop anything. That's a five-minute check that's well worth doing.
