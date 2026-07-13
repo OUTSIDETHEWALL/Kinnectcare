@@ -135,10 +135,10 @@ export default function Permissions() {
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.center}>
           <Text style={styles.emoji}>📍</Text>
-          <Text style={styles.title}>Share your location</Text>
+          <Text style={styles.title}>Let your family know you've arrived safely.</Text>
           <Text style={styles.body}>
-            Your family can know you've arrived safely — and reach
-            you instantly if you ever need help.
+            Your family can see you're safe — and reach you instantly
+            if you ever need help.
           </Text>
           <ActivityIndicator
             color={Colors.primary}
@@ -146,7 +146,7 @@ export default function Permissions() {
             style={{ marginTop: 32 }}
           />
           <Text style={styles.hint}>
-            Your location is only shared with your family group.
+            Only shared with your family group.
           </Text>
         </View>
       </SafeAreaView>
@@ -158,10 +158,11 @@ export default function Permissions() {
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.center}>
           <Text style={styles.emoji}>📍</Text>
-          <Text style={styles.title}>Location not shared</Text>
+          <Text style={styles.title}>Your family won't be able to see you're safe.</Text>
           <Text style={styles.body}>
-            Without location sharing, your family won't be able to see
-            where you are or use one-tap SOS to find you in an emergency.
+            Without location, your family can't tell when you've arrived
+            somewhere — and SOS alerts won't be able to pinpoint your
+            location in an emergency.
           </Text>
           <TouchableOpacity
             style={styles.primaryBtn}
@@ -187,10 +188,10 @@ export default function Permissions() {
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.center}>
           <Text style={styles.emoji}>🔔</Text>
-          <Text style={styles.title}>Stay in the loop</Text>
+          <Text style={styles.title}>Be notified if someone you care about needs help.</Text>
           <Text style={styles.body}>
-            You'll be notified the moment someone in your family
-            needs you — missed check-ins, SOS alerts, and more.
+            You'll know the moment someone in your family needs you —
+            SOS alerts, missed check-ins, and more.
           </Text>
           <ActivityIndicator
             color={Colors.primary}
@@ -198,7 +199,7 @@ export default function Permissions() {
             style={{ marginTop: 32 }}
           />
           <Text style={styles.hint}>
-            You can adjust notification settings at any time.
+            You can adjust this in Settings at any time.
           </Text>
         </View>
       </SafeAreaView>
@@ -210,10 +211,10 @@ export default function Permissions() {
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.center}>
           <Text style={styles.emoji}>🔔</Text>
-          <Text style={styles.title}>Notifications off</Text>
+          <Text style={styles.title}>You won't be notified if someone needs help.</Text>
           <Text style={styles.body}>
-            Without notifications, you won't receive SOS alerts or
-            check-in reminders. You can turn them on in Settings at any time.
+            Without notifications, SOS alerts and missed check-ins
+            will be silent. You can turn them on in Settings at any time.
           </Text>
           <TouchableOpacity
             style={styles.primaryBtn}

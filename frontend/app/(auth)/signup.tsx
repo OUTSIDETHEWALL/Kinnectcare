@@ -124,14 +124,16 @@ export default function Signup() {
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
           >
-            {/* Hero — family context is the first thing they read */}
+            {/* Hero — family context is the first thing they read.
+                Copy reads like a real person sent this, not a system. */}
             <View style={styles.inviteHero}>
               <Text style={styles.inviteEmoji}>💚</Text>
-              {!!inviterName && (
-                <Text style={styles.inviteByLine}>{inviterName} invited you</Text>
-              )}
+              <Text style={styles.inviteByLine}>
+                {inviterName
+                  ? `${inviterName} invited you to join`
+                  : "You've been invited to join"}
+              </Text>
               <Text style={styles.inviteHeadline}>
-                to join{'\n'}
                 <Text style={styles.inviteFamilyName}>
                   {familyName || 'your family'}
                 </Text>

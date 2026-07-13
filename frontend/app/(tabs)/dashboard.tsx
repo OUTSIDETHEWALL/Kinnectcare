@@ -60,6 +60,24 @@ export default function Dashboard() {
   // Build 50 hotfix — banner surfaces stale-but-unresolved emergencies
   // (>5 min old) instead of auto-yanking the user to the incident screen.
   const activeEmergency = useActiveEmergency();
+  // Welcome banner — shown once after a user completes onboarding for the
+  // first time.  Auto-dismisses after 3 s.  Keyed by userId so it fires
+  // once per account, not once per install (handles re-installs cleanly).
+  const [showWelcomeBanner, setShowWelcomeBanner] = useState(false);
+  useEffect(() => {
+    if (!user?.id) return;
+    const key = `@kinnship/welcomed_v1_${user.id}`;
+    (async () => {
+      try {
+        const already = await AsyncStorage.getItem(key);
+        if (already) return;
+        await AsyncStorage.setItem(key, '1');
+        setShowWelcomeBanner(true);
+        setTimeout(() => setShowWelcomeBanner(false), 3000);
+      } catch (_e) {}
+    })();
+  }, [user?.id]);
+
   // PIN setup card — shown once on the dashboard after first login if no
   // PIN is set yet and the user hasn't tapped "Not now" before.
   const [showPinCard, setShowPinCard] = useState(false);
@@ -621,6 +639,16 @@ export default function Dashboard() {
           </View>
         </View>
 
+        {/* Welcome banner — shown once after onboarding completes.
+            Auto-dismisses after 3 s.  Not full-screen, just a small
+            celebratory moment that creates closure before the user
+            explores their family dashboard. */}
+        {showWelcomeBanner && (
+          <View style={styles.welcomeBanner} testID="dashboard-welcome-banner">
+            <Text style={styles.welcomeBannerText}>✅ You're all set. Welcome to Kinnship!</Text>
+          </View>
+        )}
+
         {/* Build 50 hotfix — Active-Emergency banner.  Shown when an
             unresolved SOS is detected in the family group.  The banner
             is passive (never yanks the user), always visible until the
@@ -752,7 +780,7 @@ export default function Dashboard() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.pinCardTitle}>Add a 4-digit PIN</Text>
                 <Text style={styles.pinCardBody}>
-                  Sign in faster — no email code needed each time.
+                  Protect your account with a 4-digit PIN for faster sign-in.
                 </Text>
               </View>
               <TouchableOpacity
@@ -1277,6 +1305,20 @@ const styles = StyleSheet.create({
   // Build #59 — Pending Invitations styling.  Amber accents so the
   // section reads as "waiting on someone" without being alarming.
   pendingSection: { marginTop: 6, paddingHorizontal: 20 },
+  welcomeBanner: {
+    marginHorizontal: 24,
+    marginTop: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: Colors.primary,
+    borderRadius: 14,
+  },
+  welcomeBannerText: {
+    color: Colors.surface,
+    fontSize: 14,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
   pinCard: {
     marginHorizontal: 24, marginTop: 14, padding: 16,
     backgroundColor: Colors.surface, borderRadius: 18,
