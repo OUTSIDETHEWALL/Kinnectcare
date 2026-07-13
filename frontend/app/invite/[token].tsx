@@ -94,10 +94,29 @@ export default function InviteAcceptScreen() {
     return () => { cancelled = true; };
   }, [token]);
 
-  // Step 2 — decide what to do next once verify + auth are settled.
-  // We DO NOT auto-navigate for the not-logged-in case; we render a
-  // friendly "Continue" screen so the user sees who invited them
-  // BEFORE they're pushed into sign-up (senior-UX: no surprise flows).
+  // Step 2 — for unauthenticated users with a valid invite, auto-navigate
+  // to the merged invite+account screen immediately.  No "Continue" tap
+  // needed — the invite already provides the trust context; the person
+  // who sent the link already explained what Kinnship is.
+  useEffect(() => {
+    if (verifying || !verify?.valid || user) return;
+    // Unauthenticated + valid invite → go straight to signup with family
+    // context embedded.  The signup screen in invite-flow mode shows the
+    // family name and inviter prominently at the top.
+    router.replace({
+      pathname: '/(auth)/signup',
+      params: {
+        invite_token: token,
+        email: verify.invitee_email || '',
+        family_name: verify.family_name || '',
+        inviter_name: verify.inviter_name || '',
+      },
+    } as any);
+  }, [verifying, verify, user]);
+
+  // For authenticated users who tap an invite link, keep the explicit
+  // "Accept Invitation" button — they need to consciously confirm they're
+  // joining this specific family group before we re-tag their data.
   const onAccept = async () => {
     if (!verify?.valid || !token) return;
     if (!user) {
