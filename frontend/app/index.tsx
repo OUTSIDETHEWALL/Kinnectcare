@@ -1,11 +1,26 @@
+import { useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ImageBackground, Image } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { getPendingInvite } from '../src/pendingInvite';
 
 export default function Welcome() {
   const router = useRouter();
+
+  // If the user arrives here after completing the disclaimer / onboarding
+  // sequence that interrupted an invite deep-link, route them straight to
+  // the invite screen rather than leaving them on the generic welcome page.
+  // The invite token was persisted by the deep-link handler before RootNav
+  // took over, so it survives the redirect chain intact.
+  useEffect(() => {
+    getPendingInvite().then((pending) => {
+      if (pending?.token) {
+        router.replace(`/invite/${pending.token}` as any);
+      }
+    });
+  }, []);
 
   return (
     <ImageBackground
