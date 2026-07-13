@@ -219,11 +219,25 @@ export default function MeScreen() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // ---- Data loaders ----
-  useEffect(() => {
-    (async () => {
-      try { setBilling(await getBillingStatus()); } catch (_e) {}
-    })();
-  }, []);
+  // Billing is fetched on every tab focus, not just mount.  This means
+  // the plan badge recovers automatically after a transient network
+  // failure (Railway deploy window, airplane mode, etc.) without
+  // requiring a full app restart.  On failure the existing `billing`
+  // value is preserved — we never replace known-good data with null.
+  useFocusEffect(
+    React.useCallback(() => {
+      let cancelled = false;
+      (async () => {
+        try {
+          const b = await getBillingStatus();
+          if (!cancelled) setBilling(b);
+        } catch (_e) {
+          // Network failure — keep last known good state.
+        }
+      })();
+      return () => { cancelled = true; };
+    }, [])
+  );
 
   useEffect(() => subscribePushStatus(setPushStatus), []);
 
@@ -661,7 +675,7 @@ export default function MeScreen() {
             <Text style={styles.planName}>{planLabel}</Text>
             <View style={[styles.planBadge, billing?.plan === 'family_plan' && styles.planBadgePaid]}>
               <Text style={[styles.planBadgeText, billing?.plan === 'family_plan' && { color: Colors.surface }]}>
-                {billing?.plan === 'family_plan' ? '⭐ Active' : 'Free Tier'}
+                {billing === null ? '—' : billing.plan === 'family_plan' ? '⭐ Active' : 'Free Tier'}
               </Text>
             </View>
           </View>
@@ -670,7 +684,7 @@ export default function MeScreen() {
             <Text style={styles.planRenewal}>Renews {new Date(billing.current_period_end).toLocaleDateString()}</Text>
           ) : null}
 
-          {billing?.plan !== 'family_plan' ? (
+          {billing !== null && billing.plan !== 'family_plan' ? (
             <>
               <Text style={styles.planPitch}>
                 Unlock unlimited family members, weekly compliance charts, and priority SOS push from $9.99/month — or save 17% with the annual plan.
