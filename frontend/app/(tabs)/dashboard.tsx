@@ -35,6 +35,8 @@ import { useAuth } from '../../src/AuthContext';
 import * as memberStore from '../../src/store/memberStore';
 import { useActiveEmergency } from '../../src/activeEmergency';
 import { TrackingStatusPill } from '../../src/tracking/TrackingStatusPill';
+import { hasPinForUser } from '../../src/pinAuth';
+import { wasPinSetupDismissed, markPinSetupDismissed } from '../../src/pinSetupPrompt';
 
 export default function Dashboard() {
   const router = useRouter();
@@ -58,6 +60,36 @@ export default function Dashboard() {
   // Build 50 hotfix — banner surfaces stale-but-unresolved emergencies
   // (>5 min old) instead of auto-yanking the user to the incident screen.
   const activeEmergency = useActiveEmergency();
+  // Welcome banner — shown once after a user completes onboarding for the
+  // first time.  Auto-dismisses after 3 s.  Keyed by userId so it fires
+  // once per account, not once per install (handles re-installs cleanly).
+  const [showWelcomeBanner, setShowWelcomeBanner] = useState(false);
+  useEffect(() => {
+    if (!user?.id) return;
+    const key = `@kinnship/welcomed_v1_${user.id}`;
+    (async () => {
+      try {
+        const already = await AsyncStorage.getItem(key);
+        if (already) return;
+        await AsyncStorage.setItem(key, '1');
+        setShowWelcomeBanner(true);
+        setTimeout(() => setShowWelcomeBanner(false), 3000);
+      } catch (_e) {}
+    })();
+  }, [user?.id]);
+
+  // PIN setup card — shown once on the dashboard after first login if no
+  // PIN is set yet and the user hasn't tapped "Not now" before.
+  const [showPinCard, setShowPinCard] = useState(false);
+  useEffect(() => {
+    if (!user?.id) return;
+    (async () => {
+      const hasPin = await hasPinForUser(user.id);
+      if (hasPin) return;
+      const dismissed = await wasPinSetupDismissed(user.id);
+      if (!dismissed) setShowPinCard(true);
+    })();
+  }, [user?.id]);
   // SOS confirmation modal — purposefully in-app (NOT Alert.alert) so:
   //   1. Cancel responds instantly with no system animation lag
   //   2. The dialer launch fires from a clean synchronous event handler,
@@ -607,6 +639,16 @@ export default function Dashboard() {
           </View>
         </View>
 
+        {/* Welcome banner — shown once after onboarding completes.
+            Auto-dismisses after 3 s.  Not full-screen, just a small
+            celebratory moment that creates closure before the user
+            explores their family dashboard. */}
+        {showWelcomeBanner && (
+          <View style={styles.welcomeBanner} testID="dashboard-welcome-banner">
+            <Text style={styles.welcomeBannerText}>✅ You're all set. Welcome to Kinnship!</Text>
+          </View>
+        )}
+
         {/* Build 50 hotfix — Active-Emergency banner.  Shown when an
             unresolved SOS is detected in the family group.  The banner
             is passive (never yanks the user), always visible until the
@@ -725,6 +767,43 @@ export default function Dashboard() {
                 }}
               />
             ))}
+          </View>
+        )}
+
+        {/* PIN setup card — dismissible, shown after first login when no
+            PIN is configured.  Moved off the critical onboarding path so
+            the user reaches the dashboard before being asked to set one. */}
+        {showPinCard && (
+          <View style={styles.pinCard} testID="dashboard-pin-setup-card">
+            <View style={styles.pinCardRow}>
+              <Text style={styles.pinCardEmoji}>🔐</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.pinCardTitle}>Add a 4-digit PIN</Text>
+                <Text style={styles.pinCardBody}>
+                  Protect your account with a 4-digit PIN for faster sign-in.
+                </Text>
+              </View>
+              <TouchableOpacity
+                testID="dashboard-pin-dismiss"
+                onPress={async () => {
+                  setShowPinCard(false);
+                  if (user?.id) {
+                    try { await markPinSetupDismissed(user.id); } catch (_e) {}
+                  }
+                }}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
+                <Icon name="close" size={20} color={Colors.textTertiary} />
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity
+              testID="dashboard-pin-setup-btn"
+              style={styles.pinCardBtn}
+              onPress={() => router.push('/(auth)/pin-setup' as any)}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.pinCardBtnText}>Set up PIN</Text>
+            </TouchableOpacity>
           </View>
         )}
 
@@ -1226,6 +1305,35 @@ const styles = StyleSheet.create({
   // Build #59 — Pending Invitations styling.  Amber accents so the
   // section reads as "waiting on someone" without being alarming.
   pendingSection: { marginTop: 6, paddingHorizontal: 20 },
+  welcomeBanner: {
+    marginHorizontal: 24,
+    marginTop: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: Colors.primary,
+    borderRadius: 14,
+  },
+  welcomeBannerText: {
+    color: Colors.surface,
+    fontSize: 14,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  pinCard: {
+    marginHorizontal: 24, marginTop: 14, padding: 16,
+    backgroundColor: Colors.surface, borderRadius: 18,
+    borderWidth: 1, borderColor: Colors.border,
+    boxShadow: '0px 2px 8px rgba(27,94,53,0.07)',
+  },
+  pinCardRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  pinCardEmoji: { fontSize: 28 },
+  pinCardTitle: { fontSize: 15, fontWeight: '700', color: Colors.textPrimary },
+  pinCardBody: { fontSize: 13, color: Colors.textSecondary, marginTop: 2, lineHeight: 18 },
+  pinCardBtn: {
+    marginTop: 14, height: 46, borderRadius: 14, backgroundColor: Colors.primary,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  pinCardBtnText: { color: Colors.surface, fontSize: 15, fontWeight: '700' },
   pendingCard: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: '#FFFCF0',

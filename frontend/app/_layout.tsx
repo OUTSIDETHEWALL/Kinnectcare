@@ -5,7 +5,7 @@ import { AuthProvider, useAuth } from '../src/AuthContext';
 import { useEffect, useState, useRef } from 'react';import { View, ActivityIndicator, AppState, Platform, Linking } from 'react-native';
 import { Colors } from '../src/theme';
 import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink, refreshPushTokenIfStale } from '../src/push';
-import { isOnboardingDone } from '../src/onboardingStore';
+import { isOnboardingDone, markOnboardingDone } from '../src/onboardingStore';
 import { hasPinForUser, isUnlockedNow, markUnlocked } from '../src/pinAuth';
 import { isSessionValid } from '../src/pinSession';
 import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
@@ -22,7 +22,8 @@ import {
 } from '../src/disclaimerStore';
 import { logResumeDecision, isAlertDismissed } from '../src/resumeDiagnostics';
 import { setActiveEmergency } from '../src/activeEmergency';
-import { setPendingInvite, clearPendingInvite } from '../src/pendingInvite';
+import { setPendingInvite, clearPendingInvite, getPendingInvite } from '../src/pendingInvite';
+import { isPermissionsHandled } from '../src/permissionsStore';
 
 function RootNav() {
   const { user, loading } = useAuth();
@@ -50,6 +51,11 @@ function RootNav() {
   // medical-disclaimer compliance (v1.1.7).
   const [disclaimerChecked, setDisclaimerChecked] = useState(false);
   const [needsDisclaimer, setNeedsDisclaimer] = useState(false);
+  // Permission onboarding gate — shown once per install after the user
+  // authenticates for the first time.  Fires the OS location and
+  // notification dialogs with emotional, family-focused context.
+  const [permissionsChecked, setPermissionsChecked] = useState(false);
+  const [needsPermissions, setNeedsPermissions] = useState(false);
 
   useEffect(() => {
     // Cold-start load + subscribe-for-future-changes.  Runs ONCE on
@@ -81,6 +87,18 @@ function RootNav() {
       const done = await isOnboardingDone();
       setNeedsOnboarding(!done);
       setOnboardingChecked(true);
+    })();
+  }, []);
+
+  // Permission onboarding — read once on mount.  The permissions screen
+  // calls markPermissionsHandled() + router.replace('/dashboard') on
+  // completion; the routing effect re-reads from storage on the next
+  // segments-change trigger to confirm the gate has been cleared.
+  useEffect(() => {
+    (async () => {
+      const handled = await isPermissionsHandled();
+      setNeedsPermissions(!handled);
+      setPermissionsChecked(true);
     })();
   }, []);
 
@@ -1006,11 +1024,23 @@ function RootNav() {
     const onPinScreen = inAuthGroup && (authSubroute === 'pin-login' || authSubroute === 'pin-setup');
 
     // First-time users (not logged in, no onboarding flag) go to onboarding first.
+    // EXCEPTION: invited users skip the slides — the person who sent the invite
+    // already provided the human context that onboarding would give.  Mark
+    // onboarding done silently and fall through so index.tsx can redirect to
+    // the /invite/{token} screen.
     if (!user && needsOnboarding && !isOnboarding && !isPublic) {
       (async () => {
         const stillNeeds = !(await isOnboardingDone());
         if (stillNeeds) {
-          router.replace('/onboarding');
+          const pendingToken = await getPendingInvite();
+          if (pendingToken) {
+            // Invited path — skip slides, mark done, let the welcome-screen
+            // pending-invite redirect take the user to /invite/{token}.
+            await markOnboardingDone();
+            setNeedsOnboarding(false);
+          } else {
+            router.replace('/onboarding');
+          }
         } else {
           setNeedsOnboarding(false);
         }
@@ -1075,23 +1105,35 @@ function RootNav() {
     // loop. Same async-recheck pattern that needsOnboarding uses
     // above for the analogous AsyncStorage-mutates-without-user.id-
     // change case.
-    if (user && needsPinSetup && !onPinScreen) {
+    // PIN SETUP — moved off the critical onboarding path.  Rather than
+    // intercepting the user here, the dashboard surfaces a dismissible
+    // card offering PIN setup.  This clears the routing gate immediately
+    // so the user reaches the dashboard on first launch.  The card checks
+    // hasPinForUser + wasPinSetupDismissed independently.
+    if (user && needsPinSetup) {
+      setNeedsPinSetup(false);
+      // Fall through to the next gate — do not return.
+    }
+
+    // PERMISSIONS GATE — shown once per install after first authentication.
+    // Re-verifies from storage on every run (same async-recheck pattern as
+    // the pin-setup gate) so a successful completion on the permissions
+    // screen is picked up as soon as segments change after its
+    // router.replace('/(tabs)/dashboard').
+    const onPermissionsScreen = inAuthGroup && authSubroute === 'permissions';
+    if (user && needsPermissions && !onPermissionsScreen) {
       (async () => {
-        const hasPin = await hasPinForUser(user.id);
-        const dismissed = await wasPinSetupDismissed(user.id);
-        const stillNeeds = !hasPin && !dismissed;
-        if (stillNeeds) {
-          router.replace('/(auth)/pin-setup');
+        const handled = await isPermissionsHandled();
+        if (!handled) {
+          router.replace('/(auth)/permissions');
         } else {
-          // PIN was just saved (or prompt dismissed) — clear the
-          // cached flag so subsequent renders fall through to the
-          // dashboard branch below.
-          setNeedsPinSetup(false);
+          setNeedsPermissions(false);
         }
       })();
       return;
     }
-    if (user && !needsPinUnlock && !needsPinSetup && !onPinScreen && (inAuthGroup || isWelcome || isOnboarding)) {
+
+    if (user && !needsPinUnlock && !onPinScreen && !onPermissionsScreen && (inAuthGroup || isWelcome || isOnboarding)) {
       // Only auto-bounce out of (auth) once both PIN gates have
       // cleared. The !onPinScreen guard prevents this branch from
       // racing with the two redirects above and dragging the user
@@ -1106,9 +1148,9 @@ function RootNav() {
     // where no further redirect is needed, so taps from any state are
     // honoured once routing has settled.
     setAppReadyForDeepLink(true);
-  }, [user, loading, segments, onboardingChecked, needsOnboarding, pinChecked, needsPinUnlock, needsPinSetup, disclaimerChecked, needsDisclaimer]);
+  }, [user, loading, segments, onboardingChecked, needsOnboarding, pinChecked, needsPinUnlock, needsPinSetup, disclaimerChecked, needsDisclaimer, permissionsChecked, needsPermissions]);
 
-  if (loading || !onboardingChecked || !disclaimerChecked || (user && !pinChecked)) {
+  if (loading || !onboardingChecked || !disclaimerChecked || !permissionsChecked || (user && !pinChecked)) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: Colors.background }}>
         <ActivityIndicator size="large" color={Colors.primary} />
@@ -1131,6 +1173,7 @@ function RootNav() {
       <Stack.Screen name="terms-of-service" />
       <Stack.Screen name="onboarding" />
       <Stack.Screen name="disclaimer" />
+      <Stack.Screen name="(auth)/permissions" />
       <Stack.Screen name="upgrade" />
       <Stack.Screen name="sos-confirmation" />
       <Stack.Screen name="alert/[id]" />
