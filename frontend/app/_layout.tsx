@@ -1121,7 +1121,7 @@ function RootNav() {
     // screen is picked up as soon as segments change after its
     // router.replace('/(tabs)/dashboard').
     const onPermissionsScreen = inAuthGroup && authSubroute === 'permissions';
-    if (user && needsPermissions && !onPermissionsScreen) {
+    if (user && needsPermissions && !needsPinUnlock && !onPermissionsScreen) {
       (async () => {
         const handled = await isPermissionsHandled();
         if (!handled) {
