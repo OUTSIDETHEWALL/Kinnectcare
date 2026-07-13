@@ -56,7 +56,7 @@ export default function Permissions() {
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status === 'granted') {
           setLocationGranted(true);
-          // Move to notifications without interruption.
+          fired.current = false; // reset so notification effect can fire
           setStage('notification-context');
         } else {
           setStage('location-denied');
