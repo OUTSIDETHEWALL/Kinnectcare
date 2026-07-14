@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
-  ActivityIndicator, Alert, Linking, Platform, RefreshControl, TextInput,
+  ActivityIndicator, Alert, Linking, Platform, RefreshControl,
   AppState,
 } from 'react-native';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
@@ -17,11 +17,9 @@ import MemberMap from '../../src/MemberMap';
 import { TrackingStatusPill } from '../../src/tracking/TrackingStatusPill';
 import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone, formatTimeAgo, formatTimezone, formatPhone } from '../../src/timeFormat';
 import { TimePicker12 } from '../../src/TimePicker12';
-import { pickContact, isContactsPickerSupported } from '../../src/contactsPicker';
 import {
   requestRefresh as requestMemberRefresh,
   clearIfNewer as clearRefreshIfNewer,
-  subscribeRefreshing,
   STALE_THRESHOLD_MS,
 } from '../../src/locationRefreshState';
 import * as memberStore from '../../src/store/memberStore';
@@ -43,16 +41,8 @@ export default function MemberDetail() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showCheckinSettings, setShowCheckinSettings] = useState(false);
-  // v1.3.2 — live refresh indicator wired to locationRefreshState.
-  // Subscribes when `id` is set and unsubscribes on unmount.  The
-  // 20-second forceTick keeps the "X min ago" timestamp accurate
-  // without spamming the network.
-  const [locationRefreshing, setLocationRefreshing] = useState(false);
+  // 20-second forceTick keeps the "X min ago" relative timestamps accurate.
   const [, forceTick] = useState(0);
-  useEffect(() => {
-    if (!id) return;
-    return subscribeRefreshing(id, setLocationRefreshing);
-  }, [id]);
   // Build 47 — the old "subscribeMember + setMember merge" useEffect
   // has been DELETED.  `useMember(id)` is itself a live subscription
   // to the canonical store, so any fresh upload arriving from
@@ -63,15 +53,6 @@ export default function MemberDetail() {
     const t = setInterval(() => forceTick((n) => n + 1), 20_000);
     return () => clearInterval(t);
   }, []);
-
-  const onManualRefresh = useCallback(() => {
-    if (!id) return;
-    const seenMs = member?.last_seen ? new Date(member.last_seen).getTime() : null;
-    requestMemberRefresh(id, seenMs);
-    // Also force-refetch /members/{id} immediately so the UI
-    // re-syncs once the silent-push roundtrip completes.
-    load().catch(() => {});
-  }, [id, member?.last_seen]);
 
   const load = async () => {
     try {
@@ -263,45 +244,6 @@ export default function MemberDetail() {
     }
   };
 
-  // ----- Emergency contact (SMS) editor state -----
-  const [ecEditing, setEcEditing] = useState(false);
-  const [ecValue, setEcValue] = useState('');
-  const [ecName, setEcName] = useState('');
-  const [ecMode, setEcMode] = useState<'choose' | 'manual'>('choose');
-  const startEcEdit = () => {
-    setEcValue(member?.emergency_contact_phone || '');
-    setEcName(member?.emergency_contact_name || '');
-    // If we already have a value, jump straight into manual edit mode.
-    setEcMode(member?.emergency_contact_phone ? 'manual' : 'choose');
-    setEcEditing(true);
-  };
-  const saveEc = async (overridePhone?: string, overrideName?: string | null) => {
-    const phone = (overridePhone !== undefined ? overridePhone : ecValue).trim();
-    const name = (overrideName !== undefined ? overrideName : ecName).trim();
-    try {
-      const r = await api.put(`/members/${id}`, {
-        emergency_contact_phone: phone || null,
-        emergency_contact_name: name || null,
-      });
-      if (r?.data?.id) memberStore.upsertOne(r.data);
-      setEcEditing(false);
-    } catch (e: any) {
-      Alert.alert(
-        'Invalid phone',
-        e?.response?.data?.detail || 'Please enter a valid phone number (e.g. +1 555 123 4567).',
-      );
-    }
-  };
-  const pickFromContacts = async () => {
-    const picked = await pickContact();
-    if (!picked) return;
-    setEcValue(picked.phone);
-    setEcName(picked.name);
-    setEcMode('manual'); // jump into the manual editor showing pre-filled values
-    // Save immediately — user can still tweak before/after via "Edit".
-    await saveEc(picked.phone, picked.name);
-  };
-
   const onDelete = () => {
     Alert.alert('Remove member?', `Are you sure you want to remove ${member?.name}?`, [
       { text: 'Cancel', style: 'cancel' },
@@ -403,22 +345,6 @@ export default function MemberDetail() {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Location</Text>
-            <TouchableOpacity
-              testID="member-refresh-location"
-              onPress={onManualRefresh}
-              activeOpacity={0.85}
-              disabled={locationRefreshing}
-              style={[styles.refreshChip, locationRefreshing && styles.refreshChipDisabled]}
-            >
-              {locationRefreshing ? (
-                <>
-                  <ActivityIndicator size="small" color={Colors.primary} />
-                  <Text style={styles.refreshChipText}>Refreshing…</Text>
-                </>
-              ) : (
-                <Text style={styles.refreshChipText}>🔄 Refresh</Text>
-              )}
-            </TouchableOpacity>
           </View>
           <View style={styles.locationCard}>
             {((member as any).location_sharing_enabled === false) ? (
@@ -470,104 +396,6 @@ export default function MemberDetail() {
                   <Text style={styles.directionsText}>Get Directions</Text>
                 </TouchableOpacity>
               </>
-            )}
-          </View>
-        </View>
-
-        {/* Emergency Contact (SMS) */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Emergency Contact (SMS)</Text>
-            <TouchableOpacity
-              testID="ec-toggle"
-              onPress={() => (ecEditing ? setEcEditing(false) : startEcEdit())}
-            >
-              <Text style={styles.linkText}>{ecEditing ? 'Cancel' : member?.emergency_contact_phone ? 'Edit' : 'Add'}</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.settingCard}>
-            {ecEditing ? (
-              ecMode === 'choose' ? (
-                <View testID="ec-choose">
-                  <Text style={styles.settingLabel}>How would you like to add the contact?</Text>
-                  <TouchableOpacity
-                    testID="ec-pick-from-contacts"
-                    onPress={pickFromContacts}
-                    activeOpacity={0.85}
-                    style={[styles.ecOptionBtn, !isContactsPickerSupported() && styles.ecOptionBtnDisabled]}
-                    disabled={!isContactsPickerSupported()}
-                  >
-                    <Text style={styles.ecOptionEmoji}>📇</Text>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.ecOptionTitle}>Pick from Contacts</Text>
-                      <Text style={styles.ecOptionSub}>
-                        {isContactsPickerSupported()
-                          ? 'Select someone from your phone — auto-fills name & number.'
-                          : 'Not available on this device. Enter manually below.'}
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    testID="ec-enter-manually"
-                    onPress={() => setEcMode('manual')}
-                    activeOpacity={0.85}
-                    style={styles.ecOptionBtn}
-                  >
-                    <Text style={styles.ecOptionEmoji}>✏️</Text>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.ecOptionTitle}>Enter manually</Text>
-                      <Text style={styles.ecOptionSub}>Type a name and phone number yourself.</Text>
-                    </View>
-                  </TouchableOpacity>
-                </View>
-              ) : (
-                <>
-                  <Text style={styles.settingLabel}>Contact name (optional)</Text>
-                  <TextInput
-                    testID="ec-name-input"
-                    value={ecName}
-                    onChangeText={setEcName}
-                    placeholder="Jane Smith"
-                    placeholderTextColor={Colors.textTertiary}
-                    style={styles.ecInput}
-                  />
-                  <Text style={[styles.settingLabel, { marginTop: 12 }]}>Phone (we'll auto-format to E.164)</Text>
-                  <TextInput
-                    testID="ec-input"
-                    value={ecValue}
-                    onChangeText={setEcValue}
-                    placeholder="+1 555 123 4567"
-                    keyboardType="phone-pad"
-                    placeholderTextColor={Colors.textTertiary}
-                    style={styles.ecInput}
-                  />
-                  <TouchableOpacity
-                    testID="ec-save"
-                    style={styles.ecSaveBtn}
-                    onPress={() => saveEc()}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={styles.ecSaveText}>Save Emergency Contact</Text>
-                  </TouchableOpacity>
-                </>
-              )
-            ) : member?.emergency_contact_phone ? (
-              <View testID="ec-display">
-                {!!member.emergency_contact_name && (
-                  <Text style={styles.ecName}>{member.emergency_contact_name}</Text>
-                )}
-                <Text style={styles.ecValue}>{member.emergency_contact_phone}</Text>
-                <Text style={styles.ecHelp}>
-                  📱 Receives an SMS the moment {member?.name} triggers an SOS.
-                </Text>
-              </View>
-            ) : (
-              <View testID="ec-empty">
-                <Text style={styles.ecEmpty}>No emergency contact set</Text>
-                <Text style={styles.ecHelp}>
-                  Add a phone number so a designated person gets an SMS alert during an SOS emergency.
-                </Text>
-              </View>
             )}
           </View>
         </View>
@@ -830,14 +658,6 @@ const styles = StyleSheet.create({
   locStatusPill: { marginTop: 6 },
   locFreshRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
   locFreshRefreshing: { fontSize: 12, color: Colors.primary, fontWeight: '700' },
-  refreshChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
-    backgroundColor: Colors.tertiary,
-    minHeight: 32,
-  },
-  refreshChipDisabled: { opacity: 0.7 },
-  refreshChipText: { fontSize: 12, fontWeight: '700', color: Colors.primary },
   locDivider: { height: 1, backgroundColor: Colors.border, marginVertical: 12 },
   locMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
   locMetaLabel: { fontSize: 12, fontWeight: '700', color: Colors.textTertiary, textTransform: 'uppercase', letterSpacing: 0.5 },
@@ -937,32 +757,6 @@ const styles = StyleSheet.create({
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   legendDot: { width: 10, height: 10, borderRadius: 5 },
   legendText: { fontSize: 11, color: Colors.textSecondary, fontWeight: '600' },
-  ecInput: {
-    backgroundColor: Colors.background, borderRadius: 10, paddingHorizontal: 14,
-    paddingVertical: 12, fontSize: 16, borderWidth: 1, borderColor: Colors.border,
-    marginTop: 4, color: Colors.textPrimary,
-  },
-  ecSaveBtn: {
-    marginTop: 12, height: 44, borderRadius: 10, backgroundColor: Colors.primary,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  ecSaveText: { color: Colors.surface, fontSize: 14, fontWeight: '800' },
-  ecValue: { fontSize: 18, fontWeight: '800', color: Colors.textPrimary },
-  ecName: { fontSize: 13, fontWeight: '700', color: Colors.textSecondary, marginBottom: 2 },
-  ecOptionBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    paddingVertical: 12, paddingHorizontal: 14,
-    backgroundColor: Colors.background,
-    borderRadius: 14,
-    borderWidth: 1, borderColor: Colors.border,
-    marginTop: 10,
-  },
-  ecOptionBtnDisabled: { opacity: 0.6 },
-  ecOptionEmoji: { fontSize: 22 },
-  ecOptionTitle: { fontSize: 15, fontWeight: '800', color: Colors.textPrimary },
-  ecOptionSub: { fontSize: 12, color: Colors.textSecondary, marginTop: 2, lineHeight: 16 },
-  ecEmpty: { fontSize: 14, color: Colors.textTertiary, fontStyle: 'italic' },
-  ecHelp: { fontSize: 12, color: Colors.textSecondary, marginTop: 6, lineHeight: 17 },
 });
 
 function ComplianceChart({ history }: { history: any }) {
