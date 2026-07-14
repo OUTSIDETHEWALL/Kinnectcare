@@ -1,2 +1,3 @@
 - [Kinnship engineering rules](kinnship-engineering-rules.md) — Charles's non-negotiable process rules, git workflow, and force-push policy for this project.
 - [EAS Update env var requirement](eas-update-env-vars.md) — EXPO_PUBLIC_* vars must be in the shell env for eas update; eas.json build env section does NOT apply. Missing var = "undefined/api" baseURL = Network Error on all devices.
+- [Notification explainability rule](notification-explainability-rule.md) — permanent rule: every notification must answer 5 questions (why sent, who, why visible, why then, why once); applies at PR review for all push-related files.
