@@ -127,6 +127,16 @@ function registerHeadlessTaskOnce(): void {
   const HeadlessTask = async (event: any) => {
     try {
       const name = event?.name;
+      // ── Headless diagnostic entry ─────────────────────────────────
+      // This is our only window into the SDK running while the main JS
+      // runtime is frozen (post-kill, post-boot, background heartbeat).
+      // AsyncStorage IS available in this context — backgroundLocation.ts
+      // uses it on every tick.  Each headless invocation starts a fresh
+      // JS context, so logBuffer/logBufferLoaded always begin at their
+      // defaults; loadLogBuffer() reads from AsyncStorage to pick up the
+      // persisted ring buffer before appending.
+      await logEvent('headless_task_invoked', { eventName: name ?? 'unknown' });
+
       if (name === 'heartbeat') {
         // Force a fresh GPS fix; SDK persists and uploads via native
         // HTTP transport.  No-op if permission was revoked at the OS
@@ -138,9 +148,11 @@ function registerHeadlessTaskOnce(): void {
             timeout: 30,
             extras: { source: 'headless-heartbeat' },
           });
-        } catch (_e) {
-          // Swallow — Android may also kill us mid-flight; the SDK
-          // will retry the upload from its queue on the next event.
+          await logEvent('headless_heartbeat_ok');
+        } catch (e: any) {
+          await logEvent('headless_heartbeat_error', {
+            error: String(e?.message || e),
+          });
         }
       }
       // Other event types (location, motionchange, http) are
@@ -387,6 +399,14 @@ function attachSdkListeners(lib: any): void {
         } catch (_e) { /* swallow — diagnostics already wrote the bodyHead */ }
       }
     });
+    lib.onEnabledChange((enabled: boolean) => {
+      // Fires whenever the SDK transitions enabled ↔ disabled.
+      // Critical for blank-notification investigation: if this fires
+      // with enabled=true BEFORE our ready_invoked entry, the native
+      // foreground service started autonomously (boot/startOnBoot)
+      // without any JS config having been applied yet.
+      void logEvent('sdk_onEnabledChange', { enabled });
+    });
     lib.onHeartbeat(async () => {
       void logEvent('sdk_onHeartbeat');
       // JS-alive companion to the headless task above.  When the app
@@ -517,12 +537,34 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
   const config = buildSdkConfig(lib, cfg);
   cachedConfig = cfg;
 
-  // ----- ready() / setConfig() -----
+  // ----- Snapshot pre-ready SDK state ─────────────────────────────
+  // The key diagnostic for the blank-notification hypothesis: if
+  // enabled=true here, the native foreground service was already
+  // running (startOnBoot auto-restart) before our JS called ready().
+  // That is the window where a blank notification could have been
+  // shown using only the persisted config from the SDK's SQLite DB.
+  try {
+    const preState = await lib.getState();
+    await logEvent('pre_ready_state', {
+      enabled: !!preState?.enabled,
+      trackingMode: preState?.trackingMode,
+      isMoving: preState?.isMoving ?? null,
+      schedulerEnabled: !!preState?.schedulerEnabled,
+    });
+  } catch (_e) {
+    // getState() before ready() may throw on some SDK versions — log
+    // the failure but do not abort the start sequence.
+    await logEvent('pre_ready_state_error');
+  }
+
+  // ----- ready() / setConfig() ─────────────────────────────────────
   try {
     if (isReady) {
+      await logEvent('setConfig_invoked');
       await lib.setConfig(config);
       await logEvent('setConfig_ok');
     } else {
+      await logEvent('ready_invoked');
       const state = await lib.ready(config);
       isReady = true;
       await logEvent('ready_ok', {
