@@ -254,6 +254,43 @@ export default function MeScreen() {
   const [genderBusy, setGenderBusy] = useState(false);
   const [genderErr, setGenderErr] = useState<string | null>(null);
 
+  // Developer mode — hidden behind 7 taps on the App Version row in
+  // the Software section (same UX as Android's "Build number" easter egg).
+  // Persisted so it survives app restarts; session tap-counter resets on
+  // each app launch so the gesture can't be triggered accidentally.
+  const [devMode, setDevMode] = useState(false);
+  const [devTapCount, setDevTapCount] = useState(0);
+
+  const onAppVersionTap = useCallback(() => {
+    setDevTapCount((prev) => {
+      const next = prev + 1;
+      if (next >= 7) {
+        // Toggle dev mode and persist the new value.
+        setDevMode((current) => {
+          const enabling = !current;
+          AsyncStorage.setItem('@kinnship/dev_mode_v1', enabling ? '1' : '0').catch(() => {});
+          // Defer the Alert so the state update has already committed.
+          setTimeout(() => {
+            Alert.alert(
+              enabling ? '🛠 Developer mode on' : 'Developer mode off',
+              enabling
+                ? 'Diagnostics are now visible under Advanced. Tap App Version 7 times again to hide them.'
+                : 'Diagnostics are now hidden. Tap App Version 7 times again to re-enable.',
+            );
+          }, 50);
+          return enabling;
+        });
+        return 0; // reset tap counter
+      }
+      // Show a subtle countdown hint in the last 3 taps so it's
+      // discoverable without being obvious to ordinary users.
+      if (next >= 4) {
+        Alert.alert('', `${7 - next} more tap${7 - next === 1 ? '' : 's'} to ${devMode ? 'disable' : 'enable'} developer mode.`, [{ text: 'OK' }]);
+      }
+      return next;
+    });
+  }, [devMode]);
+
   // Delete-account modal
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
@@ -265,6 +302,13 @@ export default function MeScreen() {
     (async () => {
       try { setBilling(await getBillingStatus()); } catch (_e) {}
     })();
+  }, []);
+
+  // Load persisted developer mode preference on first mount.
+  useEffect(() => {
+    AsyncStorage.getItem('@kinnship/dev_mode_v1')
+      .then((v) => { if (v === '1') setDevMode(true); })
+      .catch(() => {});
   }, []);
 
   useEffect(() => subscribePushStatus(setPushStatus), []);
@@ -870,25 +914,34 @@ export default function MeScreen() {
           <NavRow testID="me-terms" icon="📄" label="Terms of Service" onPress={() => router.push('/terms-of-service')} />
         </View>
 
-        {/* Advanced */}
-        <SectionLabel>Advanced</SectionLabel>
-        <View style={styles.card}>
-          <NavRow
-            testID="me-diagnostics"
-            icon="🩺"
-            label="Diagnostics"
-            secondary="Technical details and app logs"
-            onPress={() => router.push('/diagnostics' as any)}
-          />
-        </View>
+        {/* Advanced — Diagnostics only visible in developer mode */}
+        {devMode && (
+          <>
+            <SectionLabel>Advanced</SectionLabel>
+            <View style={styles.card}>
+              <NavRow
+                testID="me-diagnostics"
+                icon="🩺"
+                label="Diagnostics"
+                secondary="Technical details and app logs"
+                onPress={() => router.push('/diagnostics' as any)}
+              />
+            </View>
+          </>
+        )}
 
         {/* Software — version identification so we always know exactly what's running */}
         <SectionLabel>Software</SectionLabel>
         <View style={styles.card} testID="me-software-card">
-          <ReadRow
-            label="App Version"
-            value={`${buildInfo.appVersion} (Build ${buildInfo.buildStr})`}
-          />
+          {/* Tapping App Version 7 times toggles developer mode (same UX as
+              Android's "Build number" easter egg). No visual affordance is
+              shown to ordinary users — the row looks identical to ReadRow. */}
+          <Pressable onPress={onAppVersionTap} testID="me-app-version-tap">
+            <ReadRow
+              label="App Version"
+              value={`${buildInfo.appVersion} (Build ${buildInfo.buildStr})`}
+            />
+          </Pressable>
           <ReadRow
             label="Runtime"
             value={buildInfo.runtimeVersion}
@@ -922,6 +975,17 @@ export default function MeScreen() {
             onPress={onCheckForUpdate}
             disabled={isCheckingUpdate}
           />
+          {devMode && (
+            <TouchableOpacity
+              testID="me-dev-mode-indicator"
+              onPress={onAppVersionTap}
+              style={styles.devModeRow}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.devModeDot}>🛠</Text>
+              <Text style={styles.devModeText}>Developer mode on · Tap to disable</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Session */}
@@ -1257,6 +1321,13 @@ const styles = StyleSheet.create({
   signOutText: { color: Colors.error, fontSize: 15, fontWeight: '800' },
 
   dangerHint: { marginTop: 8, paddingHorizontal: 4, fontSize: 12, color: Colors.textTertiary, lineHeight: 18 },
+  devModeRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 16, paddingVertical: 12,
+    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: Colors.border,
+  },
+  devModeDot: { fontSize: 14 },
+  devModeText: { fontSize: 12, color: Colors.textTertiary, fontWeight: '600' },
   footer: { fontSize: 12, color: Colors.textTertiary, textAlign: 'center', marginTop: 22 },
   versionFooter: { fontSize: 11, color: Colors.textTertiary, textAlign: 'center', marginTop: 4, marginBottom: 8, opacity: 0.7 },
 
