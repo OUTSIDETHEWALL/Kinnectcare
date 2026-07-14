@@ -38,6 +38,7 @@ import { TrackingStatusPill } from '../../src/tracking/TrackingStatusPill';
 import { hasPinForUser } from '../../src/pinAuth';
 import { wasPinSetupDismissed, markPinSetupDismissed } from '../../src/pinSetupPrompt';
 import Svg, { Circle } from 'react-native-svg';
+import * as Haptics from 'expo-haptics';
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 const SOS_FAB_SIZE = 88;
@@ -97,13 +98,15 @@ export default function Dashboard() {
       if (!dismissed) setShowPinCard(true);
     })();
   }, [user?.id]);
-  // SOS hold-to-activate. Press and hold the FAB for 2.5 s to fire.
-  // The deliberate hold duration IS the confirmation — no modal needed.
+  // SOS hold-to-activate. 2.5 s hold → 3-2-1 countdown overlay → fires.
+  // Cancel button on the overlay aborts before any alert is sent.
   const [sosHolding, setSosHolding] = useState(false);
+  const [sosCounting, setSosCounting] = useState(false);
+  const [sosCountdown, setSosCountdown] = useState(3);
   const sosScale = useRef(new Animated.Value(1)).current;
   const sosHoldProgress = useRef(new Animated.Value(0)).current;
   const sosHoldAnim = useRef<Animated.CompositeAnimation | null>(null);
-  const sosIdleLoop = useRef<Animated.CompositeAnimation | null>(null);
+  const sosCountdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sosDashOffset = sosHoldProgress.interpolate({
     inputRange: [0, 1],
     outputRange: [SOS_CIRCUMFERENCE, 0],
@@ -467,55 +470,21 @@ export default function Dashboard() {
     setRefreshing(false);
   };
 
-  // confirmSOS — called when the 2.5 s hold completes on the SOS FAB.
+  // launchSOS — fires the phone dialer only. GPS + /sos API are handled
+  // by the /sos-sending screen after navigation.
   //
-  // v6.6 SOS final reliability fix (was 10/20 in v6.5):
-  //
-  // ROOT CAUSE OF v6.5 REGRESSION:
-  //   The v6.5 attempt kept the React-Native Modal open for 250ms during
-  //   the Linking.openURL dispatch, showing a "Calling 911..." state.
-  //   React Native's Modal uses a SEPARATE ANDROID WINDOW that sits on top
-  //   of all other activities in our app.  When the dialer activity tries
-  //   to come to the foreground, our Modal window competes for focus and
-  //   sometimes wins back — producing the "flash then back to main screen"
-  //   symptom Charles described (10/20 failure rate).
-  //
-  // THE FIX (returns to the proven v6.2 ordering):
-  //   1) Close the Modal SYNCHRONOUSLY in the same event tick.  This
-  //      schedules the Modal's Window dismissal immediately.  Android's
-  //      activity manager will not have a competing Window above the
-  //      dialer when it tries to take focus.
-  //   2) Fire Linking.openURL in a setTimeout(0) so it runs AFTER React
-  //      has committed the modal-close state update but is still queued
-  //      in the very next microtask — earlier than any other work.
-  //   3) Use a pure .catch() promise chain for retries — no awaits,
-  //      no yields, no chance of being preempted by other JS work.
-  //   4) Background work (GPS + /sos + alerts refresh) runs in a separate
-  //      IIFE and is COMPLETELY DECOUPLED from the dialer launch.  It
-  //      starts AFTER the dialer scheduling so it can never preempt it.
-  //   5) Ref mutex prevents double-tap from triggering twice; released
-  //      after 3s (not coupled to dialer completion, so user can re-tap
-  //      after a real call without being permanently locked).
-  const confirmSOS = useCallback(() => {
-    // Synchronous mutex: refs aren't batched, so two taps within the
-    // same React commit cycle are perfectly serialised.
+  // v6.6 ordering preserved: the countdown overlay's setSosCounting(false)
+  // runs in the same setInterval tick as this call; the dialer fires in
+  // setTimeout(0) — after React commits the state but before any other JS
+  // work queues up. No RN Modal is involved so no competing Android window.
+  const launchSOS = useCallback(() => {
     if (sosDialingRef.current) return;
     sosDialingRef.current = true;
-
-    // STEP 1 — Schedule the dialer in the very next microtask (setTimeout 0).
-    // No modal exists to close — the hold gesture IS the confirmation.
-    // This runs AFTER React commits the modal-close above (so the Modal
-    // Window is already in the process of dismissing) but BEFORE any other
-    // JS work queues up. We use a pure promise chain — no awaits — so
-    // nothing can preempt the intent dispatch.
     const dialOnce = () => Linking.openURL('tel:911');
     setTimeout(() => {
       dialOnce().catch(() => {
-        // Retry once after a small delay if the first dispatch was rejected.
         setTimeout(() => {
           dialOnce().catch(() => {
-            // Final fallback for the rare hard-failure case (WiFi-only
-            // tablet, no dialer app installed, etc.).
             RNAlert.alert(
               '🆘 Call 911',
               "Your phone's dialer couldn't be opened. Please dial 911 manually right now.",
@@ -525,70 +494,50 @@ export default function Dashboard() {
         }, 250);
       });
     }, 0);
+    setTimeout(() => { sosDialingRef.current = false; }, 3000);
+  }, []);
 
-    // STEP 3 — Fire-and-forget background work AFTER the dialer is queued.
-    // Order matters: by the time this microtask runs, the dialer intent
-    // has already been pushed to the OS's intent broker. GPS + /sos + alert
-    // refresh now run on a separate async task and never touch the dialer.
-    (async () => {
-      try {
-        let lat: number | undefined, lon: number | undefined;
-        try {
-          const { status } = await Location.requestForegroundPermissionsAsync();
-          if (status === 'granted') {
-            const pos = await Location.getCurrentPositionAsync({
-              accuracy: Location.Accuracy.Balanced,
-            });
-            lat = pos.coords.latitude;
-            lon = pos.coords.longitude;
-          }
-        } catch (_e) {}
-        await api.post('/sos', { latitude: lat, longitude: lon });
-        // Fix #4 of v1.2 beta: bump the background location service
-        // to 10-second cadence for the next 30 min (or until the SOS
-        // is resolved, whichever comes first) so the caregiver sees
-        // a moving dot in real-time during the emergency.
-        try {
-          const bg = await import('../../src/backgroundLocation');
-          await bg.beginSosBoost();
-        } catch (_e) {}
-        load('quick-checkin').catch(() => {});
-        try {
-          (globalThis as any).__kinnshipAlertsBump = Date.now();
-        } catch (_e) {}
-      } catch (_e) {}
-    })();
+  // startCountdown — begins the 3-2-1 overlay after the hold completes.
+  // Each tick fires a light haptic. At zero: heavy haptic, dialer fires,
+  // navigate to /sos-sending which owns GPS + API.
+  const startCountdown = useCallback(() => {
+    setSosCounting(true);
+    setSosCountdown(3);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    let count = 3;
+    sosCountdownRef.current = setInterval(() => {
+      count -= 1;
+      if (count > 0) {
+        setSosCountdown(count);
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      } else {
+        clearInterval(sosCountdownRef.current!);
+        sosCountdownRef.current = null;
+        // Close overlay synchronously in this tick — v6.6 ordering.
+        setSosCounting(false);
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+        launchSOS();
+        router.push('/sos-sending');
+      }
+    }, 1000);
+  }, [launchSOS, router]);
 
-    // STEP 4 — Release the mutex after 3s. Decoupled from dialer success
-    // so the user can re-tap SOS after dismissing the dialer if they
-    // need to call back. (If they re-tap inside 3s, the second tap is
-    // safely ignored as a double-tap.)
-    setTimeout(() => {
-      sosDialingRef.current = false;
-    }, 3000);
-  }, [load]);
-
-  // Idle pulse — slow scale breathe so the FAB signals it is live.
-  // Stopped when a hold starts; restarted when the hold ends or fires.
-  const startSosIdlePulse = useCallback(() => {
-    sosIdleLoop.current?.stop();
-    const loop = Animated.loop(Animated.sequence([
-      Animated.timing(sosScale, { toValue: 1.06, duration: 1300, useNativeDriver: true }),
-      Animated.timing(sosScale, { toValue: 1.0, duration: 1300, useNativeDriver: true }),
-    ]));
-    sosIdleLoop.current = loop;
-    loop.start();
+  const cancelCountdown = useCallback(() => {
+    if (sosCountdownRef.current) {
+      clearInterval(sosCountdownRef.current);
+      sosCountdownRef.current = null;
+    }
+    setSosCounting(false);
+    setSosCountdown(3);
+    sosDialingRef.current = false; // release mutex — no alert was sent
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    Animated.spring(sosScale, { toValue: 1, useNativeDriver: true, friction: 6 }).start();
   }, [sosScale]);
-
-  useEffect(() => {
-    startSosIdlePulse();
-    return () => { sosIdleLoop.current?.stop(); };
-  }, [startSosIdlePulse]);
 
   const onSosHoldStart = useCallback(() => {
     if (sosDialingRef.current) return;
-    sosIdleLoop.current?.stop();
     setSosHolding(true);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); // finger-down feedback
     Animated.spring(sosScale, { toValue: 0.92, useNativeDriver: true, friction: 8, tension: 120 }).start();
     sosHoldProgress.setValue(0);
     sosHoldAnim.current = Animated.timing(sosHoldProgress, {
@@ -599,13 +548,11 @@ export default function Dashboard() {
     sosHoldAnim.current.start(({ finished }) => {
       if (!finished) return; // released early — onSosHoldEnd handles cleanup
       setSosHolding(false);
-      confirmSOS();
-      router.push({ pathname: '/sos-confirmation', params: { dialed: '1' } });
-      Animated.spring(sosScale, { toValue: 1, useNativeDriver: true, friction: 6 }).start(() => {
-        startSosIdlePulse();
-      });
+      sosHoldProgress.setValue(0);
+      Animated.spring(sosScale, { toValue: 1, useNativeDriver: true, friction: 6 }).start();
+      startCountdown();
     });
-  }, [sosHoldProgress, sosScale, confirmSOS, router, startSosIdlePulse]);
+  }, [sosHoldProgress, sosScale, startCountdown]);
 
   const onSosHoldEnd = useCallback(() => {
     if (!sosHoldAnim.current) return; // already completed naturally — no-op
@@ -613,10 +560,9 @@ export default function Dashboard() {
     sosHoldAnim.current = null;
     setSosHolding(false);
     sosHoldProgress.setValue(0);
-    Animated.spring(sosScale, { toValue: 1, useNativeDriver: true, friction: 6 }).start(() => {
-      startSosIdlePulse();
-    });
-  }, [sosScale, sosHoldProgress, startSosIdlePulse]);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); // cancellation feedback
+    Animated.spring(sosScale, { toValue: 1, useNativeDriver: true, friction: 6 }).start();
+  }, [sosScale, sosHoldProgress]);
 
   const quickCheckIn = (m: Member) => {
     // INSTANT: navigate immediately so the confirmation screen renders <1s.
@@ -859,10 +805,31 @@ export default function Dashboard() {
         )}
       </ScrollView>
 
-      {/* SOS FAB — press and hold 2.5 s to fire. The hold IS the
-          confirmation; no modal interrupts the emergency flow. The
-          progress ring shows fill progress and "Release to cancel"
-          gives a clear abort path for accidental touches. */}
+      {/* 3-2-1 countdown overlay — absolute-positioned (NOT a RN Modal)
+          so there is no competing Android window when the dialer fires.
+          setSosCounting(false) + launchSOS() run in the same setInterval
+          tick, preserving the v6.6 "close overlay → setTimeout(0) dialer"
+          ordering that solved the 10/20 Android focus-race. */}
+      {sosCounting && (
+        <View style={styles.sosCountdownOverlay} testID="sos-countdown-overlay">
+          <View style={styles.sosCountdownCard}>
+            <Text style={styles.sosCountdownEmoji}>🆘</Text>
+            <Text style={styles.sosCountdownHeading}>Emergency Alert</Text>
+            <Text style={styles.sosCountdownSub}>Sending in...</Text>
+            <Text style={styles.sosCountdownNumber}>{sosCountdown}</Text>
+            <TouchableOpacity
+              testID="sos-countdown-cancel"
+              onPress={cancelCountdown}
+              activeOpacity={0.85}
+              style={styles.sosCountdownCancel}
+            >
+              <Text style={styles.sosCountdownCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* SOS FAB — press and hold 2.5 s to trigger the countdown. */}
       <View style={styles.sosFabContainer} pointerEvents="box-none">
         <View style={{ width: SOS_RING_SIZE, height: SOS_RING_SIZE, alignItems: 'center', justifyContent: 'center' }}>
           <Svg width={SOS_RING_SIZE} height={SOS_RING_SIZE} style={StyleSheet.absoluteFill}>
@@ -902,7 +869,7 @@ export default function Dashboard() {
           </Pressable>
         </View>
         <Text style={[styles.sosFabLabel, sosHolding && styles.sosFabLabelHolding]}>
-          {sosHolding ? 'Release to cancel' : 'Hold for emergency'}
+          {sosHolding ? 'Release to cancel' : 'Hold for Emergency'}
         </Text>
       </View>
     </SafeAreaView>
@@ -1250,6 +1217,34 @@ const styles = StyleSheet.create({
   sosFabText: { color: Colors.surface, fontSize: 10, fontWeight: '900', letterSpacing: 1.4 },
   sosFabLabel: { fontSize: 12, fontWeight: '600', color: Colors.textTertiary, letterSpacing: 0.2 },
   sosFabLabelHolding: { color: Colors.sos, fontWeight: '700' },
+  // 3-2-1 countdown overlay
+  sosCountdownOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 100,
+  },
+  sosCountdownCard: {
+    width: 280,
+    backgroundColor: Colors.surface,
+    borderRadius: 24,
+    paddingVertical: 32,
+    paddingHorizontal: 28,
+    alignItems: 'center',
+    boxShadow: '0px 16px 40px rgba(0,0,0,0.4)' as any,
+    ...Platform.select({ android: { elevation: 20 } }),
+  },
+  sosCountdownEmoji: { fontSize: 44, marginBottom: 8 },
+  sosCountdownHeading: { fontSize: 22, fontWeight: '900', color: Colors.textPrimary, textAlign: 'center' },
+  sosCountdownSub: { fontSize: 14, color: Colors.textSecondary, marginTop: 6, marginBottom: 16, textAlign: 'center' },
+  sosCountdownNumber: { fontSize: 80, fontWeight: '900', color: Colors.sos, lineHeight: 88 },
+  sosCountdownCancel: {
+    marginTop: 24, alignSelf: 'stretch', height: 52,
+    borderRadius: 14, borderWidth: 2, borderColor: Colors.border,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  sosCountdownCancelText: { fontSize: 16, fontWeight: '800', color: Colors.textPrimary },
   upgradeBanner: {
     flexDirection: 'row', alignItems: 'center',
     marginHorizontal: 20, marginTop: 24, padding: 14,
