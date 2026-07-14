@@ -781,6 +781,22 @@ def build_router(
         current["family_group_id"] = target["id"]
         current["family_group_role"] = "member"
 
+        # Ghost-notification sprint — one event, one recipient, one notification.
+        #
+        # When a join was via a per-recipient INV- token, the inviter will
+        # receive a targeted "Invite accepted" push below.  Sending them the
+        # generic "New family member joined" push AS WELL produces two
+        # notifications describing the same event.  We confirmed this in
+        # production: Charles received both pushes on each of Joyce's five
+        # successful joins (10 notifications for 5 events).
+        #
+        # Fix: resolve the inviter_id before the generic loop runs and
+        # exclude that user from the loop.  Non-invite joins (KINN- codes)
+        # set inviter_id_for_exclusion to None, so the loop is unchanged.
+        inviter_id_for_exclusion = (
+            accepted_invite.get("invited_by_user_id") if accepted_invite else None
+        )
+
         # Notify other group members via push that someone joined
         if push_to_user is not None:
             try:
@@ -788,6 +804,10 @@ def build_router(
                 joiner_name = current.get("full_name") or "A new family member"
                 for uid in other_ids:
                     if uid == current["id"]:
+                        continue
+                    # Skip the inviter — they receive the more personal
+                    # "Invite accepted" push below (one notification per event).
+                    if inviter_id_for_exclusion and uid == inviter_id_for_exclusion:
                         continue
                     await push_to_user(
                         uid,
@@ -808,7 +828,7 @@ def build_router(
                 await accept_invite(db, accepted_invite["id"], current["id"])
             except Exception as e:
                 logger.warning(f"accept_invite bookkeeping failed: {e}")
-            inviter_id = accepted_invite.get("invited_by_user_id")
+            inviter_id = inviter_id_for_exclusion
             if push_to_user is not None and inviter_id and inviter_id != current["id"]:
                 try:
                     joiner_name = current.get("full_name") or "Your invited family member"
