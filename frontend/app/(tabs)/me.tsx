@@ -670,29 +670,6 @@ export default function MeScreen() {
             value={(user as any)?.timezone || 'UTC'}
             onEdit={openEditTimezone}
           />
-          {/* ── OTA diagnostics ─────────────────────────────────────────
-              These three rows are intentionally placed in the Account card
-              so they are ALWAYS visible on first screen, regardless of any
-              clipping or rendering bugs affecting sections lower on the page.
-              They let us read Joyce's runtime version, channel, and current
-              OTA directly from her screen without her needing to scroll.
-              Once the removeClippedSubviews fix is confirmed working on all
-              devices, this block can be removed (the full Software card below
-              already shows the same info in the correct location).
-          ─────────────────────────────────────────────────────────────── */}
-          <ReadRow label="Runtime" value={buildInfo.runtimeVersion} />
-          <ReadRow label="Channel" value={buildInfo.channel} />
-          <ReadRow
-            label="OTA"
-            value={buildInfo.otaId ?? 'Embedded (no OTA installed)'}
-          />
-          <NavRow
-            testID="me-check-for-update"
-            icon="🔄"
-            label={isCheckingUpdate ? 'Checking for update…' : 'Check for update'}
-            onPress={onCheckForUpdate}
-            disabled={isCheckingUpdate}
-          />
         </View>
 
         {/* Profile — member fields visible to your family */}
@@ -900,7 +877,7 @@ export default function MeScreen() {
             testID="me-diagnostics"
             icon="🩺"
             label="Diagnostics"
-            secondary="Developer tools — safe to explore"
+            secondary="Technical details and app logs"
             onPress={() => router.push('/diagnostics' as any)}
           />
         </View>
@@ -938,6 +915,13 @@ export default function MeScreen() {
               value={buildInfo.channel}
             />
           ) : null}
+          <NavRow
+            testID="me-check-for-update"
+            icon="🔄"
+            label={isCheckingUpdate ? 'Checking for update…' : 'Check for update'}
+            onPress={onCheckForUpdate}
+            disabled={isCheckingUpdate}
+          />
         </View>
 
         {/* Session */}
@@ -946,12 +930,12 @@ export default function MeScreen() {
           <Text style={styles.signOutText}>Sign out</Text>
         </TouchableOpacity>
 
-        {/* Danger Zone */}
-        <SectionLabel>Danger Zone</SectionLabel>
+        {/* Data & Privacy */}
+        <SectionLabel>Data &amp; Privacy</SectionLabel>
         <View style={[styles.card, { borderColor: '#F2C3C0' }]}>
           <NavRow testID="me-delete-account" icon="🗑" label="Delete Account" onPress={openDelete} danger />
         </View>
-        <Text style={styles.dangerHint}>Permanently deletes your account and all associated data. Cannot be undone.</Text>
+        <Text style={styles.dangerHint}>Permanently deletes your account and all associated data. This cannot be undone.</Text>
 
         {/* Footer */}
         <Text style={styles.footer}>{APP_NAME} · © {new Date().getFullYear()} {COMPANY_NAME}</Text>

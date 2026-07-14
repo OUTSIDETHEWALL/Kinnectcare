@@ -369,7 +369,7 @@ export default function MemberDetail() {
         <TouchableOpacity testID="member-back" onPress={() => router.back()} style={styles.iconBtn} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
           <Icon name="arrow-back" size={28} color={Colors.textPrimary} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Member</Text>
+        <Text style={styles.headerTitle}>{member.name}</Text>
         <TouchableOpacity testID="member-call" onPress={() => Linking.openURL(`tel:${member.phone}`)} style={styles.iconBtn}>
           <Text style={{ fontSize: 18 }}>📞</Text>
         </TouchableOpacity>
@@ -391,8 +391,12 @@ export default function MemberDetail() {
             <View style={[styles.statusDot, { backgroundColor: StatusColor(member.status) }]} />
           </View>
           <Text style={styles.name}>{member.name} {dot}</Text>
-          <Text style={styles.meta}>{member.age} years · {member.gender} · {member.role === 'senior' ? '👴 Senior' : '👨‍👩‍👧 Family'}</Text>
-          <Text style={styles.phoneText}>📞 {member.phone}</Text>
+          <Text style={styles.meta}>{[
+            member.age && member.age > 0 ? `${member.age} years` : null,
+            member.gender || null,
+            member.role === 'senior' ? '👴 Senior' : '👨‍👩‍👧 Family',
+          ].filter(Boolean).join(' · ')}</Text>
+          {!!member.phone && <Text style={styles.phoneText}>📞 {member.phone}</Text>}
         </View>
 
         {/* Location Card */}
@@ -675,7 +679,7 @@ export default function MemberDetail() {
             </TouchableOpacity>
           </View>
           {routines.length === 0 ? (
-            <Text style={styles.emptyText}>No routine items yet.</Text>
+            <Text style={styles.emptyText}>No routine items yet. Tap Add to create one.</Text>
           ) : routines.map(r => (
             <ReminderRow key={r.id} reminder={r} onMark={markReminder} onDelete={deleteReminder} onEdit={(rid) => router.push(`/edit-medication/${rid}`)} onMarkRefilled={markRefilled} />
           ))}
