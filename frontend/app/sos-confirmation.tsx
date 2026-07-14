@@ -65,8 +65,8 @@ export default function SOSConfirmation() {
           />
           <StatusRow
             icon="👀"
-            label="Waiting for acknowledgement"
-            sub="You'll be notified when a family member responds"
+            label="Waiting for your family to respond..."
+            sub="You'll be notified as soon as someone sees this"
             pending
           />
         </View>
@@ -79,7 +79,7 @@ export default function SOSConfirmation() {
           activeOpacity={0.85}
           style={styles.callBtn}
         >
-          <Text style={styles.callBtnText}>📞 Call 911 again</Text>
+          <Text style={styles.callBtnText}>📞 Call 911</Text>
         </TouchableOpacity>
         <TouchableOpacity
           testID="sos-done"
