@@ -16,6 +16,57 @@ const TWELVE_HOUR_OPTS: Intl.DateTimeFormatOptions = {
   hour12: true,
 };
 
+/**
+ * Convert an IANA timezone identifier (e.g. "America/Phoenix") to a
+ * human-readable label (e.g. "Mountain Time").  Falls back to the raw
+ * identifier so the UI is never broken by an unknown zone.
+ */
+const TZ_LABELS: Record<string, string> = {
+  'America/New_York':              'Eastern Time',
+  'America/Detroit':               'Eastern Time',
+  'America/Indiana/Indianapolis':  'Eastern Time',
+  'America/Indiana/Fort_Wayne':    'Eastern Time',
+  'America/Kentucky/Louisville':   'Eastern Time',
+  'America/Toronto':               'Eastern Time',
+  'America/Chicago':               'Central Time',
+  'America/Winnipeg':              'Central Time',
+  'America/Indiana/Knox':          'Central Time',
+  'America/Menominee':             'Central Time',
+  'America/Denver':                'Mountain Time',
+  'America/Boise':                 'Mountain Time',
+  'America/Edmonton':              'Mountain Time',
+  'America/Phoenix':               'Mountain Time (no DST)',
+  'America/Mazatlan':              'Mountain Time',
+  'America/Los_Angeles':           'Pacific Time',
+  'America/Vancouver':             'Pacific Time',
+  'America/Tijuana':               'Pacific Time',
+  'America/Anchorage':             'Alaska Time',
+  'America/Juneau':                'Alaska Time',
+  'America/Nome':                  'Alaska Time',
+  'Pacific/Honolulu':              'Hawaii Time',
+  'America/Adak':                  'Hawaii–Aleutian Time',
+  'America/Puerto_Rico':           'Atlantic Time',
+  'America/Halifax':               'Atlantic Time',
+  'UTC':                           'UTC',
+  'Etc/UTC':                       'UTC',
+  'Etc/GMT':                       'UTC',
+};
+
+export function formatTimezone(tz?: string | null): string {
+  if (!tz) return 'UTC';
+  return TZ_LABELS[tz] ?? tz.replace(/_/g, ' ').replace('/', ' / ');
+}
+
+/** Format a US/Canada phone number string as (XXX) XXX-XXXX. */
+export function formatPhone(raw?: string | null): string {
+  if (!raw) return '';
+  const digits = raw.replace(/\D/g, '');
+  // Strip leading country code 1 if present
+  const local = digits.length === 11 && digits[0] === '1' ? digits.slice(1) : digits;
+  if (local.length !== 10) return raw; // unknown format — return as-is
+  return `(${local.slice(0, 3)}) ${local.slice(3, 6)}-${local.slice(6)}`;
+}
+
 /** Detect the device's IANA timezone (e.g. "America/Los_Angeles"). */
 export function getDeviceTimezone(): string {
   try {
@@ -167,5 +218,5 @@ export function formatCheckinSetting(
   if (daily_checkin_time) {
     return `🕐 ${formatTime12(daily_checkin_time)} (daily)`;
   }
-  return '— Not set';
+  return 'Not configured';
 }

@@ -680,7 +680,9 @@ export default function Dashboard() {
           </View>
           <View style={styles.summaryDivider} />
           <View style={styles.summaryItem}>
-            <Text style={styles.summaryNum}>{totalCheckedIn}/{seniors.length}</Text>
+            <Text style={styles.summaryNum}>
+              {seniors.length > 0 ? `${totalCheckedIn} of ${seniors.length}` : '—'}
+            </Text>
             <Text style={styles.summaryLbl}>Checked in</Text>
           </View>
           <View style={styles.summaryDivider} />
@@ -692,35 +694,10 @@ export default function Dashboard() {
 
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Your Family</Text>
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            <TouchableOpacity
-              testID="refresh-all-btn"
-              onPress={() => {
-                // Manual "refresh all" — re-poll + fire pull-on-stale for every
-                // member regardless of their freshness, so the user can force a
-                // GPS update without waiting for the 60 s threshold to elapse.
-                onRefresh().catch(() => {});
-                try {
-                  for (const mb of members) {
-                    if (!mb?.id) continue;
-                    if (user?.id && mb?.user_id === user.id) continue;
-                    requestMemberRefresh(
-                      mb.id,
-                      mb.last_seen ? new Date(mb.last_seen).getTime() : null,
-                    );
-                  }
-                } catch (_e) {}
-              }}
-              style={styles.refreshAllBtn}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.refreshAllText}>🔄 Refresh</Text>
-            </TouchableOpacity>
-            <TouchableOpacity testID="add-member-btn" onPress={() => router.push('/add-member')} style={styles.addBtn}>
+          <TouchableOpacity testID="add-member-btn" onPress={() => router.push('/add-member')} style={styles.addBtn}>
               <Icon name="add" size={16} color={Colors.primary} />
               <Text style={styles.addBtnText}>Add</Text>
             </TouchableOpacity>
-          </View>
         </View>
 
         {seniors.length > 0 && <Text style={styles.subSection}>👴 Seniors</Text>}

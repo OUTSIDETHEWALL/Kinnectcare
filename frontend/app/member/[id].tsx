@@ -15,7 +15,7 @@ import { api, Member, Reminder } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
 import MemberMap from '../../src/MemberMap';
 import { TrackingStatusPill } from '../../src/tracking/TrackingStatusPill';
-import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone, formatTimeAgo } from '../../src/timeFormat';
+import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone, formatTimeAgo, formatTimezone, formatPhone } from '../../src/timeFormat';
 import { TimePicker12 } from '../../src/TimePicker12';
 import { pickContact, isContactsPickerSupported } from '../../src/contactsPicker';
 import {
@@ -390,13 +390,13 @@ export default function MemberDetail() {
             )}
             <View style={[styles.statusDot, { backgroundColor: StatusColor(member.status) }]} />
           </View>
-          <Text style={styles.name}>{member.name} {dot}</Text>
+          <Text style={styles.name}>{member.name}</Text>
           <Text style={styles.meta}>{[
-            member.age && member.age > 0 ? `${member.age} years` : null,
+            member.age && member.age > 0 ? `${member.age}` : null,
             member.gender || null,
             member.role === 'senior' ? '👴 Senior' : '👨‍👩‍👧 Family',
           ].filter(Boolean).join(' · ')}</Text>
-          {!!member.phone && <Text style={styles.phoneText}>📞 {member.phone}</Text>}
+          {!!member.phone && <Text style={styles.phoneText}>📞 {formatPhone(member.phone)}</Text>}
         </View>
 
         {/* Location Card */}
@@ -581,13 +581,13 @@ export default function MemberDetail() {
             </TouchableOpacity>
           </View>
           <View style={styles.settingCard}>
-            <Text style={styles.settingLabel}>Expected check-in ({getDeviceTimezone()})</Text>
+            <Text style={styles.settingLabel}>Expected check-in · {formatTimezone(getDeviceTimezone())}</Text>
             <Text style={styles.settingValue} testID="checkin-display">
               {member.checkin_interval_hours
                 ? `🔁 Every ${member.checkin_interval_hours} hours`
                 : member.daily_checkin_time
                   ? `🕐 ${formatTime12(member.daily_checkin_time)} (daily)`
-                  : '— Not set'}
+                  : 'Tap Edit to set a check-in time'}
             </Text>
             {showCheckinSettings && (
               <View style={{ marginTop: 14 }}>

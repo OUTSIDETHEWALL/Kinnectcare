@@ -49,6 +49,7 @@ import {
 } from '../../src/backgroundLocation';
 import { fetchAll as refetchMembers } from '../../src/store/memberStore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { formatTimezone, formatPhone } from '../../src/timeFormat';
 
 // ------ Small pieces ---------------------------------------------------
 
@@ -704,14 +705,10 @@ export default function MeScreen() {
             onEdit={openEditName}
           />
           <ReadRow label="Email" value={user?.email as string} />
-          <ReadRow
-            label="Role"
-            value={((user as any)?.role || 'member').replace(/^\w/, (c: string) => c.toUpperCase())}
-          />
           <EditableRow
             testID="me-edit-timezone"
             label="Time zone"
-            value={(user as any)?.timezone || 'UTC'}
+            value={formatTimezone((user as any)?.timezone || 'UTC')}
             onEdit={openEditTimezone}
           />
         </View>
@@ -723,12 +720,12 @@ export default function MeScreen() {
             <View style={styles.card}>
               <EditableRow
                 label="Age"
-                value={myMemberAge && myMemberAge > 0 ? `${myMemberAge} years` : 'Not set'}
+                value={myMemberAge && myMemberAge > 0 ? `${myMemberAge}` : 'Not set'}
                 onEdit={openEditAge}
               />
               <EditableRow
                 label="Phone"
-                value={myMemberPhone || 'Not set'}
+                value={myMemberPhone ? formatPhone(myMemberPhone) : 'Not set'}
                 onEdit={openEditPhone}
               />
               <EditableRow
@@ -747,7 +744,7 @@ export default function MeScreen() {
             <Text style={styles.planName}>{planLabel}</Text>
             <View style={[styles.planBadge, billing?.plan === 'family_plan' && styles.planBadgePaid]}>
               <Text style={[styles.planBadgeText, billing?.plan === 'family_plan' && { color: Colors.surface }]}>
-                {billing?.plan === 'family_plan' ? '⭐ Active' : 'Free Tier'}
+                {billing?.plan === 'family_plan' ? '✓ Active' : 'Free Tier'}
               </Text>
             </View>
           </View>
@@ -871,17 +868,7 @@ export default function MeScreen() {
                   : bioTypes.includes('face') ? '🙂'
                   : '🔐'
               }
-              label={(() => {
-                // Build #56 — honest labeling.  If BOTH Face and
-                // Fingerprint are enrolled, tell the user both work
-                // (a single OS prompt accepts either).  Otherwise
-                // name the specific method rather than a generic
-                // "Biometrics" wording.
-                const parts = bioTypes.map(labelForBiometricType);
-                if (parts.length === 0) return `Unlock with ${bioLabel}`;
-                if (parts.length === 1) return `Unlock with ${parts[0]}`;
-                return `Unlock with ${parts.slice(0, -1).join(', ')} or ${parts.slice(-1)[0]}`;
-              })()}
+              label="Biometric unlock"
               secondary="A convenience option — your PIN still works."
               value={bioOn}
               onValueChange={onToggleBiometrics}
@@ -906,29 +893,6 @@ export default function MeScreen() {
             disabled={locBusy}
           />
         </View>
-
-        {/* Legal */}
-        <SectionLabel>Legal</SectionLabel>
-        <View style={styles.card}>
-          <NavRow testID="me-privacy-policy" icon="🛡️" label="Privacy Policy" onPress={() => router.push('/privacy-policy')} />
-          <NavRow testID="me-terms" icon="📄" label="Terms of Service" onPress={() => router.push('/terms-of-service')} />
-        </View>
-
-        {/* Advanced — Diagnostics only visible in developer mode */}
-        {devMode && (
-          <>
-            <SectionLabel>Advanced</SectionLabel>
-            <View style={styles.card}>
-              <NavRow
-                testID="me-diagnostics"
-                icon="🩺"
-                label="Diagnostics"
-                secondary="Technical details and app logs"
-                onPress={() => router.push('/diagnostics' as any)}
-              />
-            </View>
-          </>
-        )}
 
         {/* Software — version identification so we always know exactly what's running */}
         <SectionLabel>Software</SectionLabel>
@@ -987,6 +951,29 @@ export default function MeScreen() {
             </TouchableOpacity>
           )}
         </View>
+
+        {/* Legal */}
+        <SectionLabel>Legal</SectionLabel>
+        <View style={styles.card}>
+          <NavRow testID="me-privacy-policy" icon="🛡️" label="Privacy Policy" onPress={() => router.push('/privacy-policy')} />
+          <NavRow testID="me-terms" icon="📄" label="Terms of Service" onPress={() => router.push('/terms-of-service')} />
+        </View>
+
+        {/* Advanced — Diagnostics only visible in developer mode */}
+        {devMode && (
+          <>
+            <SectionLabel>Advanced</SectionLabel>
+            <View style={styles.card}>
+              <NavRow
+                testID="me-diagnostics"
+                icon="🩺"
+                label="Diagnostics"
+                secondary="Technical details and app logs"
+                onPress={() => router.push('/diagnostics' as any)}
+              />
+            </View>
+          </>
+        )}
 
         {/* Session */}
         <TouchableOpacity testID="me-sign-out" style={styles.signOutBtn} onPress={confirmLogout} activeOpacity={0.85}>
