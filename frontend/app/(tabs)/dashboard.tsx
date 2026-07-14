@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
-  RefreshControl, Alert as RNAlert, Linking, ActivityIndicator, Modal, Platform,
+  RefreshControl, Alert as RNAlert, Linking, ActivityIndicator, Animated, Pressable, Platform,
   AppState,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -37,6 +37,13 @@ import { useActiveEmergency } from '../../src/activeEmergency';
 import { TrackingStatusPill } from '../../src/tracking/TrackingStatusPill';
 import { hasPinForUser } from '../../src/pinAuth';
 import { wasPinSetupDismissed, markPinSetupDismissed } from '../../src/pinSetupPrompt';
+import Svg, { Circle } from 'react-native-svg';
+
+const AnimatedCircle = Animated.createAnimatedComponent(Circle);
+const SOS_FAB_SIZE = 88;
+const SOS_RING_SIZE = 108; // FAB + 10 px gap each side for the progress ring
+const SOS_RING_RADIUS = 51; // (SOS_RING_SIZE / 2) - (strokeWidth / 2)
+const SOS_CIRCUMFERENCE = 2 * Math.PI * SOS_RING_RADIUS; // ≈ 320.4
 
 export default function Dashboard() {
   const router = useRouter();
@@ -90,20 +97,20 @@ export default function Dashboard() {
       if (!dismissed) setShowPinCard(true);
     })();
   }, [user?.id]);
-  // SOS confirmation modal — purposefully in-app (NOT Alert.alert) so:
-  //   1. Cancel responds instantly with no system animation lag
-  //   2. The dialer launch fires from a clean synchronous event handler,
-  //      avoiding the Android activity-launch race that occurred when an
-  //      Alert.alert's dismiss animation overlapped with Linking.openURL
-  //   3. The styling matches the rest of the app (large finger-friendly
-  //      buttons for senior users, high-contrast brand colors)
-  const [sosConfirmOpen, setSosConfirmOpen] = useState(false);
-  // 'idle' | 'dialing' — guards the "Yes, Call 911" button so multiple rapid
-  // taps cannot race the Linking.openURL intent (was failing ~1/10 times).
-  const [sosDialState, setSosDialState] = useState<'idle' | 'dialing'>('idle');
-  // Ref-based mutex — state updates batch async, so a second tap inside the
-  // same event loop tick can still see `sosDialState === 'idle'`. The ref is
-  // checked synchronously and is bulletproof against double-tap races.
+  // SOS hold-to-activate. Press and hold the FAB for 2.5 s to fire.
+  // The deliberate hold duration IS the confirmation — no modal needed.
+  const [sosHolding, setSosHolding] = useState(false);
+  const sosScale = useRef(new Animated.Value(1)).current;
+  const sosHoldProgress = useRef(new Animated.Value(0)).current;
+  const sosHoldAnim = useRef<Animated.CompositeAnimation | null>(null);
+  const sosIdleLoop = useRef<Animated.CompositeAnimation | null>(null);
+  const sosDashOffset = sosHoldProgress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [SOS_CIRCUMFERENCE, 0],
+  });
+  // Ref mutex — state updates batch async, so a second touch event inside
+  // the same event loop tick could still read sosHolding as false. The ref
+  // is checked synchronously and is bulletproof against double-tap races.
   const sosDialingRef = useRef(false);
 
   // Build 47 — the dashboard's old "subscribe to fresh-member broadcasts
@@ -460,14 +467,7 @@ export default function Dashboard() {
     setRefreshing(false);
   };
 
-  // Step 1 — user tapped the SOS button. Show the in-app confirmation modal.
-  // This is intentionally light: no API calls, no GPS request, no permissions.
-  // We want the modal to appear in <50ms so Cancel is instantly responsive.
-  const triggerSOS = () => {
-    setSosConfirmOpen(true);
-  };
-
-  // Step 2 — user confirmed in the modal.
+  // confirmSOS — called when the 2.5 s hold completes on the SOS FAB.
   //
   // v6.6 SOS final reliability fix (was 10/20 in v6.5):
   //
@@ -502,13 +502,8 @@ export default function Dashboard() {
     if (sosDialingRef.current) return;
     sosDialingRef.current = true;
 
-    // STEP 1 — Close the modal FIRST, in this same event tick. This is
-    // the single most important change versus v6.5. The Modal window
-    // must dismiss BEFORE the dialer tries to take foreground focus.
-    setSosConfirmOpen(false);
-    setSosDialState('idle');
-
-    // STEP 2 — Schedule the dialer in the very next microtask (setTimeout 0).
+    // STEP 1 — Schedule the dialer in the very next microtask (setTimeout 0).
+    // No modal exists to close — the hold gesture IS the confirmation.
     // This runs AFTER React commits the modal-close above (so the Modal
     // Window is already in the process of dismissing) but BEFORE any other
     // JS work queues up. We use a pure promise chain — no awaits — so
@@ -573,6 +568,56 @@ export default function Dashboard() {
     }, 3000);
   }, [load]);
 
+  // Idle pulse — slow scale breathe so the FAB signals it is live.
+  // Stopped when a hold starts; restarted when the hold ends or fires.
+  const startSosIdlePulse = useCallback(() => {
+    sosIdleLoop.current?.stop();
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(sosScale, { toValue: 1.06, duration: 1300, useNativeDriver: true }),
+      Animated.timing(sosScale, { toValue: 1.0, duration: 1300, useNativeDriver: true }),
+    ]));
+    sosIdleLoop.current = loop;
+    loop.start();
+  }, [sosScale]);
+
+  useEffect(() => {
+    startSosIdlePulse();
+    return () => { sosIdleLoop.current?.stop(); };
+  }, [startSosIdlePulse]);
+
+  const onSosHoldStart = useCallback(() => {
+    if (sosDialingRef.current) return;
+    sosIdleLoop.current?.stop();
+    setSosHolding(true);
+    Animated.spring(sosScale, { toValue: 0.92, useNativeDriver: true, friction: 8, tension: 120 }).start();
+    sosHoldProgress.setValue(0);
+    sosHoldAnim.current = Animated.timing(sosHoldProgress, {
+      toValue: 1,
+      duration: 2500,
+      useNativeDriver: false, // SVG strokeDashoffset is not supported by the native driver
+    });
+    sosHoldAnim.current.start(({ finished }) => {
+      if (!finished) return; // released early — onSosHoldEnd handles cleanup
+      setSosHolding(false);
+      confirmSOS();
+      router.push({ pathname: '/sos-confirmation', params: { dialed: '1' } });
+      Animated.spring(sosScale, { toValue: 1, useNativeDriver: true, friction: 6 }).start(() => {
+        startSosIdlePulse();
+      });
+    });
+  }, [sosHoldProgress, sosScale, confirmSOS, router, startSosIdlePulse]);
+
+  const onSosHoldEnd = useCallback(() => {
+    if (!sosHoldAnim.current) return; // already completed naturally — no-op
+    sosHoldAnim.current.stop();
+    sosHoldAnim.current = null;
+    setSosHolding(false);
+    sosHoldProgress.setValue(0);
+    Animated.spring(sosScale, { toValue: 1, useNativeDriver: true, friction: 6 }).start(() => {
+      startSosIdlePulse();
+    });
+  }, [sosScale, sosHoldProgress, startSosIdlePulse]);
+
   const quickCheckIn = (m: Member) => {
     // INSTANT: navigate immediately so the confirmation screen renders <1s.
     router.push({ pathname: '/check-in', params: { name: m.name } });
@@ -621,7 +666,7 @@ export default function Dashboard() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <ScrollView
-        contentContainerStyle={{ paddingBottom: 130 }}
+        contentContainerStyle={{ paddingBottom: 160 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.primary} />}
       >
         <View style={styles.header}>
@@ -814,64 +859,52 @@ export default function Dashboard() {
         )}
       </ScrollView>
 
-      <TouchableOpacity testID="sos-button" onPress={triggerSOS} activeOpacity={0.85} style={styles.sosBtn}>
-        <Text style={styles.sosEmoji}>🆘</Text>
-        <Text style={styles.sosText}>SOS Emergency</Text>
-      </TouchableOpacity>
-
-      {/*
-        In-app SOS confirmation modal. Replaces the previous Alert.alert
-        approach so the dialer can fire from a clean synchronous event
-        handler (no system-alert animation race with Linking.openURL).
-        Buttons are oversized (60pt tall) for senior accessibility.
-      */}
-      <Modal
-        visible={sosConfirmOpen}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
-        onRequestClose={() => sosDialState === 'idle' && setSosConfirmOpen(false)}
-      >
-        <View style={styles.sosBackdrop}>
-          <View style={styles.sosCard} testID="sos-confirm-modal">
-            <Text style={styles.sosCardEmoji}>🆘</Text>
-            <Text style={styles.sosCardTitle}>Are you sure?</Text>
-            <Text style={styles.sosCardBody}>
-              Your phone's dialer will open with 911 pre-filled and your family will be alerted with your location.
-            </Text>
-
-            <TouchableOpacity
-              testID="sos-confirm-yes"
-              style={[styles.sosCardConfirm, sosDialState === 'dialing' && styles.sosCardConfirmDisabled]}
-              onPress={confirmSOS}
-              activeOpacity={0.85}
-              disabled={sosDialState === 'dialing'}
-            >
-              {sosDialState === 'dialing' ? (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                  <ActivityIndicator color={Colors.surface} />
-                  <Text style={styles.sosCardConfirmText}>Calling 911...</Text>
-                </View>
-              ) : (
-                <Text style={styles.sosCardConfirmText}>Yes, Call 911</Text>
-              )}
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              testID="sos-confirm-cancel"
-              style={styles.sosCardCancel}
-              onPress={() => sosDialState === 'idle' && setSosConfirmOpen(false)}
-              activeOpacity={0.85}
-              disabled={sosDialState === 'dialing'}
-            >
-              <Text style={[
-                styles.sosCardCancelText,
-                sosDialState === 'dialing' && { opacity: 0.4 },
-              ]}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
+      {/* SOS FAB — press and hold 2.5 s to fire. The hold IS the
+          confirmation; no modal interrupts the emergency flow. The
+          progress ring shows fill progress and "Release to cancel"
+          gives a clear abort path for accidental touches. */}
+      <View style={styles.sosFabContainer} pointerEvents="box-none">
+        <View style={{ width: SOS_RING_SIZE, height: SOS_RING_SIZE, alignItems: 'center', justifyContent: 'center' }}>
+          <Svg width={SOS_RING_SIZE} height={SOS_RING_SIZE} style={StyleSheet.absoluteFill}>
+            {/* Track ring — faint background arc, only visible while holding */}
+            {sosHolding && (
+              <Circle
+                cx={SOS_RING_SIZE / 2} cy={SOS_RING_SIZE / 2}
+                r={SOS_RING_RADIUS}
+                stroke="rgba(255,255,255,0.28)"
+                strokeWidth={6} fill="none"
+              />
+            )}
+            {/* Progress arc — fills clockwise from 12 o'clock */}
+            {sosHolding && (
+              <AnimatedCircle
+                cx={SOS_RING_SIZE / 2} cy={SOS_RING_SIZE / 2}
+                r={SOS_RING_RADIUS}
+                stroke="white" strokeWidth={6} fill="none"
+                strokeDasharray={`${SOS_CIRCUMFERENCE}`}
+                strokeDashoffset={sosDashOffset as any}
+                strokeLinecap="round"
+                rotation="-90"
+                origin={`${SOS_RING_SIZE / 2}, ${SOS_RING_SIZE / 2}`}
+              />
+            )}
+          </Svg>
+          <Pressable
+            testID="sos-button"
+            onPressIn={onSosHoldStart}
+            onPressOut={onSosHoldEnd}
+            android_disableSound
+          >
+            <Animated.View style={[styles.sosFab, { transform: [{ scale: sosScale }] }]}>
+              <Text style={styles.sosFabIcon}>🆘</Text>
+              <Text style={styles.sosFabText}>SOS</Text>
+            </Animated.View>
+          </Pressable>
         </View>
-      </Modal>
+        <Text style={[styles.sosFabLabel, sosHolding && styles.sosFabLabelHolding]}>
+          {sosHolding ? 'Release to cancel' : 'Hold for emergency'}
+        </Text>
+      </View>
     </SafeAreaView>
   );
 }
@@ -1202,14 +1235,21 @@ const styles = StyleSheet.create({
   checkinPillText: { color: Colors.surface, fontWeight: '700', fontSize: 14 },
   empty: { alignItems: 'center', padding: 24, marginHorizontal: 24, marginTop: 8 },
   emptyText: { color: Colors.textTertiary, marginTop: 8, textAlign: 'center' },
-  sosBtn: {
-    position: 'absolute', bottom: 24, left: 24, right: 24,
-    height: 64, backgroundColor: Colors.sos, borderRadius: 20,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12,
-    boxShadow: '0px 8px 16px rgba(220,38,38,0.4)', elevation: 8,
+  sosFabContainer: {
+    position: 'absolute', bottom: 18, left: 0, right: 0,
+    alignItems: 'center', gap: 8,
   },
-  sosEmoji: { fontSize: 24 },
-  sosText: { color: Colors.surface, fontSize: 18, fontWeight: '800', letterSpacing: 0.3 },
+  sosFab: {
+    width: SOS_FAB_SIZE, height: SOS_FAB_SIZE, borderRadius: SOS_FAB_SIZE / 2,
+    backgroundColor: Colors.sos,
+    alignItems: 'center', justifyContent: 'center', gap: 1,
+    boxShadow: '0px 8px 20px rgba(220,38,38,0.45)' as any,
+    ...Platform.select({ android: { elevation: 10 } }),
+  },
+  sosFabIcon: { fontSize: 26, lineHeight: 30 },
+  sosFabText: { color: Colors.surface, fontSize: 10, fontWeight: '900', letterSpacing: 1.4 },
+  sosFabLabel: { fontSize: 12, fontWeight: '600', color: Colors.textTertiary, letterSpacing: 0.2 },
+  sosFabLabelHolding: { color: Colors.sos, fontWeight: '700' },
   upgradeBanner: {
     flexDirection: 'row', alignItems: 'center',
     marginHorizontal: 20, marginTop: 24, padding: 14,
@@ -1236,48 +1276,6 @@ const styles = StyleSheet.create({
   upgradeCtaText: { color: Colors.surface, fontSize: 13, fontWeight: '800' },
   upgradeCtaArrow: { color: Colors.surface, fontSize: 16, fontWeight: '700' },
 
-  // In-app SOS confirmation modal — designed for senior accessibility:
-  // oversized 60pt touch targets, ≥14:1 contrast, big readable type, urgent
-  // red "Yes, Call 911" button anchored at the bottom of the modal so it
-  // sits within thumb-reach.
-  sosBackdrop: {
-    flex: 1, backgroundColor: 'rgba(0,0,0,0.55)',
-    alignItems: 'center', justifyContent: 'center', padding: 22,
-  },
-  sosCard: {
-    width: '100%', maxWidth: 400, backgroundColor: Colors.surface,
-    borderRadius: 22, padding: 24, alignItems: 'center',
-    boxShadow: '0px 12px 32px rgba(0,0,0,0.35)' as any,
-    ...Platform.select({ android: { elevation: 16 } }),
-  },
-  sosCardEmoji: { fontSize: 48, marginBottom: 4 },
-  sosCardTitle: {
-    fontSize: 24, fontWeight: '900', color: Colors.textPrimary,
-    textAlign: 'center', marginTop: 4,
-  },
-  sosCardBody: {
-    fontSize: 15.5, color: Colors.textSecondary,
-    textAlign: 'center', marginTop: 12, lineHeight: 22,
-  },
-  sosCardConfirm: {
-    marginTop: 22, alignSelf: 'stretch',
-    height: 60, backgroundColor: Colors.sos, borderRadius: 16,
-    alignItems: 'center', justifyContent: 'center',
-    boxShadow: '0px 6px 14px rgba(220,38,38,0.45)' as any,
-    ...Platform.select({ android: { elevation: 6 } }),
-  },
-  sosCardConfirmDisabled: { opacity: 0.75 },
-  sosCardConfirmText: {
-    color: Colors.surface, fontSize: 17, fontWeight: '900', letterSpacing: 0.3,
-  },
-  sosCardCancel: {
-    marginTop: 10, alignSelf: 'stretch',
-    height: 56, borderRadius: 16,
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: Colors.surface,
-    borderWidth: 2, borderColor: Colors.border,
-  },
-  sosCardCancelText: { color: Colors.textPrimary, fontSize: 16, fontWeight: '800' },
 
   // Build #59 — Pending Invitations styling.  Amber accents so the
   // section reads as "waiting on someone" without being alarming.
