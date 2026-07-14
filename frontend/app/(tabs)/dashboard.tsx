@@ -1185,12 +1185,12 @@ const styles = StyleSheet.create({
   cardStatusPill: { marginTop: 6 },
   freshnessRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
   freshnessRefreshing: { fontSize: 11, color: Colors.primary, fontWeight: '700' },
-  refreshAllBtn: {
+  _refreshAllBtn_unused: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: Colors.tertiary,
     paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, gap: 4,
   },
-  refreshAllText: { color: Colors.primary, fontWeight: '700', fontSize: 13 },
+  _refreshAllText_unused: { color: Colors.primary, fontWeight: '700', fontSize: 13 },
   medRow: { flexDirection: 'row', gap: 6, marginTop: 8, flexWrap: 'wrap' },
   medChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: Colors.tertiary, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 },
   medChipEmoji: { fontSize: 12 },
