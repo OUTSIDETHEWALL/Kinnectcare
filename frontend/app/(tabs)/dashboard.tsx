@@ -1041,7 +1041,7 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
         </View>
         <View style={{ flex: 1, marginLeft: 14 }}>
           <View style={styles.nameRow}>
-            <Text style={styles.memberName}>{member.name}, {member.age}</Text>
+            <Text style={styles.memberName}>{member.name}{member.age && member.age > 0 ? `, ${member.age}` : ''}</Text>
             <Text style={styles.statusEmoji}>{dot}</Text>
           </View>
           {/* Build #57 — Location Sharing OFF renders a dedicated
@@ -1127,7 +1127,7 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
         activeOpacity={0.85}
         style={styles.checkinPill}
       >
-        <Text style={styles.checkinPillText}>✅ Check In</Text>
+        <Text style={styles.checkinPillText}>✅ Check in</Text>
       </TouchableOpacity>
     </View>
   );
