@@ -157,6 +157,7 @@ export default function MeScreen() {
 
   // Plan card state
   const [billing, setBilling] = useState<BillingStatus | null>(null);
+  const [billingError, setBillingError] = useState(false);
 
   // Push registration state
   const [pushStatus, setPushStatus] = useState<PushStatus>(getPushStatus());
@@ -299,11 +300,16 @@ export default function MeScreen() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // ---- Data loaders ----
-  useEffect(() => {
-    (async () => {
-      try { setBilling(await getBillingStatus()); } catch (_e) {}
-    })();
+  const loadBilling = useCallback(async () => {
+    setBillingError(false);
+    try {
+      setBilling(await getBillingStatus());
+    } catch (_e) {
+      setBillingError(true);
+    }
   }, []);
+
+  useEffect(() => { loadBilling(); }, [loadBilling]);
 
   // Load persisted developer mode preference on first mount.
   useEffect(() => {
@@ -740,6 +746,16 @@ export default function MeScreen() {
         {/* Plan */}
         <SectionLabel>Plan</SectionLabel>
         <View style={[styles.planCard, billing?.plan === 'family_plan' && styles.planCardPaid]}>
+          {billingError && !billing ? (
+            <View style={styles.billingErrorRow} testID="me-billing-error">
+              <Icon name="cloud-offline-outline" size={20} color={Colors.error} />
+              <Text style={styles.billingErrorText}>Unable to load subscription information.</Text>
+              <TouchableOpacity testID="me-billing-retry" onPress={loadBilling} activeOpacity={0.7} style={styles.billingRetryBtn}>
+                <Text style={styles.billingRetryText}>Retry</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <>
           <View style={styles.planNameRow}>
             <Text style={styles.planName}>{planLabel}</Text>
             <View style={[styles.planBadge, billing?.plan === 'family_plan' && styles.planBadgePaid]}>
@@ -785,6 +801,8 @@ export default function MeScreen() {
             >
               <Text style={styles.planCtaSecondaryText}>Manage Subscription ›</Text>
             </TouchableOpacity>
+          )}
+            </>
           )}
         </View>
 
@@ -1396,4 +1414,11 @@ const styles = StyleSheet.create({
   modalDangerText: { color: Colors.surface, fontSize: 16, fontWeight: '800' },
   modalSecondary: { marginTop: 10, alignItems: 'center', paddingVertical: 12 },
   modalSecondaryText: { color: Colors.textSecondary, fontSize: 15, fontWeight: '600' },
+  billingErrorRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingVertical: 12, flexWrap: 'wrap',
+  },
+  billingErrorText: { flex: 1, fontSize: 14, color: Colors.error, fontWeight: '600', lineHeight: 20 },
+  billingRetryBtn: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 999, backgroundColor: Colors.error },
+  billingRetryText: { color: Colors.surface, fontSize: 13, fontWeight: '700' },
 });

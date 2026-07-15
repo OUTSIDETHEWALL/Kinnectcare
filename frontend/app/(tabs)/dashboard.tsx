@@ -65,6 +65,7 @@ export default function Dashboard() {
   const [pendingInvites, setPendingInvites] = useState<FamilyInvite[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   // Build 50 hotfix — banner surfaces stale-but-unresolved emergencies
   // (>5 min old) instead of auto-yanking the user to the incident screen.
   const activeEmergency = useActiveEmergency();
@@ -132,6 +133,7 @@ export default function Dashboard() {
     //  trigger.  All timestamps + raw response + cascade are written
     //  here; this is the canonical source of truth for "what did the
     //  /members API return to Charles" during a stale-render incident.
+    setLoadError(false);
     const dlogId = await dashStartLoad(trigger).catch(() => '');
     try {
       // Mark the moment axios.get('/members') is about to fire.  We
@@ -249,6 +251,7 @@ export default function Dashboard() {
         memberStore.upsertMany(Array.isArray(m.data) ? m.data : []);
         setSummary(s.data.members || []);
         if (b) setBilling(b);
+        setLoadError(false);
         if (dlogId) await dashMarkSetState(dlogId).catch(() => {});
       } catch (e: any) {
         if (dlogId) {
@@ -289,6 +292,7 @@ export default function Dashboard() {
       } catch (_e) {}
     } catch (_e) {
       // Top-level catch — already recorded as error on the entry.
+      setLoadError(true);
     }
   };
 
@@ -565,32 +569,10 @@ export default function Dashboard() {
   }, [sosScale, sosHoldProgress]);
 
   const quickCheckIn = (m: Member) => {
-    // INSTANT: navigate immediately so the confirmation screen renders <1s.
-    router.push({ pathname: '/check-in', params: { name: m.name } });
-    // Backend work runs in the background.
-    (async () => {
-      try {
-        let lat: number | undefined, lon: number | undefined, name: string | undefined;
-        try {
-          const { status } = await Location.requestForegroundPermissionsAsync();
-          if (status === 'granted') {
-            const pos = await Location.getCurrentPositionAsync({
-              accuracy: Location.Accuracy.Balanced,
-            });
-            lat = pos.coords.latitude;
-            lon = pos.coords.longitude;
-            // v1.2.7 — was hardcoded 'Current Location' literal which
-            // made every member's dashboard label read identically
-            // and never actually changed.  Real reverse-geocode now.
-            name = (await geocodeLabelForCoord(lat, lon)) || undefined;
-          }
-        } catch (_e) {}
-        await api.post('/checkins', { member_id: m.id, latitude: lat, longitude: lon, location_name: name });
-        load('quick-checkin').catch(() => {});
-      } catch (_e) {
-        // Silent failure on the network side; the user already saw the confirmation.
-      }
-    })();
+    // Navigate immediately — the check-in screen owns the GPS + API call
+    // and shows Loading → Success → Error (mirrors the SOS architecture).
+    // Success is only shown after the server returns 200.
+    router.push({ pathname: '/check-in', params: { memberId: m.id, name: m.name } });
   };
 
   if (loading) {
@@ -707,7 +689,22 @@ export default function Dashboard() {
           />
         ))}
 
-        {members.length === 0 && (
+        {loadError && members.length === 0 && (
+          <View style={styles.loadErrorCard} testID="dashboard-load-error">
+            <Icon name="cloud-offline-outline" size={40} color={Colors.error} />
+            <Text style={styles.loadErrorTitle}>Couldn't load your family.</Text>
+            <Text style={styles.loadErrorMsg}>Please check your connection and try again.</Text>
+            <TouchableOpacity
+              testID="dashboard-retry"
+              onPress={() => load('pull-to-refresh')}
+              activeOpacity={0.8}
+              style={styles.loadRetryBtn}
+            >
+              <Text style={styles.loadRetryText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+        {!loadError && members.length === 0 && (
           <View style={styles.empty}>
             <Text style={{ fontSize: 36 }}>👨‍👩‍👧</Text>
             <Text style={styles.emptyText}>No family members yet. Tap "Add" to get started.</Text>
@@ -1338,4 +1335,16 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     marginLeft: 6,
   },
+  loadErrorCard: {
+    alignItems: 'center', marginHorizontal: 24, marginTop: 24, marginBottom: 8,
+    backgroundColor: Colors.errorBg || '#FEE2E2', borderRadius: 20,
+    padding: 28, borderWidth: 1, borderColor: Colors.error,
+  },
+  loadErrorTitle: { fontSize: 17, fontWeight: '700', color: Colors.error, marginTop: 12, textAlign: 'center' },
+  loadErrorMsg: { fontSize: 14, color: Colors.textSecondary, marginTop: 6, textAlign: 'center' },
+  loadRetryBtn: {
+    marginTop: 16, paddingHorizontal: 28, paddingVertical: 11,
+    backgroundColor: Colors.error, borderRadius: 999,
+  },
+  loadRetryText: { color: Colors.surface, fontWeight: '700', fontSize: 15 },
 });

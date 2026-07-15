@@ -7,7 +7,6 @@ import {
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { logScreenRender } from '../../src/screenRenderLog';
 import { Colors, StatusColor } from '../../src/theme';
@@ -40,6 +39,7 @@ export default function MemberDetail() {
   const [history, setHistory] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [showCheckinSettings, setShowCheckinSettings] = useState(false);
   // 20-second forceTick keeps the "X min ago" relative timestamps accurate.
   const [, forceTick] = useState(0);
@@ -81,6 +81,7 @@ export default function MemberDetail() {
       } catch (_e) {}
       setReminders(r.data);
       setHistory(h.data);
+      setLoadError(false);
 
       // v1.3.2 — pull-on-stale (60 s freshness threshold).  If this
       // member's last_seen is older than 60 s, ask the backend to
@@ -99,7 +100,9 @@ export default function MemberDetail() {
           }
         }
       } catch (_e) {}
-    } catch (_e) {}
+    } catch (_e) {
+      setLoadError(true);
+    }
   };
 
   useFocusEffect(useCallback(() => {
@@ -151,8 +154,13 @@ export default function MemberDetail() {
     Alert.alert('Remove?', `Remove "${title}"?`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Remove', style: 'destructive', onPress: async () => {
-          await api.delete(`/reminders/${rid}`).catch(() => {});
-          load();
+          try {
+            await api.delete(`/reminders/${rid}`);
+            load();
+          } catch (_e) {
+            Alert.alert('Could not remove', 'Please check your connection and try again.');
+            load(); // Restore the list to its server state
+          }
         } },
     ]);
   };
@@ -179,28 +187,10 @@ export default function MemberDetail() {
   };
 
   const checkIn = () => {
-    // INSTANT: navigate to confirmation screen first so it feels instant (<1s).
-    router.push({ pathname: '/check-in', params: { name: member?.name } });
-    // Backend work runs in the background.
-    (async () => {
-      try {
-        let lat: number | undefined, lon: number | undefined, loc_name: string | undefined;
-        try {
-          const { status } = await Location.requestForegroundPermissionsAsync();
-          if (status === 'granted') {
-            const pos = await Location.getCurrentPositionAsync({
-              accuracy: Location.Accuracy.Balanced,
-            });
-            lat = pos.coords.latitude;
-            lon = pos.coords.longitude;
-            loc_name = 'Current Location';
-          }
-        } catch (_e) {}
-        await api.post('/checkins', { member_id: id, latitude: lat, longitude: lon, location_name: loc_name });
-      } catch (_e) {
-        // Silent failure on the network side; the user has already seen the confirmation.
-      }
-    })();
+    // Navigate immediately — the check-in screen owns the GPS + API call
+    // and shows Loading → Success → Error (mirrors the SOS architecture).
+    // Success is only shown after the server returns 200.
+    router.push({ pathname: '/check-in', params: { memberId: id, name: member?.name } });
   };
 
   const [checkinDraftTime, setCheckinDraftTime] = useState<string>('08:00');
@@ -267,7 +257,7 @@ export default function MemberDetail() {
     ]);
   };
 
-  if (loading || !member) {
+  if (loading && !member) {
     return (
       <SafeAreaView style={styles.safe}>
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
@@ -276,6 +266,52 @@ export default function MemberDetail() {
       </SafeAreaView>
     );
   }
+
+  // Edge case: not loading, no error, but member hasn't arrived in the
+  // store yet (e.g. very first render tick before useFocusEffect fires).
+  if (!member && !loadError) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <ActivityIndicator color={Colors.primary} size="large" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!member && loadError) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.header}>
+          <TouchableOpacity testID="member-back" onPress={() => router.back()} style={styles.iconBtn} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+            <Icon name="arrow-back" size={28} color={Colors.textPrimary} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Member</Text>
+          <View style={{ width: 52 }} />
+        </View>
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 }}>
+          <Icon name="cloud-offline-outline" size={48} color={Colors.error} />
+          <Text style={{ fontSize: 18, fontWeight: '700', color: Colors.textPrimary, marginTop: 16, textAlign: 'center' }}>
+            Couldn't load member details.
+          </Text>
+          <Text style={{ fontSize: 14, color: Colors.textSecondary, marginTop: 8, textAlign: 'center' }}>
+            Please check your connection and try again.
+          </Text>
+          <TouchableOpacity
+            testID="member-retry"
+            onPress={() => { setLoadError(false); load(); }}
+            activeOpacity={0.85}
+            style={{ marginTop: 24, paddingHorizontal: 32, paddingVertical: 14, backgroundColor: Colors.primary, borderRadius: 999 }}
+          >
+            <Text style={{ color: Colors.surface, fontWeight: '700', fontSize: 15 }}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // TypeScript narrowing: all null/error paths have returned above
+  if (!member) return null;
 
   const initials = member.name.split(' ').map(s => s[0]).slice(0, 2).join('').toUpperCase();
   const hasCoords = member.latitude != null && member.longitude != null;
