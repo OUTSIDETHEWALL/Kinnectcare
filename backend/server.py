@@ -11,7 +11,7 @@ import uuid
 import asyncio
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import jwt
@@ -277,8 +277,14 @@ class FamilyMember(BaseModel):
     # docs that were created before this build.
     location_sharing_enabled: bool = True
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Build 60 — GPS capture time from the Transistor SDK.  Stored
+    # alongside last_seen (server contact time) so callers can
+    # distinguish "server saw an upload recently" from "device's GPS
+    # fix was captured recently".  None for rows created before this
+    # field was introduced; populated on the next successful upload.
+    captured_at: Optional[datetime] = None
 
-    @field_serializer("last_seen", "created_at", "checkin_interval_started_at", when_used='json')
+    @field_serializer("last_seen", "created_at", "checkin_interval_started_at", "captured_at", when_used='json')
     def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
         return _to_utc_iso(v)
 
@@ -456,9 +462,19 @@ class LocationUpdate(BaseModel):
          { "coords": { ... }, "latitude": 47.6, "longitude": -122.3, ... }
          → flat values win, coords is ignored.
 
-    Extra/unknown fields (accuracy, speed, heading, timestamp, is_moving,
-    event, provider, source, extras, etc.) are accepted and ignored — we
-    only persist latitude/longitude/location_name into Mongo.
+    Extra/unknown fields (accuracy, speed, heading, is_moving, event,
+    provider, source, extras, etc.) are accepted and ignored.
+    `timestamp` is now explicitly declared and used to populate
+    captured_at, which drives the "newest GPS fix wins" write guard
+    in update_member_location().
+
+    Build 60 (2026-07-15):
+      Added `timestamp` field and `captured_at` property.  During an
+      SDK offline-buffer replay the backend was being written with
+      historical GPS coordinates because it had no way to distinguish
+      a buffered point (captured hours ago) from a live upload.
+      captured_at carries the device's GPS capture time so the write
+      guard can reject points older than what is already stored.
     """
     latitude: Optional[float] = None
     longitude: Optional[float] = None
@@ -467,6 +483,17 @@ class LocationUpdate(BaseModel):
     # inspected by the validator below to pull lat/lon out if the top-level
     # values are missing.
     coords: Optional[Dict[str, Any]] = None
+    # GPS capture time as sent by the Transistor SDK.
+    #   • Flat (locationTemplate) path: top-level ISO-8601 string,
+    #     e.g. "2026-07-15T13:48:37.000Z"
+    #   • Android nested fallback path (Build 50 edge-case): top-level
+    #     field on the SDK's default shape; also present as
+    #     coords.timestamp — top-level wins.
+    #   • JS-side heartbeat callers: absent — treated as None, falls
+    #     back to unconditional write (pre-guard behaviour preserved).
+    #   • Some SDK versions emit Unix epoch milliseconds (int/float)
+    #     rather than ISO-8601 — both handled by captured_at below.
+    timestamp: Optional[Union[str, int, float]] = None
     # Silently accept everything else Transistor sends so unknown fields
     # don't trip validation on new SDK versions.
     model_config = {"extra": "allow"}
@@ -494,6 +521,34 @@ class LocationUpdate(BaseModel):
         if self.longitude is None:
             raise ValueError("longitude is required (top-level or coords.longitude)")
         return self
+
+    @property
+    def captured_at(self) -> Optional[datetime]:
+        """Parse the SDK's GPS capture timestamp into a UTC datetime.
+
+        Tries top-level `timestamp` first, then `coords.timestamp` as a
+        fallback for the Android nested path.  Returns None if the field
+        is absent or unparseable — callers must handle None gracefully
+        (fall back to unconditional write, not a hard error).
+        """
+        t = self.timestamp
+        # Fallback: coords.timestamp for Android nested fallback path
+        if t is None and isinstance(self.coords, dict):
+            t = self.coords.get("timestamp")
+        if t is None:
+            return None
+        if isinstance(t, (int, float)):
+            # Unix epoch milliseconds
+            try:
+                return datetime.fromtimestamp(t / 1000.0, tz=timezone.utc)
+            except (OSError, OverflowError, ValueError):
+                return None
+        if isinstance(t, str):
+            try:
+                return datetime.fromisoformat(t.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        return None
 
 
 class SOSRequest(BaseModel):
@@ -2343,66 +2398,165 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 phone="", gender="", role="family",
             )
     # Build 53 — Location Ingest diagnostic.  Capture the exact
-    # before/after last_seen values + the JWT identity that succeeded
-    # so we can prove whether Transistor's headless heartbeat is
-    # reaching us (and if not, whether JWT is the reason).  Written to
-    # a capped mongo collection with 24 h TTL.
+    # before/after last_seen + captured_at values so we can prove
+    # whether Transistor's headless heartbeat is reaching us and
+    # whether the timestamp guard accepted or rejected the write.
+    # Written to a capped mongo collection with 24 h TTL.
+    #
+    # Build 60 — Also fetch prev captured_at so the ingest log can
+    # record incoming vs. stored GPS capture times for each upload.
+    server_now = datetime.now(timezone.utc)
     prev_last_seen = None
+    prev_captured_at = None
     try:
         prev_doc = await db.members.find_one(
             {"id": member_id, "family_group_id": current["family_group_id"]},
-            {"_id": 0, "last_seen": 1},
+            {"_id": 0, "last_seen": 1, "captured_at": 1},
         )
-        prev_last_seen = (prev_doc or {}).get("last_seen") if prev_doc else None
+        if prev_doc:
+            prev_last_seen   = prev_doc.get("last_seen")
+            prev_captured_at = prev_doc.get("captured_at")
     except Exception:
         pass
 
-    update = {"latitude": data.latitude, "longitude": data.longitude, "last_seen": datetime.now(timezone.utc)}
+    # Build 60 — "Newest GPS capture wins" timestamp guard.
+    #
+    # The Transistor SDK buffers location fixes when the device is
+    # offline or connectivity is poor and replays them in bulk when
+    # connectivity returns.  Without a guard, a buffered fix captured
+    # hours ago can arrive after a current fix and overwrite the member
+    # row with stale coordinates — because the backend previously wrote
+    # last_seen = datetime.now() (server time) unconditionally, making
+    # every upload look equally "current".
+    #
+    # The fix:
+    #   1. Parse the SDK's `timestamp` field (GPS capture time) from
+    #      the payload via data.captured_at.
+    #   2. Apply an upper-bound sanity check: reject capture times more
+    #      than 5 minutes in the future to guard against bad device
+    #      clocks permanently poisoning the stored captured_at.
+    #   3. Use a MongoDB atomic conditional update filter so the
+    #      comparison and write are a single operation — safe against
+    #      concurrent uploads from the same device (90/min during a
+    #      buffer flush).
+    #   4. last_seen always written (server contact time) regardless of
+    #      whether the guard accepted or rejected the lat/lon write, so
+    #      Leonidas heartbeat monitoring is unaffected.
+    #   5. If timestamp is absent (JS-side callers, unexpected edge
+    #      cases) fall back to the previous unconditional write.
+    incoming_captured_at: Optional[datetime] = data.captured_at
+    if incoming_captured_at is not None and incoming_captured_at > server_now + timedelta(minutes=5):
+        logger.warning(
+            f"loc-write: member={member_id} captured_at={incoming_captured_at.isoformat()} "
+            f"is >5 min ahead of server time {server_now.isoformat()} "
+            f"(device clock skew?); timestamp guard disabled for this upload"
+        )
+        incoming_captured_at = None
+
+    # Build update dict — last_seen always written regardless of guard
+    update: Dict[str, Any] = {
+        "latitude":  data.latitude,
+        "longitude": data.longitude,
+        "last_seen": server_now,
+    }
+    if incoming_captured_at is not None:
+        update["captured_at"] = incoming_captured_at
     if data.location_name:
         update["location_name"] = data.location_name
-    r = await db.members.update_one({"id": member_id, "family_group_id": current["family_group_id"]}, {"$set": update})
+
+    # Atomic conditional write
+    if incoming_captured_at is not None:
+        # Only write lat/lon if the incoming GPS capture is strictly
+        # newer than what is already stored.  The $or handles two cases:
+        #   a) First upload ever — no captured_at in the doc yet.
+        #   b) Subsequent upload — incoming must be strictly newer.
+        # last_seen is always updated via a separate unconditional write
+        # below if the guard rejects the coordinates.
+        filter_doc: Dict[str, Any] = {
+            "id": member_id,
+            "family_group_id": current["family_group_id"],
+            "$or": [
+                {"captured_at": {"$exists": False}},
+                {"captured_at": {"$lt": incoming_captured_at}},
+            ],
+        }
+    else:
+        # No GPS timestamp — unconditional write (pre-Build-60 path)
+        filter_doc = {"id": member_id, "family_group_id": current["family_group_id"]}
+
+    r = await db.members.update_one(filter_doc, {"$set": update})
+
+    write_accepted: bool
+    rejection_reason: Optional[str]
+
     if r.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Member not found")
-    doc = await db.members.find_one({"id": member_id}, {"_id": 0})
-    # Persist the ingest event (fire-and-forget, TTL 24 h so this
-    # collection self-cleans).  Fields chosen to answer:
+        if incoming_captured_at is not None:
+            # Guard fired: member exists but the incoming GPS fix is not
+            # newer than the stored one.  This is the normal / expected
+            # outcome for every buffered historical point during a replay.
+            # Return the current member doc without raising a 404.
+            write_accepted   = False
+            rejection_reason = "older_timestamp"
+            # Still update last_seen so Leonidas knows the device is alive
+            await db.members.update_one(
+                {"id": member_id, "family_group_id": current["family_group_id"]},
+                {"$set": {"last_seen": server_now}},
+            )
+            doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+            if not doc:
+                raise HTTPException(status_code=404, detail="Member not found")
+        else:
+            # Unconditional path, no match → member genuinely not found
+            raise HTTPException(status_code=404, detail="Member not found")
+    else:
+        write_accepted   = True
+        rejection_reason = None
+        doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+
+    # Persist the ingest event — permanent diagnostic, not temporary
+    # debugging.  Fields chosen to answer:
     #   • did JWT decode succeed? (current is populated → yes)
-    #   • whose device wrote? (user_id, member_id)
-    #   • how stale was last_seen before this write? (age of the row)
+    #   • whose device wrote? (writer_user_id, member_id)
+    #   • how stale was last_seen before this write?
     #   • what value did we just persist?
+    #   • did the GPS capture timestamp guard accept or reject the write?
+    #   • what were the incoming vs. stored GPS capture times?
     try:
         await db.location_ingest_log.insert_one({
-            "at": datetime.now(timezone.utc),
-            "member_id": member_id,
-            "family_group_id": current["family_group_id"],
-            "writer_user_id": current["id"],
-            "is_self_write": is_self,
-            "is_owner_write": is_owner,
-            "prev_last_seen": prev_last_seen,
-            "new_last_seen": update["last_seen"],
-            "latitude_approx": round(data.latitude, 2) if data.latitude is not None else None,
-            "longitude_approx": round(data.longitude, 2) if data.longitude is not None else None,
-            "http_status": 200,
+            "at":                   server_now,
+            "member_id":            member_id,
+            "family_group_id":      current["family_group_id"],
+            "writer_user_id":       current["id"],
+            "is_self_write":        is_self,
+            "is_owner_write":       is_owner,
+            "prev_last_seen":       prev_last_seen,
+            "new_last_seen":        server_now,
+            "latitude_approx":      round(data.latitude, 2) if data.latitude is not None else None,
+            "longitude_approx":     round(data.longitude, 2) if data.longitude is not None else None,
+            "http_status":          200,
+            # Build 60 — GPS capture timestamp diagnostics
+            "incoming_captured_at": incoming_captured_at,
+            "stored_captured_at":   prev_captured_at,
+            "write_accepted":       write_accepted,
+            "rejection_reason":     rejection_reason,
         })
-    except Exception as _e:
+    except Exception:
         pass
+
     # v1.2.6 diagnostic: every successful location write logs the
     # write-vs-read shape so we can correlate Railway logs against
-    # the per-device kc_bg_task_log / kc_location_refresh_log
-    # entries.  Specifically — if the device reports an upload-ok
-    # with coords (X, Y) but Charles's dashboard still shows stale
-    # coords, this log line will tell us whether:
-    #   (a) the input we got matches the device's logged send,
-    #   (b) the post-write doc actually contains (X, Y), and
-    #   (c) which family_group_id and which member.id was touched
-    #       (catches "duplicate member doc" silent-drift bugs).
+    # the per-device kc_bg_task_log / kc_location_refresh_log entries.
+    # Build 60: extended with captured_at fields and write_accepted.
     rd = doc or {}
     logger.info(
         f"loc-write member={member_id} fg={current['family_group_id']} "
         f"user={current['id']} matched={r.matched_count} modified={r.modified_count} "
         f"sent=({data.latitude:.5f},{data.longitude:.5f}) "
         f"stored=({rd.get('latitude')},{rd.get('longitude')}) "
-        f"last_seen={rd.get('last_seen')}"
+        f"last_seen={rd.get('last_seen')} "
+        f"incoming_captured_at={incoming_captured_at} "
+        f"stored_captured_at={prev_captured_at} "
+        f"write_accepted={write_accepted} rejection_reason={rejection_reason}"
     )
     # v1.3.3 — match this GPS upload to a pending refresh trace
     # so /api/diagnostics/refresh-traces can show end-to-end latency.
@@ -3662,13 +3816,15 @@ async def diagnostics_my_members(current=Depends(get_current_user)):
             "location_name": 1,
             "last_seen": 1,
             "created_at": 1,
+            # Build 60 — GPS capture time alongside server contact time
+            "captured_at": 1,
         },
     ).to_list(50)
     # Normalize datetimes for JSON transit (some came in as BSON
     # Date post-migration, some still strings until they roll over).
     out = []
     for d in docs:
-        for k in ("last_seen", "created_at"):
+        for k in ("last_seen", "created_at", "captured_at"):
             v = d.get(k)
             if hasattr(v, "isoformat"):
                 d[k] = v.isoformat()
