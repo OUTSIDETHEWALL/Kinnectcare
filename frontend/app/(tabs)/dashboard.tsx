@@ -865,7 +865,7 @@ export default function Dashboard() {
           </Pressable>
         </View>
         <Text style={[styles.sosFabLabel, sosHolding && styles.sosFabLabelHolding]}>
-          {sosHolding ? 'Release to cancel' : 'SOS'}
+          {sosHolding ? 'Release to cancel' : 'Hold for SOS'}
         </Text>
       </View>
     </SafeAreaView>
