@@ -6,7 +6,7 @@ import {
 } from 'react-native';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Notifications from 'expo-notifications';
 import { logScreenRender } from '../../src/screenRenderLog';
 import { Colors, StatusColor } from '../../src/theme';
@@ -30,6 +30,7 @@ export default function MemberDetail() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
+  const insets = useSafeAreaInsets();
   // Build 47 — Member detail no longer owns a local `member` state
   // object.  It reads from the canonical store via useMember(id) so
   // coordinates + last_seen + location_name + accuracy can never
@@ -354,7 +355,7 @@ export default function MemberDetail() {
       </View>
 
       <ScrollView
-        contentContainerStyle={{ paddingBottom: 120 }}
+        contentContainerStyle={{ paddingBottom: insets.bottom + 96 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.primary} />}
       >
         <View style={styles.profile}>
@@ -555,7 +556,7 @@ export default function MemberDetail() {
         </TouchableOpacity>
       </ScrollView>
 
-      <TouchableOpacity testID="member-checkin" onPress={checkIn} activeOpacity={0.85} style={styles.checkinBtn}>
+      <TouchableOpacity testID="member-checkin" onPress={checkIn} activeOpacity={0.85} style={[styles.checkinBtn, { bottom: insets.bottom + 16 }]}>
         <Text style={styles.checkinEmoji}>✅</Text>
         <Text style={styles.checkinText}>Check in {member.name}</Text>
       </TouchableOpacity>
@@ -769,7 +770,7 @@ const styles = StyleSheet.create({
   deleteBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 28, paddingVertical: 12 },
   deleteText: { color: Colors.error, fontWeight: '700' },
   checkinBtn: {
-    position: 'absolute', bottom: 24, left: 24, right: 24,
+    position: 'absolute', left: 24, right: 24,
     height: 60, backgroundColor: Colors.primary, borderRadius: 18,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
     boxShadow: '0px 8px 14px rgba(27,94,53,0.3)', elevation: 8,
