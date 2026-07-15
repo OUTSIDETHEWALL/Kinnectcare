@@ -46,12 +46,16 @@ export default function Alerts() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
   const load = async () => {
+    setLoadError(false);
     try {
       const r = await api.get('/alerts');
       setAlerts(r.data);
-    } catch (_e) {}
+    } catch (_e) {
+      setLoadError(true);
+    }
   };
 
   useFocusEffect(useCallback(() => {
@@ -67,8 +71,12 @@ export default function Alerts() {
   }, []));
 
   const ack = async (id: string) => {
-    await api.post(`/alerts/${id}/ack`).catch(() => {});
-    load();
+    try {
+      await api.post(`/alerts/${id}/ack`);
+      load();
+    } catch (_e) {
+      RNAlert.alert('Could not acknowledge', 'Please check your connection and try again.');
+    }
   };
 
   const onRefresh = async () => {
@@ -142,7 +150,23 @@ export default function Alerts() {
         contentContainerStyle={{ paddingBottom: 40 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.primary} />}
       >
-        {active.length === 0 && (
+        {loadError && (
+          <View style={styles.errorCard}>
+            <Icon name="cloud-offline-outline" size={40} color={Colors.error} />
+            <Text style={styles.errorTitle}>Couldn't load alerts.</Text>
+            <Text style={styles.errorMsg}>Please check your connection.</Text>
+            <TouchableOpacity
+              testID="alerts-retry"
+              onPress={load}
+              activeOpacity={0.8}
+              style={styles.retryBtn}
+            >
+              <Text style={styles.retryText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {!loadError && active.length === 0 && (
           <View style={styles.empty}>
             <Icon name="checkmark-circle" size={48} color={Colors.success} />
             <Text style={styles.emptyTitle}>All clear!</Text>
@@ -261,4 +285,16 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', marginTop: 60, paddingHorizontal: 32 },
   emptyTitle: { fontSize: 20, fontWeight: '700', color: Colors.textPrimary, marginTop: 12 },
   emptyMsg: { fontSize: 15, color: Colors.textSecondary, marginTop: 6, textAlign: 'center' },
+  errorCard: {
+    alignItems: 'center', marginTop: 60, marginHorizontal: 32,
+    backgroundColor: Colors.errorBg || '#FEE2E2', borderRadius: 20,
+    padding: 28, borderWidth: 1, borderColor: Colors.error,
+  },
+  errorTitle: { fontSize: 18, fontWeight: '700', color: Colors.error, marginTop: 14, textAlign: 'center' },
+  errorMsg: { fontSize: 14, color: Colors.textSecondary, marginTop: 6, textAlign: 'center' },
+  retryBtn: {
+    marginTop: 18, paddingHorizontal: 28, paddingVertical: 12,
+    backgroundColor: Colors.error, borderRadius: 999,
+  },
+  retryText: { color: Colors.surface, fontWeight: '700', fontSize: 15 },
 });

@@ -19,6 +19,8 @@ export default function EditMedication() {
   const [category, setCategory] = useState<'medication' | 'routine'>('medication');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [dataLoaded, setDataLoaded] = useState(false);
   const [refillEnabled, setRefillEnabled] = useState(false);
   const [daysSupplyStr, setDaysSupplyStr] = useState('30');
   const [leadTimeStr, setLeadTimeStr] = useState('7');
@@ -41,8 +43,15 @@ export default function EditMedication() {
             setLeadTimeStr(String(found.refill_reminder_days || 7));
             setLastRefillIso(found.last_refill_at || null);
           }
+          setDataLoaded(true);
+        } else {
+          // Reminder not found in list — treat as load error so the form
+          // does not render blank and risk a silent data overwrite on save.
+          setLoadError(true);
         }
-      } catch (_e) {}
+      } catch (_e) {
+        setLoadError(true);
+      }
       setLoading(false);
     })();
   }, [reminderId]);
@@ -100,6 +109,65 @@ export default function EditMedication() {
       <SafeAreaView style={styles.safe}>
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
           <ActivityIndicator color={Colors.primary} size="large" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (loadError) {
+    const retry = () => {
+      setLoadError(false);
+      setLoading(true);
+      (async () => {
+        try {
+          const r = await api.get('/reminders');
+          const found: Reminder | undefined = (r.data as Reminder[]).find(x => x.id === reminderId);
+          if (found) {
+            setName(found.title);
+            setDosage(found.dosage || '');
+            setSlots(found.times.length > 0 ? found.times : [{ time: '08:00', label: null }]);
+            setCategory(found.category);
+            if (found.days_supply) {
+              setRefillEnabled(true);
+              setDaysSupplyStr(String(found.days_supply));
+              setLeadTimeStr(String(found.refill_reminder_days || 7));
+              setLastRefillIso(found.last_refill_at || null);
+            }
+            setDataLoaded(true);
+          } else {
+            setLoadError(true);
+          }
+        } catch (_e) {
+          setLoadError(true);
+        }
+        setLoading(false);
+      })();
+    };
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={styles.header}>
+          <TouchableOpacity testID="edit-med-close" onPress={() => router.back()} style={styles.iconBtn}>
+            <Icon name="close" size={26} color={Colors.textPrimary} />
+          </TouchableOpacity>
+          <Text style={styles.title}>Edit</Text>
+          <View style={{ width: 44 }} />
+        </View>
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 }}>
+          <Icon name="cloud-offline-outline" size={48} color={Colors.error} />
+          <Text style={{ fontSize: 18, fontWeight: '700', color: Colors.textPrimary, marginTop: 16, textAlign: 'center' }}>
+            Couldn't load medication details.
+          </Text>
+          <Text style={{ fontSize: 14, color: Colors.textSecondary, marginTop: 8, textAlign: 'center' }}>
+            Please check your connection. Without the current details, saving would overwrite your data with blank values.
+          </Text>
+          <TouchableOpacity
+            testID="edit-med-retry"
+            onPress={retry}
+            activeOpacity={0.85}
+            style={{ marginTop: 24, paddingHorizontal: 32, paddingVertical: 14, backgroundColor: Colors.primary, borderRadius: 999 }}
+          >
+            <Text style={{ color: Colors.surface, fontWeight: '700', fontSize: 15 }}>Retry</Text>
+          </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
