@@ -41,10 +41,10 @@ import Svg, { Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
-const SOS_FAB_SIZE = 88;
-const SOS_RING_SIZE = 108; // FAB + 10 px gap each side for the progress ring
-const SOS_RING_RADIUS = 51; // (SOS_RING_SIZE / 2) - (strokeWidth / 2)
-const SOS_CIRCUMFERENCE = 2 * Math.PI * SOS_RING_RADIUS; // ≈ 320.4
+const SOS_FAB_SIZE = 114; // accessibility: ~30% larger than original 88dp for tremor / dexterity users
+const SOS_RING_SIZE = 134; // FAB + 10 px gap each side for the progress ring
+const SOS_RING_RADIUS = 64; // (SOS_RING_SIZE / 2) - (strokeWidth / 2)
+const SOS_CIRCUMFERENCE = 2 * Math.PI * SOS_RING_RADIUS; // ≈ 402.1
 
 export default function Dashboard() {
   const router = useRouter();
@@ -861,12 +861,11 @@ export default function Dashboard() {
           >
             <Animated.View style={[styles.sosFab, { transform: [{ scale: sosScale }] }]}>
               <Text style={styles.sosFabIcon}>🆘</Text>
-              <Text style={styles.sosFabText}>SOS</Text>
             </Animated.View>
           </Pressable>
         </View>
         <Text style={[styles.sosFabLabel, sosHolding && styles.sosFabLabelHolding]}>
-          {sosHolding ? 'Release to cancel' : 'Hold for Emergency'}
+          {sosHolding ? 'Release to cancel' : 'SOS'}
         </Text>
       </View>
     </SafeAreaView>
@@ -1210,9 +1209,8 @@ const styles = StyleSheet.create({
     boxShadow: '0px 8px 20px rgba(220,38,38,0.45)' as any,
     ...Platform.select({ android: { elevation: 10 } }),
   },
-  sosFabIcon: { fontSize: 26, lineHeight: 30 },
-  sosFabText: { color: Colors.surface, fontSize: 10, fontWeight: '900', letterSpacing: 1.4 },
-  sosFabLabel: { fontSize: 12, fontWeight: '600', color: Colors.textTertiary, letterSpacing: 0.2 },
+  sosFabIcon: { fontSize: 34, lineHeight: 40 },
+  sosFabLabel: { fontSize: 13, fontWeight: '700', color: Colors.textTertiary, letterSpacing: 0.4 },
   sosFabLabelHolding: { color: Colors.sos, fontWeight: '700' },
   // 3-2-1 countdown overlay
   sosCountdownOverlay: {
