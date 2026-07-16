@@ -34,6 +34,49 @@ def is_valid_expo_token(t: str) -> bool:
     return isinstance(t, str) and t.startswith("ExponentPushToken[") and t.endswith("]")
 
 
+def _collapse_id(data: dict) -> Optional[str]:
+    """Derive a stable collapse ID from the notification payload.
+
+    Expo's `collapseId` field maps to FCM's `collapse_key` and APNS's
+    `apns-collapse-id`.  When the OS receives a notification whose
+    collapseId matches a notification already in the tray, it REPLACES
+    the old one instead of stacking a new entry.  This is the OS-level
+    safety net that complements the client-side `stableNotificationId`
+    logic in push.ts.
+
+    Scheme mirrors stableNotificationId() in frontend/src/push.ts:
+      medication self-due  → med_<reminder_id>_due
+      medication family    → med_<reminder_id>_family
+      medication refill    → med_<reminder_id>_refill
+      routine due          → rt_<reminder_id>_due
+      sos                  → sos_<alert_id>
+      missed_checkin       → miss_<member_id>
+
+    Returns None when the payload lacks the fields needed to build a
+    meaningful ID — in that case Expo omits the field and the OS stacks
+    normally (no regression vs. current behaviour).
+    """
+    t = data.get("type")
+    rid = data.get("reminder_id")
+    aid = data.get("alert_id")
+    mid = data.get("member_id")
+    stage = data.get("stage") or data.get("subtype")
+
+    if t == "medication" and rid:
+        if stage in ("refill",):
+            return f"med_{rid}_refill"
+        if stage in ("family_alert",):
+            return f"med_{rid}_family"
+        return f"med_{rid}_due"
+    if t == "routine" and rid:
+        return f"rt_{rid}_due"
+    if t == "sos" and aid:
+        return f"sos_{aid}"
+    if t == "missed_checkin" and mid:
+        return f"miss_{mid}"
+    return None
+
+
 # =========================================================================
 # Build 53 — Blank notification safety net.
 #
@@ -206,6 +249,16 @@ async def send_expo_push(
         }
         if _ttl is not None:
             msg["ttl"] = int(_ttl)
+        # Phase 2 ghost-notification fix — OS-level deduplication.
+        # collapseId maps to FCM collapse_key and APNS apns-collapse-id.
+        # When a notification with the same collapseId is already in the
+        # tray, the OS replaces it instead of stacking a new entry.  This
+        # is the backend-side safety net that complements the client-side
+        # stableNotificationId logic in push.ts — together they ensure
+        # at most one tray entry per logical event on both Android and iOS.
+        _cid = _collapse_id(data)
+        if _cid:
+            msg["collapseId"] = _cid
         # Build 50 — ghost-notification KILL at the FCM protocol level.
         #
         # FCM has a strict rule: any message that contains a
