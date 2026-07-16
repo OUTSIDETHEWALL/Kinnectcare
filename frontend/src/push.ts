@@ -543,7 +543,10 @@ async function rePresentSticky(n: Notifications.Notification) {
   const content = n.request.content;
   const data: any = content.data || {};
   const t = data.type;
-  if (!t || !['medication', 'routine', 'sos'].includes(t)) return;
+  if (!t || !['medication', 'routine', 'sos', 'missed_checkin'].includes(t)) return;
+  // Note: missed_checkin is now included so the stable ID `miss_<member_id>`
+  // is applied — only ONE tray entry per member, each new push replaces the
+  // prior one instead of stacking.
 
   // ============================================================
   //  CRITICAL: ONLY re-present when the app is in FOREGROUND.
@@ -591,7 +594,7 @@ async function rePresentSticky(n: Notifications.Notification) {
 
   const channelId =
     data.channelId ||
-    (t === 'sos' ? 'sos' : t === 'routine' ? 'routines' : 'meds_v2');
+    (t === 'sos' ? 'sos' : t === 'routine' ? 'routines' : t === 'missed_checkin' ? 'default' : 'meds_v2');
   const cat = data.categoryIdentifier;
   const stableId = stableNotificationId(data);
 
@@ -626,7 +629,7 @@ async function rePresentSticky(n: Notifications.Notification) {
         sticky: true,        // can't be swiped away on Android
         autoDismiss: false,  // doesn't auto-dismiss on tap
         priority: Notifications.AndroidNotificationPriority.MAX,
-        color: t === 'sos' ? '#DC2626' : '#1B5E35',
+        color: t === 'sos' ? '#DC2626' : t === 'missed_checkin' ? '#A85800' : '#1B5E35',
       } as any,
       trigger: { channelId } as any,
     });
