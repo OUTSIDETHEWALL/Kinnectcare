@@ -39,6 +39,7 @@ import {
   Linking,
   Alert as RNAlert,
 } from 'react-native';
+import * as Notifications from 'expo-notifications';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Icon } from '../../src/Icon';
@@ -130,6 +131,12 @@ export default function MissedCheckinDetail() {
               const res = await api.post(`/alerts/${alert.id}/resolve`);
               const updated = res?.data?.alert ?? { ...alert, resolved: true };
               setAlert(updated as Alert);
+              // Dismiss the sticky missed-checkin notification for this member
+              // now that the caregiver has explicitly acknowledged it.
+              // Fire-and-forget — a dismiss failure is purely cosmetic.
+              try {
+                await Notifications.dismissNotificationAsync(`miss_${alert.member_id}`);
+              } catch (_e) {}
             } catch (e: any) {
               const status = e?.response?.status;
               if (status === 404) {
