@@ -85,6 +85,10 @@ export async function getRestrictionStatus(): Promise<RestrictionStatus> {
   }
 
   // ── 2. OS-blocked restart evidence (engine diagnostic log) ────────────
+  //
+  // A subsequent successful restart clears this flag automatically — the
+  // card disappears on the next Diagnostics load once recovery succeeds,
+  // which satisfies "if the restriction disappears, the card disappears".
   let restartBlockedByOs = false;
   let lastRestartBlockAt: number | null = null;
   try {
@@ -96,8 +100,20 @@ export async function getRestrictionStatus(): Promise<RestrictionStatus> {
           e.event === 'restart_error'),
     );
     if (blocking.length > 0) {
-      restartBlockedByOs = true;
-      lastRestartBlockAt = Math.max(...blocking.map((e) => e.at));
+      const lastBlockAt = Math.max(...blocking.map((e) => e.at));
+      // Only flag if no successful restart has been recorded after the
+      // most recent block.  restart_completed = foreground path;
+      // headless_engine_disabled_restart_ok = headless path.
+      const recoveredAfterBlock = engineLog.some(
+        (e) =>
+          e.at > lastBlockAt &&
+          (e.event === 'restart_completed' ||
+            e.event === 'headless_engine_disabled_restart_ok'),
+      );
+      if (!recoveredAfterBlock) {
+        restartBlockedByOs = true;
+        lastRestartBlockAt = lastBlockAt;
+      }
     }
   } catch (_e) {
     // Ring buffer unavailable — treat as no evidence

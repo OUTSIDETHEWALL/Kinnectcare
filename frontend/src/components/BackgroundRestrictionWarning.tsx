@@ -51,8 +51,9 @@ export function BackgroundRestrictionWarning({ status }: Props) {
     <View style={styles.card} testID="diagnostics-restriction-warning">
       <Text style={styles.title}>⚠  Background Tracking Needs Attention</Text>
       <Text style={styles.body}>
-        Android appears to be limiting Kinnship's background activity. Location
-        updates may be delayed while the app is closed.
+        Kinnship has detected that Android may be limiting background tracking
+        on this device. While this is happening, location updates may be delayed
+        when the app is closed.
       </Text>
 
       <View style={styles.divider} />
