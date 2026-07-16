@@ -401,17 +401,27 @@ function RootNav() {
       }
       return;
     }
-    if (t === 'sos' || t === 'missed_checkin') {
-      // Fix #3 (v1.2 beta): deep-link straight to the SPECIFIC alert
-      // (not the generic alerts list).  This preserves the user's
-      // intent — they tapped the notification because THAT alert
-      // needed their attention.  If the push didn't carry an
-      // alert_id (legacy build, or the rare missing-id race), fall
-      // back to the alerts list so the user isn't dead-ended.
+    if (t === 'sos') {
+      // Deep-link straight to the SOS incident screen for the specific
+      // alert.  Falls back to the alerts list when no alert_id is present
+      // (legacy build or rare missing-id race).
       const aid = data?.alert_id;
       if (aid) {
         __logRoute(`/alert/${aid}`);
         router.replace({ pathname: '/alert/[id]', params: { id: aid } } as any);
+      } else {
+        __logRoute('/(tabs)/alerts');
+        router.replace('/(tabs)/alerts');
+      }
+    }
+    if (t === 'missed_checkin') {
+      // Missed check-ins route to their own dedicated screen — NOT the
+      // SOS incident screen.  A missed check-in is a welfare concern,
+      // not an emergency; the UI must reflect that.
+      const aid = data?.alert_id;
+      if (aid) {
+        __logRoute(`/missed-checkin/${aid}`);
+        router.replace({ pathname: '/missed-checkin/[id]', params: { id: aid } } as any);
       } else {
         __logRoute('/(tabs)/alerts');
         router.replace('/(tabs)/alerts');
