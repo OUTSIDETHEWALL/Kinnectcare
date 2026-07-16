@@ -57,6 +57,8 @@ import { PATROL_INTERVAL_SECONDS } from '../src/leonidas/types';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from '../src/diagBufferConfig';
 import { api } from '../src/api';
 import { useAuth } from '../src/AuthContext';
+import { getRestrictionStatus, RestrictionStatus } from '../src/backgroundRestrictionDetector';
+import { BackgroundRestrictionWarning } from '../src/components/BackgroundRestrictionWarning';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
 const PUSH_REFRESH_KEY = 'kc_push_refresh_log';
@@ -256,6 +258,13 @@ export default function DiagnosticsScreen() {
   // Leonidas (Build 46) — snapshot + recovery log
   const [leoSnapshot, setLeoSnapshot] = useState<leonidas.LeonidasSnapshotForUI | null>(null);
   const [leoLog, setLeoLog] = useState<leonidas.RecoveryLogEntry[]>([]);
+  const [restrictionStatus, setRestrictionStatus] = useState<RestrictionStatus>({
+    isRestricted: false,
+    powerSaveActive: false,
+    restartBlockedByOs: false,
+    leonidasRestartFailed: false,
+    lastEvidenceAt: null,
+  });
   // 1-second ticking clock used ONLY for the live "Next Patrol" countdown
   // in the Leonidas snapshot card.  Only ticks while the Leonidas panel
   // is expanded — see the gated effect below.
@@ -300,7 +309,7 @@ export default function DiagnosticsScreen() {
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [r, a, p, l, b, sr, eng, dl, cr, lsnap, llog] = await Promise.all([
+    const [r, a, p, l, b, sr, eng, dl, cr, lsnap, llog, rs] = await Promise.all([
       readRouteLog(),
       readAuthClearLog(),
       readPushRefreshLog(),
@@ -312,6 +321,7 @@ export default function DiagnosticsScreen() {
       getCardRenderLog(),
       Promise.resolve(leonidas.getSnapshot()),
       leonidas.getRecoveryLog(),
+      getRestrictionStatus(),
     ]);
     setRouteLog(r);
     setAuthLog(a);
@@ -326,6 +336,7 @@ export default function DiagnosticsScreen() {
     setCardLog(cr);
     setLeoSnapshot(lsnap);
     setLeoLog(llog);
+    setRestrictionStatus(rs);
     setLoading(false);
   }, []);
 
@@ -638,6 +649,14 @@ export default function DiagnosticsScreen() {
           Clears engine, dashboard, card-render, Leonidas, auth, route, push,
           notifications, and every other developer ring buffer in one tap.
         </Text>
+
+        {/* =====================================================
+            Leonidas v1.1 — Background Restriction Warning.
+            Reads positively confirmed evidence from the engine
+            and Leonidas ring buffers.  Invisible in the happy
+            path (isRestricted === false → renders null).
+            ===================================================== */}
+        <BackgroundRestrictionWarning status={restrictionStatus} />
 
         {/* =====================================================
             Build 46 — Leonidas v1.0 Health Monitor.
