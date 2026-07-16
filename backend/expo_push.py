@@ -226,12 +226,41 @@ async def send_expo_push(
         return []
 
     messages = []
+    is_data_only = not bool((title or "").strip()) and not bool((body or "").strip())
     for t in valid:
         msg: Dict[str, Any] = {
             "to": t,
             "priority": priority,
-            "channelId": channel_id,
             "data": data,
+            # Build 63 — omit top-level channelId for data-only pushes.
+            #
+            # The top-level `channelId` in the Expo Push API format tells
+            # Expo to set `android.channel_id` inside the FCM *notification*
+            # block.  For notification messages (non-empty title or body)
+            # this is correct — it routes the heads-up to the right Android
+            # channel.
+            #
+            # For data-only pushes (both title AND body empty), including
+            # a top-level `channelId` causes Expo's relay to attach an
+            # `android.channel_id` field to what should be a pure data
+            # message.  Samsung One UI / Xiaomi MIUI / OnePlus OxygenOS
+            # intercept this and render a status-bar icon ("K") even
+            # though the message has no visible content — because the OEM
+            # treats any message with a channel assignment as potentially
+            # visible.  JS can dismiss this icon only while the JS runtime
+            # is alive; when the OS has killed JS (typical after 30-60 min
+            # of background on Samsung under App Power Management), the
+            # dismiss never fires and the blank K persists indefinitely.
+            #
+            # Fix: when the push is data-only, omit `channelId` from the
+            # top-level Expo message entirely.  FCM then sends a pure
+            # data message with no notification block — nothing for any
+            # OEM to render, regardless of JS state.  The `channelId`
+            # field is still present inside `data` (e.g. "silent_v2") so
+            # the JS handler can read it if needed.
+            #
+            # Notification messages keep the top-level channelId so
+            # Android routes the heads-up to the correct channel.
             # NOTE: TTL intentionally OMITTED BY DEFAULT so Expo/FCM/APNs
             # use their default redelivery window (~28 days for FCM, 4
             # weeks for APNs tokens).  An earlier version of this file set
@@ -249,6 +278,10 @@ async def send_expo_push(
         }
         if _ttl is not None:
             msg["ttl"] = int(_ttl)
+        # Build 63 — see comment in msg dict above.
+        # Only attach top-level channelId for notification messages.
+        if not is_data_only:
+            msg["channelId"] = channel_id
         # Phase 2 ghost-notification fix — OS-level deduplication.
         # collapseId maps to FCM collapse_key and APNS apns-collapse-id.
         # When a notification with the same collapseId is already in the
