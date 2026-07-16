@@ -154,6 +154,36 @@ function registerHeadlessTaskOnce(): void {
             error: String(e?.message || e),
           });
         }
+
+        // Leonidas v1.1 — headless recovery path.
+        //
+        // If a heartbeat arrived it means the Transistor native service
+        // is alive.  However, the engine may be in a disabled state if
+        // a previous Leonidas patrol called stop() but could not complete
+        // the restart (v1.0 limitation).  Check and recover here while
+        // we still have an active headless execution window.
+        //
+        // In the headless JS context cachedConfig is always null (fresh
+        // JS process — no memory shared with the main app).  We call
+        // lib.start() with no arguments: the Transistor SDK persists its
+        // native config (URL, JWT, headers) across stop/start cycles in
+        // its own SQLite store, so a no-arg start() is valid and safe.
+        //
+        // This does NOT override or conflict with the main app's start()
+        // path — if the app subsequently foregrounds and calls start()
+        // with a fresh JWT, setConfig() applies the new token on top.
+        try {
+          const st = await lib.getState();
+          if (st?.enabled === false) {
+            await logEvent('headless_engine_disabled_restart_attempted');
+            await lib.start();
+            await logEvent('headless_engine_disabled_restart_ok');
+          }
+        } catch (e: any) {
+          await logEvent('headless_engine_disabled_restart_error', {
+            error: String(e?.message || e),
+          });
+        }
       }
       // Other event types (location, motionchange, http) are
       // observability only — we don't need to act on them in
@@ -336,6 +366,17 @@ function attachSdkListeners(lib: any): void {
         status: evt?.status,
       });
     });
+    // Power-save awareness — fires when Android battery-saver mode
+    // activates or deactivates.  Battery-saver suppresses background
+    // work and GPS wake-locks even for foreground services, so knowing
+    // when it is active is a key diagnostic for stale-location reports.
+    // The SDK wrapper is optional (guard avoids crash on SDK versions
+    // that don't yet expose this binding).
+    if (typeof lib.onPowerSaveChange === 'function') {
+      lib.onPowerSaveChange((isPowerSaveMode: boolean) => {
+        void logEvent('sdk_onPowerSaveChange', { isPowerSaveMode });
+      });
+    }
     lib.onHttp((evt: any) => {
       // success: boolean, status: HTTP code, url: string, responseText: string.
       //
@@ -647,6 +688,38 @@ export async function stop(): Promise<void> {
   } catch (e: any) {
     await logEvent('stop_error', { error: String(e?.message || e) });
   }
+}
+
+/**
+ * Restart the engine using the most recently cached JS config.
+ *
+ * Leonidas v1.1 — completes the stop→start cycle that the v1.0 patrol
+ * could only half-execute.  Previously, patrol.ts called
+ * locationEngine.stop() but had no access to the cached config needed
+ * to call locationEngine.start() again.  This function encapsulates
+ * both steps so Leonidas can issue a true restart in one call.
+ *
+ * Not suitable from the HeadlessTask context — cachedConfig is always
+ * null there (fresh JS context per invocation).  The HeadlessTask uses
+ * lib.start() with no arguments instead, relying on the SDK's persisted
+ * native config.
+ *
+ * Logs restart_skipped (no cached config), restart_completed (success),
+ * or propagates the error from stop()/start() with its own log entries.
+ */
+export async function restart(): Promise<void> {
+  await logEvent('restart_invoked');
+  if (!cachedConfig) {
+    await logEvent('restart_skipped', { reason: 'no_cached_config' });
+    return;
+  }
+  // Capture before the async gap — stop() is async and cachedConfig
+  // could theoretically be cleared by a concurrent sign-out, though
+  // that is extremely unlikely.  Snapshot avoids the race.
+  const cfg = cachedConfig;
+  await stop();
+  await start(cfg);
+  await logEvent('restart_completed');
 }
 
 /**

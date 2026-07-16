@@ -203,18 +203,14 @@ export async function runOnePatrol(): Promise<HealthSnapshot> {
     if (verdict.action === 'restart-engine' || verdict.action === 'restart-engine+request-fresh-location') {
       await logRecovery('engine-restart-attempted', verdict.state);
       try {
-        await locationEngine.stop();
-        // We cannot re-call start() here because we don't have the
-        // cached config (memberId, jwt, backendBaseUrl).  The Transistor
-        // SDK persists its native config across stop()/start() cycles,
-        // so calling start() with no args via the layout's existing
-        // wiring on next user.id change will resume.  For Leonidas v1.0
-        // we log the restart-stop step and leave re-start to the next
-        // patrol cycle or auth-effect re-trigger.  See Leonidas v1.1
-        // for direct re-start support.
-        await logRecovery('engine-restart-succeeded', verdict.state, {
-          note: 'stop completed; restart deferred to next auth lifecycle',
-        });
+        // Leonidas v1.1 — complete the stop→start cycle.
+        // v1.0 called locationEngine.stop() only, leaving the engine
+        // stopped and deferring restart to "next auth lifecycle event"
+        // which never arrives during a continuous session.
+        // locationEngine.restart() now encapsulates stop() + start()
+        // using the cached config, so recovery is fully autonomous.
+        await locationEngine.restart();
+        await logRecovery('engine-restart-succeeded', verdict.state);
       } catch (e: any) {
         await logRecovery('engine-restart-failed', verdict.state, {
           error: String(e?.message || e),
