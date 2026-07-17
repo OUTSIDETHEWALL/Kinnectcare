@@ -83,8 +83,8 @@ const STATUS: Record<TrackingStatusKind, Omit<TrackingStatus, 'kind'>> = {
 //  If you update these, update the Leonidas constants too.  They must
 //  stay in sync so the badge and the health monitor speak the same language.
 
-const MOVING_HEALTHY_MAX_MS  = 2  * 60 * 1000;  // Leonidas: MOVING_HEALTHY_MAX_MINUTES
-const MOVING_DEGRADED_MS     = 10 * 60 * 1000;  // Leonidas: MOVING_CRITICAL_MINUTES
+const MOVING_HEALTHY_MAX_MS  = 2 * 60 * 1000;  // Leonidas: MOVING_HEALTHY_MAX_MINUTES
+const MOVING_DEGRADED_MS     = 5 * 60 * 1000;  // Leonidas: MOVING_CRITICAL_MINUTES (spec: >5 min = degraded)
 const STATIONARY_DELAYED_MS  = 15 * 60 * 1000;  // Leonidas: STATIONARY_RECOVERY_MIN_MINUTES
 const STATIONARY_DEGRADED_MS = 30 * 60 * 1000;  // Leonidas: STATIONARY_RECOVERY_MAX_MINUTES
 const UNKNOWN_DELAYED_MS     = 5  * 60 * 1000;
