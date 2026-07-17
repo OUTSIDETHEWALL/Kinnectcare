@@ -1045,6 +1045,7 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
               hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
               lastSeenIso={member.last_seen}
               locationSharingEnabled={(member as any).location_sharing_enabled}
+              isMoving={(member as any).is_moving ?? null}
               screen="dashboard-card"
               size="compact"
               style={styles.cardStatusPill}

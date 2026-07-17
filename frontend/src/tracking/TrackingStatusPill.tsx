@@ -1,51 +1,49 @@
 /**
- * Build #52 — Shared Tracking Status component + logic
+ * Build 64 — Tracking Status Pill: freshness + movement-aware location health
  * ============================================================================
  *
- * Single source of truth for how Kinnship communicates location freshness
- * to caregivers.  Every screen that displays a member's location — SOS
- * incident screen, member detail, family dashboard cards, and any future
- * location-status surface — MUST use the same computation and the same
- * visual language so a caregiver can never see contradictory signals.
+ * The pill answers exactly one question for a caregiver:
+ *   "Can I trust that I'm seeing this person's current location right now?"
  *
- * Design language (approved by Charles, Build #52):
+ * NOT: "Is the background service technically running?"
  *
- *   🟢 Tracking healthy        coords present AND last_seen ≤ 60 s
- *   🟡 Location updating…      coords present AND last_seen 60 s – 5 min
- *   🟡 Last known location     coords present AND (>5 min OR no timestamp)
- *   🔴 Location unavailable    RESERVED for the true no-coords case
+ * Design language (approved by Charles, Build 64):
  *
- * The caregiver's first impression should answer:
- *   "Can I trust that I'm seeing this person's current location?"
- * NOT:
- *   "How many minutes ago was this updated?"
+ *   🟢 Tracking healthy    upload is fresh relative to member's movement state
+ *   🟡 Tracking delayed    engine probably running; location becoming stale
+ *   🔴 Tracking degraded   stale beyond movement-appropriate limit
+ *   ◯  Tracking unavailable structural gap: no perms, engine off, no coords
+ *   🔒 Location sharing off intentional privacy choice (never red/yellow)
  *
- * The timestamp is still available as tiny secondary text below the pill
- * (rendered by the consuming screen), but the pill is the primary signal.
+ * Build 54 design flaw (now fixed):
+ *   The pill was green as long as last_seen < 72 hours.  That was an
+ *   ENGINE-health signal, not a location-pipeline signal.  A caregiver
+ *   could see "Tracking healthy" while the map displayed a 45-minute-stale
+ *   position for a member who was actively driving.  Build 64 replaces
+ *   this with freshness thresholds that mirror the Leonidas internal
+ *   constants and scale to the member's actual movement state.
  *
  * ============================================================================
  * Usage:
  *
- *   import { TrackingStatusPill, computeTrackingStatus } from
- *     '../../src/tracking/TrackingStatusPill';
- *
  *   <TrackingStatusPill
  *     hasCoords={typeof lat === 'number'}
  *     lastSeenIso={member?.last_seen}
- *     testID="member-tracking-status"
+ *     isMoving={member?.is_moving ?? null}
+ *     locationSharingEnabled={member?.location_sharing_enabled}
  *   />
- *
- * Consumers that also want to alter surrounding UI based on the status
- * (e.g. hide a "Refreshing…" spinner when we're already Healthy) can
- * call `computeTrackingStatus()` directly.
  * ============================================================================
  */
 import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ViewStyle, TextStyle } from 'react-native';
-import { Colors } from '../theme';
 import { logTrackingPillDecision } from './trackingPillDiagnostics';
 
-export type TrackingStatusKind = 'healthy' | 'updating' | 'last-known' | 'unavailable' | 'sharing-off';
+export type TrackingStatusKind =
+  | 'healthy'       // 🟢 upload fresh for movement state
+  | 'delayed'       // 🟡 becoming stale; engine probably running
+  | 'degraded'      // 🔴 stale beyond movement-appropriate limit
+  | 'unavailable'   // ◯  structural: no perms, engine off, no coords
+  | 'sharing-off';  // 🔒 intentional privacy choice
 
 export type TrackingStatus = {
   kind: TrackingStatusKind;
@@ -56,59 +54,80 @@ export type TrackingStatus = {
 };
 
 // ---------------------------------------------------------------------------
-//  Pure computation
+//  Visual definitions
 // ---------------------------------------------------------------------------
 
+// Unavailable is GRAY (#F3F4F6), NOT red.  It signals a structural issue
+// (permissions revoked, engine disabled, no coordinates) — something that
+// cannot be fixed by refreshing location data.
+//
+// Red ("degraded") is reserved for: pipeline is running BUT the data the
+// caregiver is looking at on the map is too stale to be trustworthy given
+// the member's current movement state.
 const STATUS: Record<TrackingStatusKind, Omit<TrackingStatus, 'kind'>> = {
-  healthy:      { color: '#166534',       bg: '#DCFCE7', label: 'Tracking healthy',          emoji: '🟢' },
-  updating:     { color: '#92400E',       bg: '#FEF3C7', label: 'Tracking needs attention',  emoji: '🟡' },
-  'last-known': { color: '#92400E',       bg: '#FEF3C7', label: 'Tracking needs attention',  emoji: '🟡' },
-  unavailable:  { color: Colors.error,    bg: '#FEE2E2', label: 'Tracking offline',          emoji: '🔴' },
-  // Build #56 — Privacy state.  Neutral grey pill, NOT red/yellow — the
-  // caregiver should immediately recognise this as an intentional
-  // privacy choice rather than a system failure.
-  'sharing-off': { color: '#374151',      bg: '#E5E7EB', label: 'Location sharing off',      emoji: '🔒' },
+  healthy:       { color: '#166534', bg: '#DCFCE7', label: 'Tracking healthy',     emoji: '🟢' },
+  delayed:       { color: '#92400E', bg: '#FEF3C7', label: 'Tracking delayed',     emoji: '🟡' },
+  degraded:      { color: '#991B1B', bg: '#FEE2E2', label: 'Tracking degraded',    emoji: '🔴' },
+  unavailable:   { color: '#6B7280', bg: '#F3F4F6', label: 'Tracking unavailable', emoji: '◯' },
+  'sharing-off': { color: '#374151', bg: '#E5E7EB', label: 'Location sharing off', emoji: '🔒' },
 };
 
-// Build 54 — Health-based, NOT freshness-based.
+// ---------------------------------------------------------------------------
+//  Freshness thresholds — mirror Leonidas constants in leonidas/types.ts
+// ---------------------------------------------------------------------------
 //
-//   🟢 Healthy   — has coords AND we haven't hit a hard-fail signal.
-//                  A phone sitting idle overnight is HEALTHY: absence of
-//                  motion is not evidence of failure.
-//   🟡 Attention — reserved for real failure evidence: explicit upload/auth
-//                  failure, or the local engine self-reports unhealthy.
-//                  In Build 54 the memberStore doesn't publish these yet,
-//                  so the pill effectively never turns yellow.  Kept as
-//                  an escape hatch for Build 55+ backend health signal.
-//   🔴 Offline   — no coords ever, OR last_seen older than 72 h (device
-//                  has been silent for 3+ days — this IS evidence), OR
-//                  the caller passes an explicit `isTrackingDisabled` /
-//                  permissions-revoked flag.
+//  MOVING   healthy ≤ 2 min  | delayed 2–10 min  | degraded > 10 min
+//  STILL    healthy ≤ 15 min | delayed 15–30 min | degraded > 30 min
+//  UNKNOWN  healthy ≤ 5 min  | delayed 5–30 min  | degraded > 30 min
 //
-// This intentionally does NOT flip to Attention/Offline just because
-// time elapsed.  Charles's philosophy for Build 54: "Do not turn
-// yellow simply because someone hasn't moved."
-const OFFLINE_MS = 72 * 60 * 60 * 1000; // 72 h — 3-day silence = broken
+//  If you update these, update the Leonidas constants too.  They must
+//  stay in sync so the badge and the health monitor speak the same language.
+
+const MOVING_HEALTHY_MAX_MS  = 2  * 60 * 1000;  // Leonidas: MOVING_HEALTHY_MAX_MINUTES
+const MOVING_DEGRADED_MS     = 10 * 60 * 1000;  // Leonidas: MOVING_CRITICAL_MINUTES
+const STATIONARY_DELAYED_MS  = 15 * 60 * 1000;  // Leonidas: STATIONARY_RECOVERY_MIN_MINUTES
+const STATIONARY_DEGRADED_MS = 30 * 60 * 1000;  // Leonidas: STATIONARY_RECOVERY_MAX_MINUTES
+const UNKNOWN_DELAYED_MS     = 5  * 60 * 1000;
+const UNKNOWN_DEGRADED_MS    = 30 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+//  Options
+// ---------------------------------------------------------------------------
 
 export type ComputeStatusOptions = {
-  /** Local caller only — true when the user has explicitly turned tracking off. */
+  /** True when the user has explicitly turned tracking off locally. */
   isTrackingDisabled?: boolean;
-  /** Local caller only — true when foreground permissions are revoked. */
+  /** True when foreground location permissions have been revoked. */
   permissionsRevoked?: boolean;
-  /** Any surface can pass this when the backend/memberStore reports a real
-      upload or auth failure has occurred — flips the pill to Attention.
-      Kept optional so the default (no data-driven failure signal) simply
-      leaves the pill Healthy. */
+  /**
+   * @deprecated Pre-Build-64 escape hatch.  No current caller sets this.
+   * Kept for API compatibility only.
+   */
   hasKnownFailure?: boolean;
   /**
-   * Build #56 — Privacy: when the member has explicitly turned Location
-   * Sharing OFF (via Me → Privacy), we render a neutral "🔒 Location
-   * sharing off" pill instead of ANY green/yellow/red state.  Caregivers
-   * should never see Tracking Healthy when the member has intentionally
-   * disabled sharing — that's misleading and undermines trust.
+   * Build #56 — When explicitly false, renders the 🔒 privacy pill and
+   * bypasses all freshness logic.  Default undefined → treat as enabled
+   * (backwards-compatible with pre-Build-56 member docs).
    */
   locationSharingEnabled?: boolean;
+  /**
+   * Build 64 — Whether the member's device is currently in MOVING mode.
+   * Populated from the `is_moving` field on the member doc, which is
+   * written by the backend from the Transistor SDK upload payload.
+   *
+   *   true  → tight thresholds (2 min healthy / 10 min degraded)
+   *   false → lenient thresholds (15 min healthy / 30 min degraded)
+   *   null / undefined → conservative unknown defaults
+   *
+   * Never pass this from the local device's Leonidas engine — Leonidas
+   * knows the current user's own movement, not other members'.
+   */
+  isMoving?: boolean | null;
 };
+
+// ---------------------------------------------------------------------------
+//  Pure computation
+// ---------------------------------------------------------------------------
 
 export function computeTrackingStatus(
   hasCoords: boolean,
@@ -116,39 +135,63 @@ export function computeTrackingStatus(
   nowMs: number = Date.now(),
   opts?: ComputeStatusOptions,
 ): TrackingStatus {
-  // Build #56 — Privacy takes precedence over EVERY other state.  If
-  // the member has flipped Location Sharing off, we do NOT compute
-  // freshness, we do NOT display a green Healthy pill, we do NOT
-  // surface stale coords.  The pill reads "Location sharing off" and
-  // that's it.  Default is `undefined` → treat as ON for backwards
-  // compatibility with older member docs missing the flag.
+  // Privacy takes absolute precedence.  When Location Sharing is OFF we
+  // show the lock pill and skip every other check, including freshness.
   if (opts?.locationSharingEnabled === false) {
     return { kind: 'sharing-off', ...STATUS['sharing-off'] };
   }
-  // Hard-fail signals first (only reach this branch when the caller
-  // actually knows something is wrong locally).
+
+  // Structural failures → gray "Tracking unavailable".  These cannot be
+  // resolved by refreshing — a system-level action (grant permissions,
+  // re-enable the engine) is required.
   if (opts?.isTrackingDisabled || opts?.permissionsRevoked) {
     return { kind: 'unavailable', ...STATUS.unavailable };
   }
-  if (!hasCoords) return { kind: 'unavailable', ...STATUS.unavailable };
-
-  // Real evidence of a problem (upload/auth failure surfaced by caller).
-  if (opts?.hasKnownFailure) {
-    return { kind: 'updating', ...STATUS.updating };
-  }
-
-  // Genuine long-silence = something IS broken.
-  const lastSeenMs = lastSeenIso ? new Date(lastSeenIso).getTime() : 0;
-  if (lastSeenMs && nowMs - lastSeenMs > OFFLINE_MS) {
+  if (!hasCoords) {
     return { kind: 'unavailable', ...STATUS.unavailable };
   }
 
-  // Default = Healthy.  Idle overnight, stationary, on a charger — all healthy.
+  // Coords exist but no server-contact timestamp → can't assess freshness.
+  // Return unavailable rather than falsely showing green.
+  const lastSeenMs = lastSeenIso ? new Date(lastSeenIso).getTime() : 0;
+  if (!lastSeenMs) {
+    return { kind: 'unavailable', ...STATUS.unavailable };
+  }
+
+  const ageMs = nowMs - lastSeenMs;
+
+  // Movement-aware freshness ladder.
+  // `isMoving` reflects the member's device state at last upload time.
+  // It comes from the member doc (backend-populated), NOT from local Leonidas.
+  const isMoving = opts?.isMoving;
+
+  if (isMoving === true) {
+    // MOVING: SDK uploads every 10–30 s.  A 2-minute gap is unusual;
+    // 10+ minutes means the pipeline has stalled while the member is in
+    // transit — exactly the scenario that must show red to a caregiver.
+    if (ageMs > MOVING_DEGRADED_MS)    return { kind: 'degraded', ...STATUS.degraded };
+    if (ageMs > MOVING_HEALTHY_MAX_MS) return { kind: 'delayed',  ...STATUS.delayed  };
+    return { kind: 'healthy', ...STATUS.healthy };
+  }
+
+  if (isMoving === false) {
+    // STATIONARY: heartbeat uploads every 15–30 min are expected behaviour.
+    // Only escalate when the gap exceeds the heartbeat window.
+    if (ageMs > STATIONARY_DEGRADED_MS) return { kind: 'degraded', ...STATUS.degraded };
+    if (ageMs > STATIONARY_DELAYED_MS)  return { kind: 'delayed',  ...STATUS.delayed  };
+    return { kind: 'healthy', ...STATUS.healthy };
+  }
+
+  // Movement state unknown (pre-Build-64 device, cold start, first upload).
+  // Conservative thresholds: err toward caution because we don't know
+  // whether the member is in a vehicle doing 60 mph.
+  if (ageMs > UNKNOWN_DEGRADED_MS) return { kind: 'degraded', ...STATUS.degraded };
+  if (ageMs > UNKNOWN_DELAYED_MS)  return { kind: 'delayed',  ...STATUS.delayed  };
   return { kind: 'healthy', ...STATUS.healthy };
 }
 
 // ---------------------------------------------------------------------------
-//  <TrackingStatusPill /> — the visual component every screen shares
+//  <TrackingStatusPill /> — shared visual component
 // ---------------------------------------------------------------------------
 
 export type TrackingStatusPillProps = {
@@ -156,29 +199,27 @@ export type TrackingStatusPillProps = {
   lastSeenIso?: string | null;
   /**
    * Build #56 — mirrored from the member doc's `location_sharing_enabled`
-   * field.  When explicitly `false`, the pill renders "🔒 Location
-   * sharing off" and bypasses all freshness computation.  Default
-   * (`undefined`) is treated as sharing enabled (backwards-compatible
-   * with member docs created before this migration).
+   * field.  When explicitly false the pill renders "🔒 Location sharing off"
+   * and bypasses all freshness computation.
    */
   locationSharingEnabled?: boolean;
   /**
-   * Which surface is rendering this pill.  Used only by the temporary
-   * decision-log diagnostic (Build 53) to attribute decisions to the
-   * calling screen.  Recommended values: 'alert' | 'member' |
-   * 'dashboard-card' | 'diagnostics' — but any string is accepted.
+   * Build 64 — Whether the member's device is currently in MOVING mode.
+   * Read from the member doc's `is_moving` field (written from the SDK
+   * upload payload).  Drives movement-aware freshness thresholds.
+   */
+  isMoving?: boolean | null;
+  /**
+   * Which surface is rendering this pill.  Used only by the Build 53
+   * decision-log diagnostic.  'alert' | 'member' | 'dashboard-card' | etc.
    */
   screen?: string;
-  /**
-   * Compact ("dashboard card") vs. default ("detail screens").  Compact
-   * uses smaller padding + font — appropriate for dense list rows.
-   */
+  /** Compact ("dashboard card") vs. default ("detail screens"). */
   size?: 'compact' | 'default';
   /**
-   * If true, the pill re-renders itself every 20 s so the "Healthy →
-   * Updating → Last known" transitions happen automatically even when
-   * no props change.  On by default; disable only for pure/static
-   * previews (e.g. Storybook / diagnostics).
+   * When true the pill re-renders every 20 s so freshness transitions
+   * happen automatically even when props don't change.
+   * Disable only for static previews.
    */
   autoTick?: boolean;
   style?: ViewStyle;
@@ -190,6 +231,7 @@ export function TrackingStatusPill({
   hasCoords,
   lastSeenIso,
   locationSharingEnabled,
+  isMoving,
   screen = 'unknown',
   size = 'default',
   autoTick = true,
@@ -197,9 +239,8 @@ export function TrackingStatusPill({
   labelStyle,
   testID,
 }: TrackingStatusPillProps) {
-  // Auto-tick so the pill drifts through Healthy → Updating → Last known
-  // even when the underlying data doesn't change.  20 s cadence matches
-  // the rest of the app's "freshness re-render" convention.
+  // 20-second auto-tick so freshness transitions (healthy → delayed → degraded)
+  // happen without a new backend response.
   const [, forceTick] = useState(0);
   useEffect(() => {
     if (!autoTick) return;
@@ -209,22 +250,24 @@ export function TrackingStatusPill({
 
   const s = computeTrackingStatus(hasCoords, lastSeenIso, undefined, {
     locationSharingEnabled,
+    isMoving,
   });
   const containerStyle = size === 'compact' ? styles.pillCompact : styles.pill;
   const textStyle = size === 'compact' ? styles.labelCompact : styles.label;
 
-  // Build 53 — temporary decision log.  Each pill render records its
-  // inputs + chosen kind so we can post-mortem "why yellow when Joyce
-  // is fine".  Written best-effort to AsyncStorage; disabled behaviour
-  // change is zero.  Will be removed before RC.
+  // Build 53 — temporary decision log.  Records pill inputs + outcome
+  // so we can post-mortem "why was this green when Joyce was stale?"
+  // Only fires when inputs change (not on every 20-s auto-tick).
   useEffect(() => {
     const ageMs = lastSeenIso ? Date.now() - new Date(lastSeenIso).getTime() : null;
     const reason =
       s.kind === 'unavailable'
-        ? (!hasCoords ? 'no-coords' : 'silent >72h or explicit-offline')
-        : s.kind === 'healthy'
-        ? 'has-coords + not-silent-72h'
-        : 'known-failure-signal';
+        ? (!hasCoords ? 'no-coords' : !lastSeenIso ? 'no-timestamp' : 'explicit-offline')
+        : s.kind === 'degraded'
+        ? `degraded·isMoving=${isMoving ?? 'unknown'}`
+        : s.kind === 'delayed'
+        ? `delayed·isMoving=${isMoving ?? 'unknown'}`
+        : 'healthy';
     logTrackingPillDecision({
       screen,
       hasCoords,
@@ -233,8 +276,7 @@ export function TrackingStatusPill({
       kind: s.kind,
       reason,
     });
-    // Only log when inputs change — not on every 20-s auto-tick re-render.
-  }, [screen, hasCoords, lastSeenIso, s.kind]);
+  }, [screen, hasCoords, lastSeenIso, s.kind, isMoving]);
 
   return (
     <View

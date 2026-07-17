@@ -283,6 +283,12 @@ class FamilyMember(BaseModel):
     # fix was captured recently".  None for rows created before this
     # field was introduced; populated on the next successful upload.
     captured_at: Optional[datetime] = None
+    # Build 64 — SDK movement state from the Transistor upload payload.
+    # True when the SDK was in MOVING mode at the time of the last upload.
+    # Exposed in /members so TrackingStatusPill can apply movement-aware
+    # freshness thresholds instead of the engine-health-based 72 h gate.
+    # None for rows created before this field was introduced.
+    is_moving: Optional[bool] = None
 
     @field_serializer("last_seen", "created_at", "checkin_interval_started_at", "captured_at", when_used='json')
     def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
@@ -2463,6 +2469,17 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         update["captured_at"] = incoming_captured_at
     if data.location_name:
         update["location_name"] = data.location_name
+    # Build 64 — Persist the SDK's movement state so TrackingStatusPill can
+    # apply movement-aware freshness thresholds instead of the old 72-hour
+    # engine-health gate.  `is_moving` arrives as a top-level extra field
+    # on the Transistor SDK's default upload shape.  model_extra holds all
+    # fields not declared on LocationUpdate (via model_config extra="allow").
+    raw_is_moving = (data.model_extra or {}).get("is_moving")
+    if raw_is_moving is not None:
+        try:
+            update["is_moving"] = bool(raw_is_moving)
+        except (TypeError, ValueError):
+            pass  # malformed value — omit rather than corrupt the field
 
     # Atomic conditional write
     if incoming_captured_at is not None:

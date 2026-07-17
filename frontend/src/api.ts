@@ -219,6 +219,11 @@ export type Member = {
   // state directly from the /members payload.  Defaults true on legacy
   // docs that never had the field (server-side).
   location_sharing_enabled?: boolean;
+  // Build 64 — SDK movement state from the Transistor upload payload.
+  // True when the SDK was in MOVING mode at last upload time.
+  // Drives movement-aware freshness thresholds in TrackingStatusPill.
+  // Null for member rows created before this field was introduced.
+  is_moving?: boolean | null;
 };
 
 export type Alert = {
