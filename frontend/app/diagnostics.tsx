@@ -20,7 +20,7 @@
  * Linked from Settings → "Diagnostics" (Beta) row. Safe to keep in
  * production — both logs cap themselves and are rolling buffers.
  */
-import { useEffect, useState, useCallback, useRef, ReactNode } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo, ReactNode } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -175,6 +175,151 @@ function formatAgeMs(ms: number | null): string {
 }
 
 // ===========================================================
+//  Motion Timeline helpers — Build 64.
+//
+//  Filters the engine ring buffer to show only motion-relevant
+//  events in strict chronological order so Charles and Joyce's
+//  phone behaviour can be compared side-by-side during the same
+//  trip.  Oldest-first so the sequence reads top → bottom.
+// ===========================================================
+
+const MOTION_EVENT_SET = new Set([
+  'sdk_onActivityChange',
+  'sdk_onMotionChange',
+  'sdk_onHeartbeat',
+  'heartbeat_getCurrentPosition_ok',
+  'heartbeat_getCurrentPosition_error',
+  'sdk_onLocation',
+  'sdk_onHttp',
+  'sdk_onPowerSaveChange',
+  'sdk_onEnabledChange',
+  'headless_task_invoked',
+  'headless_heartbeat_ok',
+  'headless_heartbeat_error',
+  'started_ok',
+  'requestFreshLocation_ok',
+  'requestFreshLocation_error',
+  'sdk_config_snapshot',
+]);
+
+function fmtTime(ts: number): string {
+  try {
+    return new Date(ts).toLocaleTimeString([], {
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    });
+  } catch (_e) { return String(ts); }
+}
+
+type MotionFmt = { badge: string; badgeColor: string; label: string; detail: string | null };
+
+function formatMotionEvent(entry: EngineLogEvent): MotionFmt {
+  const d = entry.detail ?? {};
+  switch (entry.event) {
+    case 'sdk_onActivityChange': {
+      const act = String(d.activity ?? '—').toUpperCase().replace(/_/g, ' ');
+      const conf = d.confidence != null ? `${d.confidence}%` : '—';
+      return {
+        badge: 'ACTIVITY', badgeColor: '#3B82F6',
+        label: `${act}  conf=${conf}`,
+        detail: `moving=${d.isMoving ? 'YES' : 'NO'}`,
+      };
+    }
+    case 'sdk_onMotionChange':
+      return {
+        badge: d.isMoving ? '→ MOVING' : '→ STILL',
+        badgeColor: d.isMoving ? '#10B981' : '#6B7280',
+        label: d.isMoving
+          ? 'STATIONARY → MOVING  (SDK transition)'
+          : 'MOVING → STATIONARY  (SDK transition)',
+        detail: null,
+      };
+    case 'sdk_onHeartbeat':
+      return { badge: 'HEARTBEAT', badgeColor: '#9CA3AF', label: 'SDK heartbeat', detail: null };
+    case 'headless_task_invoked':
+      return {
+        badge: 'HEADLESS', badgeColor: '#9CA3AF',
+        label: 'Headless task invoked',
+        detail: d.eventName ? `event=${d.eventName}` : null,
+      };
+    case 'headless_heartbeat_ok':
+      return { badge: 'HB ✓', badgeColor: '#9CA3AF', label: 'Headless heartbeat — fix ok', detail: null };
+    case 'headless_heartbeat_error':
+      return {
+        badge: 'HB ✗', badgeColor: '#EF4444',
+        label: 'Headless heartbeat — fix FAILED',
+        detail: String(d.error ?? ''),
+      };
+    case 'heartbeat_getCurrentPosition_ok':
+      return { badge: 'FIX ✓', badgeColor: '#10B981', label: 'JS heartbeat — GPS fix acquired', detail: null };
+    case 'heartbeat_getCurrentPosition_error':
+      return {
+        badge: 'FIX ✗', badgeColor: '#EF4444',
+        label: 'JS heartbeat — GPS fix FAILED',
+        detail: String(d.error ?? ''),
+      };
+    case 'sdk_onLocation':
+      return {
+        badge: 'LOCATION', badgeColor: '#14B8A6',
+        label: `acc=${d.acc ?? '—'}m  speed=${d.speed != null ? `${d.speed}` : '—'}`,
+        detail: `event=${d.event ?? '—'}  isMoving=${d.isMoving}`,
+      };
+    case 'sdk_onHttp':
+      return {
+        badge: d.success ? 'HTTP ✓' : 'HTTP ✗',
+        badgeColor: d.success ? '#10B981' : '#EF4444',
+        label: `status=${d.status ?? '—'}`,
+        detail: null,
+      };
+    case 'sdk_onPowerSaveChange':
+      return {
+        badge: 'POWER', badgeColor: '#F59E0B',
+        label: `Battery saver: ${d.isPowerSaveMode ? 'ON ⚠' : 'OFF'}`,
+        detail: null,
+      };
+    case 'sdk_onEnabledChange':
+      return {
+        badge: 'ENGINE', badgeColor: '#8B5CF6',
+        label: `SDK ${d.enabled ? 'enabled' : 'DISABLED'}`,
+        detail: null,
+      };
+    case 'started_ok':
+      return {
+        badge: 'STARTED', badgeColor: '#8B5CF6',
+        label: `Engine started  isMoving=${d.isMoving ?? '—'}`,
+        detail: null,
+      };
+    case 'requestFreshLocation_ok':
+      return { badge: 'FRESH ✓', badgeColor: '#14B8A6', label: 'Fresh location request OK', detail: null };
+    case 'requestFreshLocation_error':
+      return {
+        badge: 'FRESH ✗', badgeColor: '#EF4444',
+        label: 'Fresh location request FAILED',
+        detail: String(d.error ?? ''),
+      };
+    case 'sdk_config_snapshot':
+      return {
+        badge: 'CONFIG', badgeColor: '#8B5CF6',
+        label: [
+          `distFilter=${d.distanceFilter ?? '—'}m`,
+          `stationaryR=${d.stationaryRadius ?? '—'}m`,
+          `stopTimeout=${d.stopTimeout ?? '—'}min`,
+          `heartbeat=${d.heartbeatInterval ?? '—'}s`,
+        ].join('  '),
+        detail: [
+          `activityInterval=${d.activityRecognitionInterval ?? '—'}ms`,
+          `minConf=${d.minimumActivityRecognitionConfidence ?? '—'}%`,
+          `disableStopDet=${d.disableStopDetection ?? '—'}`,
+          `motionTriggerDelay=${d.motionTriggerDelay ?? '—'}`,
+          `preventSuspend=${d.preventSuspend ?? '—'}`,
+          `autoSync=${d.autoSync ?? '—'}`,
+        ].join('  '),
+      };
+    default:
+      return { badge: entry.event.slice(0, 10), badgeColor: '#9CA3AF', label: entry.event, detail: null };
+  }
+}
+
+// ===========================================================
 //  CollapsibleSection — Build 46 wrapper.
 //
 //  Every Diagnostics section uses this so users can hide the noise
@@ -269,6 +414,23 @@ export default function DiagnosticsScreen() {
   // in the Leonidas snapshot card.  Only ticks while the Leonidas panel
   // is expanded — see the gated effect below.
   const [nowTick, setNowTick] = useState<number>(Date.now());
+
+  // Build 64 — Motion Timeline derived data.
+  // Computed from engineLog so they stay in sync with the reload() cycle.
+  const motionEvents = useMemo(
+    () => engineLog.filter((e) => MOTION_EVENT_SET.has(e.event)),
+    [engineLog],
+  );
+  const lastActivityEvt = useMemo(
+    () => [...motionEvents].reverse().find((e) => e.event === 'sdk_onActivityChange') ?? null,
+    [motionEvents],
+  );
+  const lastHeartbeatEvt = useMemo(
+    () => [...motionEvents].reverse().find(
+      (e) => e.event === 'sdk_onHeartbeat' || e.event === 'headless_heartbeat_ok',
+    ) ?? null,
+    [motionEvents],
+  );
 
   // Build 46 — collapsible-section state.  Persisted to AsyncStorage
   // (best-effort) so the screen remembers which panels were open
@@ -552,6 +714,19 @@ export default function DiagnosticsScreen() {
   };
 
   // Build 46 — Leonidas-specific actions.
+  const onCopyMotionTimeline = useCallback(async () => {
+    try {
+      const lines = motionEvents.map((e) => {
+        const { badge, label, detail } = formatMotionEvent(e);
+        return `${new Date(e.at).toISOString()}  [${badge}]  ${label}${detail ? '  · ' + detail : ''}`;
+      }).join('\n');
+      await Clipboard.setStringAsync(lines);
+      Alert.alert('Copied', `Motion timeline copied (${motionEvents.length} events).`);
+    } catch (e: any) {
+      Alert.alert('Could not copy', e?.message || 'Try again.');
+    }
+  }, [motionEvents]);
+
   const onCopyLeonidasLog = useCallback(async () => {
     try {
       const payload = {
@@ -907,6 +1082,111 @@ export default function DiagnosticsScreen() {
             </TouchableOpacity>
           </View>
         </View>
+
+        {/* =====================================================
+            Build 64 — Motion Timeline.
+            Filters the engine log to show only motion-relevant
+            events (Activity Recognition, motion state changes,
+            GPS fixes, HTTP uploads) in strict chronological order
+            so Charles's and Joyce's phone behaviour can be
+            compared side-by-side during the same trip.
+            ===================================================== */}
+        <CollapsibleSection
+          id="motion-timeline"
+          title="Motion Timeline"
+          count={motionEvents.length}
+          hint={
+            'Activity Recognition → Motion Change → GPS Fix → HTTP Upload, oldest first. ' +
+            'Compare Charles and Joyce side-by-side. Missing sdk_onActivityChange entries ' +
+            'mean Android never delivered a motion event to the SDK.'
+          }
+          expanded={!!expanded['motion-timeline']}
+          onToggle={toggleSection}
+          testID="diagnostics-motion-timeline"
+          defaultExpanded
+        >
+          {/* Live status bar */}
+          <View style={styles.card}>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>isMoving: </Text>
+              <Text style={engineState?.isMoving
+                ? { color: '#10B981', fontWeight: '800' } as any
+                : styles.entryV}>
+                {engineState?.isMoving === null ? '—' : engineState?.isMoving ? 'YES ▶' : 'NO ■'}
+              </Text>
+            </Text>
+            {lastActivityEvt ? (
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryK}>last activity: </Text>
+                <Text style={styles.entryV}>
+                  {String(lastActivityEvt.detail?.activity ?? '—').toUpperCase().replace(/_/g, ' ')}
+                  {' '}conf={lastActivityEvt.detail?.confidence ?? '—'}%
+                  {'  '}({fmtTime(lastActivityEvt.at)})
+                </Text>
+              </Text>
+            ) : (
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryK}>last activity: </Text>
+                <Text style={[styles.entryV, { color: '#EF4444' }]}>
+                  none recorded — onActivityChange has not fired yet
+                </Text>
+              </Text>
+            )}
+            {lastHeartbeatEvt ? (
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryK}>last heartbeat: </Text>
+                <Text style={styles.entryV}>
+                  {fmtTime(lastHeartbeatEvt.at)}
+                  {'  '}({formatAgeMs(Date.now() - lastHeartbeatEvt.at)})
+                </Text>
+              </Text>
+            ) : null}
+          </View>
+
+          {/* Chronological timeline */}
+          {motionEvents.length === 0 ? (
+            <View style={styles.card}>
+              <Text style={styles.muted}>
+                No motion events yet. Clear the engine log, then drive or walk for 30 seconds.
+              </Text>
+            </View>
+          ) : (
+            motionEvents.map((entry, i) => {
+              const { badge, badgeColor, label, detail } = formatMotionEvent(entry);
+              const isTransition = entry.event === 'sdk_onMotionChange';
+              return (
+                <View
+                  key={`mt-${entry.seq ?? i}-${entry.at}`}
+                  style={[
+                    styles.mtRow,
+                    isTransition && styles.mtRowHighlight,
+                  ]}
+                >
+                  <Text style={styles.mtTime}>{fmtTime(entry.at)}</Text>
+                  <View style={[styles.mtBadge, { backgroundColor: badgeColor }]}>
+                    <Text style={styles.mtBadgeText}>{badge}</Text>
+                  </View>
+                  <View style={styles.mtContent}>
+                    <Text style={[styles.mtLabel, isTransition && styles.mtLabelBold]}>
+                      {label}
+                    </Text>
+                    {detail ? (
+                      <Text style={styles.mtDetail}>{detail}</Text>
+                    ) : null}
+                  </View>
+                </View>
+              );
+            })
+          )}
+
+          <TouchableOpacity
+            style={[styles.secondaryBtn, { marginTop: 8 }]}
+            onPress={onCopyMotionTimeline}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.secondaryBtnText}>Copy motion timeline</Text>
+          </TouchableOpacity>
+        </CollapsibleSection>
 
         {/* =====================================================
             v1.2.1 (build 41) — Transistor Location Engine.
@@ -1852,5 +2132,66 @@ const styles = StyleSheet.create({
   footer: {
     fontSize: 11.5, color: Colors.textTertiary, textAlign: 'center',
     marginTop: 14, lineHeight: 16,
+  },
+
+  // Motion Timeline row styles — Build 64
+  mtRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'flex-start' as const,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    backgroundColor: Colors.surface,
+    marginBottom: 2,
+    borderRadius: 8,
+  },
+  mtRowHighlight: {
+    backgroundColor: '#F0FDF4',
+    borderColor: '#10B981',
+    borderWidth: 1,
+  },
+  mtTime: {
+    fontSize: 11,
+    fontWeight: '700' as const,
+    color: Colors.textTertiary,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginTop: 2,
+    minWidth: 60,
+  },
+  mtBadge: {
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    alignSelf: 'flex-start' as const,
+    marginTop: 1,
+    minWidth: 70,
+    alignItems: 'center' as const,
+  },
+  mtBadgeText: {
+    fontSize: 9,
+    fontWeight: '800' as const,
+    color: '#fff',
+    letterSpacing: 0.3,
+    textTransform: 'uppercase' as const,
+  },
+  mtContent: {
+    flex: 1,
+  },
+  mtLabel: {
+    fontSize: 12,
+    color: Colors.textPrimary,
+    lineHeight: 16,
+  },
+  mtLabelBold: {
+    fontWeight: '800' as const,
+  },
+  mtDetail: {
+    fontSize: 11,
+    color: Colors.textTertiary,
+    lineHeight: 15,
+    marginTop: 2,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
 });
