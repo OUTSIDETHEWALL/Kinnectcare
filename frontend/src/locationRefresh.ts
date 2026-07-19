@@ -314,9 +314,69 @@ function formatGeocodeLabel(addr: any): string {
 }
 
 /**
+ * Geocode using Google's Geocoding REST API.
+ *
+ * Field-test finding (July 2026): iOS (Apple MapKit) and Android (Google Geocoder)
+ * return different city names for the same coordinates — "Fort Mohave, AZ" on iOS
+ * vs "Bullhead City, AZ" on Android — because the two geocoding backends have
+ * different city-boundary datasets.  Using Google's REST API directly gives
+ * identical results on both platforms.
+ *
+ * The key (`EXPO_PUBLIC_GOOGLE_MAPS_API_KEY`) is already embedded in the app for
+ * map rendering; using it here adds zero new dependency.
+ *
+ * Returns empty string on any failure so callers fall through to the platform
+ * geocoder.
+ */
+async function geocodeWithGoogle(lat: number, lon: number): Promise<string> {
+  const key = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY;
+  if (!key) return '';
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lon}&key=${key}`;
+    const res = await fetch(url);
+    if (!res.ok) return '';
+    const json = await res.json() as any;
+    if (json.status !== 'OK' || !json.results?.length) return '';
+
+    // Walk the first (most specific) result's address_components.
+    const components: { types: string[]; long_name: string; short_name: string }[] =
+      json.results[0].address_components || [];
+
+    let locality   = '';   // city
+    let stateShort = '';   // e.g. "AZ"
+    let premise    = '';   // named place / establishment
+    let route      = '';   // street (to detect street-address results)
+
+    for (const c of components) {
+      if (c.types.includes('locality'))                        locality   = c.long_name;
+      if (c.types.includes('administrative_area_level_1'))     stateShort = c.short_name;
+      if (c.types.includes('premise') ||
+          c.types.includes('establishment') ||
+          c.types.includes('point_of_interest'))               premise    = c.long_name;
+      if (c.types.includes('route'))                           route      = c.long_name;
+    }
+
+    // Skip results that are just a street address (we want a city/place label).
+    if (route && !locality) return '';
+
+    if (premise && locality && premise !== locality) return `${premise}, ${locality}`;
+    if (locality && stateShort) return `${locality}, ${stateShort}`;
+    if (locality) return locality;
+    return '';
+  } catch (_e) {
+    return '';
+  }
+}
+
+/**
  * Reverse-geocode at most once per 50 m of movement.  Returns the
  * cached name when the device hasn't moved.  Never throws —
  * empty string on failure so callers can ?? past it.
+ *
+ * Strategy (field-test build):
+ *   1. Try Google Geocoding REST API — consistent results on iOS + Android.
+ *   2. Fall back to Expo's platform geocoder (Apple MapKit / Google native)
+ *      if the REST call fails or returns nothing.
  */
 export async function geocodeLabelForCoord(lat: number, lon: number): Promise<string> {
   try {
@@ -328,8 +388,16 @@ export async function geocodeLabelForCoord(lat: number, lon: number): Promise<st
     ) {
       return lastGeocodedName;
     }
-    const results = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lon });
-    const label = results?.length > 0 ? formatGeocodeLabel(pickBestGeoResult(results)) : '';
+
+    // 1. Google REST geocoder — platform-consistent.
+    let label = await geocodeWithGoogle(lat, lon);
+
+    // 2. Platform fallback (Apple MapKit on iOS, Google native on Android).
+    if (!label) {
+      const results = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lon });
+      label = results?.length > 0 ? formatGeocodeLabel(pickBestGeoResult(results)) : '';
+    }
+
     if (label) {
       lastGeocodedLat = lat;
       lastGeocodedLon = lon;

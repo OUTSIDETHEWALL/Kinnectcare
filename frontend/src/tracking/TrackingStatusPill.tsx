@@ -76,19 +76,31 @@ const STATUS: Record<TrackingStatusKind, Omit<TrackingStatus, 'kind'>> = {
 //  Freshness thresholds — mirror Leonidas constants in leonidas/types.ts
 // ---------------------------------------------------------------------------
 //
-//  MOVING   healthy ≤ 2 min  | delayed 2–10 min  | degraded > 10 min
-//  STILL    healthy ≤ 15 min | delayed 15–30 min | degraded > 30 min
-//  UNKNOWN  healthy ≤ 5 min  | delayed 5–30 min  | degraded > 30 min
+//  MOVING   healthy ≤ 2 min  | delayed 2–5 min   | degraded > 5 min
+//  STILL    healthy ≤ 60 min | delayed 60–240 min | degraded > 240 min
+//  UNKNOWN  healthy ≤ 10 min | delayed 10–60 min  | degraded > 60 min
+//
+//  Field-test finding (July 2026): the caregiver's real question is
+//  "should I be worried?" not "how old is the last GPS fix?".
+//  A stationary member inside Walmart for 25 minutes IS safe — the last
+//  known location is still valid.  The old 15-min STATIONARY threshold
+//  caused a yellow "Tracking delayed" alarm for normal stationary dwell
+//  time, eroding caregiver trust.  Thresholds now reflect that:
+//    • STATIONARY healthy: ≤ 60 min (covers a typical shopping trip)
+//    • STATIONARY degraded: > 4 hours (suggests the device is off or
+//      permissions were revoked — a genuine concern signal)
+//    • MOVING thresholds unchanged (driving gaps are still unusual)
+//    • UNKNOWN delayed bumped to 10 min (first boot / cold-start grace)
 //
 //  If you update these, update the Leonidas constants too.  They must
 //  stay in sync so the badge and the health monitor speak the same language.
 
-const MOVING_HEALTHY_MAX_MS  = 2 * 60 * 1000;  // Leonidas: MOVING_HEALTHY_MAX_MINUTES
-const MOVING_DEGRADED_MS     = 5 * 60 * 1000;  // Leonidas: MOVING_CRITICAL_MINUTES (spec: >5 min = degraded)
-const STATIONARY_DELAYED_MS  = 15 * 60 * 1000;  // Leonidas: STATIONARY_RECOVERY_MIN_MINUTES
-const STATIONARY_DEGRADED_MS = 30 * 60 * 1000;  // Leonidas: STATIONARY_RECOVERY_MAX_MINUTES
-const UNKNOWN_DELAYED_MS     = 5  * 60 * 1000;
-const UNKNOWN_DEGRADED_MS    = 30 * 60 * 1000;
+const MOVING_HEALTHY_MAX_MS  = 2  * 60 * 1000;  // 2 min
+const MOVING_DEGRADED_MS     = 5  * 60 * 1000;  // 5 min
+const STATIONARY_DELAYED_MS  = 60 * 60 * 1000;  // 60 min (was 15 min)
+const STATIONARY_DEGRADED_MS = 240 * 60 * 1000; // 4 hours (was 30 min)
+const UNKNOWN_DELAYED_MS     = 10 * 60 * 1000;  // 10 min (was 5 min)
+const UNKNOWN_DEGRADED_MS    = 60 * 60 * 1000;  // 60 min (was 30 min)
 
 // ---------------------------------------------------------------------------
 //  Options

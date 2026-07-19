@@ -529,7 +529,12 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
     desiredAccuracy: lib.DESIRED_ACCURACY_HIGH,
     distanceFilter: 10,
     stopTimeout: 5,
-    locationUpdateInterval: 30000,
+    // Field-test build — reduced from 30 000 ms to 10 000 ms (the same value
+    // as fastestLocationUpdateInterval) so Android's fused-location provider
+    // delivers GPS fixes as quickly as the hardware allows when MOVING.
+    // Previously the 30 s hint caused Android to batch fixes, producing
+    // 3–5 min latency even though Joyce's device was uploading correctly.
+    locationUpdateInterval: 10000,
     fastestLocationUpdateInterval: 10000,
 
     // Activity Recognition / motion detection
