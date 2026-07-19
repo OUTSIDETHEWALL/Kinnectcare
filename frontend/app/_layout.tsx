@@ -4,7 +4,7 @@ import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from '../src/AuthContext';
 import { useEffect, useState, useRef } from 'react';import { View, ActivityIndicator, AppState, Platform, Linking } from 'react-native';
 import { Colors } from '../src/theme';
-import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink, refreshPushTokenIfStale } from '../src/push';
+import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink, refreshPushTokenIfStale, dismissStaleAreYouOkNotifs } from '../src/push';
 import { isOnboardingDone, markOnboardingDone } from '../src/onboardingStore';
 import { hasPinForUser, isUnlockedNow, markUnlocked } from '../src/pinAuth';
 import { isSessionValid } from '../src/pinSession';
@@ -508,9 +508,18 @@ function RootNav() {
     // 'active' before the user signed in (e.g. cold-start via
     // notification tap → OTP → returns to 'active').
     refreshPushTokenIfStale('mount').catch(() => {});
+    // Build XX — sweep stale are_you_ok_response / checkin confirmation
+    // notifications on mount (handles notifications that arrived while
+    // the app was killed and have now aged past 8 hours).
+    dismissStaleAreYouOkNotifs().catch(() => {});
     const sub = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
         refreshPushTokenIfStale('foreground').catch(() => {});
+        // Build XX — sweep stale confirmation notifications on every
+        // foreground resume.  8-hour default: caregiver has a full
+        // overnight window to see the confirmation; tray is clean by
+        // the following morning.
+        dismissStaleAreYouOkNotifs().catch(() => {});
       }
     });
     return () => sub.remove();
