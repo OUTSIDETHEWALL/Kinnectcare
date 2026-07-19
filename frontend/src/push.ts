@@ -665,6 +665,68 @@ async function rePresentSticky(n: Notifications.Notification) {
   }
 }
 
+// Build XX — Auto-dismiss stale "Are You OK?" confirmation notifications.
+//
+// `are_you_ok_response` and `checkin` push notifications (the ✅ banner
+// Charles sees when Joyce confirms she's OK) are NOT in the rePresentSticky
+// allowlist, so they accumulate in the OS notification tray until manually
+// dismissed.  After a few days of check-ins, the tray fills with
+// "Joyce confirmed they are OK" entries that have long since served their purpose.
+//
+// Two call sites:
+//   1. On each app foreground: dismisses notifications older than `maxAgeMs`
+//      (default 8 h) — keeps the tray clean without removing a very-recent one
+//      the caregiver hasn't read yet.
+//   2. When a NEW confirmation arrives (inside the recv listener): passes
+//      maxAgeMs=0 to dismiss ALL existing ones of that type immediately, so
+//      only the newest confirmation is ever visible (no stacking).
+//
+// Date normalisation: iOS delivers `notification.date` in SECONDS since epoch
+// (~1.7 × 10⁹); Android delivers it in MILLISECONDS (~1.7 × 10¹²).
+// We distinguish the two with a magnitude check and convert to ms before
+// comparing with Date.now().
+async function dismissPresentedByType(
+  types: string[],
+  maxAgeMs = 8 * 60 * 60 * 1000,
+): Promise<void> {
+  try {
+    const presented = await Notifications.getPresentedNotificationsAsync();
+    const now = Date.now();
+    for (const n of presented) {
+      const data: any = n.request.content.data || {};
+      if (!types.includes(data.type)) continue;
+      const rawDate = (n as any).date;
+      // iOS  → seconds  (rawDate ≈ 1.7e9)  → multiply by 1 000
+      // Android → ms   (rawDate ≈ 1.7e12) → use as-is
+      const deliveredMs = typeof rawDate === 'number' && rawDate > 0
+        ? (rawDate < 1e11 ? rawDate * 1000 : rawDate)
+        : 0;
+      const ageMs = deliveredMs > 0 ? now - deliveredMs : Number.POSITIVE_INFINITY;
+      if (maxAgeMs === 0 || ageMs >= maxAgeMs) {
+        Notifications.dismissNotificationAsync(n.request.identifier).catch(() => {});
+      }
+    }
+  } catch (_e) {
+    // getPresentedNotificationsAsync can fail on some Android OEMs — treat
+    // as a no-op so the rest of the app is never affected by a tray sweep.
+  }
+}
+
+/**
+ * Exported for use in _layout.tsx.
+ *
+ * Called on each foreground resume to sweep `are_you_ok_response` and
+ * `checkin` confirmation notifications older than `maxAgeMs` (default 8 h)
+ * out of the OS notification tray.  The 8-hour default gives the caregiver
+ * a full overnight window to see the confirmation while keeping the tray
+ * clean by the following morning.
+ */
+export async function dismissStaleAreYouOkNotifs(
+  maxAgeMs = 8 * 60 * 60 * 1000,
+): Promise<void> {
+  return dismissPresentedByType(['are_you_ok_response', 'checkin'], maxAgeMs);
+}
+
 // ---------- Pending deep-link queue (race-condition-free) ----------
 //
 // Why this exists:
@@ -923,6 +985,18 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
             }
           } catch (_e) {}
           return; // do not surface as a sticky/last notification
+        }
+      } catch (_e) {}
+      // Build XX — when a new are_you_ok_response or checkin confirmation
+      // arrives, immediately dismiss ALL existing ones of the same type so
+      // only the newest is ever visible in the tray.  maxAgeMs=0 means
+      // "dismiss regardless of age" — the just-arrived notification will
+      // be shown by the OS AFTER this handler runs, so we're clearing
+      // the prior entries, not the new one.
+      try {
+        const arrivedType: string | undefined = (n?.request?.content?.data as any)?.type;
+        if (arrivedType === 'are_you_ok_response' || arrivedType === 'checkin') {
+          dismissPresentedByType([arrivedType], 0).catch(() => {});
         }
       } catch (_e) {}
       setLast(n);
