@@ -15,6 +15,7 @@ import * as locationEngine from '../src/locationEngine';
 import * as leonidas from '../src/leonidas';
 import * as memberStore from '../src/store/memberStore';
 import { api, getCurrentToken, subscribeToTokenChanges } from '../src/api';
+import { logPipelineEvent } from '../src/refreshPipelineLog';
 import {
   loadDisclaimerAck,
   subscribeDisclaimerAck,
@@ -742,6 +743,66 @@ function RootNav() {
       }
     });
     return () => sub.remove();
+  }, [user?.id]);
+
+  // ============================================================
+  //  Foreground 30s refresh — Build XX
+  // ============================================================
+  //
+  //  Problem: the SDK's onHttp → upsertOne path (Build 48) fires
+  //  immediately when a background upload completes, but ONLY when
+  //  the foreground JS thread is alive.  When the device screen
+  //  goes off (iOS suspends the JS runtime), uploads still succeed
+  //  in the native SDK layer, but onHttp callbacks never fire.
+  //  The dashboard polls at 60 s, but only while IT is the active
+  //  screen.  The Me tab, Diagnostics, and Member Detail have no
+  //  cross-screen refresh mechanism.
+  //
+  //  Fix: an interval that runs ONLY while AppState === 'active'
+  //  (screen on, app foregrounded).  Battery cost is zero when the
+  //  screen is off — the interval stops the instant the app goes to
+  //  background.  memberStore.fetchAll() has in-flight dedup, so it
+  //  is safe to run alongside any existing per-screen polls without
+  //  doubling network requests.
+  //
+  //  At 30 s the worst-case delay between a successful SDK upload
+  //  and the UI reflecting it is 30 s (when the user is actively
+  //  looking at the app with the screen on).  When they are not
+  //  looking (screen off), the delay doesn't matter because they
+  //  can't see it anyway — they will see fresh data within 30 s of
+  //  picking the phone back up.
+  // ============================================================
+  useEffect(() => {
+    if (!user?.id) return;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    function startInterval() {
+      if (timer !== null) return; // idempotent
+      timer = setInterval(() => {
+        // Log the trigger so the Refresh Pipeline section in
+        // Diagnostics shows this as a named, attributable event.
+        try { logPipelineEvent({ stage: 'dashboard-load', trigger: 'foreground-poll-30s' }); } catch (_e) {}
+        memberStore.fetchAll().catch(() => {});
+      }, 30_000);
+    }
+
+    function stopInterval() {
+      if (timer !== null) { clearInterval(timer); timer = null; }
+    }
+
+    // Start immediately if the app is already in the foreground
+    // (covers the normal authenticated session case).
+    if (AppState.currentState === 'active') startInterval();
+
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') startInterval();
+      else stopInterval(); // 'background' or 'inactive'
+    });
+
+    return () => {
+      sub.remove();
+      stopInterval();
+    };
   }, [user?.id]);
 
   // ============================================================
