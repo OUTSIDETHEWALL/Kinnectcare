@@ -405,6 +405,9 @@ export default function DiagnosticsScreen() {
   const [serverState, setServerState] = useState<any>(null);
   const [serverStateLoading, setServerStateLoading] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Build XX — GPS quality history fetched from backend location_history collection.
+  const [gpsHistory, setGpsHistory] = useState<any[]>([]);
+  const [gpsHistoryErr, setGpsHistoryErr] = useState<string | null>(null);
 
   // Leonidas (Build 46) — snapshot + recovery log
   const [leoSnapshot, setLeoSnapshot] = useState<leonidas.LeonidasSnapshotForUI | null>(null);
@@ -508,6 +511,24 @@ export default function DiagnosticsScreen() {
     setLeoSnapshot(lsnap);
     setLeoLog(llog);
     setRestrictionStatus(rs);
+
+    // Build XX — GPS quality history from the backend location_history collection.
+    // Read the device's own member_id from AsyncStorage (same key as locationRefresh.ts)
+    // then call GET /members/{id}/location-history.
+    try {
+      const memberId = await AsyncStorage.getItem('kc_my_member_id_v1');
+      if (memberId) {
+        const resp = await api.get(`/members/${memberId}/location-history`);
+        setGpsHistory(resp.data || []);
+        setGpsHistoryErr(null);
+      }
+    } catch (e: any) {
+      const msg = e?.response?.status
+        ? `http_${e.response.status}`
+        : (e?.message || 'unknown').slice(0, 80);
+      setGpsHistoryErr(msg);
+    }
+
     setLoading(false);
   }, []);
 
@@ -1933,6 +1954,75 @@ export default function DiagnosticsScreen() {
             )}
           </View>
         </View>
+
+        {/* Build XX — GPS Quality History */}
+        <CollapsibleSection
+          id="gps-history"
+          title="GPS Quality History"
+          count={gpsHistoryErr ? '!' : gpsHistory.length || null}
+          hint={
+            'Last 50 accepted fixes from the backend — full-precision coordinates, accuracy, speed, and heading. ' +
+            'Use this to reconstruct GPS behaviour around anomalies: was the accuracy poor? Was the device stationary? ' +
+            'Did the next fix immediately correct the position? ' +
+            'Not populated until the next accepted upload from this device.'
+          }
+          expanded={!!expanded['gps-history']}
+          onToggle={toggleSection}
+        >
+          <View style={styles.card}>
+            {loading ? (
+              <Text style={styles.muted}>Loading…</Text>
+            ) : gpsHistoryErr ? (
+              <Text style={styles.muted}>Failed to load: {gpsHistoryErr}</Text>
+            ) : gpsHistory.length === 0 ? (
+              <Text style={styles.muted}>
+                No history yet. Will populate after the next accepted location upload from this device.
+              </Text>
+            ) : (
+              gpsHistory.map((e: any, i: number) => {
+                const acceptedDate = e.accepted_at ? new Date(e.accepted_at) : null;
+                const capturedDate = e.captured_at ? new Date(e.captured_at) : null;
+                const latencyS = acceptedDate && capturedDate
+                  ? ((acceptedDate.getTime() - capturedDate.getTime()) / 1000).toFixed(1)
+                  : null;
+                const speedMph = e.speed != null ? (Number(e.speed) * 2.23694).toFixed(1) : null;
+                return (
+                  <View key={`gh-${i}`} style={styles.entry}>
+                    <Text style={styles.entryTime}>
+                      {acceptedDate ? acceptedDate.toLocaleTimeString() : '—'}
+                      {latencyS !== null ? ` · ${latencyS}s upload lag` : ''}
+                    </Text>
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>lat/lon: </Text>
+                      {typeof e.latitude === 'number' ? e.latitude.toFixed(6) : '—'},{' '}
+                      {typeof e.longitude === 'number' ? e.longitude.toFixed(6) : '—'}
+                    </Text>
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>accuracy: </Text>
+                      {e.accuracy != null ? `${Number(e.accuracy).toFixed(1)} m` : '—'}
+                      {'   '}
+                      <Text style={styles.entryK}>speed: </Text>
+                      {speedMph != null ? `${speedMph} mph` : '—'}
+                      {'   '}
+                      <Text style={styles.entryK}>hdg: </Text>
+                      {e.heading != null ? `${Number(e.heading).toFixed(0)}°` : '—'}
+                    </Text>
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>moving: </Text>
+                      {e.is_moving != null ? String(e.is_moving) : '—'}
+                      {'   '}
+                      <Text style={styles.entryK}>provider: </Text>
+                      {e.provider || '—'}
+                      {'   '}
+                      <Text style={styles.entryK}>event: </Text>
+                      {e.event || '—'}
+                    </Text>
+                  </View>
+                );
+              })
+            )}
+          </View>
+        </CollapsibleSection>
 
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
