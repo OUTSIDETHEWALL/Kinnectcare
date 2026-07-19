@@ -21,6 +21,7 @@ import {
   clearIfNewer as clearRefreshIfNewer,
   STALE_THRESHOLD_MS,
 } from '../../src/locationRefreshState';
+import { formatLastSeenAge } from '../../src/locationRefresh';
 import * as memberStore from '../../src/store/memberStore';
 
 const INTERVAL_OPTIONS = [2, 4, 6, 8, 12] as const;
@@ -401,6 +402,9 @@ export default function MemberDetail() {
                   <View style={styles.locPinBubble}><Text style={styles.locPinEmoji}>📍</Text></View>
                   <View style={{ flex: 1, marginLeft: 14 }}>
                     <Text style={styles.locName}>{member.location_name || 'Unknown location'}</Text>
+                    {member.last_seen ? (
+                      <Text style={styles.locAge}>{formatLastSeenAge(member.last_seen)}</Text>
+                    ) : null}
                     {/* Build 54 — health-first design.  The pill is the only
                         tracking signal shown on the primary member surface;
                         per-tick freshness lives in Diagnostics.
@@ -692,6 +696,7 @@ const styles = StyleSheet.create({
   locPinBubble: { width: 48, height: 48, borderRadius: 24, backgroundColor: Colors.tertiary, alignItems: 'center', justifyContent: 'center' },
   locPinEmoji: { fontSize: 22 },
   locName: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
+  locAge: { fontSize: 11, color: Colors.textTertiary, marginTop: 2 },
   locSub: { fontSize: 12, color: Colors.textTertiary, marginTop: 4 },
   locStatusPill: { marginTop: 6 },
   locFreshRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },

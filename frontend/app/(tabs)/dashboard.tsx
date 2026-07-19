@@ -12,7 +12,7 @@ import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, MemberSummary, getBillingStatus, BillingStatus, FamilyInvite, listFamilyInvites, revokeFamilyInvite } from '../../src/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { geocodeLabelForCoord } from '../../src/locationRefresh';
+import { geocodeLabelForCoord, formatLastSeenAge } from '../../src/locationRefresh';
 import {
   requestRefresh as requestMemberRefresh,
   clearIfNewer as clearRefreshIfNewer,
@@ -1033,7 +1033,12 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
               🔒 Location Sharing Off
             </Text>
           ) : (
-            <Text style={styles.memberMeta}>📍 {member.location_name || 'Unknown'}</Text>
+            <>
+              <Text style={styles.memberMeta}>📍 {member.location_name || 'Unknown'}</Text>
+              {member.last_seen ? (
+                <Text style={styles.memberMetaAge}>{formatLastSeenAge(member.last_seen)}</Text>
+              ) : null}
+            </>
           )}
           {/* Build 54 — status-first design.  The tracking pill is the
               only tracking signal shown on the dashboard card.  Timestamps
@@ -1173,6 +1178,7 @@ const styles = StyleSheet.create({
   memberName: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
   statusEmoji: { fontSize: 12 },
   memberMeta: { fontSize: 13, color: Colors.textTertiary, marginTop: 2 },
+  memberMetaAge: { fontSize: 11, color: Colors.textTertiary, marginTop: 1, opacity: 0.75 },
   // Build #57 — Location Sharing Off row: neutral grey lock + honest
   // copy, replaces the "📍 Location Name" line entirely so caregivers
   // can't misread a private member as tracking-healthy.
