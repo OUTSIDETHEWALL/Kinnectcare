@@ -219,28 +219,164 @@ function haversineM(lat1: number, lon1: number, lat2: number, lon2: number): num
   return Math.sqrt(dLat * dLat + dLon * dLon);
 }
 
-function formatGeocodeLabel(addr: any): string {
-  // Prefer POI / building name when the geocoder identifies one and
-  // it isn't a literal address (numbers + street).
-  const name = (addr?.name || '').trim();
-  const street = (addr?.street || '').trim();
-  const city = (addr?.city || addr?.subregion || '').trim();
-  const region = (addr?.region || '').trim();
-  const country = (addr?.isoCountryCode || '').trim();
+// US state (and common Canadian province) names → 2-letter abbreviations.
+// Applied when isoCountryCode === 'US' or 'CA' so labels read
+// "Bullhead City, AZ" rather than "Bullhead City, Arizona".
+const REGION_ABBREV: Record<string, string> = {
+  // US states
+  'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR',
+  'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE',
+  'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID',
+  'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS',
+  'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD',
+  'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS',
+  'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV',
+  'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY',
+  'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK',
+  'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC',
+  'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT',
+  'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV',
+  'Wisconsin': 'WI', 'Wyoming': 'WY', 'District of Columbia': 'DC',
+  // Canadian provinces
+  'Alberta': 'AB', 'British Columbia': 'BC', 'Manitoba': 'MB',
+  'New Brunswick': 'NB', 'Newfoundland and Labrador': 'NL', 'Nova Scotia': 'NS',
+  'Ontario': 'ON', 'Prince Edward Island': 'PE', 'Quebec': 'QC',
+  'Saskatchewan': 'SK',
+};
 
-  const looksLikeAddress = !!name && /^\d/.test(name); // starts with a number
-  if (name && !looksLikeAddress && city) return `${name}, ${city}`;
-  if (city && region) return `${city}, ${region}`;
-  if (city) return city;
-  if (street && region) return `${street}, ${region}`;
-  if (region && country) return `${region}, ${country}`;
+/**
+ * Pick the most useful geocoder result from the array the platform returns.
+ *
+ * Both Apple MapKit (iOS) and Google Geocoder (Android) may return several
+ * results at different granularities.  We prefer the result that has a
+ * populated `city` field — that's the clearest signal that an incorporated
+ * municipality was found.  A result with only a `district` is better than
+ * one with nothing.
+ */
+function pickBestGeoResult(results: any[]): any {
+  if (!results || results.length === 0) return null;
+  let best = results[0];
+  let bestScore = -Infinity;
+  for (const r of results) {
+    let score = 0;
+    if (r?.city)     score += 10;
+    if (r?.district) score += 4;
+    if (r?.region)   score += 1;
+    if (score > bestScore) { bestScore = score; best = r; }
+  }
+  return best;
+}
+
+function formatGeocodeLabel(addr: any): string {
+  const rawName   = (addr?.name       || '').trim();
+  const city      = (addr?.city       || '').trim();
+  const district  = (addr?.district   || '').trim(); // sublocality / neighborhood
+  const subregion = (addr?.subregion  || '').trim(); // county
+  const region    = (addr?.region     || '').trim(); // state — full name on iOS
+  const isoCode   = (addr?.isoCountryCode || '').trim();
+
+  // Abbreviate state for US/CA so labels read "Bullhead City, AZ" not "Bullhead City, Arizona".
+  const regionShort = REGION_ABBREV[region] ?? region;
+
+  // Primary locale: incorporated city is ground truth.
+  // Fall through to district (sublocality / unincorporated community) only
+  // when the geocoder found no city — common for rural/unincorporated areas.
+  const primaryLocale = city || district;
+
+  // `name` in geocoder results is a fine-grained local label: it can be a
+  // neighborhood name, a community name (e.g. "Fort Mohave"), or a POI.
+  // We only use it as a POI prefix — never as the primary locale — because
+  // it is unreliable as a city identifier and frequently points to a
+  // sub-locality (like "Fort Mohave") when the actual city ("Bullhead City")
+  // is already available in the `city` field.
+  //
+  // A name qualifies as a POI prefix when ALL four conditions hold:
+  //   1. Non-empty
+  //   2. Doesn't start with a digit (avoids "123 Main St" street addresses)
+  //   3. Doesn't duplicate the city, district, county, or state — geocoders
+  //      sometimes echo the city into `name`, which would produce
+  //      "Bullhead City, Bullhead City"
+  //   4. A real primary locale exists — a POI name without a known city is
+  //      ambiguous and not useful as a standalone label
+  const looksLikeStreetAddr = rawName.length > 0 && /^\d/.test(rawName);
+  const isDuplicate = rawName === city || rawName === district
+                   || rawName === subregion || rawName === region;
+  const isPoi = rawName && !looksLikeStreetAddr && !isDuplicate && !!primaryLocale;
+
+  if (isPoi)                                return `${rawName}, ${primaryLocale}`;
+  if (primaryLocale && regionShort)         return `${primaryLocale}, ${regionShort}`;
+  if (primaryLocale)                        return primaryLocale;
+  // Remote / unincorporated with no city or district: surface the county so
+  // the label is at least regionally meaningful rather than misleading.
+  if (subregion && regionShort)             return `${subregion} area, ${regionShort}`;
+  if (regionShort)                          return regionShort;
   return '';
+}
+
+/**
+ * Geocode using Google's Geocoding REST API.
+ *
+ * Field-test finding (July 2026): iOS (Apple MapKit) and Android (Google Geocoder)
+ * return different city names for the same coordinates — "Fort Mohave, AZ" on iOS
+ * vs "Bullhead City, AZ" on Android — because the two geocoding backends have
+ * different city-boundary datasets.  Using Google's REST API directly gives
+ * identical results on both platforms.
+ *
+ * The key (`EXPO_PUBLIC_GOOGLE_MAPS_API_KEY`) is already embedded in the app for
+ * map rendering; using it here adds zero new dependency.
+ *
+ * Returns empty string on any failure so callers fall through to the platform
+ * geocoder.
+ */
+async function geocodeWithGoogle(lat: number, lon: number): Promise<string> {
+  const key = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY;
+  if (!key) return '';
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lon}&key=${key}`;
+    const res = await fetch(url);
+    if (!res.ok) return '';
+    const json = await res.json() as any;
+    if (json.status !== 'OK' || !json.results?.length) return '';
+
+    // Walk the first (most specific) result's address_components.
+    const components: { types: string[]; long_name: string; short_name: string }[] =
+      json.results[0].address_components || [];
+
+    let locality   = '';   // city
+    let stateShort = '';   // e.g. "AZ"
+    let premise    = '';   // named place / establishment
+    let route      = '';   // street (to detect street-address results)
+
+    for (const c of components) {
+      if (c.types.includes('locality'))                        locality   = c.long_name;
+      if (c.types.includes('administrative_area_level_1'))     stateShort = c.short_name;
+      if (c.types.includes('premise') ||
+          c.types.includes('establishment') ||
+          c.types.includes('point_of_interest'))               premise    = c.long_name;
+      if (c.types.includes('route'))                           route      = c.long_name;
+    }
+
+    // Skip results that are just a street address (we want a city/place label).
+    if (route && !locality) return '';
+
+    if (premise && locality && premise !== locality) return `${premise}, ${locality}`;
+    if (locality && stateShort) return `${locality}, ${stateShort}`;
+    if (locality) return locality;
+    return '';
+  } catch (_e) {
+    return '';
+  }
 }
 
 /**
  * Reverse-geocode at most once per 50 m of movement.  Returns the
  * cached name when the device hasn't moved.  Never throws —
  * empty string on failure so callers can ?? past it.
+ *
+ * Strategy (field-test build):
+ *   1. Try Google Geocoding REST API — consistent results on iOS + Android.
+ *   2. Fall back to Expo's platform geocoder (Apple MapKit / Google native)
+ *      if the REST call fails or returns nothing.
  */
 export async function geocodeLabelForCoord(lat: number, lon: number): Promise<string> {
   try {
@@ -252,8 +388,16 @@ export async function geocodeLabelForCoord(lat: number, lon: number): Promise<st
     ) {
       return lastGeocodedName;
     }
-    const results = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lon });
-    const label = results?.[0] ? formatGeocodeLabel(results[0]) : '';
+
+    // 1. Google REST geocoder — platform-consistent.
+    let label = await geocodeWithGoogle(lat, lon);
+
+    // 2. Platform fallback (Apple MapKit on iOS, Google native on Android).
+    if (!label) {
+      const results = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lon });
+      label = results?.length > 0 ? formatGeocodeLabel(pickBestGeoResult(results)) : '';
+    }
+
     if (label) {
       lastGeocodedLat = lat;
       lastGeocodedLon = lon;
@@ -261,6 +405,37 @@ export async function geocodeLabelForCoord(lat: number, lon: number): Promise<st
       return label;
     }
     return '';
+  } catch (_e) {
+    return '';
+  }
+}
+
+/**
+ * Format a `last_seen` ISO timestamp as a compact human-readable age.
+ *
+ * Returns an empty string for null/undefined/invalid timestamps so callers
+ * can skip rendering rather than showing a broken label.
+ *
+ * Examples:
+ *   "just now"     (< 10 s)
+ *   "45s ago"      (< 1 min)
+ *   "3 min ago"    (< 1 h)
+ *   "2h ago"       (< 24 h)
+ *   "3d ago"       (≥ 24 h)
+ */
+export function formatLastSeenAge(isoString: string | null | undefined): string {
+  if (!isoString) return '';
+  try {
+    const ms = Date.now() - new Date(isoString).getTime();
+    if (!Number.isFinite(ms) || ms < 0) return '';
+    const s = Math.round(ms / 1000);
+    if (s < 10)   return 'just now';
+    if (s < 60)   return `${s}s ago`;
+    const m = Math.round(s / 60);
+    if (m < 60)   return `${m} min ago`;
+    const h = Math.round(m / 60);
+    if (h < 24)   return `${h}h ago`;
+    return `${Math.round(h / 24)}d ago`;
   } catch (_e) {
     return '';
   }

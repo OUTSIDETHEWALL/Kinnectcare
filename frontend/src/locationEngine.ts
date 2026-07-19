@@ -324,6 +324,14 @@ let cachedConfig: LocationEngineConfig | null = null;
 let isReady = false;
 let listenersAttached = false;
 
+// Activity-change dedup — onActivityChange fires every
+// activityRecognitionInterval (10 s) even when the activity is
+// unchanged.  Only log when the type OR the moving-state changes so the
+// 50-entry ring buffer stays useful across a full trip rather than being
+// consumed in the first few minutes.
+let _lastActivityType: string | null = null;
+let _lastActivityIsMoving: boolean | null = null;
+
 /**
  * One-time SDK event subscription.  These callbacks feed the
  * diagnostic ring buffer — they are READ-ONLY observers, they do not
@@ -468,6 +476,36 @@ function attachSdkListeners(lib: any): void {
         });
       }
     });
+
+    // ---- Activity Recognition (Build 64 — Motion Timeline audit) ----
+    //
+    // onActivityChange fires whenever Android Activity Recognition
+    // detects a change in the device's physical activity:
+    //   still | walking | on_foot | running | in_vehicle | on_bicycle
+    //
+    // This is the first link in the stationary→moving transition chain:
+    //   Activity Recognition detects IN_VEHICLE
+    //   → SDK evaluates confidence vs minimumActivityRecognitionConfidence
+    //   → SDK fires onMotionChange(isMoving=true)
+    //   → GPS active, distanceFilter applies, uploads begin
+    //
+    // Without this listener we had NO visibility into whether Android
+    // Activity Recognition was firing at all on Joyce's device.
+    // Deduplicated (see _lastActivity* vars above) to avoid flooding
+    // the ring buffer — only transitions are logged.
+    if (typeof lib.onActivityChange === 'function') {
+      lib.onActivityChange((evt: any) => {
+        const activity: string = String(evt?.activity ?? 'unknown');
+        const confidence: number = typeof evt?.confidence === 'number' ? evt.confidence : 0;
+        const isMoving: boolean = !!evt?.isMoving;
+        if (activity !== _lastActivityType || isMoving !== _lastActivityIsMoving) {
+          _lastActivityType = activity;
+          _lastActivityIsMoving = isMoving;
+          void logEvent('sdk_onActivityChange', { activity, confidence, isMoving });
+        }
+      });
+    }
+
     listenersAttached = true;
     void logEvent('sdk_listeners_attached');
   } catch (e: any) {
@@ -491,7 +529,12 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
     desiredAccuracy: lib.DESIRED_ACCURACY_HIGH,
     distanceFilter: 10,
     stopTimeout: 5,
-    locationUpdateInterval: 30000,
+    // Field-test build — reduced from 30 000 ms to 10 000 ms (the same value
+    // as fastestLocationUpdateInterval) so Android's fused-location provider
+    // delivers GPS fixes as quickly as the hardware allows when MOVING.
+    // Previously the 30 s hint caused Android to batch fixes, producing
+    // 3–5 min latency even though Joyce's device was uploading correctly.
+    locationUpdateInterval: 10000,
     fastestLocationUpdateInterval: 10000,
 
     // Activity Recognition / motion detection
@@ -613,6 +656,36 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
         trackingMode: state?.trackingMode,
         didLaunchInBackground: !!state?.didLaunchInBackground,
       });
+      // Build 64 — Config snapshot.
+      //
+      // Log the SDK's ACTUAL resolved config immediately after ready().
+      // The SDK merges the JS config with any values already persisted
+      // in its native SQLite database.  If Charles and Joyce ever show
+      // different values here, the persisted database is the explanation.
+      // Charles's and Joyce's logs can then be compared side-by-side to
+      // identify which field differs and why.
+      try {
+        await logEvent('sdk_config_snapshot', {
+          distanceFilter:                    state?.distanceFilter,
+          stationaryRadius:                  state?.stationaryRadius,
+          stopTimeout:                       state?.stopTimeout,
+          heartbeatInterval:                 state?.heartbeatInterval,
+          activityRecognitionInterval:       state?.activityRecognitionInterval,
+          minimumActivityRecognitionConfidence: state?.minimumActivityRecognitionConfidence,
+          locationUpdateInterval:            state?.locationUpdateInterval,
+          fastestLocationUpdateInterval:     state?.fastestLocationUpdateInterval,
+          motionTriggerDelay:                state?.motionTriggerDelay ?? null,
+          disableStopDetection:              state?.disableStopDetection ?? false,
+          elasticityMultiplier:              state?.elasticityMultiplier ?? null,
+          preventSuspend:                    state?.preventSuspend ?? false,
+          pausesLocationUpdatesAutomatically: state?.pausesLocationUpdatesAutomatically ?? null,
+          autoSync:                          state?.autoSync,
+          batchSync:                         state?.batchSync,
+          maxBatchSize:                      state?.maxBatchSize,
+        });
+      } catch (_e) {
+        // Best-effort — never abort engine startup for a diagnostic log.
+      }
     }
   } catch (e: any) {
     await logEvent('ready_or_setConfig_error', {

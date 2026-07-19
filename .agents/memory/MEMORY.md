@@ -2,3 +2,5 @@
 - [EAS Update env var requirement](eas-update-env-vars.md) — EXPO_PUBLIC_* vars must be in the shell env for eas update; eas.json build env section does NOT apply. Missing var = "undefined/api" baseURL = Network Error on all devices.
 - [Notification explainability rule](notification-explainability-rule.md) — permanent rule: every notification must answer 5 questions (why sent, who, why visible, why then, why once); applies at PR review for all push-related files.
 - [GPS capture timestamp guard](location-timestamp-guard.md) — Build 60: atomic MongoDB $lt guard prevents SDK buffer-replay from overwriting current location; last_seen always written for Leonidas.
+- [Motion Timeline instrumentation](motion-timeline-instrumentation.md) — Build 64: onActivityChange listener + sdk_config_snapshot added; Motion Timeline section in Diagnostics.
+

@@ -219,6 +219,11 @@ export type Member = {
   // state directly from the /members payload.  Defaults true on legacy
   // docs that never had the field (server-side).
   location_sharing_enabled?: boolean;
+  // Build 64 — SDK movement state from the Transistor upload payload.
+  // True when the SDK was in MOVING mode at last upload time.
+  // Drives movement-aware freshness thresholds in TrackingStatusPill.
+  // Null for member rows created before this field was introduced.
+  is_moving?: boolean | null;
 };
 
 export type Alert = {
@@ -261,6 +266,55 @@ export type Reminder = {
   last_refill_at?: string | null;
   run_out_at?: string | null;
 };
+
+export type CheckIn = {
+  id: string;
+  owner_id: string;
+  family_group_id?: string | null;
+  member_id: string;
+  member_name: string;
+  location_name?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  confirmed_by?: string | null;
+  source?: string | null;
+  created_at: string;
+};
+
+export type CheckinRequest = {
+  id: string;
+  family_group_id: string;
+  requester_id: string;
+  requester_name: string;
+  member_id: string;
+  member_name: string;
+  status: 'pending' | 'responded' | 'need_help';
+  created_at: string;
+  responded_at?: string | null;
+};
+
+export async function sendCheckinRequest(memberId: string): Promise<{ ok: boolean; request_id: string }> {
+  const r = await api.post(`/checkin-requests/${memberId}`);
+  return r.data;
+}
+
+export async function respondToCheckinRequest(
+  requestId: string,
+  payload: { member_id: string; latitude?: number; longitude?: number; location_name?: string }
+): Promise<CheckIn> {
+  const r = await api.post(`/checkin-requests/${requestId}/respond`, payload);
+  return r.data;
+}
+
+export async function listCheckinRequestsForMember(memberId: string): Promise<CheckinRequest[]> {
+  const r = await api.get(`/checkin-requests/member/${memberId}`);
+  return r.data;
+}
+
+export async function listCheckinsForMember(memberId: string): Promise<CheckIn[]> {
+  const r = await api.get(`/checkins/member/${memberId}`);
+  return r.data;
+}
 
 export type MemberSummary = {
   member_id: string;
