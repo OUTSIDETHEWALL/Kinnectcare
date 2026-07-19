@@ -289,6 +289,12 @@ class FamilyMember(BaseModel):
     # freshness thresholds instead of the engine-health-based 72 h gate.
     # None for rows created before this field was introduced.
     is_moving: Optional[bool] = None
+    # Build XX — GPS quality metrics from the Transistor SDK upload payload.
+    # Preserved alongside each accepted fix for post-anomaly diagnosis.
+    # None for rows created before this build; populated on next upload.
+    gps_accuracy: Optional[float] = None  # horizontal accuracy in metres (lower = better)
+    gps_speed:    Optional[float] = None  # m/s as reported by the device
+    gps_heading:  Optional[float] = None  # degrees 0-360 (0 = North)
 
     @field_serializer("last_seen", "created_at", "checkin_interval_started_at", "captured_at", when_used='json')
     def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
@@ -2504,6 +2510,36 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         except (TypeError, ValueError):
             pass  # malformed value — omit rather than corrupt the field
 
+    # Build XX — GPS quality metrics.  Accuracy, speed, and heading arrive as
+    # extra fields on both upload paths:
+    #   flat path  (locationTemplate) → top-level fields in model_extra
+    #   nested path (Android fallback) → inside data.coords dict
+    # We try top-level first, then fall back to the nested dict.
+    _extras = data.model_extra or {}
+    _nest   = data.coords if isinstance(data.coords, dict) else {}
+
+    def _flt(key: str) -> Optional[float]:
+        v = _extras.get(key)
+        if v is None:
+            v = _nest.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    raw_accuracy = _flt("accuracy")
+    raw_speed    = _flt("speed")
+    raw_heading  = _flt("heading")
+    raw_provider = _extras.get("provider") or _nest.get("provider")
+    raw_event    = _extras.get("event")
+
+    if raw_accuracy is not None:
+        update["gps_accuracy"] = raw_accuracy
+    if raw_speed is not None:
+        update["gps_speed"] = raw_speed
+    if raw_heading is not None:
+        update["gps_heading"] = raw_heading
+
     # Atomic conditional write
     if incoming_captured_at is not None:
         # Only write lat/lon if the incoming GPS capture is strictly
@@ -2571,8 +2607,15 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             "is_owner_write":       is_owner,
             "prev_last_seen":       prev_last_seen,
             "new_last_seen":        server_now,
-            "latitude_approx":      round(data.latitude, 2) if data.latitude is not None else None,
-            "longitude_approx":     round(data.longitude, 2) if data.longitude is not None else None,
+            # Build XX — full precision replaces 2 dp (~1 km) rounding;
+            # coarse coordinates made spatial anomaly analysis impossible.
+            "latitude":             data.latitude,
+            "longitude":            data.longitude,
+            "accuracy":             raw_accuracy,
+            "speed":                raw_speed,
+            "heading":              raw_heading,
+            "provider":             raw_provider,
+            "event":                raw_event,
             "http_status":          200,
             # Build 60 — GPS capture timestamp diagnostics
             "incoming_captured_at": incoming_captured_at,
@@ -2582,6 +2625,29 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         })
     except Exception:
         pass
+
+    # Build XX — Rolling GPS quality history.  Only written for ACCEPTED fixes
+    # so the history reflects what was actually displayed to caregivers.
+    # 7-day TTL (enforced by MongoDB TTL index on accepted_at) keeps the
+    # collection bounded without a manual cleanup job.
+    if write_accepted:
+        try:
+            await db.location_history.insert_one({
+                "accepted_at":     server_now,
+                "captured_at":     incoming_captured_at,
+                "member_id":       member_id,
+                "family_group_id": current["family_group_id"],
+                "latitude":        data.latitude,
+                "longitude":       data.longitude,
+                "accuracy":        raw_accuracy,
+                "speed":           raw_speed,
+                "heading":         raw_heading,
+                "is_moving":       bool(raw_is_moving) if raw_is_moving is not None else None,
+                "provider":        raw_provider,
+                "event":           raw_event,
+            })
+        except Exception:
+            pass
 
     # v1.2.6 diagnostic: every successful location write logs the
     # write-vs-read shape so we can correlate Railway logs against
@@ -2605,6 +2671,51 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     except Exception as _e:
         pass
     return FamilyMember(**doc)
+
+
+@api_router.get("/members/{member_id}/location-history")
+async def get_location_history(
+    member_id: str,
+    limit: int = 50,
+    current=Depends(get_current_user),
+):
+    """
+    Build XX — Return the most recent accepted GPS fixes for a member.
+
+    Each entry includes full-precision coordinates plus the quality metrics
+    (accuracy, speed, heading, is_moving, provider, event) that were
+    discarded before this build.  Intended for use on the Diagnostics screen
+    to reconstruct GPS behaviour around observed anomalies.
+
+    Access is limited to members within the same family group.
+    `limit` is capped at 100; default 50.
+    """
+    member = await db.members.find_one(
+        {"id": member_id, "family_group_id": current["family_group_id"]},
+        {"_id": 0, "id": 1},
+    )
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    limit = max(1, min(limit, 100))
+    docs = await db.location_history.find(
+        {"member_id": member_id, "family_group_id": current["family_group_id"]},
+        {"_id": 0},
+        sort=[("accepted_at", -1)],
+        limit=limit,
+    ).to_list(length=limit)
+
+    # Serialise datetimes to ISO-8601 strings for JSON transport.
+    def _ser(d: dict) -> dict:
+        out = {}
+        for k, v in d.items():
+            if isinstance(v, datetime):
+                out[k] = v.isoformat().replace("+00:00", "Z")
+            else:
+                out[k] = v
+        return out
+
+    return [_ser(d) for d in docs]
 
 
 ALLOWED_CHECKIN_INTERVALS = {2, 4, 6, 8, 12}
@@ -4465,6 +4576,19 @@ async def _start_med_scheduler():
 
 
 @app.on_event("startup")
+async def _ensure_location_history_index():
+    """Compound index on location_history for efficient per-member queries."""
+    try:
+        await db.location_history.create_index(
+            [("member_id", 1), ("accepted_at", -1)],
+            name="member_history",
+        )
+        logger.info("location_history.member_history index ensured")
+    except Exception as e:
+        logger.warning(f"location_history index skipped: {e}")
+
+
+@app.on_event("startup")
 async def _ensure_alert_dedup_index():
     """Create the unique partial index that makes alert generation race-safe.
 
@@ -4532,6 +4656,10 @@ async def _ensure_alert_dedup_index():
         # debugging session; nothing here is needed longer.
         ("location_ingest_log", "at",         86400,        None),
         ("blank_push_drops",    "at",         86400,        None),
+        # Build XX — GPS quality history: 7 days covers multi-day field-test
+        # sessions without accumulating indefinitely.  Only accepted writes
+        # are stored so collection growth is bounded by upload frequency.
+        ("location_history",    "accepted_at", 7 * 86400,   None),
     ]
     for coll_name, field, ttl_seconds, partial_filter in ttl_indexes:
         try:
