@@ -47,6 +47,11 @@ import {
   CardRenderEntry,
 } from '../src/cardRenderLog';
 import {
+  getRefreshPipelineLog,
+  clearRefreshPipelineLog,
+  PipelineEntry,
+} from '../src/refreshPipelineLog';
+import {
   getEngineDiagnostics,
   clearEngineLog,
   EngineLogEvent,
@@ -396,6 +401,7 @@ export default function DiagnosticsScreen() {
   const [engineAvailable, setEngineAvailable] = useState<boolean>(false);
   const [dashLoadLog, setDashLoadLog] = useState<DashboardLoadEntry[]>([]);
   const [cardLog, setCardLog] = useState<CardRenderEntry[]>([]);
+  const [pipelineLog, setPipelineLog] = useState<PipelineEntry[]>([]);
   const [serverState, setServerState] = useState<any>(null);
   const [serverStateLoading, setServerStateLoading] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -441,6 +447,7 @@ export default function DiagnosticsScreen() {
     'build-ota': true,
     leonidas: true,
     engine: true,
+    pipeline: true,  // Build XX — Refresh Pipeline investigation, default open
   });
   const expansionLoadedRef = useRef(false);
 
@@ -471,7 +478,7 @@ export default function DiagnosticsScreen() {
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [r, a, p, l, b, sr, eng, dl, cr, lsnap, llog, rs] = await Promise.all([
+    const [r, a, p, l, b, sr, eng, dl, cr, pl, lsnap, llog, rs] = await Promise.all([
       readRouteLog(),
       readAuthClearLog(),
       readPushRefreshLog(),
@@ -481,6 +488,7 @@ export default function DiagnosticsScreen() {
       getEngineDiagnostics(),
       getDashboardLoadLog(),
       getCardRenderLog(),
+      getRefreshPipelineLog(),
       Promise.resolve(leonidas.getSnapshot()),
       leonidas.getRecoveryLog(),
       getRestrictionStatus(),
@@ -496,6 +504,7 @@ export default function DiagnosticsScreen() {
     setEngineAvailable(eng.available);
     setDashLoadLog(dl);
     setCardLog(cr);
+    setPipelineLog(pl);
     setLeoSnapshot(lsnap);
     setLeoLog(llog);
     setRestrictionStatus(rs);
@@ -727,6 +736,20 @@ export default function DiagnosticsScreen() {
     }
   }, [motionEvents]);
 
+  // Build XX — Refresh Pipeline copy action.
+  const onCopyPipelineLog = useCallback(async () => {
+    try {
+      const payload = {
+        generatedAt: new Date().toISOString(),
+        refresh_pipeline: pipelineLog,
+      };
+      await Clipboard.setStringAsync(JSON.stringify(payload, null, 2));
+      Alert.alert('Copied', `Refresh pipeline copied (${pipelineLog.length} entries).`);
+    } catch (e: any) {
+      Alert.alert('Could not copy', e?.message || 'Try again.');
+    }
+  }, [pipelineLog]);
+
   const onCopyLeonidasLog = useCallback(async () => {
     try {
       const payload = {
@@ -944,42 +967,42 @@ export default function DiagnosticsScreen() {
                 <Text style={styles.entryLine}>
                   <Text style={styles.entryK}>#{e.seq} {fmt(e.at)} </Text>
                   <Text style={styles.bold}>{e.event}</Text>
-                  <Text style={styles.entryV}>  state={e.health_state}</Text>
+                  <Text style={styles.entry}>  state={e.health_state}</Text>
                 </Text>
                 {e.detail?.reason ? (
                   <Text style={styles.entryLine}>
                     <Text style={styles.entryK}>  reason: </Text>
-                    <Text style={styles.entryV}>{String(e.detail.reason)}</Text>
+                    <Text style={styles.entry}>{String(e.detail.reason)}</Text>
                   </Text>
                 ) : null}
                 {e.detail?.action ? (
                   <Text style={styles.entryLine}>
                     <Text style={styles.entryK}>  action: </Text>
-                    <Text style={styles.entryV}>{String(e.detail.action)}</Text>
+                    <Text style={styles.entry}>{String(e.detail.action)}</Text>
                   </Text>
                 ) : null}
                 {e.detail?.duration_ms != null ? (
                   <Text style={styles.entryLine}>
                     <Text style={styles.entryK}>  duration: </Text>
-                    <Text style={styles.entryV}>{String(e.detail.duration_ms)} ms</Text>
+                    <Text style={styles.entry}>{String(e.detail.duration_ms)} ms</Text>
                   </Text>
                 ) : null}
                 {e.detail?.last_upload_age_ms != null ? (
                   <Text style={styles.entryLine}>
                     <Text style={styles.entryK}>  last_upload_age: </Text>
-                    <Text style={styles.entryV}>{formatAgeMs(e.detail.last_upload_age_ms)}</Text>
+                    <Text style={styles.entry}>{formatAgeMs(e.detail.last_upload_age_ms)}</Text>
                   </Text>
                 ) : null}
                 {e.detail?.engine_is_moving != null ? (
                   <Text style={styles.entryLine}>
                     <Text style={styles.entryK}>  engine_is_moving: </Text>
-                    <Text style={styles.entryV}>{String(e.detail.engine_is_moving)}</Text>
+                    <Text style={styles.entry}>{String(e.detail.engine_is_moving)}</Text>
                   </Text>
                 ) : null}
                 {e.detail?.note ? (
                   <Text style={styles.entryLine}>
                     <Text style={styles.entryK}>  note: </Text>
-                    <Text style={styles.entryV}>{String(e.detail.note)}</Text>
+                    <Text style={styles.entry}>{String(e.detail.note)}</Text>
                   </Text>
                 ) : null}
                 {e.detail?.error ? (
@@ -991,7 +1014,7 @@ export default function DiagnosticsScreen() {
                 {e.detail?.from && e.detail?.to ? (
                   <Text style={styles.entryLine}>
                     <Text style={styles.entryK}>  transition: </Text>
-                    <Text style={styles.entryV}>{String(e.detail.from)} → {String(e.detail.to)}</Text>
+                    <Text style={styles.entry}>{String(e.detail.from)} → {String(e.detail.to)}</Text>
                   </Text>
                 ) : null}
               </View>
@@ -1111,14 +1134,14 @@ export default function DiagnosticsScreen() {
               <Text style={styles.entryK}>isMoving: </Text>
               <Text style={engineState?.isMoving
                 ? { color: '#10B981', fontWeight: '800' } as any
-                : styles.entryV}>
+                : styles.entry}>
                 {engineState?.isMoving === null ? '—' : engineState?.isMoving ? 'YES ▶' : 'NO ■'}
               </Text>
             </Text>
             {lastActivityEvt ? (
               <Text style={styles.entryLine}>
                 <Text style={styles.entryK}>last activity: </Text>
-                <Text style={styles.entryV}>
+                <Text style={styles.entry}>
                   {String(lastActivityEvt.detail?.activity ?? '—').toUpperCase().replace(/_/g, ' ')}
                   {' '}conf={lastActivityEvt.detail?.confidence ?? '—'}%
                   {'  '}({fmtTime(lastActivityEvt.at)})
@@ -1127,7 +1150,7 @@ export default function DiagnosticsScreen() {
             ) : (
               <Text style={styles.entryLine}>
                 <Text style={styles.entryK}>last activity: </Text>
-                <Text style={[styles.entryV, { color: '#EF4444' }]}>
+                <Text style={[styles.entry, { color: '#EF4444' }]}>
                   none recorded — onActivityChange has not fired yet
                 </Text>
               </Text>
@@ -1135,7 +1158,7 @@ export default function DiagnosticsScreen() {
             {lastHeartbeatEvt ? (
               <Text style={styles.entryLine}>
                 <Text style={styles.entryK}>last heartbeat: </Text>
-                <Text style={styles.entryV}>
+                <Text style={styles.entry}>
                   {fmtTime(lastHeartbeatEvt.at)}
                   {'  '}({formatAgeMs(Date.now() - lastHeartbeatEvt.at)})
                 </Text>
@@ -1189,6 +1212,125 @@ export default function DiagnosticsScreen() {
         </CollapsibleSection>
 
         {/* =====================================================
+            Build XX — Refresh Pipeline
+            Instruments the complete path from dashboard refresh
+            trigger → API response → store write, so we can
+            pinpoint exactly where stale data stops propagating.
+
+            Key signals:
+              [DASH LOAD]     which event triggered a /members fetch
+              [UPSERT]        single-member write, prev → new location
+              [BATCH]         batch write from dashboard, advanced/regressed count
+              [FETCH-ALL]     store's own fetchAll(), same stats
+              ⚠ REGRESSION   incoming last_seen is OLDER than stored —
+                              a slower response overwrote a fresher one
+              [DROPPED]       fetchSeq race-protection suppressed the write
+            ===================================================== */}
+        <CollapsibleSection
+          id="pipeline"
+          title="Refresh Pipeline"
+          count={pipelineLog.length}
+          hint="Logs every dashboard refresh trigger and store write — newest first. Look for ⚠ REGRESSION entries to spot race conditions."
+          defaultExpanded
+          expanded={!!expanded['pipeline']}
+          onToggle={toggleSection}
+          testID="diagnostics-pipeline"
+        >
+          {pipelineLog.length === 0 ? (
+            <Text style={styles.muted}>No pipeline events yet. Trigger a refresh or navigate to the dashboard.</Text>
+          ) : (
+            pipelineLog.slice(0, 40).map((entry, i) => {
+              const isDashLoad = entry.stage === 'dashboard-load';
+              const isBatch = entry.stage === 'store-upsert-many' || entry.stage === 'store-fetch-all';
+              const isRegression = (entry.lastSeenDeltaMs !== undefined && entry.lastSeenDeltaMs !== null && entry.lastSeenDeltaMs < 0)
+                || (entry.batchRegressed !== undefined && entry.batchRegressed > 0);
+              const isDropped = entry.droppedBySeq === true;
+
+              let badgeLabel = '?';
+              let badgeColor = '#9CA3AF';
+              if (isDashLoad) { badgeLabel = 'DASH LOAD'; badgeColor = '#3B82F6'; }
+              else if (entry.stage === 'store-upsert-one') {
+                badgeLabel = isDropped ? 'DROPPED' : isRegression ? '⚠ REGRESS' : 'UPSERT';
+                badgeColor = isDropped ? '#9CA3AF' : isRegression ? '#EF4444' : '#10B981';
+              } else if (entry.stage === 'store-upsert-many') {
+                badgeLabel = isRegression ? '⚠ BATCH' : 'BATCH';
+                badgeColor = isRegression ? '#EF4444' : '#8B5CF6';
+              } else if (entry.stage === 'store-fetch-all') {
+                badgeLabel = isRegression ? '⚠ FETCH-ALL' : 'FETCH-ALL';
+                badgeColor = isRegression ? '#EF4444' : '#14B8A6';
+              }
+
+              // Build the main label line
+              let label = '';
+              let detail = '';
+              if (isDashLoad) {
+                label = `trigger=${entry.trigger ?? '—'}`;
+              } else if (isBatch) {
+                label = `${entry.batchTotal ?? 0} members`;
+                const parts: string[] = [];
+                if (entry.batchAdvanced)   parts.push(`↑${entry.batchAdvanced} fresh`);
+                if (entry.batchUnchanged)  parts.push(`=${entry.batchUnchanged} same`);
+                if (entry.batchRegressed)  parts.push(`↓${entry.batchRegressed} older ⚠`);
+                if (entry.batchFirstWrite) parts.push(`+${entry.batchFirstWrite} new`);
+                detail = parts.join('  ');
+              } else {
+                // upsert-one
+                const name = entry.memberName ?? entry.memberId?.slice(0, 8) ?? '—';
+                const prevLoc = entry.prevLocationName ?? '(none)';
+                const newLoc = entry.newLocationName ?? '(none)';
+                if (isDropped) {
+                  label = `${name}  [dropped by seq]`;
+                  detail = `${prevLoc} unchanged`;
+                } else if (entry.prevLastSeen == null) {
+                  label = `${name}  first write`;
+                  detail = newLoc;
+                } else {
+                  const deltaMs = entry.lastSeenDeltaMs ?? 0;
+                  const deltaSign = deltaMs >= 0 ? '+' : '';
+                  const deltaSec = Math.round(Math.abs(deltaMs) / 1000);
+                  const arrow = deltaMs >= 0 ? '↑' : '↓⚠';
+                  label = `${name}  ${arrow} ${deltaSign}${deltaSec}s`;
+                  if (prevLoc !== newLoc) {
+                    detail = `"${prevLoc}" → "${newLoc}"`;
+                  } else {
+                    detail = `"${newLoc}" (same place)`;
+                  }
+                }
+              }
+
+              return (
+                <View key={`pl-${entry.seq}-${i}`} style={[styles.plRow, isRegression && styles.plRowWarn]}>
+                  <Text style={styles.plTime}>{fmtTime(entry.t)}</Text>
+                  <View style={[styles.plBadge, { backgroundColor: badgeColor }]}>
+                    <Text style={styles.plBadgeText}>{badgeLabel}</Text>
+                  </View>
+                  <View style={styles.plContent}>
+                    <Text style={styles.plLabel}>{label}</Text>
+                    {!!detail && <Text style={styles.plDetail}>{detail}</Text>}
+                  </View>
+                </View>
+              );
+            })
+          )}
+          <TouchableOpacity
+            style={[styles.secondaryBtn, { marginTop: 8 }]}
+            onPress={onCopyPipelineLog}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.secondaryBtnText}>Copy pipeline log</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.dangerBtn, { marginTop: 6 }]}
+            onPress={() => {
+              clearRefreshPipelineLog().then(reload);
+            }}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.dangerBtnText}>Clear pipeline log</Text>
+          </TouchableOpacity>
+        </CollapsibleSection>
+
+        {/* =====================================================
             v1.2.1 (build 41) — Transistor Location Engine.
             Shows whether the background-geolocation native module
             is loaded, the SDK's current tracking state, and a
@@ -1221,7 +1363,7 @@ export default function DiagnosticsScreen() {
               <Text style={styles.entryK}>available: </Text>
               {String(engineAvailable)}
               {!engineAvailable && (
-                <Text style={styles.entryV}> (native module not loaded — web or non-Transistor build)</Text>
+                <Text style={styles.entry}> (native module not loaded — web or non-Transistor build)</Text>
               )}
             </Text>
             <Text style={styles.entryLine}>
@@ -1248,7 +1390,7 @@ export default function DiagnosticsScreen() {
           {engineLog.length === 0 ? (
             <View style={styles.card}>
               <Text style={styles.entryLine}>
-                <Text style={styles.entryV}>
+                <Text style={styles.entry}>
                   No events recorded yet.  If you reached this screen after login but
                   see nothing here, the layout effect never fired — likely an auth-state
                   or member-row issue.
@@ -1264,7 +1406,7 @@ export default function DiagnosticsScreen() {
                 </Text>
                 {entry.detail && Object.keys(entry.detail).length > 0 ? (
                   <Text style={styles.entryLine}>
-                    <Text style={styles.entryV}>
+                    <Text style={styles.entry}>
                       {Object.entries(entry.detail)
                         .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
                         .join('  ·  ')}
@@ -1323,7 +1465,7 @@ export default function DiagnosticsScreen() {
           {dashLoadLog.length === 0 ? (
             <View style={styles.card}>
               <Text style={styles.entryLine}>
-                <Text style={styles.entryV}>
+                <Text style={styles.entry}>
                   No dashboard refreshes recorded yet.  Open the Dashboard tab
                   and wait for a refresh cycle.
                 </Text>
@@ -1342,24 +1484,24 @@ export default function DiagnosticsScreen() {
                   <Text style={styles.entryLine}>
                     <Text style={styles.entryK}>{fmt(entry.t_load_started)} </Text>
                     <Text style={styles.bold}>[{entry.trigger}]</Text>
-                    <Text style={styles.entryV}>  status={entry.http_status ?? '—'}  http={dur}  total={total}  count={entry.member_count ?? '—'}</Text>
+                    <Text style={styles.entry}>  status={entry.http_status ?? '—'}  http={dur}  total={total}  count={entry.member_count ?? '—'}</Text>
                   </Text>
                   {entry.server_date_header ? (
                     <Text style={styles.entryLine}>
                       <Text style={styles.entryK}>server Date: </Text>
-                      <Text style={styles.entryV}>{entry.server_date_header}</Text>
+                      <Text style={styles.entry}>{entry.server_date_header}</Text>
                     </Text>
                   ) : null}
                   {entry.error ? (
                     <Text style={styles.entryLine}>
                       <Text style={styles.entryK}>error: </Text>
-                      <Text style={styles.entryV}>{entry.error}</Text>
+                      <Text style={styles.entry}>{entry.error}</Text>
                     </Text>
                   ) : null}
                   {entry.staleness_triggered_for.length > 0 ? (
                     <Text style={styles.entryLine}>
                       <Text style={styles.entryK}>silent-push fired for: </Text>
-                      <Text style={styles.entryV}>
+                      <Text style={styles.entry}>
                         {entry.staleness_triggered_for.map((m) => m.slice(-6)).join(', ')}
                       </Text>
                     </Text>
@@ -1368,7 +1510,7 @@ export default function DiagnosticsScreen() {
                     entry.raw_members.map((mb: any, j: number) => (
                       <Text key={`dl-${entry.id}-mb-${j}`} style={styles.entryLine}>
                         <Text style={styles.entryK}>id={(mb?.id || '').slice(-6)} </Text>
-                        <Text style={styles.entryV}>
+                        <Text style={styles.entry}>
                           user_id={(mb?.user_id || '').slice(-6)} · fg={(mb?.family_group_id || '').slice(-6)} · last_seen={mb?.last_seen ?? 'null'} · lat={mb?.latitude ?? '—'} · lon={mb?.longitude ?? '—'} · name={mb?.location_name ?? '—'}
                         </Text>
                       </Text>
@@ -1421,7 +1563,7 @@ export default function DiagnosticsScreen() {
           {cardLog.length === 0 ? (
             <View style={styles.card}>
               <Text style={styles.entryLine}>
-                <Text style={styles.entryV}>
+                <Text style={styles.entry}>
                   No card renders or broadcasts recorded yet.  Open the
                   Dashboard tab to populate this log.
                 </Text>
@@ -1439,15 +1581,15 @@ export default function DiagnosticsScreen() {
                     <Text style={styles.entryLine}>
                       <Text style={styles.entryK}>{seqStr} {fmt(entry.at)} </Text>
                       <Text style={styles.bold}>[card-render]</Text>
-                      <Text style={styles.entryV}>  member={mid}  refreshing={String(entry.refreshing)}</Text>
+                      <Text style={styles.entry}>  member={mid}  refreshing={String(entry.refreshing)}</Text>
                     </Text>
                     <Text style={styles.entryLine}>
                       <Text style={styles.entryK}>  prop last_seen: </Text>
-                      <Text style={styles.entryV}>{entry.last_seen ?? 'null'}</Text>
+                      <Text style={styles.entry}>{entry.last_seen ?? 'null'}</Text>
                     </Text>
                     <Text style={styles.entryLine}>
                       <Text style={styles.entryK}>  rendered ageLabel: </Text>
-                      <Text style={styles.entryV}>&quot;{entry.age_label}&quot;</Text>
+                      <Text style={styles.entry}>&quot;{entry.age_label}&quot;</Text>
                     </Text>
                   </View>
                 );
@@ -1458,15 +1600,15 @@ export default function DiagnosticsScreen() {
                   <Text style={styles.entryLine}>
                     <Text style={styles.entryK}>{seqStr} {fmt(entry.at)} </Text>
                     <Text style={styles.bold}>[broadcast]</Text>
-                    <Text style={styles.entryV}>  member={mid}  is_newer={String(entry.is_newer)}</Text>
+                    <Text style={styles.entry}>  member={mid}  is_newer={String(entry.is_newer)}</Text>
                   </Text>
                   <Text style={styles.entryLine}>
                     <Text style={styles.entryK}>  broadcast last_seen: </Text>
-                    <Text style={styles.entryV}>{entry.broadcast_last_seen ?? 'null'}</Text>
+                    <Text style={styles.entry}>{entry.broadcast_last_seen ?? 'null'}</Text>
                   </Text>
                   <Text style={styles.entryLine}>
                     <Text style={styles.entryK}>  prior state last_seen: </Text>
-                    <Text style={styles.entryV}>{entry.prior_state_last_seen ?? 'null'}</Text>
+                    <Text style={styles.entry}>{entry.prior_state_last_seen ?? 'null'}</Text>
                   </Text>
                 </View>
               );
@@ -1507,7 +1649,7 @@ export default function DiagnosticsScreen() {
             ) : notifLog.slice(0, 20).map((n, i) => (
               <View key={i} style={{ marginBottom: 8 }}>
                 <Text style={styles.entryLine}>
-                  <Text style={styles.entryK}>{fmt(new Date(n.at).toISOString())} </Text>
+                  <Text style={styles.entryK}>{fmt(n.at)} </Text>
                   ({n.source})
                 </Text>
                 <Text style={styles.entryLine}>
@@ -1560,7 +1702,7 @@ export default function DiagnosticsScreen() {
             ) : refreshTraces.slice(0, 20).map((t, i) => (
               <View key={i} style={{ marginBottom: 8 }}>
                 <Text style={styles.entryLine}>
-                  <Text style={styles.entryK}>{fmt(new Date(t.requested_at).toISOString())} </Text>
+                  <Text style={styles.entryK}>{fmt(t.requested_at)} </Text>
                   member <Text style={styles.entryK}>{t.member_id?.slice(0, 8)}</Text>
                 </Text>
                 <Text style={styles.entryLine}>
@@ -2132,6 +2274,63 @@ const styles = StyleSheet.create({
   footer: {
     fontSize: 11.5, color: Colors.textTertiary, textAlign: 'center',
     marginTop: 14, lineHeight: 16,
+  },
+
+  // Refresh Pipeline row styles — Build XX
+  plRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'flex-start' as const,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    gap: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    backgroundColor: Colors.surface,
+    marginBottom: 2,
+    borderRadius: 8,
+  },
+  plRowWarn: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FCA5A5',
+    borderWidth: 1,
+  },
+  plTime: {
+    fontSize: 10,
+    fontWeight: '700' as const,
+    color: Colors.textTertiary,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginTop: 3,
+    minWidth: 58,
+  },
+  plBadge: {
+    borderRadius: 5,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    alignSelf: 'flex-start' as const,
+    marginTop: 1,
+    minWidth: 58,
+    alignItems: 'center' as const,
+  },
+  plBadgeText: {
+    fontSize: 8,
+    fontWeight: '800' as const,
+    color: '#fff',
+    letterSpacing: 0.2,
+    textTransform: 'uppercase' as const,
+  },
+  plContent: { flex: 1 },
+  plLabel: {
+    fontSize: 12,
+    color: Colors.textPrimary,
+    lineHeight: 16,
+    fontWeight: '600' as const,
+  },
+  plDetail: {
+    fontSize: 11,
+    color: Colors.textTertiary,
+    lineHeight: 15,
+    marginTop: 1,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
 
   // Motion Timeline row styles — Build 64

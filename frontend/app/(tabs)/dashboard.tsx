@@ -33,6 +33,7 @@ import {
 import { logCardRender } from '../../src/cardRenderLog';
 import { useAuth } from '../../src/AuthContext';
 import * as memberStore from '../../src/store/memberStore';
+import { logPipelineEvent } from '../../src/refreshPipelineLog';
 import { useActiveEmergency } from '../../src/activeEmergency';
 import { TrackingStatusPill } from '../../src/tracking/TrackingStatusPill';
 import { hasPinForUser } from '../../src/pinAuth';
@@ -126,6 +127,9 @@ export default function Dashboard() {
   // merge races.
 
   const load = async (trigger: DashboardLoadTrigger = 'unknown') => {
+    // Pipeline instrumentation — record what triggered this refresh
+    // so Diagnostics can show the full event sequence.
+    try { logPipelineEvent({ stage: 'dashboard-load', trigger }); } catch (_e) {}
     // ============================================================
     //  v1.2.0 (43) — Dashboard Refresh Log (pure additive)
     // ============================================================

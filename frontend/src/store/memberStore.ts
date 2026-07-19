@@ -65,6 +65,7 @@
 
 import { useSyncExternalStore } from 'react';
 import { api, Member } from '../api';
+import { logPipelineEvent } from '../refreshPipelineLog';
 
 // ============================================================
 //  Module-level state
@@ -168,6 +169,24 @@ function getOneSnapshot(id: string): MemberRecord | undefined {
 }
 
 // ============================================================
+//  Pipeline instrumentation helpers
+// ============================================================
+//
+// Computes the delta between two ISO last_seen strings.
+// Returns null when there is no prior record (first write).
+// Positive = fresh data arrived. Negative = REGRESSION (race condition).
+function computeLastSeenDelta(
+  prevIso: string | null | undefined,
+  newIso: string | null | undefined,
+): number | null {
+  if (!prevIso) return null; // first write for this member
+  const prevMs = new Date(prevIso).getTime();
+  const newMs = newIso ? new Date(newIso).getTime() : 0;
+  if (!Number.isFinite(prevMs) || !Number.isFinite(newMs)) return null;
+  return newMs - prevMs;
+}
+
+// ============================================================
 //  Internal writers (atomic)
 // ============================================================
 //
@@ -197,10 +216,25 @@ function commit(nextMap: Record<string, MemberRecord>, touchedIds: string[]): vo
 export function upsertOne(incoming: MemberRecord, seq: number | null = null): void {
   if (!incoming || !incoming.id) return;
   const id = incoming.id;
+  // Capture prev BEFORE any mutation for the pipeline log.
+  const prev = state.members[id];
   if (seq !== null) {
     const cur = fetchSeq[id] ?? 0;
     if (seq < cur) {
-      // Stale response — drop it.
+      // Stale response — drop it.  Log so we can see race-protection firing.
+      try {
+        logPipelineEvent({
+          stage: 'store-upsert-one',
+          memberId: id,
+          memberName: (incoming as any).name ?? null,
+          prevLastSeen: prev?.last_seen ?? null,
+          newLastSeen: incoming.last_seen ?? null,
+          prevLocationName: (prev as any)?.location_name ?? null,
+          newLocationName: (incoming as any).location_name ?? null,
+          lastSeenDeltaMs: computeLastSeenDelta(prev?.last_seen, incoming.last_seen),
+          droppedBySeq: true,
+        });
+      } catch (_e) {}
       return;
     }
     fetchSeq[id] = seq;
@@ -208,6 +242,20 @@ export function upsertOne(incoming: MemberRecord, seq: number | null = null): vo
   const next = { ...state.members, [id]: incoming };
   commit(next, [id]);
   notifyLegacy(incoming);
+  // Log after commit so the entry reflects committed state.
+  try {
+    logPipelineEvent({
+      stage: 'store-upsert-one',
+      memberId: id,
+      memberName: (incoming as any).name ?? null,
+      prevLastSeen: prev?.last_seen ?? null,
+      newLastSeen: incoming.last_seen ?? null,
+      prevLocationName: (prev as any)?.location_name ?? null,
+      newLocationName: (incoming as any).location_name ?? null,
+      lastSeenDeltaMs: computeLastSeenDelta(prev?.last_seen, incoming.last_seen),
+      droppedBySeq: false,
+    });
+  } catch (_e) {}
 }
 
 /**
@@ -217,10 +265,17 @@ export function upsertOne(incoming: MemberRecord, seq: number | null = null): vo
  */
 export function upsertMany(incoming: MemberRecord[]): void {
   if (!incoming || incoming.length === 0) return;
+  // Pipeline instrumentation: compute aggregate stats BEFORE mutating state.
+  let batchAdvanced = 0, batchUnchanged = 0, batchRegressed = 0, batchFirstWrite = 0;
   const next: Record<string, MemberRecord> = { ...state.members };
   const touched: string[] = [];
   for (const m of incoming) {
     if (!m || !m.id) continue;
+    const delta = computeLastSeenDelta(state.members[m.id]?.last_seen, m.last_seen);
+    if (delta === null)      batchFirstWrite++;
+    else if (delta > 0)      batchAdvanced++;
+    else if (delta === 0)    batchUnchanged++;
+    else                     batchRegressed++; // negative delta = regression
     // Bump the per-id seq so any in-flight fetchOne with an older seq
     // can't clobber this fresh data.
     fetchSeq[m.id] = nextSeq++;
@@ -229,6 +284,16 @@ export function upsertMany(incoming: MemberRecord[]): void {
   }
   commit(next, touched);
   for (const m of incoming) notifyLegacy(m);
+  try {
+    logPipelineEvent({
+      stage: 'store-upsert-many',
+      batchTotal: incoming.length,
+      batchAdvanced,
+      batchUnchanged,
+      batchRegressed,
+      batchFirstWrite,
+    });
+  } catch (_e) {}
 }
 
 /** Remove all records — used on sign-out. */
@@ -301,10 +366,30 @@ export function fetchAll(): Promise<MemberRecord[]> {
       for (const id of Object.keys(state.members)) {
         if (!next[id]) touched.push(id);
       }
+      // Pipeline instrumentation: compute stats against the PREVIOUS state.
+      let batchAdvanced = 0, batchUnchanged = 0, batchRegressed = 0, batchFirstWrite = 0;
+      for (const m of arr) {
+        if (!m || !m.id) continue;
+        const delta = computeLastSeenDelta(state.members[m.id]?.last_seen, m.last_seen);
+        if (delta === null)   batchFirstWrite++;
+        else if (delta > 0)   batchAdvanced++;
+        else if (delta === 0) batchUnchanged++;
+        else                  batchRegressed++;
+      }
       state = { members: next, version: state.version + 1, lastFetchAllAt: Date.now() };
       notifyGlobal();
       for (const id of touched) notifyId(id);
       for (const m of arr) notifyLegacy(m);
+      try {
+        logPipelineEvent({
+          stage: 'store-fetch-all',
+          batchTotal: arr.length,
+          batchAdvanced,
+          batchUnchanged,
+          batchRegressed,
+          batchFirstWrite,
+        });
+      } catch (_e) {}
       return arr;
     } catch (_e) {
       // Network failure — keep existing state.  The next foreground
