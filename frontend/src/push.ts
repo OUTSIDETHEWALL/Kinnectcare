@@ -294,6 +294,21 @@ async function ensureNotificationCategories() {
         },
       },
     ]);
+    // Build XX — "Are You OK?" action buttons.
+    // opensAppToForeground: true so Joyce's phone opens the app and
+    // the response screen can capture GPS before calling /respond.
+    await Notifications.setNotificationCategoryAsync('ARE_YOU_OK', [
+      {
+        identifier: 'IM_OK',
+        buttonTitle: "✅  I'M OK",
+        options: { opensAppToForeground: true },
+      },
+      {
+        identifier: 'NEED_HELP',
+        buttonTitle: '🚨  NEED HELP',
+        options: { opensAppToForeground: true },
+      },
+    ]);
   } catch (e) {
     // eslint-disable-next-line no-console
     console.warn('Failed to register notification categories:', e);
@@ -383,6 +398,17 @@ export async function ensureNotificationChannel() {
     // re-create the channel with the IMPORTANCE_MIN setting if the
     // user previously had a `silent` channel cached at a higher
     // importance.  Backend payload must match — see expo_push.py.
+    // Build XX — "Are You OK?" channel: high importance, distinct sound.
+    await Notifications.setNotificationChannelAsync('are_you_ok', {
+      name: 'Wellness check-ins',
+      description: '"Are you OK?" requests from family caregivers',
+      importance: Notifications.AndroidImportance.HIGH,
+      vibrationPattern: [0, 400, 200, 400],
+      lightColor: '#1B5E35',
+      sound: 'default',
+      enableVibrate: true,
+      showBadge: true,
+    });
     try { await Notifications.deleteNotificationChannelAsync('silent'); } catch (_e) {}
     await Notifications.setNotificationChannelAsync('silent_v2', {
       name: 'Background sync',
@@ -907,6 +933,29 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
       const data: any = r.notification.request.content.data || {};
       const actionId = r.actionIdentifier;
       const reqId = r.notification.request.identifier;
+
+      // Build XX — "Are You OK?" action button taps.
+      // Both actions open the app (opensAppToForeground: true in the category),
+      // so we route through the deep-link queue like a normal notification tap,
+      // passing _action so the response screen knows to auto-submit.
+      if (actionId === 'IM_OK') {
+        markNotificationConsumed(reqId);
+        enqueueDeepLink({
+          ...data,
+          type: 'are_you_ok_request',
+          _action: 'im_ok',
+        });
+        return;
+      }
+      if (actionId === 'NEED_HELP') {
+        markNotificationConsumed(reqId);
+        enqueueDeepLink({
+          ...data,
+          type: 'are_you_ok_request',
+          _action: 'need_help',
+        });
+        return;
+      }
 
       // Action button taps — silent mark-taken / snooze.
       if (actionId === 'TOOK_IT' || actionId === 'DONE') {

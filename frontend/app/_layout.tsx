@@ -428,6 +428,38 @@ function RootNav() {
         router.replace('/(tabs)/alerts');
       }
     }
+    if (t === 'are_you_ok_request') {
+      // Build XX — "Are You OK?" request arrives on Joyce's device.
+      // Route to the response screen; _action drives auto-submit vs. prompt.
+      const rid = data?.request_id;
+      const mid = data?.member_id;
+      const act = data?._action; // 'im_ok' | 'need_help' | undefined
+      __logRoute('/are-you-ok-response');
+      try {
+        router.replace({
+          pathname: '/are-you-ok-response',
+          params: {
+            requestId: rid || '',
+            memberId: mid || '',
+            ...(act ? { action: act } : {}),
+          },
+        } as any);
+      } catch (_e) {
+        router.replace('/(tabs)/dashboard');
+      }
+    }
+    if (t === 'are_you_ok_response' || t === 'checkin') {
+      // Build XX — caregiver (Charles) receives confirmation that Joyce is OK.
+      // Just refresh the dashboard data; no navigation needed.
+      // The 30s foreground poll will pick this up on the next tick automatically,
+      // but we can trigger an immediate refresh here for instant UI update.
+      // Dynamic import to avoid circular deps.
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const store = require('../src/store/memberStore');
+        store.fetchAll().catch(() => {});
+      } catch (_e) {}
+    }
   });
 
   useEffect(() => {

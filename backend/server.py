@@ -429,6 +429,11 @@ class CheckIn(BaseModel):
     location_name: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    # Build XX — check-in redesign.
+    # confirmed_by: name of the person who physically pressed "Check In" (always the member themselves now).
+    # source: "self" (member initiated) or "request_response" (response to an "Are You OK?" request).
+    confirmed_by: Optional[str] = None
+    source: str = "self"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @field_serializer("created_at", when_used='json')
@@ -441,6 +446,24 @@ class CheckInCreate(BaseModel):
     location_name: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+
+
+class CheckinRequest(BaseModel):
+    """Represents an 'Are You OK?' request sent by a caregiver to a member."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    family_group_id: str
+    requester_id: str       # user_id of the caregiver who sent the request
+    requester_name: str
+    member_id: str          # member record id of the target (Joyce)
+    member_name: str
+    target_user_id: Optional[str] = None   # user_id of target device (for push)
+    status: str = "pending"    # "pending" | "responded" | "need_help"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    responded_at: Optional[datetime] = None
+
+    @field_serializer("created_at", "responded_at", when_used='json')
+    def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
+        return _to_utc_iso(v) if v else None
 
 
 class LocationUpdate(BaseModel):
@@ -3064,9 +3087,17 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
     member = await db.members.find_one({"id": data.member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
+    # Build XX — self-only enforcement.  A check-in must be performed by
+    # the member themselves.  Caregivers use POST /checkin-requests instead.
+    if member.get("user_id") != current["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only check yourself in. To prompt another member, use 'Are You OK?'.",
+        )
     ci = CheckIn(
         owner_id=current["id"], family_group_id=current["family_group_id"], member_id=data.member_id, member_name=member["name"],
         location_name=data.location_name, latitude=data.latitude, longitude=data.longitude,
+        confirmed_by=member["name"], source="self",
     )
     await db.checkins.insert_one(ci.model_dump())
     update = {"last_seen": datetime.now(timezone.utc), "status": "healthy"}
@@ -3123,6 +3154,197 @@ async def list_recent_checkins(current=Depends(get_current_user)):
         {"family_group_id": current["family_group_id"], "created_at": {"$gte": day_start_utc}}, {"_id": 0}
     ).sort("created_at", -1).to_list(200)
     return [CheckIn(**d) for d in docs]
+
+
+# ========== Checkin Requests ("Are You OK?") ==========
+
+@api_router.post("/checkin-requests/{member_id}")
+async def send_checkin_request(member_id: str, current=Depends(get_current_user)):
+    """Build XX — send an 'Are You OK?' prompt to a family member's device.
+
+    The caregiver (Charles) calls this instead of POST /checkins.  It:
+      1. Sends a silent GPS-refresh push to get the freshest possible location.
+      2. Sends a high-priority visible push with 'I'm OK' / 'Need Help' action buttons.
+      3. Persists a checkin_request document for audit-trail history.
+
+    Self-requests are not blocked (you can send one to your own linked member)
+    but the primary use case is caregiver → senior.
+    """
+    target = await db.members.find_one(
+        {"id": member_id, "family_group_id": current["family_group_id"]},
+        {"_id": 0, "id": 1, "user_id": 1, "name": 1},
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found in your family group")
+
+    target_user_id = target.get("user_id")
+    req = CheckinRequest(
+        family_group_id=current["family_group_id"],
+        requester_id=current["id"],
+        requester_name=current.get("name", "Someone"),
+        member_id=member_id,
+        member_name=target["name"],
+        target_user_id=target_user_id,
+    )
+    await db.checkin_requests.insert_one(req.model_dump())
+
+    if not target_user_id:
+        return {"ok": True, "request_id": req.id, "skipped_push": "no_user_link"}
+
+    # 1. Silent GPS-refresh push (best-effort — reuses existing refresh pipeline).
+    #    Bypass the 5-minute throttle by writing directly to send_expo_push.
+    try:
+        tgt_user = await db.users.find_one({"id": target_user_id}, {"_id": 0, "push_tokens": 1, "location_sharing_enabled": 1})
+        tokens = (tgt_user or {}).get("push_tokens") or []
+        sharing_on = (tgt_user or {}).get("location_sharing_enabled", True)
+        if tokens and sharing_on:
+            import time as _t
+            await send_expo_push(
+                tokens=tokens, title="", body="",
+                data={
+                    "type": "request_location_refresh",
+                    "member_id": member_id,
+                    "_contentAvailable": True,
+                    "channelId": "silent_v2",
+                    "_sentAt": _t.time(),
+                    "_source_tag": "are_you_ok_gps_refresh",
+                },
+            )
+    except Exception as e:
+        logger.warning(f"checkin_request silent-refresh push failed (non-fatal): {e}")
+
+    # 2. Visible "Are You OK?" push with action buttons.
+    try:
+        await push_to_user(
+            target_user_id,
+            f"{req.requester_name} is checking on you",
+            "Are you okay?",
+            {
+                "type": "are_you_ok_request",
+                "request_id": req.id,
+                "requester_name": req.requester_name,
+                "member_id": member_id,
+                "categoryIdentifier": "ARE_YOU_OK",
+            },
+        )
+    except Exception as e:
+        logger.warning(f"checkin_request visible push failed (non-fatal): {e}")
+
+    return {"ok": True, "request_id": req.id}
+
+
+@api_router.post("/checkin-requests/{request_id}/respond", response_model=CheckIn)
+async def respond_to_checkin_request(
+    request_id: str,
+    data: CheckInCreate,
+    current=Depends(get_current_user),
+):
+    """Build XX — Joyce taps 'I'm OK' and her device calls this endpoint.
+
+    Accepts the GPS fix captured at response time, creates a self check-in,
+    marks the request responded, and notifies the requester.
+    """
+    req_doc = await db.checkin_requests.find_one(
+        {"id": request_id, "family_group_id": current["family_group_id"]},
+        {"_id": 0},
+    )
+    if not req_doc:
+        raise HTTPException(status_code=404, detail="Check-in request not found")
+
+    # Resolve the member record so we can validate the responder.
+    member = await db.members.find_one(
+        {"id": req_doc["member_id"], "family_group_id": current["family_group_id"]},
+        {"_id": 0},
+    )
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    # Only the member themselves can respond.
+    if member.get("user_id") != current["id"]:
+        raise HTTPException(status_code=403, detail="Only the member can respond to their own check-in request")
+
+    ci = CheckIn(
+        owner_id=current["id"],
+        family_group_id=current["family_group_id"],
+        member_id=req_doc["member_id"],
+        member_name=member["name"],
+        location_name=data.location_name,
+        latitude=data.latitude,
+        longitude=data.longitude,
+        confirmed_by=member["name"],
+        source="request_response",
+    )
+    await db.checkins.insert_one(ci.model_dump())
+
+    # Update member last_seen + location.
+    update: dict = {"last_seen": datetime.now(timezone.utc), "status": "healthy"}
+    if data.location_name:
+        update["location_name"] = data.location_name
+    if data.latitude is not None and data.longitude is not None:
+        update["latitude"] = data.latitude
+        update["longitude"] = data.longitude
+    await db.members.update_one({"id": req_doc["member_id"]}, {"$set": update})
+
+    # Ack any missed-checkin alerts for today.
+    tz = user_tz(current)
+    now_local = datetime.now(tz)
+    day_start_utc = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz).astimezone(timezone.utc)
+    await db.alerts.update_many(
+        {"family_group_id": current["family_group_id"], "member_id": req_doc["member_id"],
+         "type": "missed_checkin", "created_at": {"$gte": day_start_utc}},
+        {"$set": {"acknowledged": True}},
+    )
+
+    # Mark the request as responded.
+    await db.checkin_requests.update_one(
+        {"id": request_id},
+        {"$set": {"status": "responded", "responded_at": datetime.now(timezone.utc)}},
+    )
+
+    # Notify the requester.
+    loc_str = f" from {data.location_name}" if data.location_name else ""
+    try:
+        await push_to_user(
+            req_doc["requester_id"],
+            f"✅ {member['name']} is OK",
+            f"{member['name']} confirmed they are okay{loc_str}.",
+            {
+                "type": "are_you_ok_response",
+                "member_id": req_doc["member_id"],
+                "checkin_id": ci.id,
+                "request_id": request_id,
+            },
+        )
+    except Exception as e:
+        logger.warning(f"checkin_request response notify failed (non-fatal): {e}")
+
+    # Notify the rest of the family too.
+    try:
+        await push_to_family_group(
+            current["family_group_id"],
+            f"✅ {member['name']} checked in",
+            f"{member['name']} is safe — confirmed they are okay{loc_str}.",
+            {"type": "checkin", "member_id": req_doc["member_id"], "checkin_id": ci.id},
+            exclude_user_id=current["id"],
+        )
+    except Exception as e:
+        logger.warning(f"checkin_request family fanout failed (non-fatal): {e}")
+
+    return ci
+
+
+@api_router.get("/checkin-requests/member/{member_id}")
+async def list_checkin_requests_for_member(member_id: str, current=Depends(get_current_user)):
+    """Build XX — returns the last 50 checkin requests for a member (for history timeline)."""
+    docs = await db.checkin_requests.find(
+        {"family_group_id": current["family_group_id"], "member_id": member_id}, {"_id": 0}
+    ).sort("created_at", -1).to_list(50)
+    # Coerce datetimes to ISO strings for the response.
+    for d in docs:
+        for k in ("created_at", "responded_at"):
+            if isinstance(d.get(k), datetime):
+                d[k] = _to_utc_iso(d[k])
+    return docs
 
 
 # ========== Billing (Stripe) ==========

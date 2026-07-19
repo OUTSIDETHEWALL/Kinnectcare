@@ -23,6 +23,10 @@ import {
 } from '../../src/locationRefreshState';
 import { formatLastSeenAge } from '../../src/locationRefresh';
 import * as memberStore from '../../src/store/memberStore';
+import {
+  sendCheckinRequest, listCheckinsForMember, listCheckinRequestsForMember,
+  CheckIn as CheckInRecord, CheckinRequest,
+} from '../../src/api';
 
 const INTERVAL_OPTIONS = [2, 4, 6, 8, 12] as const;
 type CheckinMode = 'fixed' | 'interval' | 'disabled';
@@ -43,6 +47,8 @@ export default function MemberDetail() {
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [showCheckinSettings, setShowCheckinSettings] = useState(false);
+  const [checkinTimeline, setCheckinTimeline] = useState<Array<{ kind: 'checkin'; item: CheckInRecord } | { kind: 'request'; item: CheckinRequest }>>([]);
+  const [sendingRequest, setSendingRequest] = useState(false);
   // 20-second forceTick keeps the "X min ago" relative timestamps accurate.
   const [, forceTick] = useState(0);
   // Build 47 — the old "subscribeMember + setMember merge" useEffect
@@ -84,6 +90,22 @@ export default function MemberDetail() {
       setReminders(r.data);
       setHistory(h.data);
       setLoadError(false);
+
+      // Build XX — load checkin history timeline (checkins + requests interleaved).
+      try {
+        const [cis, reqs] = await Promise.all([
+          listCheckinsForMember(id as string),
+          listCheckinRequestsForMember(id as string),
+        ]);
+        const combined: Array<{ kind: 'checkin'; item: CheckInRecord } | { kind: 'request'; item: CheckinRequest }> = [
+          ...cis.map(c => ({ kind: 'checkin' as const, item: c })),
+          ...reqs.map(r => ({ kind: 'request' as const, item: r })),
+        ];
+        combined.sort((a, b) => new Date(b.item.created_at).getTime() - new Date(a.item.created_at).getTime());
+        setCheckinTimeline(combined.slice(0, 30));
+      } catch (_e) {
+        // Non-fatal — history section stays empty.
+      }
 
       // v1.3.2 — pull-on-stale (60 s freshness threshold).  If this
       // member's last_seen is older than 60 s, ask the backend to
@@ -192,7 +214,21 @@ export default function MemberDetail() {
     // Navigate immediately — the check-in screen owns the GPS + API call
     // and shows Loading → Success → Error (mirrors the SOS architecture).
     // Success is only shown after the server returns 200.
+    // Build XX: only called from the self-check-in button (member.user_id === user?.id).
     router.push({ pathname: '/check-in', params: { memberId: id, name: member?.name } });
+  };
+
+  const sendAreYouOk = async () => {
+    if (!id || sendingRequest) return;
+    setSendingRequest(true);
+    try {
+      await sendCheckinRequest(id as string);
+      Alert.alert('Request sent', `${member?.name} will receive an "Are you OK?" notification.`);
+    } catch (e: any) {
+      Alert.alert('Failed', e?.response?.data?.detail || 'Could not send request. Try again.');
+    } finally {
+      setSendingRequest(false);
+    }
   };
 
   const [checkinDraftTime, setCheckinDraftTime] = useState<string>('08:00');
@@ -442,6 +478,50 @@ export default function MemberDetail() {
           </View>
         </View>
 
+        {/* Check-in History Timeline */}
+        {checkinTimeline.length > 0 && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Check-in History</Text>
+            </View>
+            {checkinTimeline.map((entry, i) => {
+              const ts = new Date(entry.item.created_at);
+              const timeStr = ts.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+              const dateStr = ts.toLocaleDateString([], { month: 'short', day: 'numeric' });
+              if (entry.kind === 'checkin') {
+                const ci = entry.item as CheckInRecord;
+                return (
+                  <View key={ci.id} style={[styles.timelineRow, i > 0 && styles.timelineRowBorder]}>
+                    <Text style={styles.timelineEmoji}>✅</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.timelineTitle}>
+                        {ci.confirmed_by || ci.member_name} confirmed they are OK
+                      </Text>
+                      {ci.location_name ? (
+                        <Text style={styles.timelineDetail}>📍 {ci.location_name}</Text>
+                      ) : null}
+                      <Text style={styles.timelineTime}>{dateStr} · {timeStr}</Text>
+                    </View>
+                  </View>
+                );
+              } else {
+                const req = entry.item as CheckinRequest;
+                return (
+                  <View key={req.id} style={[styles.timelineRow, i > 0 && styles.timelineRowBorder]}>
+                    <Text style={styles.timelineEmoji}>❓</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.timelineTitle}>
+                        {req.requester_name} requested a check-in
+                      </Text>
+                      <Text style={styles.timelineTime}>{dateStr} · {timeStr}</Text>
+                    </View>
+                  </View>
+                );
+              }
+            })}
+          </View>
+        )}
+
         {/* Check-in Settings */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
@@ -561,10 +641,25 @@ export default function MemberDetail() {
         </TouchableOpacity>
       </ScrollView>
 
-      <TouchableOpacity testID="member-checkin" onPress={checkIn} activeOpacity={0.85} style={[styles.checkinBtn, { bottom: insets.bottom + 16 }]}>
-        <Text style={styles.checkinEmoji}>✅</Text>
-        <Text style={styles.checkinText}>Check in {member.name}</Text>
-      </TouchableOpacity>
+      {/* Build XX — self-only check-in.  Show "Check In" only on the member's own device;
+          everyone else sees "Are You OK?" which sends a request instead of a direct check-in. */}
+      {member.user_id === user?.id ? (
+        <TouchableOpacity testID="member-checkin" onPress={checkIn} activeOpacity={0.85} style={[styles.checkinBtn, { bottom: insets.bottom + 16 }]}>
+          <Text style={styles.checkinEmoji}>✅</Text>
+          <Text style={styles.checkinText}>Check In</Text>
+        </TouchableOpacity>
+      ) : (
+        <TouchableOpacity
+          testID="member-are-you-ok"
+          onPress={sendAreYouOk}
+          activeOpacity={0.85}
+          disabled={sendingRequest}
+          style={[styles.checkinBtn, styles.areYouOkBtn, { bottom: insets.bottom + 16 }]}
+        >
+          <Text style={styles.checkinEmoji}>{sendingRequest ? '⏳' : '❓'}</Text>
+          <Text style={styles.checkinText}>{sendingRequest ? 'Sending…' : `Are You OK?`}</Text>
+        </TouchableOpacity>
+      )}
     </SafeAreaView>
   );
 }
@@ -697,6 +792,15 @@ const styles = StyleSheet.create({
   locPinEmoji: { fontSize: 22 },
   locName: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
   locAge: { fontSize: 11, color: Colors.textTertiary, marginTop: 2 },
+  // Check-in timeline
+  timelineRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingVertical: 12, backgroundColor: Colors.surface, borderRadius: 14, paddingHorizontal: 14, marginBottom: 8, borderWidth: 1, borderColor: Colors.border },
+  timelineRowBorder: {},
+  timelineEmoji: { fontSize: 22, marginTop: 1 },
+  timelineTitle: { fontSize: 14, fontWeight: '700', color: Colors.textPrimary },
+  timelineDetail: { fontSize: 13, color: Colors.textSecondary, marginTop: 2 },
+  timelineTime: { fontSize: 12, color: Colors.textTertiary, marginTop: 3 },
+  // "Are You OK?" button variant
+  areYouOkBtn: { backgroundColor: Colors.secondary },
   locSub: { fontSize: 12, color: Colors.textTertiary, marginTop: 4 },
   locStatusPill: { marginTop: 6 },
   locFreshRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
