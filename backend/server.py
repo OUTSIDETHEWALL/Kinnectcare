@@ -2488,6 +2488,40 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         )
         incoming_captured_at = None
 
+    # Option A — Replay-suppression.
+    #
+    # The Transistor SDK replays its offline buffer in chronological order
+    # (oldest first) after connectivity is restored.  Each replayed point IS
+    # genuinely newer than the previous one, so the $lt guard accepts every
+    # intermediate position and advances the member doc through historical
+    # locations one by one.  With the dashboard polling at 60-second intervals,
+    # caregivers see the pin jump → pause → jump through each queued position
+    # before settling on the actual current location.
+    #
+    # Fix: if the GPS fix was captured more than 5 minutes before the server
+    # received it, treat it as a catch-up point.  Write last_seen and
+    # captured_at as normal (Leonidas heartbeat and the $lt guard stay
+    # correct), but strip lat/lon/location_name from the member-doc update so
+    # the live map pin does not move.  All points — including suppressed ones —
+    # continue to flow into location_ingest_log and location_history for GPS
+    # quality diagnostics.  When the SDK finally delivers the current fix
+    # (captured_at ≈ now), it passes the threshold and updates the pin in one
+    # clean jump to the member's actual position.
+    #
+    # Threshold: 5 minutes — already the upper-bound on the future clock-skew
+    # rejection above, symmetrically applied to the past.
+    _REPLAY_LAG_THRESHOLD = timedelta(minutes=5)
+    coord_suppressed: bool = (
+        incoming_captured_at is not None
+        and (server_now - incoming_captured_at) > _REPLAY_LAG_THRESHOLD
+    )
+    if coord_suppressed:
+        logger.info(
+            f"loc-write: member={member_id} captured_at={incoming_captured_at.isoformat()} "
+            f"is >{_REPLAY_LAG_THRESHOLD} behind server time — "
+            f"replay suppression active; lat/lon withheld from member doc"
+        )
+
     # Build update dict — last_seen always written regardless of guard
     update: Dict[str, Any] = {
         "latitude":  data.latitude,
@@ -2540,6 +2574,14 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     if raw_heading is not None:
         update["gps_heading"] = raw_heading
 
+    # Strip map-visible coordinate fields for replay catch-up points.
+    # last_seen + captured_at remain in `update` so heartbeat monitoring
+    # and the $lt guard both continue to advance correctly.
+    if coord_suppressed:
+        update.pop("latitude", None)
+        update.pop("longitude", None)
+        update.pop("location_name", None)
+
     # Atomic conditional write
     if incoming_captured_at is not None:
         # Only write lat/lon if the incoming GPS capture is strictly
@@ -2586,7 +2628,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             raise HTTPException(status_code=404, detail="Member not found")
     else:
         write_accepted   = True
-        rejection_reason = None
+        rejection_reason = "replay_suppressed" if coord_suppressed else None
         doc = await db.members.find_one({"id": member_id}, {"_id": 0})
 
     # Persist the ingest event — permanent diagnostic, not temporary
@@ -2622,29 +2664,35 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             "stored_captured_at":   prev_captured_at,
             "write_accepted":       write_accepted,
             "rejection_reason":     rejection_reason,
+            "coord_suppressed":     coord_suppressed,
         })
     except Exception:
         pass
 
-    # Build XX — Rolling GPS quality history.  Only written for ACCEPTED fixes
-    # so the history reflects what was actually displayed to caregivers.
+    # Build XX — Rolling GPS quality history.  Written for all accepted fixes,
+    # including replay-suppressed ones (coord_suppressed=True), so the GPS
+    # diagnostics screen shows the full picture of what the SDK uploaded
+    # during a dead-zone catch-up sequence.  The coord_suppressed flag lets
+    # the diagnostics UI distinguish points that reached location_history from
+    # ones that actually moved the caregiver map pin.
     # 7-day TTL (enforced by MongoDB TTL index on accepted_at) keeps the
     # collection bounded without a manual cleanup job.
     if write_accepted:
         try:
             await db.location_history.insert_one({
-                "accepted_at":     server_now,
-                "captured_at":     incoming_captured_at,
-                "member_id":       member_id,
-                "family_group_id": current["family_group_id"],
-                "latitude":        data.latitude,
-                "longitude":       data.longitude,
-                "accuracy":        raw_accuracy,
-                "speed":           raw_speed,
-                "heading":         raw_heading,
-                "is_moving":       bool(raw_is_moving) if raw_is_moving is not None else None,
-                "provider":        raw_provider,
-                "event":           raw_event,
+                "accepted_at":      server_now,
+                "captured_at":      incoming_captured_at,
+                "member_id":        member_id,
+                "family_group_id":  current["family_group_id"],
+                "latitude":         data.latitude,
+                "longitude":        data.longitude,
+                "accuracy":         raw_accuracy,
+                "speed":            raw_speed,
+                "heading":          raw_heading,
+                "is_moving":        bool(raw_is_moving) if raw_is_moving is not None else None,
+                "provider":         raw_provider,
+                "event":            raw_event,
+                "coord_suppressed": coord_suppressed,
             })
         except Exception:
             pass
