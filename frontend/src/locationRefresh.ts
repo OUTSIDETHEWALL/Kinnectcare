@@ -136,6 +136,16 @@ export type LocationRefreshEntry = {
   respLat?: number | null;
   respLon?: number | null;
   writeMismatch?: boolean;
+  // Build XX — geocoder observability.
+  // Answers: which path ran, what label was produced, and if the
+  // Google REST call failed, exactly why it fell back to the platform
+  // geocoder.  Added after a field-test incident where one device
+  // showed "Fort Mohave" while the other showed "Bullhead City" for
+  // the same location, and we had no way to determine which geocoder
+  // path each device took.
+  locationName?: string | null;          // label sent in the PUT body (null = none sent)
+  geocoderPath?: string | null;          // 'cache_hit' | 'google_rest' | 'platform_fallback' | 'none'
+  geocoderFallbackReason?: string | null; // why Google REST was skipped or returned empty
 };
 
 async function appendLog(entry: LocationRefreshEntry): Promise<void> {
@@ -313,6 +323,14 @@ function formatGeocodeLabel(addr: any): string {
   return '';
 }
 
+// Internal result shape — carries diagnostic fields alongside the label.
+type GoogleGeoResult = { label: string; failureReason: string | null };
+type GeocodeDiag = {
+  label: string;
+  geocoderPath: 'cache_hit' | 'google_rest' | 'platform_fallback' | 'none';
+  geocoderFallbackReason: string | null;
+};
+
 /**
  * Geocode using Google's Geocoding REST API.
  *
@@ -325,18 +343,20 @@ function formatGeocodeLabel(addr: any): string {
  * The key (`EXPO_PUBLIC_GOOGLE_MAPS_API_KEY`) is already embedded in the app for
  * map rendering; using it here adds zero new dependency.
  *
- * Returns empty string on any failure so callers fall through to the platform
- * geocoder.
+ * Returns { label, failureReason } — label is empty string on any failure so
+ * callers fall through to the platform geocoder.  failureReason explains exactly
+ * why label is empty, enabling precise diagnostics.
  */
-async function geocodeWithGoogle(lat: number, lon: number): Promise<string> {
+async function geocodeWithGoogle(lat: number, lon: number): Promise<GoogleGeoResult> {
   const key = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY;
-  if (!key) return '';
+  if (!key) return { label: '', failureReason: 'no_key' };
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lon}&key=${key}`;
     const res = await fetch(url);
-    if (!res.ok) return '';
+    if (!res.ok) return { label: '', failureReason: `http_${res.status}` };
     const json = await res.json() as any;
-    if (json.status !== 'OK' || !json.results?.length) return '';
+    if (json.status !== 'OK') return { label: '', failureReason: `api_status_${json.status ?? 'unknown'}` };
+    if (!json.results?.length)  return { label: '', failureReason: 'no_results' };
 
     // Walk the first (most specific) result's address_components.
     const components: { types: string[]; long_name: string; short_name: string }[] =
@@ -357,14 +377,70 @@ async function geocodeWithGoogle(lat: number, lon: number): Promise<string> {
     }
 
     // Skip results that are just a street address (we want a city/place label).
-    if (route && !locality) return '';
+    if (route && !locality) return { label: '', failureReason: 'street_address_only' };
 
-    if (premise && locality && premise !== locality) return `${premise}, ${locality}`;
-    if (locality && stateShort) return `${locality}, ${stateShort}`;
-    if (locality) return locality;
-    return '';
-  } catch (_e) {
-    return '';
+    if (premise && locality && premise !== locality)
+      return { label: `${premise}, ${locality}`, failureReason: null };
+    if (locality && stateShort)
+      return { label: `${locality}, ${stateShort}`, failureReason: null };
+    if (locality)
+      return { label: locality, failureReason: null };
+    return { label: '', failureReason: 'no_locality' };
+  } catch (e: any) {
+    return { label: '', failureReason: `exception_${(e?.message || 'unknown').slice(0, 40)}` };
+  }
+}
+
+/**
+ * Internal version of geocodeLabelForCoord that also returns diagnostic fields.
+ * Used by refreshLocationIfStale so each log entry captures exactly which path
+ * ran and why any fallback occurred.
+ */
+async function _geocodeLabelWithDiag(lat: number, lon: number): Promise<GeocodeDiag> {
+  try {
+    // Cache hit — device has not moved more than GEOCODE_MIN_MOVE_M since the
+    // last successful geocode.  Return the cached label without a network call.
+    if (
+      lastGeocodedLat !== null &&
+      lastGeocodedLon !== null &&
+      lastGeocodedName !== null &&
+      haversineM(lastGeocodedLat, lastGeocodedLon, lat, lon) < GEOCODE_MIN_MOVE_M
+    ) {
+      return { label: lastGeocodedName, geocoderPath: 'cache_hit', geocoderFallbackReason: null };
+    }
+
+    // 1. Google REST geocoder — platform-consistent results on iOS + Android.
+    const googleResult = await geocodeWithGoogle(lat, lon);
+
+    if (googleResult.label) {
+      lastGeocodedLat  = lat;
+      lastGeocodedLon  = lon;
+      lastGeocodedName = googleResult.label;
+      return { label: googleResult.label, geocoderPath: 'google_rest', geocoderFallbackReason: null };
+    }
+
+    // 2. Platform fallback (Apple MapKit on iOS, Google native on Android).
+    // Records why Google REST was skipped so we can diagnose label divergence.
+    const fallbackReason = googleResult.failureReason;
+    const results = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lon });
+    const label = results?.length > 0 ? formatGeocodeLabel(pickBestGeoResult(results)) : '';
+
+    if (label) {
+      lastGeocodedLat  = lat;
+      lastGeocodedLon  = lon;
+      lastGeocodedName = label;
+    }
+    return {
+      label,
+      geocoderPath: label ? 'platform_fallback' : 'none',
+      geocoderFallbackReason: fallbackReason,
+    };
+  } catch (e: any) {
+    return {
+      label: '',
+      geocoderPath: 'none',
+      geocoderFallbackReason: `exception_${(e?.message || 'unknown').slice(0, 40)}`,
+    };
   }
 }
 
@@ -373,41 +449,18 @@ async function geocodeWithGoogle(lat: number, lon: number): Promise<string> {
  * cached name when the device hasn't moved.  Never throws —
  * empty string on failure so callers can ?? past it.
  *
- * Strategy (field-test build):
+ * Strategy:
  *   1. Try Google Geocoding REST API — consistent results on iOS + Android.
  *   2. Fall back to Expo's platform geocoder (Apple MapKit / Google native)
  *      if the REST call fails or returns nothing.
+ *
+ * For full diagnostic detail (geocoder path, fallback reason) use the
+ * internal _geocodeLabelWithDiag — called directly by refreshLocationIfStale
+ * so every log entry records which path fired.
  */
 export async function geocodeLabelForCoord(lat: number, lon: number): Promise<string> {
-  try {
-    if (
-      lastGeocodedLat !== null &&
-      lastGeocodedLon !== null &&
-      lastGeocodedName !== null &&
-      haversineM(lastGeocodedLat, lastGeocodedLon, lat, lon) < GEOCODE_MIN_MOVE_M
-    ) {
-      return lastGeocodedName;
-    }
-
-    // 1. Google REST geocoder — platform-consistent.
-    let label = await geocodeWithGoogle(lat, lon);
-
-    // 2. Platform fallback (Apple MapKit on iOS, Google native on Android).
-    if (!label) {
-      const results = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lon });
-      label = results?.length > 0 ? formatGeocodeLabel(pickBestGeoResult(results)) : '';
-    }
-
-    if (label) {
-      lastGeocodedLat = lat;
-      lastGeocodedLon = lon;
-      lastGeocodedName = label;
-      return label;
-    }
-    return '';
-  } catch (_e) {
-    return '';
-  }
+  const { label } = await _geocodeLabelWithDiag(lat, lon);
+  return label;
 }
 
 /**
@@ -551,7 +604,10 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
     // geocoder fails or returns nothing useful we still PUT the
     // coords; the backend retains the previous label rather than
     // overwriting with junk.
-    const locationName = await geocodeLabelForCoord(lat, lon);
+    // Build XX: use the internal diagnostic variant so the log entry
+    // records exactly which path ran and why any fallback occurred.
+    const geocodeDiag = await _geocodeLabelWithDiag(lat, lon);
+    const locationName = geocodeDiag.label;
     try {
       const body: any = { latitude: lat, longitude: lon };
       if (locationName) body.location_name = locationName;
@@ -604,6 +660,10 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
       respLat: respLat !== null ? roundCoord(respLat) : null,
       respLon: respLon !== null ? roundCoord(respLon) : null,
       writeMismatch,
+      // Build XX — geocoder observability fields.
+      locationName:           locationName || null,
+      geocoderPath:           geocodeDiag.geocoderPath,
+      geocoderFallbackReason: geocodeDiag.geocoderFallbackReason,
     });
   } catch (_e) {
     // Never let a refresh failure crash the foreground transition.
