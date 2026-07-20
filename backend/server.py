@@ -2665,6 +2665,12 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             "write_accepted":       write_accepted,
             "rejection_reason":     rejection_reason,
             "coord_suppressed":     coord_suppressed,
+            # Build XX — geocoder observability.  The client computes and
+            # sends location_name; logging it here lets us correlate which
+            # label each device produced alongside the coordinates and
+            # write outcome, without having to pull device-side AsyncStorage
+            # logs to diagnose label divergence between devices.
+            "location_name":        data.location_name,
         })
     except Exception:
         pass
