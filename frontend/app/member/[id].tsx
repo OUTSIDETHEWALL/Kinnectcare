@@ -102,7 +102,7 @@ export default function MemberDetail() {
           ...reqs.map(r => ({ kind: 'request' as const, item: r })),
         ];
         combined.sort((a, b) => new Date(b.item.created_at).getTime() - new Date(a.item.created_at).getTime());
-        setCheckinTimeline(combined.slice(0, 30));
+        setCheckinTimeline(combined.slice(0, 4));
       } catch (_e) {
         // Non-fatal — history section stays empty.
       }
