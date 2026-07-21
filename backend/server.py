@@ -4441,7 +4441,7 @@ async def invite_landing_page(token: str):
     padding: 32px 20px;
   }}
   .card {{
-    width: 100%; max-width: 460px;
+    width: 100%; max-width: 380px;
     background: #fff; border-radius: 20px;
     box-shadow: 0 4px 20px rgba(27,94,53,0.10);
     overflow: hidden;
@@ -4458,54 +4458,31 @@ async def invite_landing_page(token: str):
     letter-spacing: 1px; text-transform: uppercase;
     margin-top: 6px;
   }}
-  .body {{ padding: 28px 24px 20px; }}
+  .body {{ padding: 36px 24px 32px; text-align: center; }}
   h1 {{
-    margin: 0 0 12px; font-size: 22px; text-align: center;
-    color: #1B5E35; font-weight: 800;
+    margin: 0 0 8px; font-size: 18px;
+    color: #1B5E35; font-weight: 700;
   }}
-  p {{
-    margin: 8px 0; font-size: 16px; line-height: 1.5;
-    color: #333; text-align: center;
+  /* CSS spinner */
+  .spinner {{
+    width: 44px; height: 44px;
+    border: 4px solid #d4e8d4;
+    border-top-color: #1B5E35;
+    border-radius: 50%;
+    animation: spin 0.75s linear infinite;
+    margin: 20px auto 8px;
   }}
-  .btn {{
-    display: block; width: 100%; margin: 20px 0 8px;
-    padding: 18px 20px;
+  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+  /* Play Store button — hidden until JS reveals it */
+  .store-btn {{
+    display: none;
+    margin-top: 24px; width: 100%;
+    padding: 16px 20px;
     background: #1B5E35; color: #fff;
-    font-size: 18px; font-weight: 800; letter-spacing: 0.3px;
+    font-size: 16px; font-weight: 700;
     text-align: center; text-decoration: none;
-    border-radius: 16px;
-    box-shadow: 0 4px 14px rgba(27,94,53,0.28);
-  }}
-  .btn-secondary {{
-    display: block; width: 100%; margin: 12px 0 8px;
-    padding: 14px 20px;
-    background: #fff; color: #1B5E35;
-    font-size: 15px; font-weight: 700;
-    text-align: center; text-decoration: none;
-    border: 2px solid #1B5E35; border-radius: 14px;
-  }}
-  .code-hint {{
-    margin-top: 22px; padding: 12px 14px;
-    background: #fafbfa; border: 1px dashed #cfd6cf;
-    border-radius: 10px;
-  }}
-  .code-hint-label {{
-    font-size: 11px; color: #888;
-    letter-spacing: 1px; text-transform: uppercase;
-    margin-bottom: 4px; text-align: center;
-  }}
-  .code {{
-    font-family: "SFMono-Regular",Consolas,Menlo,monospace;
-    font-size: 16px; font-weight: 800; color: #333;
-    letter-spacing: 2px; text-align: center;
-  }}
-  .footer {{
-    text-align: center; font-size: 12px; color: #999;
-    padding: 16px 24px 22px;
-  }}
-  .status {{
-    font-size: 13px; color: #666; text-align: center;
-    margin-top: 8px;
+    border-radius: 14px;
+    box-shadow: 0 4px 14px rgba(27,94,53,0.22);
   }}
 </style>
 </head>
@@ -4517,60 +4494,43 @@ async def invite_landing_page(token: str):
       <div class="tagline">Family safety · Senior wellness</div>
     </div>
     <div class="body">
-      <h1>Welcome to the family</h1>
-      <p>Tap the button below to open the Kinnship app.
-         We'll finish setting you up in about a minute.</p>
-
-      <a id="openBtn" class="btn" href="{app_scheme_url}">
-        Open Kinnship &nbsp;→
+      <h1 id="heading">Opening Kinnship…</h1>
+      <div class="spinner" id="spinner"></div>
+      <a id="storeBtn" class="store-btn" href="{play_store_url_with_referrer}">
+        Open in Play Store
       </a>
-      <p class="status" id="status">Opening the app…</p>
-
-      <a id="installBtn" class="btn-secondary" href="{play_store_url_with_referrer}">
-        Don't have Kinnship? Install from Google Play
-      </a>
-
-      <div class="code-hint">
-        <div class="code-hint-label">Backup invitation code</div>
-        <div class="code">{safe}</div>
-      </div>
-    </div>
-    <div class="footer">
-      Having trouble? Reply to your invitation email and we'll help.
     </div>
   </div>
 </div>
 
 <script>
   (function() {{
-    var scheme = "{app_scheme_url}";
-    var store  = "{play_store_url_with_referrer}";
-    var status = document.getElementById("status");
+    var scheme  = "{app_scheme_url}";
+    var store   = "{play_store_url_with_referrer}";
+    var heading = document.getElementById("heading");
+    var spinner = document.getElementById("spinner");
+    var storeBtn = document.getElementById("storeBtn");
 
-    // 1) Immediately try the custom scheme.  On Android Chrome this
-    //    either opens the installed app (success) or does nothing
-    //    (fail, scheme unhandled).  We can't detect success directly
-    //    from JavaScript — the standard pattern is to schedule a
-    //    fallback and rely on the page being backgrounded (which
-    //    indicates the app opened) to cancel it.
     var didBackground = false;
     document.addEventListener("visibilitychange", function() {{
       if (document.hidden) didBackground = true;
     }});
 
-    // Attempt the scheme after a tiny delay so the browser has
-    // rendered the visible fallback first (important — if the scheme
-    // fails silently on iOS Safari the user still sees something).
+    // Try the custom scheme. If the app is installed, it opens and the
+    // page is backgrounded. We detect success via visibilitychange.
     setTimeout(function() {{ window.location.href = scheme; }}, 120);
 
-    // 2) If the page is still foreground after 2.5s, the app clearly
-    //    didn't open.  Auto-redirect to Play Store.
+    // After 2 s, if still foreground, the app isn't installed.
+    // Reveal the Play Store button and auto-navigate after a brief pause
+    // so the user sees where they're going.
     setTimeout(function() {{
       if (!didBackground) {{
-        if (status) status.textContent = "Kinnship isn't installed yet — taking you to Google Play…";
-        window.location.href = store;
+        if (spinner)  spinner.style.display  = "none";
+        if (heading)  heading.textContent    = "Get Kinnship from Google Play";
+        if (storeBtn) storeBtn.style.display = "block";
+        setTimeout(function() {{ window.location.href = store; }}, 1800);
       }}
-    }}, 2500);
+    }}, 2000);
   }})();
 </script>
 </body>

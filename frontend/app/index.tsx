@@ -50,30 +50,31 @@ export default function Welcome() {
 
         <View style={styles.bottom}>
           <TouchableOpacity
-            testID="welcome-join-family-btn"
-            style={styles.cta}
-            activeOpacity={0.85}
-            onPress={() => router.push('/(auth)/join-family')}
-          >
-            <Icon name="enter-outline" size={20} color={Colors.surface} />
-            <Text style={styles.ctaText}>Join a Family</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
             testID="welcome-create-family-btn"
-            style={styles.ctaSecondary}
+            style={styles.cta}
             activeOpacity={0.85}
             onPress={() => router.push('/(auth)/signup')}
           >
-            <Icon name="add-circle-outline" size={20} color={Colors.primary} />
-            <Text style={styles.ctaSecondaryText}>Create a New Family</Text>
+            <Icon name="add-circle-outline" size={20} color={Colors.surface} />
+            <Text style={styles.ctaText}>Create a New Family</Text>
           </TouchableOpacity>
           <TouchableOpacity
             testID="welcome-login-link"
             onPress={() => router.push('/(auth)/login')}
-            style={styles.loginLink}
+            style={styles.ctaSecondary}
+            activeOpacity={0.85}
           >
-            <Text style={styles.loginLinkText}>
-              I already have an account · <Text style={{ fontWeight: '700' }}>Sign in</Text>
+            <Icon name="log-in-outline" size={20} color={Colors.primary} />
+            <Text style={styles.ctaSecondaryText}>Sign In</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            testID="welcome-join-family-btn"
+            onPress={() => router.push('/(auth)/join-family')}
+            style={styles.recoveryLink}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.recoveryLinkText}>
+              Having trouble joining? <Text style={{ fontWeight: '700' }}>Enter an invite code</Text>
             </Text>
           </TouchableOpacity>
         </View>
@@ -140,6 +141,6 @@ const styles = StyleSheet.create({
     borderWidth: 2, borderColor: Colors.primary,
   },
   ctaSecondaryText: { color: Colors.primary, fontSize: 18, fontWeight: '700' },
-  loginLink: { marginTop: 18, alignItems: 'center' },
-  loginLinkText: { fontSize: 15, color: Colors.textSecondary },
+  recoveryLink: { marginTop: 18, alignItems: 'center' },
+  recoveryLinkText: { fontSize: 13, color: Colors.textTertiary },
 });
