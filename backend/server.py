@@ -295,6 +295,11 @@ class FamilyMember(BaseModel):
     gps_accuracy: Optional[float] = None  # horizontal accuracy in metres (lower = better)
     gps_speed:    Optional[float] = None  # m/s as reported by the device
     gps_heading:  Optional[float] = None  # degrees 0-360 (0 = North)
+    # Build XX — Battery telemetry from the monitored device (expo-battery).
+    # Reported in every location PUT so caregivers can see why uploads may
+    # eventually stop.  None for rows written before this build.
+    battery_level: Optional[float] = None  # 0.0–1.0
+    is_charging:   Optional[bool]  = None  # True when plugged in / full
 
     @field_serializer("last_seen", "created_at", "checkin_interval_started_at", "captured_at", when_used='json')
     def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
@@ -529,6 +534,10 @@ class LocationUpdate(BaseModel):
     #   • Some SDK versions emit Unix epoch milliseconds (int/float)
     #     rather than ISO-8601 — both handled by captured_at below.
     timestamp: Optional[Union[str, int, float]] = None
+    # Build XX — Battery telemetry.  Sent by expo-battery on every
+    # foreground location refresh; absent on SDK-native uploads.
+    battery_level: Optional[float] = None   # 0.0–1.0
+    is_charging:   Optional[bool]  = None   # True = plugged in / full
     # Silently accept everything else Transistor sends so unknown fields
     # don't trip validation on new SDK versions.
     model_config = {"extra": "allow"}
@@ -2446,7 +2455,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     try:
         prev_doc = await db.members.find_one(
             {"id": member_id, "family_group_id": current["family_group_id"]},
-            {"_id": 0, "last_seen": 1, "captured_at": 1},
+            {"_id": 0, "last_seen": 1, "captured_at": 1, "name": 1, "low_battery_alerted": 1},
         )
         if prev_doc:
             prev_last_seen   = prev_doc.get("last_seen")
@@ -2573,6 +2582,45 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         update["gps_speed"] = raw_speed
     if raw_heading is not None:
         update["gps_heading"] = raw_heading
+
+    # Build XX — Battery telemetry.
+    # Clamp to [0, 1] in case a buggy SDK sends an out-of-range value.
+    if data.battery_level is not None:
+        update["battery_level"] = max(0.0, min(1.0, data.battery_level))
+    if data.is_charging is not None:
+        update["is_charging"] = data.is_charging
+
+    # Build XX — Low battery one-shot notification.
+    # Fires at most once per drop below 15%; resets when battery recovers
+    # above the threshold so a second drop triggers a second notification.
+    _LOW_BATTERY_THRESHOLD = 0.15
+    if data.battery_level is not None and prev_doc is not None:
+        _was_alerted    = bool(prev_doc.get("low_battery_alerted", False))
+        _member_name    = prev_doc.get("name") or "Your family member"
+        _battery_pct    = round(data.battery_level * 100)
+        if data.battery_level <= _LOW_BATTERY_THRESHOLD and not _was_alerted:
+            update["low_battery_alerted"] = True
+            try:
+                await push_to_family_group(
+                    current["family_group_id"],
+                    title=f"{_member_name}'s battery is low",
+                    body=(
+                        f"{_member_name}'s phone battery is low ({_battery_pct}%). "
+                        f"Charging the phone will help maintain location updates."
+                    ),
+                    data={"type": "low_battery", "member_id": member_id},
+                    exclude_user_id=current["id"],
+                )
+                logger.info(
+                    f"low-battery notification sent: member={member_id} "
+                    f"battery={_battery_pct}%"
+                )
+            except Exception as _be:
+                logger.warning(f"low-battery notification failed: {_be}")
+        elif data.battery_level > _LOW_BATTERY_THRESHOLD and _was_alerted:
+            # Battery has recovered; reset the flag so the next drop triggers
+            # a fresh notification.
+            update["low_battery_alerted"] = False
 
     # Strip map-visible coordinate fields for replay catch-up points.
     # last_seen + captured_at remain in `update` so heartbeat monitoring

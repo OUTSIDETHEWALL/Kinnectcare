@@ -224,6 +224,11 @@ export type Member = {
   // Drives movement-aware freshness thresholds in TrackingStatusPill.
   // Null for member rows created before this field was introduced.
   is_moving?: boolean | null;
+  // Build XX — Battery telemetry from the monitored device.
+  // 0.0–1.0 (expo-battery getBatteryLevelAsync), null = not yet reported.
+  battery_level?: number | null;
+  // True when the device is plugged in or the battery is full.
+  is_charging?: boolean | null;
 };
 
 export type Alert = {

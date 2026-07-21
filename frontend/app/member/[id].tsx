@@ -13,7 +13,7 @@ import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, Reminder } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
 import MemberMap from '../../src/MemberMap';
-import { TrackingStatusPill } from '../../src/tracking/TrackingStatusPill';
+// TrackingStatusPill removed — Build XX family screen simplification.
 import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone, formatTimeAgo, formatTimezone, formatPhone } from '../../src/timeFormat';
 import { TimePicker12 } from '../../src/TimePicker12';
 import {
@@ -434,31 +434,35 @@ export default function MemberDetail() {
               </View>
             ) : (
               <>
+                {/* Build XX — factual freshness, no tracking badge. */}
                 <View style={styles.locRow}>
                   <View style={styles.locPinBubble}><Text style={styles.locPinEmoji}>📍</Text></View>
                   <View style={{ flex: 1, marginLeft: 14 }}>
+                    <Text style={styles.locLastKnown}>Last known location</Text>
                     <Text style={styles.locName}>{member.location_name || 'Unknown location'}</Text>
                     {member.last_seen ? (
-                      <Text style={styles.locAge}>{formatLastSeenAge(member.last_seen)}</Text>
+                      <Text style={styles.locFreshness}>
+                        Updated {formatLastSeenAge(member.last_seen)}
+                      </Text>
                     ) : null}
-                    {/* Build 54 — health-first design.  The pill is the only
-                        tracking signal shown on the primary member surface;
-                        per-tick freshness lives in Diagnostics.
-                        Build #56 — locationSharingEnabled prop is forwarded
-                        so the pill can flip to "🔒 Location sharing off"
-                        atomically with the banner above. */}
-                    <TrackingStatusPill
-                      hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
-                      lastSeenIso={member.last_seen}
-                      locationSharingEnabled={(member as any).location_sharing_enabled}
-                      isMoving={(member as any).is_moving ?? null}
-                      screen="member"
-                      size="compact"
-                      style={styles.locStatusPill}
-                      testID="member-tracking-status"
-                    />
                   </View>
                 </View>
+                {/* Build XX — Battery row inside the location card. */}
+                {(member as any).battery_level != null && (
+                  <>
+                    <View style={styles.locDivider} />
+                    <View style={styles.batteryRow}>
+                      <Text style={styles.batteryRowLabel}>🔋 Battery</Text>
+                      <Text style={[
+                        styles.batteryRowValue,
+                        (member as any).battery_level <= 0.15 && styles.batteryRowValueLow,
+                      ]}>
+                        {Math.round((member as any).battery_level * 100)}%
+                        {(member as any).is_charging ? ' (Charging)' : ''}
+                      </Text>
+                    </View>
+                  </>
+                )}
                 <View style={{ marginTop: 12 }}>
                   <MemberMap
                     latitude={member.latitude}
@@ -790,8 +794,16 @@ const styles = StyleSheet.create({
   locRow: { flexDirection: 'row', alignItems: 'center' },
   locPinBubble: { width: 48, height: 48, borderRadius: 24, backgroundColor: Colors.tertiary, alignItems: 'center', justifyContent: 'center' },
   locPinEmoji: { fontSize: 22 },
+  // Build XX — freshness-first location card.
+  locLastKnown: { fontSize: 11, fontWeight: '600', color: Colors.textTertiary, marginBottom: 2 },
   locName: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
-  locAge: { fontSize: 11, color: Colors.textTertiary, marginTop: 2 },
+  locAge: { fontSize: 11, color: Colors.textTertiary, marginTop: 2 },  // kept for reference
+  locFreshness: { fontSize: 14, fontWeight: '700', color: Colors.primary, marginTop: 4 },
+  // Build XX — battery row inside the location card.
+  batteryRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 4 },
+  batteryRowLabel: { fontSize: 14, color: Colors.textSecondary, fontWeight: '600' },
+  batteryRowValue: { fontSize: 14, fontWeight: '700', color: Colors.textPrimary },
+  batteryRowValueLow: { color: Colors.warning },
   // Check-in timeline
   timelineRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingVertical: 12, backgroundColor: Colors.surface, borderRadius: 14, paddingHorizontal: 14, marginBottom: 8, borderWidth: 1, borderColor: Colors.border },
   timelineRowBorder: {},
