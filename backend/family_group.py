@@ -1005,48 +1005,31 @@ def build_router(
     async def list_invites(current=Depends(get_current_user)):
         """List all invites for the current user's family group.
 
-        Build #61 — hardened against the "ghost pending" bug where an
-        invite whose recipient DID successfully join the family (via
-        Path A ``/family-group/join``, Path B ``verify-otp`` signup, or
-        the deep-link auto-consume) still appeared as ``pending`` on
-        the caregiver's dashboard forever.  Root cause of the ghost
-        state: any code path that got as far as marking the joiner a
-        member but NOT as far as calling ``accept_invite`` (e.g. a
-        Build #59 build where the ensure_self_member_row helper hadn't
-        yet shipped, or any future path where a race causes the
-        bookkeeping step to be skipped) leaves the invite in a
-        permanently-inconsistent state.
+        Build #62 — GET endpoint is now a pure read except for the
+        time-based expiry transition (Case 1 below), which is strictly
+        correct: an invite whose ``expires_at`` has passed is expired
+        by definition regardless of any other state.
 
-        Fix: self-heal on read.  For every ``pending`` invite:
-          1. If ``users`` already has a user with the invitee's email
-             sitting inside this family group → the person is
-             already in.  Auto-transition to ``accepted``.
-          2. Else if the invite is past its ``expires_at`` → transition
-             to ``expired``.
-          3. Otherwise leave it truly pending.
+        The Build #61 member-email ghost heal has been removed from
+        this path.  It caused a regression where opening the invites
+        screen immediately consumed a brand-new invite sent to someone
+        who was already a family member — before the recipient could
+        ever enter the code.  The ghost heal now runs exactly once at
+        backend startup as a sentinel-guarded migration
+        (``_migrate_invite_ghost_heal_v62`` in server.py), scoped to
+        invites older than 24 hours so newly created invites are never
+        touched.
 
-        The response reflects the corrected state so the client's
-        ``status === 'pending'`` filter naturally hides the ghost.
+        Build #61 context: the ghost-pending bug arose because some
+        pre-Build-59 join paths reached ``ensure_self_member_row`` but
+        not ``accept_invite``.  All current join paths call both in
+        sequence; new ghost invites are no longer created.
         """
         gid = await ensure_family_group(db, current)
         cursor = db.family_invites.find(
             {"family_group_id": gid}, {"_id": 0}
         ).sort("created_at", -1)
         rows = await cursor.to_list(200)
-
-        # Build #61 — pre-fetch every user email currently in this
-        # family group so we can detect ghost pendings in one query
-        # rather than one per invite.  Only care about pending rows,
-        # so short-circuit when there are none.
-        member_emails: set[str] = set()
-        if any(r.get("status") == "pending" for r in rows):
-            async for u in db.users.find(
-                {"family_group_id": gid},
-                {"_id": 0, "email": 1},
-            ):
-                em = (u.get("email") or "").lower().strip()
-                if em:
-                    member_emails.add(em)
 
         now = datetime.now(timezone.utc)
         cleaned = []
@@ -1056,32 +1039,8 @@ def build_router(
             if isinstance(exp, datetime) and exp.tzinfo is None:
                 exp = exp.replace(tzinfo=timezone.utc)
 
-            # Case 1 — invitee already joined this family via ANY path.
-            # Self-heal to accepted and stamp a synthetic accepted_at
-            # so downstream analytics have a timestamp.
-            if status == "pending":
-                iv_email = (r.get("invitee_email") or "").lower().strip()
-                if iv_email and iv_email in member_emails:
-                    try:
-                        await db.family_invites.update_one(
-                            {"id": r["id"], "status": "pending"},
-                            {"$set": {
-                                "status": "accepted",
-                                "accepted_at": now,
-                            }},
-                        )
-                        logger.info(
-                            f"[invite-heal] auto-marked accepted for {iv_email} "
-                            f"(id={r['id']}, group={gid}) — invitee is already "
-                            f"a family member"
-                        )
-                    except Exception as e:
-                        logger.warning(f"[invite-heal] auto-accept failed: {e}")
-                    r["status"] = "accepted"
-                    r["accepted_at"] = now
-                    status = "accepted"
-
-            # Case 2 — pending but expired.
+            # Case 1 — pending but past expires_at.  Strictly time-based:
+            # no member-state lookup, no risk of consuming a live invite.
             if (
                 status == "pending"
                 and isinstance(exp, datetime)
