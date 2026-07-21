@@ -9,7 +9,9 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "ota:publish": "bash scripts/publish-ota.sh"
+    "ota:publish": "bash scripts/publish-ota.sh",
+    "normalize-lockfile": "bash scripts/normalize-lockfile.sh",
+    "build:android": "bash scripts/build-android.sh"
   },
   "dependencies": {
     "@babel/runtime": "^7.20.6",

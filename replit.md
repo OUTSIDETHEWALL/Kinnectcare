@@ -28,6 +28,33 @@ Speculative fixes are not acceptable. "This should work" is not acceptable. If c
 - **No force-pushes to any branch without Charles's explicit approval**
 - Charles reviews and approves every merge
 
+## Release commands
+
+Always run from the `frontend/` directory.
+
+| Task | Command |
+|---|---|
+| Publish OTA update | `yarn ota:publish "Your message"` |
+| Submit Android native build | `yarn build:android "Build N message"` |
+| Normalize yarn.lock only | `yarn normalize-lockfile` |
+
+### Why yarn.lock needs normalization before every native build
+
+Replit sets four shell environment variables at the container level that redirect all npm/yarn traffic through a local proxy:
+
+```
+YARN_REGISTRY            = http://package-firewall.replit.local/npm/
+YARN_NPM_REGISTRY_SERVER = http://package-firewall.replit.local/npm/
+npm_config_registry      = http://package-firewall.replit.local/npm/
+NPM_CONFIG_REGISTRY      = http://package-firewall.replit.local/npm/
+```
+
+Every `yarn add` or `yarn install` inside Replit writes `http://package-firewall.replit.local/npm/…` into yarn.lock's `resolved:` fields. EAS cloud build servers have no route to that host, so `yarn install --frozen-lockfile` fails before any native code compiles.
+
+`scripts/build-android.sh` handles this automatically: it detects any proxy URLs in yarn.lock, replaces them with `https://registry.yarnpkg.com/`, commits the result directly to main (yarn.lock only — the one permitted direct-to-main commit because it is purely mechanical), and then submits the EAS build. The SHA1 fragment and SHA512 integrity fields in yarn.lock are content-based and remain valid after the URL replacement.
+
+OTA updates (`yarn ota:publish`) are not affected — EAS OTA bundling runs on EAS's servers and does not re-run `yarn install`.
+
 ## User preferences
 
 - Treat Charles as a non-programmer. Step-by-step guidance for all technical work.
