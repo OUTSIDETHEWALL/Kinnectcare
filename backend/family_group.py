@@ -356,19 +356,14 @@ def _invite_email_body(
     text_body = (
         f"Hi {invitee_name},\n\n"
         f"{inviter_name} has invited you to join {inviter_possessive} "
-        f"family on Kinnship{rel_line} — the family safety and senior "
-        f"wellness app.\n\n"
-        f"ACCEPT INVITATION (one tap — no code typing)\n"
-        f"  Tap this link on your phone:\n"
+        f"family on Kinnship{rel_line}.\n\n"
+        f"Tap the link below on your phone to join:\n"
         f"  {accept_url}\n\n"
-        f"  If Kinnship is already installed, it opens right up.  If\n"
-        f"  not, we'll send you to the Play Store to install it, and\n"
-        f"  then finish setting you up automatically after install.\n\n"
-        f"BACKUP: MANUAL INVITE CODE (only if the link doesn't work)\n"
-        f"  {token}\n"
-        f"  Open Kinnship → tap \"Join a Family\" → type the code above.\n\n"
-        f"This invite expires on {exp_str}.  If you didn't expect this "
-        f"email, you can safely ignore it — no account will be created.\n\n"
+        f"This invitation expires on {exp_str}.\n\n"
+        f"If this link doesn't work, contact the person who invited you "
+        f"and ask them to send a new one.\n\n"
+        f"If you didn't expect this email, you can safely ignore it — "
+        f"no account will be created.\n\n"
         f"Welcome to the family,\n"
         f"— The Kinnship team"
     )
@@ -411,27 +406,23 @@ def _invite_email_body(
               ✓ Accept Invitation
             </a>
           </td></tr>
-          <tr><td align="center" style="padding-top:10px;font-size:13px;color:#666;">
-            One tap — Kinnship opens automatically. If it's not
-            installed yet, we'll take you to Google Play.
-          </td></tr>
         </table>
       </td></tr>
 
-      <!-- Backup invite code — the primary Accept button above now
-           handles both installed and not-installed cases via the HTTPS
-           landing page, so the "Install from Play Store" secondary
-           button became redundant.  We keep ONLY the manual code here
-           as an emergency fallback for the rare case where the
-           landing page can't run (corp email, ancient browser, etc.). -->
-      <tr><td style="padding:32px 32px 8px 32px;">
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-          <tr><td style="background-color:#fafbfa;border:1px dashed #cfd6cf;border-radius:10px;padding:14px 16px;">
-            <div style="font-size:11px;color:#888;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px;">Backup code (only if the button above doesn&apos;t work)</div>
+      <!-- Recovery code — hidden behind a disclosure toggle.
+           Codes are a support/recovery mechanism only; they should
+           not be part of the standard user journey. -->
+      <tr><td style="padding:24px 32px 8px 32px;text-align:center;">
+        <details style="display:inline-block;text-align:left;max-width:420px;width:100%;">
+          <summary style="font-size:12px;color:#999;cursor:pointer;list-style:none;text-align:center;padding:6px 0;">
+            Can&apos;t tap the button? &#9654; Show backup code
+          </summary>
+          <div style="margin-top:12px;background-color:#fafbfa;border:1px dashed #cfd6cf;border-radius:10px;padding:14px 16px;">
+            <div style="font-size:11px;color:#888;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;">Backup code</div>
             <div style="font-family:'SFMono-Regular',Consolas,Menlo,'Courier New',monospace;font-size:18px;font-weight:700;color:#333;letter-spacing:2px;">{token}</div>
-            <div style="font-size:11px;color:#888;margin-top:6px;">Install Kinnship, tap &quot;Join a Family,&quot; then enter this code.</div>
-          </td></tr>
-        </table>
+            <div style="font-size:11px;color:#888;margin-top:6px;">Open Kinnship, tap &ldquo;Having trouble joining?&rdquo; and enter this code.</div>
+          </div>
+        </details>
       </td></tr>
 
       <!-- Expiry/ignore note -->
@@ -937,6 +928,48 @@ def build_router(
         if pending >= 50:
             raise HTTPException(
                 429, "Too many pending invites. Revoke old ones first."
+            )
+
+        # Duplicate guard 1 — invitee is already a member of this family.
+        # Return a structured 409 so the client can show a friendly
+        # "Joyce is already part of your family" prompt rather than a
+        # generic error.
+        existing_member = await db.users.find_one(
+            {"family_group_id": gid, "email": email},
+            {"_id": 0, "id": 1, "full_name": 1},
+        )
+        if existing_member:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "already_member",
+                    "message": f"{name} is already part of your family.",
+                    "member_name": existing_member.get("full_name") or name,
+                },
+            )
+
+        # Duplicate guard 2 — a valid pending invite already exists for
+        # this email in this group.  Return a structured 409 so the
+        # client can offer "Resend Invitation" (revoke old → re-create)
+        # rather than silently creating a second pending token.
+        now_check = datetime.now(timezone.utc)
+        existing_invite = await db.family_invites.find_one(
+            {
+                "family_group_id": gid,
+                "invitee_email": email,
+                "status": "pending",
+                "expires_at": {"$gt": now_check},
+            },
+            {"_id": 0, "id": 1, "token": 1},
+        )
+        if existing_invite:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "pending_invite_exists",
+                    "message": f"{name} already has a pending invitation.",
+                    "invite_id": existing_invite["id"],
+                },
             )
 
         token = await _generate_unique_invite_token(db)

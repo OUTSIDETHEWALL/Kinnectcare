@@ -28,7 +28,7 @@ import { useRouter } from 'expo-router';
 import { Icon } from '../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../src/theme';
-import { sendFamilyInvite, isPaywall } from '../src/api';
+import { sendFamilyInvite, revokeFamilyInvite, isPaywall } from '../src/api';
 
 type Role = 'family' | 'senior';
 
@@ -44,6 +44,13 @@ export default function AddFamilyMember() {
   const [paywallMsg, setPaywallMsg] = useState<string | null>(null);
   const [successOpen, setSuccessOpen] = useState(false);
   const [sentInfo, setSentInfo] = useState<{ name: string; email: string; delivered: boolean; token: string } | null>(null);
+
+  // Duplicate-invite state: set when the backend returns a structured 409.
+  type DuplicateState =
+    | { kind: 'already_member'; memberName: string }
+    | { kind: 'pending_invite'; inviteId: string };
+  const [duplicateState, setDuplicateState] = useState<DuplicateState | null>(null);
+  const [resending, setResending] = useState(false);
 
   const emailValid = /\S+@\S+\.\S+/.test(email.trim());
   const canSubmit = !!name.trim() && emailValid && !loading;
@@ -74,14 +81,49 @@ export default function AddFamilyMember() {
       if (pw) {
         setPaywallMsg(pw.message);
       } else {
-        setError(
-          err?.response?.data?.detail
-          || err?.message
-          || 'Something went wrong. Please try again.'
-        );
+        const detail = err?.response?.data?.detail;
+        if (detail?.code === 'already_member') {
+          setDuplicateState({ kind: 'already_member', memberName: detail.member_name || name.trim() });
+        } else if (detail?.code === 'pending_invite_exists') {
+          setDuplicateState({ kind: 'pending_invite', inviteId: detail.invite_id });
+        } else {
+          setError(
+            (typeof detail === 'string' ? detail : null)
+            || err?.message
+            || 'Something went wrong. Please try again.'
+          );
+        }
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Resend: revoke the existing pending invite then re-create.
+  const onResend = async () => {
+    if (!duplicateState || duplicateState.kind !== 'pending_invite') return;
+    setResending(true);
+    try {
+      await revokeFamilyInvite(duplicateState.inviteId);
+      const r = await sendFamilyInvite({
+        name: name.trim(),
+        email: email.trim().toLowerCase(),
+        relationship: relationship.trim() || undefined,
+        role,
+      });
+      setSentInfo({
+        name: name.trim(),
+        email: email.trim().toLowerCase(),
+        delivered: !!r.delivered,
+        token: r.invite?.token || '',
+      });
+      setDuplicateState(null);
+      setSuccessOpen(true);
+    } catch (err: any) {
+      setDuplicateState(null);
+      setError(err?.response?.data?.detail || 'Could not resend. Please try again.');
+    } finally {
+      setResending(false);
     }
   };
 
@@ -248,6 +290,84 @@ export default function AddFamilyMember() {
               activeOpacity={0.7}
             >
               <Text style={styles.modalSecondaryText}>Maybe later</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Already-a-member modal */}
+      <Modal
+        visible={duplicateState?.kind === 'already_member'}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDuplicateState(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard} testID="already-member-modal">
+            <Text style={styles.modalEmoji}>💚</Text>
+            <Text style={styles.modalTitle}>
+              {duplicateState?.kind === 'already_member'
+                ? `${duplicateState.memberName} is already part of your family`
+                : ''}
+            </Text>
+            <Text style={styles.modalBody}>
+              They're already set up and connected to your family in Kinnship.
+            </Text>
+            <TouchableOpacity
+              testID="already-member-open"
+              style={styles.modalPrimary}
+              onPress={() => { setDuplicateState(null); router.back(); }}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.modalPrimaryText}>Open Family</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="already-member-cancel"
+              style={styles.modalSecondary}
+              onPress={() => setDuplicateState(null)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.modalSecondaryText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Pending-invite modal */}
+      <Modal
+        visible={duplicateState?.kind === 'pending_invite'}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDuplicateState(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard} testID="pending-invite-modal">
+            <Text style={styles.modalEmoji}>📬</Text>
+            <Text style={styles.modalTitle}>
+              {name.trim()} already has a pending invitation
+            </Text>
+            <Text style={styles.modalBody}>
+              An invitation was already sent to {email.trim().toLowerCase()}.
+              You can resend it to deliver a fresh link.
+            </Text>
+            <TouchableOpacity
+              testID="pending-invite-resend"
+              style={[styles.modalPrimary, resending && { opacity: 0.7 }]}
+              onPress={onResend}
+              disabled={resending}
+              activeOpacity={0.85}
+            >
+              {resending
+                ? <ActivityIndicator color={Colors.surface} />
+                : <Text style={styles.modalPrimaryText}>Resend Invitation</Text>}
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="pending-invite-cancel"
+              style={styles.modalSecondary}
+              onPress={() => setDuplicateState(null)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.modalSecondaryText}>Cancel</Text>
             </TouchableOpacity>
           </View>
         </View>

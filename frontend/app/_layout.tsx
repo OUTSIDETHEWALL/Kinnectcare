@@ -180,35 +180,13 @@ function RootNav() {
       // is best-effort.
       await setPendingInvite(token);
 
-      // If we already have an authenticated user, join immediately so
-      // the caregiver's dashboard sees the new member on the very
-      // next poll.  If not, verifyOtp() will consume this later.
-      if (user) {
-        try {
-          await api.post('/family-group/join', { invite_code: token });
-          await clearPendingInvite();
-          // Force re-fetch of /auth/me + members list so RootNav sees
-          // the new family_group_id and the dashboard re-renders.
-          try {
-            const meRes = await api.get('/auth/me');
-            // AuthContext's setUser is not exposed here, but a poll
-            // via refreshUser gives the same effect.  We invoke it
-            // via the context.
-            // (Handled by the effect that re-reads /auth/me on family
-            // membership change.)
-            void meRes;
-          } catch (_e) {}
-        } catch (_e) {
-          // 404 / already-member / expired — leave the token in
-          // storage so the user can still enter it manually via
-          // /(auth)/join-family if they want.  Non-fatal.
-        }
-      }
-
-      // Route the user to /invite/{token} — the friendly preview
-      // screen decides whether to auto-accept (logged-in) or hand
-      // off to signup (logged-out).  On cold start we defer until
-      // the layout has mounted (~100ms).
+      // Zero-friction onboarding: never auto-join silently.
+      // Route directly to /invite/{token} so the user always sees
+      // the explicit "Join Family" confirmation card, regardless of
+      // whether they are already authenticated.  The card handles
+      // the join for authenticated users and hands off to signup for
+      // unauthenticated ones.  verifyOtp() auto-joins after the
+      // account is created so the pending token is always consumed.
       if (!inviteRouteRef.current) {
         inviteRouteRef.current = true;
         setTimeout(() => {
