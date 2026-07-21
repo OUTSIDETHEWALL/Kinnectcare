@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ============================================================
-# build-android.sh — safe Android native build via EAS
+# build-android.sh — safe Android native build + Play Store submit
 #
 # Usage (from frontend/ directory):
-#   bash scripts/build-android.sh "Build 62 message"
-#   yarn build:android "Build 62 message"
+#   bash scripts/build-android.sh "Build 63 message"
+#   yarn build:android "Build 63 message"
 #
 # Process (in order, aborts on first failure):
 #   1. Verify git branch is main
@@ -16,13 +16,16 @@
 #   3. Verify working tree is clean
 #   4. Verify local main matches origin/main
 #   5. Verify EXPO_TOKEN is set
-#   6. Submit EAS Android production build (--no-wait)
-#   7. Print the EAS dashboard URL
+#   6. Run EAS Android production build (--wait, blocks until done)
+#   7. Submit the finished .aab to Google Play Closed Testing (Alpha)
 #
-# Why --no-wait:
-#   Native builds take 15–30 min.  The script submits the job
-#   and exits so the terminal isn't blocked.  EAS emails you
-#   when the .aab is ready.
+# Prerequisite — one-time setup:
+#   A Google Play service account key must be uploaded to the EAS
+#   credentials store before step 7 will succeed.  Run:
+#     EXPO_TOKEN=$EXPO_TOKEN npx eas-cli credentials
+#   then: Android → app.kinnship.client → Google Service Account Key
+#   → Add new key → paste the JSON.  The key is stored encrypted in
+#   EAS; no file is committed to git.  See replit.md for full steps.
 # ============================================================
 
 set -euo pipefail
@@ -145,41 +148,72 @@ fi
 ok "EXPO_TOKEN present"
 
 # ═════════════════════════════════════════════════════════════
-hdr "Step 6 — Submit EAS Android build"
+hdr "Step 6 — EAS Android build (waiting for completion)"
 # ═════════════════════════════════════════════════════════════
 echo ""
 echo "  Platform : Android"
 echo "  Profile  : production"
 echo "  Message  : ${MESSAGE}"
 echo ""
-warn "Submitting build — this may take 30–60 s to confirm..."
+warn "Starting build — native builds take 15–30 min. Do not interrupt."
+echo ""
 
 cd "$FRONTEND_DIR"
 BUILD_OUTPUT=$(npx eas build \
   --platform android \
   --profile production \
   --non-interactive \
-  --no-wait \
-  --message "$MESSAGE" 2>&1) || fail "eas build submission failed:\n\n${BUILD_OUTPUT}"
-
-# Extract the EAS dashboard URL from the output
-BUILD_URL=$(echo "$BUILD_OUTPUT" | grep -oE 'https://expo\.dev/accounts/[^ ]+/builds/[^ ]+' | head -1 || true)
+  --wait \
+  --message "$MESSAGE" 2>&1) || fail "EAS build failed:\n\n${BUILD_OUTPUT}"
 
 echo "$BUILD_OUTPUT"
 echo ""
 
-# ═════════════════════════════════════════════════════════════
-hdr "Build submitted"
-# ═════════════════════════════════════════════════════════════
-ok "EAS Android build queued successfully"
-echo ""
+# Extract build ID and URL from output
+BUILD_URL=$(echo "$BUILD_OUTPUT" | grep -oE 'https://expo\.dev/accounts/[^ ]+/builds/[a-f0-9-]+' | head -1 || true)
+BUILD_ID=$(echo "$BUILD_URL" | grep -oE '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}' | head -1 || true)
+
+ok "Build finished"
 if [[ -n "$BUILD_URL" ]]; then
-  echo -e "  ${CYAN}Track progress:${NC}"
   echo "  ${BUILD_URL}"
-else
-  echo -e "  ${CYAN}Track progress:${NC} check EAS dashboard"
-  echo "  https://expo.dev/accounts/finalcut/projects/kinnship/builds"
 fi
 echo ""
-ok "EAS will email you when the .aab is ready (~15–30 min)"
-ok "Next: install the .aab on both beta devices, then run a full QA pass"
+
+# ═════════════════════════════════════════════════════════════
+hdr "Step 7 — Submit to Google Play Closed Testing (Alpha)"
+# ═════════════════════════════════════════════════════════════
+# Requires: Google Play service account key uploaded to EAS credentials
+# store (one-time setup — see replit.md). Track and releaseStatus are
+# configured in eas.json submit.production.android.
+
+if [[ -n "$BUILD_ID" ]]; then
+  info "Submitting build ${BUILD_ID} to Play Store..."
+  npx eas submit \
+    --platform android \
+    --id "$BUILD_ID" \
+    --profile production \
+    --non-interactive \
+    --wait \
+    || fail "EAS submit failed. If this is a credentials error, run:\n\n   EXPO_TOKEN=\$EXPO_TOKEN npx eas-cli credentials\n\n   then re-run this script."
+else
+  warn "Could not extract build ID from EAS output — submitting latest build instead"
+  npx eas submit \
+    --platform android \
+    --latest \
+    --profile production \
+    --non-interactive \
+    --wait \
+    || fail "EAS submit failed. If this is a credentials error, run:\n\n   EXPO_TOKEN=\$EXPO_TOKEN npx eas-cli credentials\n\n   then re-run this script."
+fi
+
+# ═════════════════════════════════════════════════════════════
+hdr "Done"
+# ═════════════════════════════════════════════════════════════
+echo ""
+ok "Build compiled and submitted to Google Play Closed Testing (Alpha)"
+ok "Google Play processing typically takes 2–60 min"
+ok "Testers on the Closed Testing track will receive the update automatically"
+echo ""
+echo "  Play Console: https://play.google.com/console"
+echo ""
+ok "Next: verify on Play Console that the new versionCode appears on the Alpha track"

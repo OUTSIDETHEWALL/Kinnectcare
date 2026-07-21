@@ -50,9 +50,8 @@
         "appleTeamId": "REPLACE_WITH_10_CHAR_TEAM_ID"
       },
       "android": {
-        "serviceAccountKeyPath": "./play-service-account.json",
-        "track": "internal",
-        "releaseStatus": "draft"
+        "track": "alpha",
+        "releaseStatus": "completed"
       }
     }
   }
