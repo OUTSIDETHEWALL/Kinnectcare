@@ -44,6 +44,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { api } from './api';
 import * as memberStore from './store/memberStore';
+import * as Battery from 'expo-battery';
 
 const MY_MEMBER_ID_KEY = 'kc_my_member_id_v1';
 // v1.2.5 diagnostic: stash the user_id alongside the member_id so
@@ -608,9 +609,25 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
     // records exactly which path ran and why any fallback occurred.
     const geocodeDiag = await _geocodeLabelWithDiag(lat, lon);
     const locationName = geocodeDiag.label;
+
+    // Build XX — Battery telemetry.  Best-effort; never blocks the upload.
+    let batteryLevel: number | null = null;
+    let isCharging: boolean | null = null;
+    try {
+      batteryLevel = await Battery.getBatteryLevelAsync();
+      const batteryState = await Battery.getBatteryStateAsync();
+      isCharging =
+        batteryState === Battery.BatteryState.CHARGING ||
+        batteryState === Battery.BatteryState.FULL;
+    } catch (_be) {
+      // expo-battery not available on this platform — skip silently.
+    }
+
     try {
       const body: any = { latitude: lat, longitude: lon };
       if (locationName) body.location_name = locationName;
+      if (batteryLevel !== null) body.battery_level = batteryLevel;
+      if (isCharging !== null) body.is_charging = isCharging;
       const resp = await api.put(`/members/${memberId}/location`, body);
       // v1.2.6: capture the backend's post-write view of the row so we
       // can detect partial / wrong-doc writes.  PUT response body is

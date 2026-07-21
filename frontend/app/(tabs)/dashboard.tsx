@@ -35,7 +35,7 @@ import { useAuth } from '../../src/AuthContext';
 import * as memberStore from '../../src/store/memberStore';
 import { logPipelineEvent } from '../../src/refreshPipelineLog';
 import { useActiveEmergency } from '../../src/activeEmergency';
-import { TrackingStatusPill } from '../../src/tracking/TrackingStatusPill';
+// TrackingStatusPill removed — Build XX family screen simplification.
 import { hasPinForUser } from '../../src/pinAuth';
 import { wasPinSetupDismissed, markPinSetupDismissed } from '../../src/pinSetupPrompt';
 import Svg, { Circle } from 'react-native-svg';
@@ -1021,45 +1021,23 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
             <Text style={styles.memberName}>{member.name}{member.age && member.age > 0 ? `, ${member.age}` : ''}</Text>
             <Text style={styles.statusEmoji}>{dot}</Text>
           </View>
-          {/* Build #57 — Location Sharing OFF renders a dedicated
-              privacy row (lock + honest copy) INSTEAD of the pin
-              + fake-location line.  The pill is also swapped for
-              the neutral 🔒 state.  Rationale: caregivers should
-              never see even the *shape* of a location field when
-              a family member has opted out — no "📍 Location Sharing
-              Off" clunky repeat, no green Tracking Healthy fallback. */}
+          {/* Build XX — Location Sharing OFF: keep the privacy lock row.
+              When sharing is enabled: show factual location freshness —
+              no tracking badge, no color-coded health signal. */}
           {(member as any).location_sharing_enabled === false ? (
             <Text style={styles.memberMetaPrivacy} testID={`member-privacy-off-${member.id}`}>
               🔒 Location Sharing Off
             </Text>
           ) : (
             <>
-              <Text style={styles.memberMeta}>📍 {member.location_name || 'Unknown'}</Text>
+              <Text style={styles.memberMetaLastKnown}>📍 Last known location</Text>
+              <Text style={styles.memberMeta}>{member.location_name || 'Unknown'}</Text>
               {member.last_seen ? (
-                <Text style={styles.memberMetaAge}>{formatLastSeenAge(member.last_seen)}</Text>
+                <Text style={styles.memberMetaFreshness}>
+                  Updated {formatLastSeenAge(member.last_seen)}
+                </Text>
               ) : null}
             </>
-          )}
-          {/* Build 54 — status-first design.  The tracking pill is the
-              only tracking signal shown on the dashboard card.  Timestamps
-              have been moved to Diagnostics; the pill stays green while
-              a silent refresh is in flight (background refresh is normal
-              operation, not a health issue).
-              Build #56 — locationSharingEnabled flows through so the
-              pill renders "🔒 Location sharing off" whenever the member
-              has intentionally disabled sharing, no green/yellow/red
-              confusion. */}
-          {(member as any).location_sharing_enabled === false ? null : (
-            <TrackingStatusPill
-              hasCoords={typeof member.latitude === 'number' && typeof member.longitude === 'number'}
-              lastSeenIso={member.last_seen}
-              locationSharingEnabled={(member as any).location_sharing_enabled}
-              isMoving={(member as any).is_moving ?? null}
-              screen="dashboard-card"
-              size="compact"
-              style={styles.cardStatusPill}
-              testID={`member-tracking-status-${member.id}`}
-            />
           )}
           {/* Build #59 — hide the medication chip row entirely when
               there's no medication schedule at all.  Previously the
@@ -1177,8 +1155,11 @@ const styles = StyleSheet.create({
   nameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   memberName: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
   statusEmoji: { fontSize: 12 },
-  memberMeta: { fontSize: 13, color: Colors.textTertiary, marginTop: 2 },
+  memberMeta: { fontSize: 13, color: Colors.textTertiary, marginTop: 1 },
   memberMetaAge: { fontSize: 11, color: Colors.textTertiary, marginTop: 1, opacity: 0.75 },
+  // Build XX — freshness-first family card labels.
+  memberMetaLastKnown: { fontSize: 11, color: Colors.textTertiary, marginTop: 2, fontWeight: '600' },
+  memberMetaFreshness: { fontSize: 13, color: Colors.primary, fontWeight: '700', marginTop: 2 },
   // Build #57 — Location Sharing Off row: neutral grey lock + honest
   // copy, replaces the "📍 Location Name" line entirely so caregivers
   // can't misread a private member as tracking-healthy.

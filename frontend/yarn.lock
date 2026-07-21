@@ -4003,6 +4003,11 @@ expo-asset@~12.0.13:
     "@expo/image-utils" "^0.8.8"
     expo-constants "~18.0.13"
 
+expo-battery@~10.0.8:
+  version "10.0.8"
+  resolved "http://package-firewall.replit.local/npm/expo-battery/-/expo-battery-10.0.8.tgz#27135dcf9a80af90daefa7f2d0477e45728cb367"
+  integrity sha512-4rwg603XNEnMO5XnM0exq3JJMrJmJcQJegh6lkobLUDZPGHXwxE+4b9kDcYcW8+m2v1BenUnr8tNVla6llYQUA==
+
 expo-blur@~15.0.8:
   version "15.0.8"
   resolved "https://registry.yarnpkg.com/expo-blur/-/expo-blur-15.0.8.tgz#846cea275a6644639c5c338987b4cca54cf93eca"
