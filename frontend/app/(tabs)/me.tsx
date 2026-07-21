@@ -932,12 +932,10 @@ export default function MeScreen() {
             label="OTA Status"
             value={buildInfo.otaStatus}
           />
-          {buildInfo.otaId ? (
-            <ReadRow
-              label="OTA ID"
-              value={buildInfo.otaId}
-            />
-          ) : null}
+          <ReadRow
+            label="OTA ID"
+            value={buildInfo.otaId ?? 'Embedded (no OTA applied)'}
+          />
           {buildInfo.otaPublished ? (
             <ReadRow
               label="Published"
