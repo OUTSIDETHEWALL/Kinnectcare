@@ -28,7 +28,7 @@ module.exports = ({ config }) => ({
   expo: {
     name: 'Kinnship',
     slug: 'kinnship',
-    version: '1.2.0',
+    version: '1.3.0',
     runtimeVersion: { policy: 'appVersion' },
     updates: {
       url: 'https://u.expo.dev/11cb65a8-eab0-4745-9b4a-7b8964805381',
@@ -73,7 +73,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 61, // Build 61 — INVITATION FINAL POLISH + BLANK NOTIFICATION KILL + REAL SHIELD NOTIFICATION ICON. Three device-QA findings from Build 60 addressed. (P1 GHOST INVITATION PENDING) Backend self-heal in GET /family-group/invites auto-transitions any pending invite whose invitee_email is already a member of the family to "accepted" on read.  Plus client-side name-clash belt in dashboard.tsx.  Ghost card permanently gone from DB after next dashboard focus. (P2 BLANK NOTIFICATIONS) Refresh push throttle bumped 30s → 5 min per member, and a comprehensive [push-outbound] audit log now traces every send_expo_push at INFO with source_tag, type, channel, priority, and title/body previews so any future phantom push can be pinpointed in Railway logs. (P3 REAL SHIELD ICON) Investigation of Charles's Build 60 QA revealed TWO things: (a) the app's LAUNCHER icon `kinnship-icon-1024.png` is literally a green square with a white letter "K" — that IS the "K" being shown, not a fallback, and (b) the prior notification icon `kinnship-notification-icon-v2.png` was technically monochrome but rendered as an unrecognizable white blob at status-bar size.  Generated a proper monochrome shield-with-checkmark asset `kinnship-notification-icon-shield.png` (192×192 RGBA, pure white on transparent, alpha-thresholded at 90 to eliminate mid-grey OEM-render inconsistency, recognizable shield outline + bold checkmark that reads clearly at 24-32px).  New filename forces Android to rebuild the drawable resource on first launch of the new AAB.  Backend regression: 13/13 tests pass.
+      versionCode: 62, // Build 62 — New native baseline. expo-battery compiled into binary (runtime 1.3.0). Battery level + charging state reporting. Incorporates all OTA improvements since Build 61: family screen simplification, geocoder instrumentation, location refresh improvements, replay suppression, GPS path 2 recovery, diagnostics enhancements, low-battery push notification, member detail battery display.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
