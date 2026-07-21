@@ -4960,6 +4960,105 @@ async def _migrate_alerts_backfill_v50():
         logger.warning(f"alerts backfill migration skipped: {e}")
 
 
+# =========================================================================
+# Build 62 — One-time ghost-invite heal migration.
+#
+# Problem: the Build #61 live ghost-heal inside GET /family-group/invites
+# had no minimum-age guard.  The moment Charles opened the invites screen
+# after creating a fresh invite for an existing family member, the GET
+# handler consumed the brand-new token — before the recipient could ever
+# enter it.  Backend correctly rejected it as "already used."
+#
+# Fix: the live heal is removed from the GET endpoint entirely.  GET must
+# never mutate state.  All remaining historical ghost-pending invites
+# (left by the pre-Build-59 bookkeeping gap) are cleaned up here, once,
+# at startup.
+#
+# Safety model:
+#   A. SENTINEL DOC — migration short-circuits on every subsequent boot.
+#   B. MINIMUM AGE (24 h) — only heals invites created more than 24 hours
+#      before this boot.  Any invite created after this deployment is
+#      never touched, even if the sentinel were somehow deleted and the
+#      migration re-ran.
+# =========================================================================
+MIGRATION_ID_INVITE_GHOST_HEAL_V62 = "invite_ghost_heal_v62"
+
+
+@app.on_event("startup")
+async def _migrate_invite_ghost_heal_v62():
+    try:
+        # Safeguard A — sentinel doc.
+        if await db.migrations.find_one({"_id": MIGRATION_ID_INVITE_GHOST_HEAL_V62}):
+            return
+
+        now = datetime.now(timezone.utc)
+        # Safeguard B — minimum age: only touch invites older than 24 h.
+        age_cutoff = now - timedelta(hours=24)
+
+        pending = await db.family_invites.find(
+            {"status": "pending", "created_at": {"$lt": age_cutoff}},
+            {"_id": 0, "id": 1, "invitee_email": 1, "family_group_id": 1},
+        ).to_list(10_000)
+
+        if not pending:
+            await db.migrations.update_one(
+                {"_id": MIGRATION_ID_INVITE_GHOST_HEAL_V62},
+                {"$set": {"_id": MIGRATION_ID_INVITE_GHOST_HEAL_V62,
+                           "run_at": now, "healed": 0}},
+                upsert=True,
+            )
+            return
+
+        # Group by family_group_id so we fetch member emails once per group.
+        groups: dict[str, list[dict]] = {}
+        for inv in pending:
+            gid = inv.get("family_group_id")
+            if gid and inv.get("invitee_email"):
+                groups.setdefault(gid, []).append(inv)
+
+        healed = 0
+        for gid, invites in groups.items():
+            member_emails: set[str] = set()
+            async for u in db.users.find(
+                {"family_group_id": gid}, {"_id": 0, "email": 1}
+            ):
+                em = (u.get("email") or "").lower().strip()
+                if em:
+                    member_emails.add(em)
+
+            for inv in invites:
+                iv_email = (inv.get("invitee_email") or "").lower().strip()
+                if not iv_email or iv_email not in member_emails:
+                    continue
+                try:
+                    res = await db.family_invites.update_one(
+                        {"id": inv["id"], "status": "pending"},
+                        {"$set": {"status": "accepted", "accepted_at": now}},
+                    )
+                    if res.modified_count:
+                        healed += 1
+                        logger.info(
+                            f"[invite-ghost-heal-v62] healed {iv_email} "
+                            f"(id={inv['id']}, group={gid[:8]})"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[invite-ghost-heal-v62] failed for {inv['id']}: {e}"
+                    )
+
+        await db.migrations.update_one(
+            {"_id": MIGRATION_ID_INVITE_GHOST_HEAL_V62},
+            {"$set": {"_id": MIGRATION_ID_INVITE_GHOST_HEAL_V62,
+                       "run_at": now, "healed": healed}},
+            upsert=True,
+        )
+        logger.info(
+            f"[invite-ghost-heal-v62] complete — healed {healed} ghost invite(s)"
+        )
+    except Exception as e:
+        logger.warning(f"[invite-ghost-heal-v62] migration skipped: {e}")
+
+
 @app.on_event("startup")
 async def _migrate_iso_string_timestamps_to_date():
     """One-time migration: convert string-typed `created_at` to BSON Date.

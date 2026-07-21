@@ -5,3 +5,4 @@
 - [Motion Timeline instrumentation](motion-timeline-instrumentation.md) — Build 64: onActivityChange listener + sdk_config_snapshot added; Motion Timeline section in Diagnostics.
 - [Geocoding architecture decision](geocoding-architecture-decision.md) — backend geocoding is the planned long-term solution; AsyncStorage cache explicitly ruled out by Charles.
 - [Native module OTA rule](native-module-ota-rule.md) — top-level import of a package with native code in an OTA-only update crashes the bundle at module-eval time; Expo rollback does NOT save you.
+- [Replit yarn.lock proxy contamination](replit-yarn-proxy.md) — Replit env vars poison yarn.lock resolved: URLs; fix is `yarn build:android` (never raw `eas build`); scripts/normalize-lockfile.sh.
