@@ -194,6 +194,8 @@ async def ensure_self_member_row(
     user: dict,
     group_id: str,
     invite_doc: Optional[dict] = None,
+    *,
+    caller: str = "unknown",
 ) -> dict:
     """Build #59 hotfix — guarantee a self-member row exists for ``user``
     in ``group_id``.  Idempotent, safe to call multiple times.
@@ -230,6 +232,13 @@ async def ensure_self_member_row(
     Returns the members document (either pre-existing or freshly
     inserted).  The response is a plain ``dict`` (no ``_id``) matching
     the shape the ``/members`` endpoint returns to clients.
+
+    Args:
+      caller: short label identifying the call site, e.g. "login_heal",
+              "signup_invite", "join".  Included in the INFO log that is
+              emitted only when a row is actually created — never on the
+              no-op path — so we can track whether missing rows are a
+              one-time historical issue or something that recurs.
     """
     if not user or not group_id:
         return {}
@@ -243,6 +252,10 @@ async def ensure_self_member_row(
         {"_id": 0},
     )
     if existing:
+        logger.debug(
+            f"[member-row] no-op (row exists) — "
+            f"user={uid[:8]} group={group_id[:8]} caller={caller}"
+        )
         return existing
 
     role = None
@@ -295,8 +308,9 @@ async def ensure_self_member_row(
     # Strip the Mongo _id in case the driver injected one.
     doc.pop("_id", None)
     logger.info(
-        f"[invite-accept] self-member row auto-created for user={uid} "
-        f"in group={group_id} (role={role}, relationship={relationship!r})"
+        f"[member-row] REPAIRED missing row — "
+        f"user={uid[:8]} group={group_id[:8]} "
+        f"caller={caller} role={role} relationship={relationship!r}"
     )
     return doc
 
@@ -756,7 +770,7 @@ def build_router(
         # /members and sees the new row).  See ensure_self_member_row
         # docstring for the full failure-mode analysis.
         try:
-            await ensure_self_member_row(db, current, target["id"], accepted_invite)
+            await ensure_self_member_row(db, current, target["id"], accepted_invite, caller="join")
         except Exception as e:
             logger.error(
                 f"ensure_self_member_row (join path) FAILED — "
