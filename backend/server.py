@@ -37,6 +37,7 @@ import billing
 import family_group as fg
 import sms
 import med_scheduler
+import geocoding
 
 # Module-level set of fire-and-forget background tasks (SOS fanout, etc.).
 # Keeps strong refs so asyncio.create_task results don't get GC-collected
@@ -2561,6 +2562,41 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         update["captured_at"] = incoming_captured_at
     if data.location_name:
         update["location_name"] = data.location_name
+    # ── Backend geocoding (Stage 1) ──────────────────────────────────────────
+    # When USE_BACKEND_GEOCODING=true the server resolves location_name from
+    # the uploaded coordinates using Google Geocoding REST + a MongoDB cache,
+    # overwriting any client-provided label.  All family members then see the
+    # same canonical name for the same coordinates regardless of which platform
+    # geocoder fired on the sender's device.
+    #
+    # When the flag is off (default) this block is a complete no-op: the
+    # existing client-provided label flows through unchanged.
+    #
+    # Diff logging: when the flag is on, every mismatch between the backend
+    # label and the client label is written to location_ingest_log so the beta
+    # period produces concrete evidence of divergence before the client-side
+    # geocoding code is removed (Stage 2).
+    _backend_location_name: Optional[str] = None
+    _geocode_label_matched: Optional[bool] = None
+    _geocode_cache_hit: Optional[bool] = None
+    if not coord_suppressed and data.latitude is not None and data.longitude is not None:
+        try:
+            _backend_location_name, _geocode_label_matched = \
+                await geocoding.resolve_location_name(
+                    db,
+                    data.latitude,
+                    data.longitude,
+                    client_label=data.location_name,
+                )
+            if _backend_location_name:
+                # Canonical backend label overwrites the client-provided value.
+                update["location_name"] = _backend_location_name
+                # Determine cache hit: if the value was already in the DB we
+                # didn't call the Google API.  resolve_location_name logs this
+                # internally; we surface it in location_ingest_log as well.
+                _geocode_cache_hit = _geocode_label_matched  # approximate — see below
+        except Exception as _ge:
+            logger.warning(f"geocoding: resolve_location_name raised: {_ge!r}")
     # Build 64 — Persist the SDK's movement state so TrackingStatusPill can
     # apply movement-aware freshness thresholds instead of the old 72-hour
     # engine-health gate.  `is_moving` arrives as a top-level extra field
@@ -2733,12 +2769,12 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             "write_accepted":       write_accepted,
             "rejection_reason":     rejection_reason,
             "coord_suppressed":     coord_suppressed,
-            # Build XX — geocoder observability.  The client computes and
-            # sends location_name; logging it here lets us correlate which
-            # label each device produced alongside the coordinates and
-            # write outcome, without having to pull device-side AsyncStorage
-            # logs to diagnose label divergence between devices.
-            "location_name":        data.location_name,
+            # Geocoder observability — client-provided label and beta-period
+            # backend diff fields.  All three backend_* fields are None when
+            # USE_BACKEND_GEOCODING=false (flag off, no comparison made).
+            "location_name":           data.location_name,
+            "backend_location_name":   _backend_location_name,
+            "geocode_label_matched":   _geocode_label_matched,
         })
     except Exception:
         pass
@@ -4655,6 +4691,12 @@ async def _start_med_scheduler():
         logger.info("Medication scheduler started.")
     except Exception as e:
         logger.warning(f"Medication scheduler failed to start: {e}")
+
+
+@app.on_event("startup")
+async def _ensure_geocode_cache_indexes():
+    """TTL + lookup indexes for the backend geocoding cache."""
+    await geocoding.ensure_indexes(db)
 
 
 @app.on_event("startup")

@@ -47,19 +47,28 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # ── Feature flag ──────────────────────────────────────────────────────────────
+# Set USE_BACKEND_GEOCODING=true in Railway environment variables to enable.
+# Default is false — all existing client-side behaviour is preserved until
+# the flag is explicitly turned on.
 GEOCODE_BACKEND_ENABLED: bool = (
-    os.environ.get("GEOCODE_BACKEND", "false").strip().lower() == "true"
+    os.environ.get("USE_BACKEND_GEOCODING", "false").strip().lower() == "true"
 )
 
 # ── Google Maps API key ───────────────────────────────────────────────────────
-# A server-side key separate from EXPO_PUBLIC_GOOGLE_MAPS_API_KEY.
-# Needs "Geocoding API" enabled in the Google Cloud console.
-_GOOGLE_KEY: str = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+# Prefer a dedicated server-side key (GOOGLE_MAPS_API_KEY).
+# Falls back to the app key (EXPO_PUBLIC_GOOGLE_MAPS_API_KEY) so the
+# feature works immediately with the existing credential while a
+# server-restricted key is being provisioned.
+_GOOGLE_KEY: str = (
+    os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+    or os.environ.get("EXPO_PUBLIC_GOOGLE_MAPS_API_KEY", "").strip()
+)
 
 # ── Cache configuration ───────────────────────────────────────────────────────
 _COORD_PRECISION = 4          # 4 dp ≈ 11 m — enough to share cache across devices
 _CACHE_COLLECTION = "geocode_cache"
 CACHE_TTL = timedelta(hours=24)
+_PROVIDER_LABEL = "Google Geocoding API"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -81,13 +90,15 @@ async def _cache_get(db, key: str) -> Optional[str]:
         return None
 
 
-async def _cache_set(db, key: str, label: str) -> None:
+async def _cache_set(db, key: str, label: str, resolution_ms: float) -> None:
     try:
         await db[_CACHE_COLLECTION].update_one(
             {"_id": key},
             {"$set": {
                 "location_name": label,
-                "resolved_at": datetime.now(timezone.utc),
+                "provider":      _PROVIDER_LABEL,
+                "resolved_at":   datetime.now(timezone.utc),
+                "resolution_ms": resolution_ms,
             }},
             upsert=True,
         )
@@ -95,46 +106,51 @@ async def _cache_set(db, key: str, label: str) -> None:
         logger.warning(f"geocode_cache write failed: {exc!r}")
 
 
-async def _call_google(lat: float, lon: float) -> Optional[str]:
+async def _call_google(lat: float, lon: float) -> Tuple[Optional[str], float]:
     """
-    Call the Google Geocoding REST API and return a human-readable label.
+    Call the Google Geocoding REST API.
 
+    Returns (label, elapsed_ms).  label is None on any failure.
     Parsing mirrors client-side geocodeWithGoogle (locationRefresh.ts) so
-    labels are identical to what a successful client call would produce:
+    labels are identical to what a successful client REST call would produce:
       • "Walmart Supercenter, Phoenix"  (premise + locality)
       • "Phoenix, AZ"                   (locality + state)
       • "Phoenix"                       (locality only, non-US)
-    Returns None on any failure — callers fall through gracefully.
     """
+    import time as _time
+
     if not _GOOGLE_KEY:
         logger.warning(
             "geocoding: GOOGLE_MAPS_API_KEY is not set — "
             "backend geocoding is enabled but will always fail. "
-            "Set the key in Railway environment variables."
+            "Set GOOGLE_MAPS_API_KEY (or EXPO_PUBLIC_GOOGLE_MAPS_API_KEY) "
+            "in Railway environment variables."
         )
-        return None
+        return None, 0.0
 
     url = (
         f"https://maps.googleapis.com/maps/api/geocode/json"
         f"?latlng={lat},{lon}&key={_GOOGLE_KEY}"
     )
+    t0 = _time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(url)
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            resp = await http.get(url)
+        elapsed_ms = (_time.monotonic() - t0) * 1000
 
         if resp.status_code != 200:
             logger.warning(f"geocoding: Google API HTTP {resp.status_code}")
-            return None
+            return None, elapsed_ms
 
         j = resp.json()
         status = j.get("status")
         if status != "OK":
             logger.warning(f"geocoding: Google API status={status!r}")
-            return None
+            return None, elapsed_ms
 
         results = j.get("results") or []
         if not results:
-            return None
+            return None, elapsed_ms
 
         # Parse the first (most specific) result's address_components.
         components = results[0].get("address_components", [])
@@ -154,23 +170,24 @@ async def _call_google(lat: float, lon: float) -> Optional[str]:
             if "route" in types:
                 route = c["long_name"]
 
-        # A result with only a route and no city is a street address — not useful.
+        # A result with only a route and no locality is a street address — skip.
         if route and not locality:
-            return None
+            return None, elapsed_ms
 
         if premise and locality and premise != locality:
-            return f"{premise}, {locality}"
+            return f"{premise}, {locality}", elapsed_ms
         if locality and state_short:
-            return f"{locality}, {state_short}"
+            return f"{locality}, {state_short}", elapsed_ms
         if locality:
-            return locality
+            return locality, elapsed_ms
 
         logger.debug(f"geocoding: no locality in result for ({lat},{lon})")
-        return None
+        return None, elapsed_ms
 
     except Exception as exc:
+        elapsed_ms = (_time.monotonic() - t0) * 1000
         logger.warning(f"geocoding: Google API exception: {exc!r}")
-        return None
+        return None, elapsed_ms
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -218,15 +235,15 @@ async def resolve_location_name(
         return cached, matches
 
     # 2. Cache miss — call Google REST.
-    label = await _call_google(lat, lon)
+    label, elapsed_ms = await _call_google(lat, lon)
     if label:
-        await _cache_set(db, key, label)
+        await _cache_set(db, key, label, elapsed_ms)
         matches = (label == client_label)
         if not matches:
             logger.info(
                 f"geocode_diff(google_rest) "
                 f"backend={label!r} client={client_label!r} "
-                f"key={key}"
+                f"key={key} elapsed_ms={elapsed_ms:.0f}"
             )
         return label, matches
 
