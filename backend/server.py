@@ -1828,6 +1828,30 @@ async def verify_otp(data: OtpVerify):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
 
     await fg.ensure_family_group(db, user)
+
+    # Login-path member-row heal — idempotent, cheap (one findOne, one
+    # optional insert).  The signup paths (new user + invite, new user
+    # solo) already call ensure_self_member_row.  The LOGIN path did not,
+    # leaving any user whose members row was never created (or was lost)
+    # permanently invisible on the dashboard: send_invite correctly sees
+    # them in db.users and returns "already_member", but /members returns
+    # nothing because it reads db.members.
+    #
+    # Fix: call ensure_self_member_row for every login where the user
+    # already has a family_group_id.  If the row exists this is a no-op.
+    # If it was missing (Joyce's exact situation), it is created here so
+    # the dashboard reflects the correct membership on the very next poll.
+    gid_for_heal = user.get("family_group_id")
+    if gid_for_heal:
+        try:
+            await fg.ensure_self_member_row(db, user, gid_for_heal, None)
+        except Exception as _heal_err:
+            logger.error(
+                f"ensure_self_member_row (login heal) FAILED — "
+                f"user={user.get('id','?')[:8]} group={gid_for_heal[:8]}: {_heal_err}",
+                exc_info=True,
+            )
+
     return TokenResponse(
         access_token=create_access_token(user["id"]),
         user=_user_response(user),
@@ -5418,9 +5442,16 @@ async def _heal_missing_self_member_rows():
                     exc_info=True,
                 )
         logger.info(
-            f"Build #62 heal: scanned {n_users} users, created missing "
-            f"self-member rows for {n_healed}"
+            f"[startup] self-member-row heal: scanned {n_users} users, "
+            f"created missing rows for {n_healed}"
         )
+        # Write result to migrations so we can verify it ran and what it found.
+        await db.migrations.insert_one({
+            "key": "self_member_row_heal",
+            "scanned": n_users,
+            "healed": n_healed,
+            "run_at": datetime.now(timezone.utc),
+        })
     except Exception as e:
         logger.warning(f"_heal_missing_self_member_rows skipped: {e}")
 
