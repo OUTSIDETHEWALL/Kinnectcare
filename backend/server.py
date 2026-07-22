@@ -1657,11 +1657,11 @@ async def verify_otp(data: OtpVerify):
             # motivated this hotfix.
             try:
                 await fg.ensure_self_member_row(
-                    db, doc, target_group["id"], accepted_invite
+                    db, doc, target_group["id"], accepted_invite, caller="signup_invite"
                 )
             except Exception as e:
                 logger.error(
-                    f"ensure_self_member_row (signup path) FAILED — "
+                    f"ensure_self_member_row (signup_invite) FAILED — "
                     f"user={user_id[:8]} group={target_group.get('id', '')[:8]}: {e}",
                     exc_info=True,
                 )
@@ -1724,15 +1724,11 @@ async def verify_otp(data: OtpVerify):
         # live reproduction script that surfaced the bug.
         try:
             await fg.ensure_self_member_row(
-                db, doc, doc["family_group_id"], accepted_invite
-            )
-            logger.info(
-                f"[signup] ensured self-member row for user={user_id[:8]} "
-                f"in group={doc['family_group_id'][:8]}"
+                db, doc, doc["family_group_id"], accepted_invite, caller="signup_solo"
             )
         except Exception as e:
             logger.error(
-                f"ensure_self_member_row (universal signup) FAILED — "
+                f"ensure_self_member_row (signup_solo) FAILED — "
                 f"user={user_id[:8]} group={doc.get('family_group_id', '')[:8]}: {e}",
                 exc_info=True,
             )
@@ -1794,11 +1790,11 @@ async def verify_otp(data: OtpVerify):
                             await db.family_groups.delete_one({"id": _old_gid})
                     try:
                         await fg.ensure_self_member_row(
-                            db, user, _ei_target["id"], _ei_accepted
+                            db, user, _ei_target["id"], _ei_accepted, caller="login_invite"
                         )
                     except Exception as _esm_err:
                         logger.error(
-                            f"ensure_self_member_row (login+invite path) FAILED — "
+                            f"ensure_self_member_row (login_invite) FAILED — "
                             f"user={user['id'][:8]} group={_ei_target.get('id','')[:8]}: "
                             f"{_esm_err}",
                             exc_info=True,
@@ -1844,10 +1840,10 @@ async def verify_otp(data: OtpVerify):
     gid_for_heal = user.get("family_group_id")
     if gid_for_heal:
         try:
-            await fg.ensure_self_member_row(db, user, gid_for_heal, None)
+            await fg.ensure_self_member_row(db, user, gid_for_heal, None, caller="login_heal")
         except Exception as _heal_err:
             logger.error(
-                f"ensure_self_member_row (login heal) FAILED — "
+                f"ensure_self_member_row (login_heal) FAILED — "
                 f"user={user.get('id','?')[:8]} group={gid_for_heal[:8]}: {_heal_err}",
                 exc_info=True,
             )
@@ -5434,7 +5430,7 @@ async def _heal_missing_self_member_rows():
                 continue
             # No self-member row — heal it.
             try:
-                await fg.ensure_self_member_row(db, u, gid, None)
+                await fg.ensure_self_member_row(db, u, gid, None, caller="startup_migration")
                 n_healed += 1
             except Exception as e:
                 logger.error(
