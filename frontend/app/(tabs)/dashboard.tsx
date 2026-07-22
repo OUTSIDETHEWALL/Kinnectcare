@@ -43,6 +43,23 @@ import * as Haptics from 'expo-haptics';
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 const SOS_FAB_SIZE = 114; // accessibility: ~30% larger than original 88dp for tremor / dexterity users
+
+// ── Embedded map preview ──────────────────────────────────────────────────────
+// Uses the Google Static Maps API (a plain image URL) rather than a WebView so
+// multiple cards in a ScrollView don't each spin up a JS runtime.  One HTTP
+// request per unique lat/lon pair; React Native's Image caches by URL so the
+// same tile is not re-fetched on every render.  Size 600×280 at scale=2 renders
+// at 300×140 logical pixels — within the sprint's 120–160 px target.
+const _STATIC_MAPS_KEY = (process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || '').trim();
+function buildStaticMapUrl(lat: number, lon: number): string {
+  const marker = encodeURIComponent(`color:0x1B5E35|${lat},${lon}`);
+  return (
+    `https://maps.googleapis.com/maps/api/staticmap` +
+    `?center=${lat},${lon}&zoom=15&size=600x280&scale=2` +
+    `&markers=${marker}` +
+    `&key=${_STATIC_MAPS_KEY}`
+  );
+}
 const SOS_RING_SIZE = 134; // FAB + 10 px gap each side for the progress ring
 const SOS_RING_RADIUS = 64; // (SOS_RING_SIZE / 2) - (strokeWidth / 2)
 const SOS_CIRCUMFERENCE = 2 * Math.PI * SOS_RING_RADIUS; // ≈ 402.1
@@ -1082,6 +1099,34 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
           )}
         </View>
       </TouchableOpacity>
+
+      {/* Embedded map preview — only when location sharing is on.
+          Tapping navigates to the member detail screen (same as the
+          card's main press target) which hosts the full interactive map.
+          No new GPS polling: lat/lon come from the member object already
+          fetched for this render.  No new geocoding: location_name is
+          already resolved and shown in the text row above. */}
+      {(member as any).location_sharing_enabled !== false && (
+        <TouchableOpacity
+          testID={`member-map-preview-${member.id}`}
+          onPress={onPress}
+          activeOpacity={0.92}
+          style={styles.mapPreviewWrap}
+        >
+          {member.latitude != null && member.longitude != null ? (
+            <Image
+              source={{ uri: buildStaticMapUrl(member.latitude, member.longitude) }}
+              style={styles.mapPreviewImg}
+              resizeMode="cover"
+            />
+          ) : (
+            <View style={styles.mapPlaceholder}>
+              <Text style={styles.mapPlaceholderText}>📍 Location unavailable</Text>
+            </View>
+          )}
+        </TouchableOpacity>
+      )}
+
       {onCheckIn && (
         <TouchableOpacity
           testID={`member-checkin-${member.id}`}
@@ -1190,6 +1235,16 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   checkinPillText: { color: Colors.surface, fontWeight: '700', fontSize: 14 },
+  mapPreviewWrap: {
+    marginTop: 12, borderRadius: 12, overflow: 'hidden', height: 140,
+  },
+  mapPreviewImg: { width: '100%', height: 140 },
+  mapPlaceholder: {
+    height: 140, borderRadius: 12,
+    backgroundColor: Colors.tertiary,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  mapPlaceholderText: { color: Colors.textTertiary, fontSize: 13, fontWeight: '600' },
   empty: { alignItems: 'center', padding: 24, marginHorizontal: 24, marginTop: 8 },
   emptyText: { color: Colors.textTertiary, marginTop: 8, textAlign: 'center' },
   sosFabContainer: {
