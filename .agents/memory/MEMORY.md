@@ -3,6 +3,6 @@
 - [Notification explainability rule](notification-explainability-rule.md) — permanent rule: every notification must answer 5 questions (why sent, who, why visible, why then, why once); applies at PR review for all push-related files.
 - [GPS capture timestamp guard](location-timestamp-guard.md) — Build 60: atomic MongoDB $lt guard prevents SDK buffer-replay from overwriting current location; last_seen always written for Leonidas.
 - [Motion Timeline instrumentation](motion-timeline-instrumentation.md) — Build 64: onActivityChange listener + sdk_config_snapshot added; Motion Timeline section in Diagnostics.
-- [Geocoding architecture decision](geocoding-architecture-decision.md) — backend geocoding is the planned long-term solution; AsyncStorage cache explicitly ruled out by Charles.
+- [Geocoding architecture decision](geocoding-architecture-decision.md) — backend geocoding LIVE in production (flag_enabled=True, dedicated Railway key); Stage 2 scope and logging quirk documented.
 - [Native module OTA rule](native-module-ota-rule.md) — top-level import of a package with native code in an OTA-only update crashes the bundle at module-eval time; Expo rollback does NOT save you.
 - [Replit yarn.lock proxy contamination](replit-yarn-proxy.md) — Replit env vars poison yarn.lock resolved: URLs; fix is `yarn build:android` (never raw `eas build`); scripts/normalize-lockfile.sh.
