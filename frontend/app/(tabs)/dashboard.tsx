@@ -681,7 +681,7 @@ export default function Dashboard() {
         {seniors.map(m => (
           <MemberCard key={m.id} member={m} sum={sumOf(m.id)} isSenior
             onPress={() => router.push(`/member/${m.id}`)}
-            onCheckIn={() => quickCheckIn(m)}
+            onCheckIn={m.user_id === user?.id ? () => quickCheckIn(m) : undefined}
           />
         ))}
 
@@ -689,7 +689,7 @@ export default function Dashboard() {
         {family.map(m => (
           <MemberCard key={m.id} member={m} sum={sumOf(m.id)}
             onPress={() => router.push(`/member/${m.id}`)}
-            onCheckIn={() => quickCheckIn(m)}
+            onCheckIn={m.user_id === user?.id ? () => quickCheckIn(m) : undefined}
           />
         ))}
 
@@ -947,7 +947,7 @@ function PendingInviteCard({
 
 function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
   member: Member; sum?: MemberSummary; isSenior?: boolean;
-  onPress: () => void; onCheckIn: () => void;
+  onPress: () => void; onCheckIn?: () => void;
 }) {
   const initials = member.name.split(' ').map(s => s[0]).slice(0, 2).join('').toUpperCase();
   // Build #58 — Location Sharing overrides the health dot.  When a
@@ -1082,14 +1082,16 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
           )}
         </View>
       </TouchableOpacity>
-      <TouchableOpacity
-        testID={`member-checkin-${member.id}`}
-        onPress={onCheckIn}
-        activeOpacity={0.85}
-        style={styles.checkinPill}
-      >
-        <Text style={styles.checkinPillText}>✅ Check in</Text>
-      </TouchableOpacity>
+      {onCheckIn && (
+        <TouchableOpacity
+          testID={`member-checkin-${member.id}`}
+          onPress={onCheckIn}
+          activeOpacity={0.85}
+          style={styles.checkinPill}
+        >
+          <Text style={styles.checkinPillText}>✅ Check in</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
