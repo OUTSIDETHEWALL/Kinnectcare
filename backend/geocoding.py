@@ -64,6 +64,30 @@ _GOOGLE_KEY: str = (
     or os.environ.get("EXPO_PUBLIC_GOOGLE_MAPS_API_KEY", "").strip()
 )
 
+# ── Startup diagnostic ────────────────────────────────────────────────────────
+# Logs key presence and source at import time (server startup).
+# Never logs the key value — only its length as a fingerprint and which
+# env var supplied it.
+_key_source: str
+if os.environ.get("GOOGLE_MAPS_API_KEY", "").strip():
+    _key_source = "GOOGLE_MAPS_API_KEY"
+elif os.environ.get("EXPO_PUBLIC_GOOGLE_MAPS_API_KEY", "").strip():
+    _key_source = "EXPO_PUBLIC_GOOGLE_MAPS_API_KEY (fallback)"
+else:
+    _key_source = "MISSING"
+
+logger.info(
+    f"geocoding init: key={'present' if _GOOGLE_KEY else 'MISSING'} "
+    f"source={_key_source} "
+    f"key_len={len(_GOOGLE_KEY)} "
+    f"flag_enabled={GEOCODE_BACKEND_ENABLED}"
+)
+if not _GOOGLE_KEY:
+    logger.warning(
+        "geocoding: no API key found — backend geocoding will fail silently "
+        "until GOOGLE_MAPS_API_KEY is set in Railway environment variables."
+    )
+
 # ── Cache configuration ───────────────────────────────────────────────────────
 _COORD_PRECISION = 4          # 4 dp ≈ 11 m — enough to share cache across devices
 _CACHE_COLLECTION = "geocode_cache"
