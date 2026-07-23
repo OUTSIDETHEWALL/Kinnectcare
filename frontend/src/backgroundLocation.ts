@@ -23,6 +23,7 @@
  */
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
+import * as Battery from 'expo-battery';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { api } from './api';
@@ -301,11 +302,26 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
   // the GPS-fix age so we can spot OS deferred-update batching.
   const gpsAgeS = fresh.timestamp ? Math.round((now - fresh.timestamp) / 1000) : undefined;
 
+  // Battery telemetry — sampled fresh on every background heartbeat.
+  // Best-effort: never blocks the upload if expo-battery is unavailable.
+  let bgBatteryLevel: number | null = null;
+  let bgIsCharging: boolean | null = null;
   try {
-    const resp = await api.put(`/members/${memberId}/location`, {
+    bgBatteryLevel = await Battery.getBatteryLevelAsync();
+    const bgBatteryState = await Battery.getBatteryStateAsync();
+    bgIsCharging =
+      bgBatteryState === Battery.BatteryState.CHARGING ||
+      bgBatteryState === Battery.BatteryState.FULL;
+  } catch (_be) {}
+
+  try {
+    const bgPayload: Record<string, unknown> = {
       latitude: fresh.coords.latitude,
       longitude: fresh.coords.longitude,
-    });
+    };
+    if (bgBatteryLevel !== null) bgPayload.battery_level = bgBatteryLevel;
+    if (bgIsCharging !== null) bgPayload.is_charging = bgIsCharging;
+    const resp = await api.put(`/members/${memberId}/location`, bgPayload);
     // v1.2.6: capture the backend's post-write view of the row to
     // detect partial / wrong-doc writes from the OS-task context.
     const rd: any = resp?.data || {};
