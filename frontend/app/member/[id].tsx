@@ -62,6 +62,22 @@ export default function MemberDetail() {
     return () => clearInterval(t);
   }, []);
 
+  // CP7 — log the battery value at the moment it renders.  Fires whenever
+  // the store pushes a new member record to this screen.  If this log shows
+  // 0.72 while MongoDB has 0.68, the gap is between the API response and the
+  // store.  If it shows the correct value but the UI still looks wrong, the
+  // gap is in how the JSX reads battery_level from the record.
+  const _renderedBatteryLevel = (member as any)?.battery_level ?? null;
+  useEffect(() => {
+    if (member?.id) {
+      console.log(
+        `[batt_pipeline CP7_render] member_id=${member.id} ` +
+        `battery_level=${_renderedBatteryLevel} ` +
+        `is_charging=${(member as any)?.is_charging ?? null}`
+      );
+    }
+  }, [member?.id, _renderedBatteryLevel]);
+
   const load = async () => {
     try {
       // Build 47 — `/members/{id}` fetch routes through the canonical
