@@ -112,7 +112,8 @@ type BgTaskLogPhase =
   | 'upload-ok'
   | 'upload-fail'
   | 'sharing-off'
-  | 'battery-sampled'; // CP1 — battery read immediately after getBatteryLevelAsync()
+  | 'battery-sampled'  // CP1 — battery read immediately after getBatteryLevelAsync()
+  | 'battery-error';  // CP1-err — getBatteryLevelAsync() threw; error field has String(e)
 
 type BgTaskLogEntry = {
   t: number;
@@ -317,18 +318,30 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
     bgIsCharging =
       bgBatteryState === Battery.BatteryState.CHARGING ||
       bgBatteryState === Battery.BatteryState.FULL;
-  } catch (_be) {}
+  } catch (batteryErr) {
+    // CP1-err — surface the exception so we can see exactly what the OS
+    // threw.  Common causes: background runtime restriction (iOS), missing
+    // permission, or the module not being compiled into this build.
+    await appendBgLog({
+      t: now,
+      phase: 'battery-error',
+      memberId,
+      err: String(batteryErr),
+    });
+  }
 
   // CP1 — log immediately after sampling so we know what the OS gave us
-  // before the PUT is built.  If this entry shows null, the battery API
-  // is not available in this background context.
+  // before the PUT is built.  Possible outcomes:
+  //   normal float (0.0–1.0): API worked, value will be sent
+  //   -1: API reports "unsupported" on this platform/runtime
+  //   null: API threw (see battery-error entry above) or returned null
   await appendBgLog({
     t: now,
     phase: 'battery-sampled',
     memberId,
     batteryLevel: bgBatteryLevel,
     isCharging: bgIsCharging,
-    payloadIncludesBattery: bgBatteryLevel !== null,
+    payloadIncludesBattery: bgBatteryLevel !== null && bgBatteryLevel !== -1,
   });
 
   try {
