@@ -111,7 +111,8 @@ type BgTaskLogPhase =
   | 'lock-held'
   | 'upload-ok'
   | 'upload-fail'
-  | 'sharing-off';
+  | 'sharing-off'
+  | 'battery-sampled'; // CP1 — battery read immediately after getBatteryLevelAsync()
 
 type BgTaskLogEntry = {
   t: number;
@@ -138,6 +139,10 @@ type BgTaskLogEntry = {
   respLat?: number;
   respLon?: number;
   writeMismatch?: boolean;
+  // Battery pipeline instrumentation (CP1 + CP2).
+  batteryLevel?: number | null;      // raw value from getBatteryLevelAsync()
+  isCharging?: boolean | null;       // derived from getBatteryStateAsync()
+  payloadIncludesBattery?: boolean;  // true iff battery_level was sent in the PUT body
 };
 
 async function appendBgLog(entry: BgTaskLogEntry): Promise<void> {
@@ -314,6 +319,18 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
       bgBatteryState === Battery.BatteryState.FULL;
   } catch (_be) {}
 
+  // CP1 — log immediately after sampling so we know what the OS gave us
+  // before the PUT is built.  If this entry shows null, the battery API
+  // is not available in this background context.
+  await appendBgLog({
+    t: now,
+    phase: 'battery-sampled',
+    memberId,
+    batteryLevel: bgBatteryLevel,
+    isCharging: bgIsCharging,
+    payloadIncludesBattery: bgBatteryLevel !== null,
+  });
+
   try {
     const bgPayload: Record<string, unknown> = {
       latitude: fresh.coords.latitude,
@@ -356,6 +373,10 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
       respLat: typeof respLat === 'number' ? roundCoord(respLat) : undefined,
       respLon: typeof respLon === 'number' ? roundCoord(respLon) : undefined,
       writeMismatch,
+      // CP2 — confirm what was actually in the PUT payload.
+      batteryLevel: bgBatteryLevel,
+      isCharging: bgIsCharging,
+      payloadIncludesBattery: bgBatteryLevel !== null,
     });
   } catch (e: any) {
     // Silent in terms of UI — but persist the failure so we can

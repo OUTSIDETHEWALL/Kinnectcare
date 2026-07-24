@@ -254,6 +254,9 @@ export function upsertOne(incoming: MemberRecord, seq: number | null = null): vo
       newLocationName: (incoming as any).location_name ?? null,
       lastSeenDeltaMs: computeLastSeenDelta(prev?.last_seen, incoming.last_seen),
       droppedBySeq: false,
+      // CP6 — battery pipeline: prev vs new value entering the store.
+      prevBatteryLevel: (prev as any)?.battery_level ?? null,
+      newBatteryLevel: (incoming as any)?.battery_level ?? null,
     });
   } catch (_e) {}
 }

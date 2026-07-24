@@ -80,6 +80,9 @@ export type PipelineEntry = {
    * we know the protection is firing and how often.
    */
   droppedBySeq?: boolean;
+  // CP6 — battery pipeline: what the store held before vs after upsertOne.
+  prevBatteryLevel?: number | null;
+  newBatteryLevel?: number | null;
 
   // ── Batch write (store-upsert-many / store-fetch-all) ──────────────────
   /** Total members in the batch. */

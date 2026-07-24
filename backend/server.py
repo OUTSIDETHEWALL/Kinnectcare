@@ -2256,6 +2256,13 @@ async def delete_account(
 @api_router.get("/members", response_model=List[FamilyMember])
 async def list_members(current=Depends(get_current_user)):
     docs = await db.members.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).to_list(1000)
+    # CP5 — log what battery_level is in the GET /members response for each member.
+    for d in docs:
+        logger.info(
+            f"batt_pipeline CP5_api: requester={current.get('id')} "
+            f"member_id={d.get('id')} member_name={d.get('name')!r} "
+            f"battery_level={d.get('battery_level')} is_charging={d.get('is_charging')}"
+        )
     return [FamilyMember(**d) for d in docs]
 
 
@@ -2645,6 +2652,12 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         update["battery_level"] = max(0.0, min(1.0, data.battery_level))
     if data.is_charging is not None:
         update["is_charging"] = data.is_charging
+    # CP3 — log what the backend actually received in this PUT body.
+    logger.info(
+        f"batt_pipeline CP3_recv: member_id={member_id} "
+        f"battery_level={data.battery_level} is_charging={data.is_charging} "
+        f"in_update={'battery_level' in update}"
+    )
 
     # Build XX — Low battery one-shot notification.
     # Fires at most once per drop below 15%; resets when battery recovers
@@ -2734,6 +2747,12 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         write_accepted   = True
         rejection_reason = "replay_suppressed" if coord_suppressed else None
         doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+    # CP4 — log what MongoDB actually contains immediately after the write.
+    logger.info(
+        f"batt_pipeline CP4_mongo: member_id={member_id} "
+        f"stored_battery_level={doc.get('battery_level') if doc else 'NO_DOC'} "
+        f"write_accepted={write_accepted}"
+    )
 
     # Persist the ingest event — permanent diagnostic, not temporary
     # debugging.  Fields chosen to answer:
