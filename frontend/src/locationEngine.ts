@@ -575,7 +575,7 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
     maxBatchSize: 50,
     httpRootProperty: '.',
     locationTemplate:
-      '{"latitude":<%= latitude %>,"longitude":<%= longitude %>,"accuracy":<%= accuracy %>,"speed":<%= speed %>,"heading":<%= heading %>,"timestamp":"<%= timestamp %>","is_moving":<%= is_moving %>,"event":"<%= event %>","provider":"transistor"}',
+      '{"latitude":<%= latitude %>,"longitude":<%= longitude %>,"accuracy":<%= accuracy %>,"speed":<%= speed %>,"heading":<%= heading %>,"timestamp":"<%= timestamp %>","is_moving":<%= is_moving %>,"event":"<%= event %>","provider":"transistor","battery_level":<%= battery.level %>,"is_charging":<%= battery.is_charging %>}',
     headers: {
       'Content-Type': 'application/json',
     },

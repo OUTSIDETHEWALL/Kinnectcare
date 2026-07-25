@@ -2646,10 +2646,12 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     if raw_heading is not None:
         update["gps_heading"] = raw_heading
 
-    # Build XX — Battery telemetry.
-    # Clamp to [0, 1] in case a buggy SDK sends an out-of-range value.
-    if data.battery_level is not None:
-        update["battery_level"] = max(0.0, min(1.0, data.battery_level))
+    # Battery telemetry.
+    # Guard: reject -1 (SDK "unavailable" sentinel on some platforms/emulators)
+    # and any other out-of-range value before storing.  Clamp the upper bound
+    # to 1.0 so a misbehaving client can't write > 100%.
+    if data.battery_level is not None and data.battery_level >= 0:
+        update["battery_level"] = min(1.0, data.battery_level)
     if data.is_charging is not None:
         update["is_charging"] = data.is_charging
     # CP3 — log what the backend actually received in this PUT body.
