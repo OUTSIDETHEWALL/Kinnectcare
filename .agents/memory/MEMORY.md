@@ -7,3 +7,4 @@
 - [Native module OTA rule](native-module-ota-rule.md) — top-level import of a package with native code in an OTA-only update crashes the bundle at module-eval time; Expo rollback does NOT save you.
 - [Replit yarn.lock proxy contamination](replit-yarn-proxy.md) — Replit env vars poison yarn.lock resolved: URLs; fix is `yarn build:android` (never raw `eas build`); scripts/normalize-lockfile.sh.
 - [Battery sync — Transistor SDK architecture](battery-transistor-architecture.md) — battery/telemetry belongs in locationTemplate, not the TaskManager JS task; backend needs >= 0 guard against -1 sentinel.
+- [locationTemplate architecture decision](location-template-architecture.md) — agreed post-beta plan: remove locationTemplate, consume SDK native payload; battery comes free; no template variables needed.
