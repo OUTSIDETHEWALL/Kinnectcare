@@ -509,23 +509,23 @@ class LocationUpdate(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     location_name: Optional[str] = None
-    # Nested Transistor default-shape passthrough.  Never persisted; only
-    # inspected by the validator below to pull lat/lon out if the top-level
-    # values are missing.
-    coords: Optional[Dict[str, Any]] = None
+    # Nested Transistor default-shape passthroughs.  Never persisted;
+    # only inspected by the validator below to promote values into the
+    # top-level fields the rest of the handler reads.
+    coords:  Optional[Dict[str, Any]] = None
+    battery: Optional[Dict[str, Any]] = None
     # GPS capture time as sent by the Transistor SDK.
-    #   • Flat (locationTemplate) path: top-level ISO-8601 string,
-    #     e.g. "2026-07-15T13:48:37.000Z"
-    #   • Android nested fallback path (Build 50 edge-case): top-level
-    #     field on the SDK's default shape; also present as
-    #     coords.timestamp — top-level wins.
+    #   • Native SDK path: top-level ISO-8601 string.
     #   • JS-side heartbeat callers: absent — treated as None, falls
     #     back to unconditional write (pre-guard behaviour preserved).
     #   • Some SDK versions emit Unix epoch milliseconds (int/float)
     #     rather than ISO-8601 — both handled by captured_at below.
     timestamp: Optional[Union[str, int, float]] = None
-    # Build XX — Battery telemetry.  Sent by expo-battery on every
-    # foreground location refresh; absent on SDK-native uploads.
+    # Battery telemetry.
+    #   • Native SDK path:  promoted from battery.level / battery.is_charging
+    #     by the validator below.
+    #   • Foreground heartbeat path: sent as top-level fields directly.
+    #   Both paths converge here; everything downstream is unchanged.
     battery_level: Optional[float] = None   # 0.0–1.0
     is_charging:   Optional[bool]  = None   # True = plugged in / full
     # Silently accept everything else Transistor sends so unknown fields
@@ -533,9 +533,11 @@ class LocationUpdate(BaseModel):
     model_config = {"extra": "allow"}
 
     @model_validator(mode="after")
-    def _normalize_coords(self) -> "LocationUpdate":
-        # If flat lat/lon are missing but nested `coords.{lat,lon}` are
-        # present, promote them.  This is the Transistor-fallback path.
+    def _normalize_payload(self) -> "LocationUpdate":
+        # ---- Coordinates ----
+        # If flat lat/lon are missing but nested coords.{lat,lon} are
+        # present, promote them.  This is the Transistor native-payload path
+        # (and the Android offline-buffer fallback path from Build 50).
         if self.latitude is None or self.longitude is None:
             c = self.coords or {}
             if isinstance(c, dict):
@@ -545,15 +547,28 @@ class LocationUpdate(BaseModel):
                     self.latitude = float(lat_c)
                 if self.longitude is None and isinstance(lon_c, (int, float)):
                     self.longitude = float(lon_c)
-        # After promotion, BOTH must be numbers.  If either is still
-        # missing, we return a clear 422 with the same field-required
-        # error Pydantic would have produced pre-Build 50 — but now the
-        # trigger is a genuinely malformed body, not a legitimate
-        # Transistor upload with nested coords.
+        # After promotion, BOTH must be numbers.
         if self.latitude is None:
             raise ValueError("latitude is required (top-level or coords.latitude)")
         if self.longitude is None:
             raise ValueError("longitude is required (top-level or coords.longitude)")
+
+        # ---- Battery ----
+        # Native SDK payload sends { "battery": { "level": 0.85,
+        # "is_charging": false } } at the top level of the location object.
+        # Promote those into the declared fields only when the top-level
+        # fields are absent (so a client that sends both doesn't get
+        # overwritten by the nested values).
+        b = self.battery if isinstance(self.battery, dict) else {}
+        if self.battery_level is None:
+            raw = b.get("level")
+            if isinstance(raw, (int, float)):
+                self.battery_level = float(raw)
+        if self.is_charging is None:
+            raw = b.get("is_charging")
+            if isinstance(raw, bool):
+                self.is_charging = raw
+
         return self
 
     @property

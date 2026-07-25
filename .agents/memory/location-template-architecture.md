@@ -1,41 +1,63 @@
 ---
 name: locationTemplate architecture decision
-description: Why locationTemplate exists, what it costs, and the agreed plan to remove it after beta.
+description: Why locationTemplate existed, what replaced it, and the current production state.
 ---
 
-## Current state
+## Current state (as of OTA 019f9b71)
 
-`buildSdkConfig()` in `locationEngine.ts` sets a custom `locationTemplate` that produces a flat JSON body matching the backend's PUT `/members/{id}/location` contract:
+`locationTemplate` has been removed from `buildSdkConfig()`. The SDK now sends its
+native payload. The backend accepts both shapes simultaneously for backward
+compatibility during the OTA rollout window.
 
+## What the native SDK payload looks like
+
+```json
+{
+  "coords":  { "latitude": 47.6, "longitude": -122.3, "accuracy": 12, "speed": 0, "heading": 0 },
+  "battery": { "level": 0.85, "is_charging": false },
+  "is_moving": false,
+  "timestamp": "2026-07-25T14:00:00.000Z",
+  "event": "motionchange",
+  "uuid": "..."
+}
 ```
-{"latitude":<%= latitude %>,"longitude":<%= longitude %>,"accuracy":<%= accuracy %>,...,"provider":"transistor"}
-```
 
-## The problem with this approach
+## How the backend normalises both shapes
 
-`locationTemplate` replaces the SDK's entire default HTTP payload. The SDK's native payload includes `battery`, `activity`, `uuid`, `odometer`, and other fields automatically — all of which are silently discarded when a custom template is used. Adding those fields back via template requires ERB-style variable interpolation, which has a failure mode: if any variable is undefined (not null) in the template context, the rendered JSON is invalid and the SDK silently drops the upload.
+`LocationUpdate._normalize_payload()` in `server.py` promotes nested values to the
+top-level fields the rest of the handler reads:
 
-This is exactly what broke PR #65: `battery.level` and `battery.is_charging` are documented template variables, but under certain conditions in headless/getCurrentPosition context in v5.2.0, the upload transport stopped entirely. The template was the only change; reverting the battery fields restored uploads.
+- **Coordinates:** `coords.latitude` / `coords.longitude` → `latitude` / `longitude`
+  (Build 50, unchanged)
+- **Battery:** `battery.level` → `battery_level`, `battery.is_charging` → `is_charging`
+  (added alongside locationTemplate removal)
 
-## Agreed long-term plan
+Top-level values always win over nested ones, so a client that sends both (transition
+period) is never overwritten by the nested values.
 
-After beta stabilization (onboarding, reminders, SOS, core flows validated):
+## Why locationTemplate was introduced originally
 
-1. **Remove `locationTemplate` from `buildSdkConfig()` entirely.**
-2. The SDK will send its native nested payload:
-   ```json
-   { "location": { "coords": { "latitude": ..., "longitude": ... }, "battery": { "level": ..., "is_charging": ... }, ... } }
-   ```
-3. **Update the backend** (`server.py` PUT `/members/{id}/location`) to read from the nested SDK schema instead of the flat template schema.
-4. Battery sync comes for free — no template variables, no failure surface.
+Two reasons, neither battery-related:
+1. **Hardcoded `"provider":"transistor"` literal** — no SDK template variable exists
+   for a static string. The only way to inject it was to own the entire JSON shape.
+2. **Flat payload shape** — the backend was written expecting flat top-level fields;
+   the SDK's native shape nests everything under `coords`, `battery`, etc.
 
-**Why:** The SDK's native schema is richer, versioned by Transistor, and maintained. The custom template is a hand-rolled contract that must be kept in sync with the backend and breaks silently when template variables misbehave.
+## Why it was removed
 
-## What NOT to do in the meantime
+`locationTemplate` replaces the SDK's entire HTTP payload. Any template variable that
+is undefined (not null) in the SDK's render context produces invalid JSON and causes
+the upload to be silently dropped. PR #65 (battery fields in template) triggered this
+failure mode and stopped all background uploads. The native payload has no render step
+and no failure surface of this kind.
 
-- Do not add more fields to `locationTemplate` until the transport stability during beta is confirmed over multiple days.
-- Do not use `extras` + `setConfig()` as a battery workaround — timing race condition between config update and queued upload.
+`provider` was the only non-battery field injected by the template and is
+**diagnostic-only** — written to `location_ingest_log` and `location_history` but
+never used for business logic, notifications, or write guards. Its absence from native
+uploads is acceptable; those rows will show `null` for `provider`.
 
-## Battery investigation status
+## What NOT to do
 
-`battery.level` and `battery.is_charging` ARE officially supported template variables in v5.2.0. The cause of the upload stoppage is not yet confirmed — native log (`BackgroundGeolocation.logger.getLog()`) was not obtained. Investigate after beta if the template approach is revisited, or skip entirely in favor of the native-payload migration above.
+Do not re-introduce `locationTemplate` or add custom serialization of any kind. If a
+new field is needed from the SDK payload, extend `_normalize_payload()` to promote it
+from the nested structure — the same pattern used for coords and battery.

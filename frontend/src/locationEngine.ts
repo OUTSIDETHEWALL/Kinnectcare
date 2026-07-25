@@ -574,8 +574,9 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
     batchSync: false,
     maxBatchSize: 50,
     httpRootProperty: '.',
-    locationTemplate:
-      '{"latitude":<%= latitude %>,"longitude":<%= longitude %>,"accuracy":<%= accuracy %>,"speed":<%= speed %>,"heading":<%= heading %>,"timestamp":"<%= timestamp %>","is_moving":<%= is_moving %>,"event":"<%= event %>","provider":"transistor"}',
+    // No locationTemplate — the SDK's native payload is accepted directly.
+    // The backend normalises both flat and nested shapes so old clients
+    // and new clients can coexist during the OTA rollout window.
     headers: {
       'Content-Type': 'application/json',
     },
