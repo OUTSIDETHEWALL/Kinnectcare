@@ -47,7 +47,6 @@ def _collapse_id(data: dict) -> Optional[str]:
     Scheme mirrors stableNotificationId() in frontend/src/push.ts:
       medication self-due  → med_<reminder_id>_due
       medication family    → med_<reminder_id>_family
-      medication refill    → med_<reminder_id>_refill
       routine due          → rt_<reminder_id>_due
       sos                  → sos_<alert_id>
       missed_checkin       → miss_<member_id>
@@ -63,8 +62,6 @@ def _collapse_id(data: dict) -> Optional[str]:
     stage = data.get("stage") or data.get("subtype")
 
     if t == "medication" and rid:
-        if stage in ("refill",):
-            return f"med_{rid}_refill"
         if stage in ("family_alert",):
             return f"med_{rid}_family"
         return f"med_{rid}_due"

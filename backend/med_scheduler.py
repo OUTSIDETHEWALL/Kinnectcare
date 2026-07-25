@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 # ---------- Stages ----------
 STAGE_DUE = "due"
 STAGE_FAMILY = "family_alert"
-STAGE_REFILL = "refill"
 
 # Per v6.3: T+0 self, T+15 family. No remind_30, no 2h escalation.
 STAGE_OFFSETS_MIN: Dict[str, int] = {
@@ -99,14 +98,6 @@ async def ensure_indexes(db) -> None:
         )
     except Exception as e:
         logger.warning(f"med_notifications index ensure skipped: {e}")
-    try:
-        await db.refill_notifications.create_index(
-            [("reminder_id", 1), ("last_refill_at", 1)],
-            unique=True,
-            name="uniq_reminder_refill_cycle",
-        )
-    except Exception as e:
-        logger.warning(f"refill_notifications index ensure skipped: {e}")
 
 
 async def _has_taken_log_after(db, reminder_id: str, slot_utc: datetime) -> bool:
@@ -434,122 +425,6 @@ async def process_pending_notifications(
     return counters
 
 
-# ---------- Refill notifications ----------
-async def process_refill_notifications(
-    db,
-    *,
-    push_to_user: Callable[[str, str, str, Dict[str, Any]], Awaitable[int]],
-    now_utc: Optional[datetime] = None,
-) -> Dict[str, int]:
-    """Fire ONE refill push per refill cycle when within `refill_reminder_days`
-    of run-out.  Idempotent via the `refill_notifications` unique index.
-    """
-    now_utc = now_utc or datetime.now(timezone.utc)
-    counters = {"scanned_refill": 0, "fired_refill": 0}
-
-    cursor = db.reminders.find(
-        {
-            "category": "medication",
-            "days_supply": {"$gt": 0},
-            "run_out_at": {"$ne": None},
-        },
-        {"_id": 0},
-    )
-    reminders = await cursor.to_list(20000)
-
-    for rem in reminders:
-        counters["scanned_refill"] += 1
-        run_out_at = rem.get("run_out_at")
-        last_refill_at = rem.get("last_refill_at")
-        lead = rem.get("refill_reminder_days") or 7
-
-        if not run_out_at or not last_refill_at:
-            continue
-        if isinstance(run_out_at, str):
-            try:
-                run_out_at = datetime.fromisoformat(run_out_at.replace("Z", "+00:00"))
-            except Exception:
-                continue
-        if isinstance(last_refill_at, str):
-            try:
-                last_refill_at = datetime.fromisoformat(last_refill_at.replace("Z", "+00:00"))
-            except Exception:
-                continue
-        if run_out_at.tzinfo is None:
-            run_out_at = run_out_at.replace(tzinfo=timezone.utc)
-        if last_refill_at.tzinfo is None:
-            last_refill_at = last_refill_at.replace(tzinfo=timezone.utc)
-
-        days_until_runout = (run_out_at - now_utc).total_seconds() / 86400.0
-        if days_until_runout > lead:
-            continue
-
-        try:
-            await db.refill_notifications.insert_one(
-                {
-                    "reminder_id": rem["id"],
-                    "last_refill_at": last_refill_at,
-                    "family_group_id": rem.get("family_group_id"),
-                    "member_id": rem.get("member_id"),
-                    "fired_at": now_utc,
-                    "days_until_runout_at_fire": round(days_until_runout, 2),
-                }
-            )
-        except Exception:
-            continue
-
-        owner_user_id = rem.get("owner_id")
-        if not owner_user_id:
-            counters["fired_refill"] += 1
-            continue
-
-        member_name = rem.get("member_name") or "your loved one"
-        med_title = rem.get("title") or "medication"
-        days_left = max(0, int(round(days_until_runout)))
-        days_phrase = (
-            "today" if days_left == 0
-            else (f"in {days_left} day" + ("s" if days_left != 1 else ""))
-        )
-
-        try:
-            await push_to_user(
-                owner_user_id,
-                f"💊 {member_name}'s {med_title} may be running low",
-                f"Time to refill — supply runs out {days_phrase}.",
-                {
-                    "type": "medication",
-                    "subtype": "refill",
-                    "reminder_id": rem["id"],
-                    "member_id": rem.get("member_id"),
-                    "stage": STAGE_REFILL,
-                    "days_until_runout": days_left,
-                    "channelId": "meds_v2",
-                },
-            )
-        except Exception as e:
-            logger.warning(f"refill push failed: {e}")
-
-        await _log_alert(
-            db,
-            owner_id=owner_user_id,
-            family_group_id=rem.get("family_group_id"),
-            member_id=rem.get("member_id"),
-            member_name=member_name,
-            a_type="medication_refill",
-            severity="warning",
-            title=f"Refill {member_name}'s {med_title}",
-            message=(
-                f"{member_name}'s {med_title} may be running low — "
-                f"time to refill (supply runs out {days_phrase})."
-            ),
-            now_utc=now_utc,
-        )
-
-        counters["fired_refill"] += 1
-
-    return counters
-
-
 class MedicationScheduler:
     """Persistent background task wrapper."""
 
@@ -569,20 +444,13 @@ class MedicationScheduler:
                     push_to_user=self.push_to_user,
                     push_to_family_group=self.push_to_family_group,
                 )
-                refill_counters = await process_refill_notifications(
-                    self.db,
-                    push_to_user=self.push_to_user,
-                )
                 fired_total = (
                     counters["fired_due"]
                     + counters["fired_family_alert"]
                     + counters["fired_routine_due"]
-                    + refill_counters["fired_refill"]
                 )
                 if fired_total > 0:
-                    logger.info(
-                        f"Medication scheduler tick → {counters} + {refill_counters}"
-                    )
+                    logger.info(f"Medication scheduler tick → {counters}")
             except Exception as e:
                 logger.warning(f"Medication scheduler tick failed: {e}")
             try:

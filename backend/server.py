@@ -366,10 +366,6 @@ class ReminderCreate(BaseModel):
     category: str = "medication"
     dosage: Optional[str] = None
     times: List[TimeSlot] = Field(default_factory=list)
-    # Optional refill metadata — only meaningful when category=="medication".
-    days_supply: Optional[int] = None
-    refill_reminder_days: Optional[int] = None
-
     @field_validator("times", mode="before")
     @classmethod
     def _coerce_times(cls, v):
@@ -380,13 +376,6 @@ class ReminderUpdate(BaseModel):
     title: Optional[str] = None
     dosage: Optional[str] = None
     times: Optional[List[TimeSlot]] = None
-    # Setting either field updates the refill state; setting both to null
-    # disables refill tracking for the medication.
-    days_supply: Optional[int] = None
-    refill_reminder_days: Optional[int] = None
-    # Manual override of last_refill_at (rare — usually set via the
-    # /reminders/{id}/mark-refilled endpoint).
-    last_refill_at: Optional[datetime] = None
 
     @field_validator("times", mode="before")
     @classmethod
@@ -2372,7 +2361,6 @@ async def delete_member(member_id: str, current=Depends(get_current_user)):
       • alerts               (SOS history, missed_checkin, medication, etc.)
       • medication_logs
       • med_notifications    (per-slot scheduler bookkeeping)
-      • refill_notifications (refill-cycle bookkeeping)
     All scoped to the caller's family_group_id so a user can never
     accidentally (or deliberately) wipe another family's data.
     """
@@ -2389,7 +2377,6 @@ async def delete_member(member_id: str, current=Depends(get_current_user)):
         ("alerts",               {"family_group_id": fgid, "member_id": member_id}),
         ("medication_logs",      {"family_group_id": fgid, "member_id": member_id}),
         ("med_notifications",    {"family_group_id": fgid, "member_id": member_id}),
-        ("refill_notifications", {"family_group_id": fgid, "member_id": member_id}),
     ):
         try:
             res = await db[coll].delete_many(query)
@@ -3071,17 +3058,6 @@ async def list_member_reminders(member_id: str, current=Depends(get_current_user
     return [Reminder.model_validate(d) for d in docs]
 
 
-DEFAULT_REFILL_REMINDER_DAYS = 7
-
-
-def _compute_run_out(last_refill_at: Optional[datetime], days_supply: Optional[int]) -> Optional[datetime]:
-    if not last_refill_at or not days_supply or days_supply <= 0:
-        return None
-    if last_refill_at.tzinfo is None:
-        last_refill_at = last_refill_at.replace(tzinfo=timezone.utc)
-    return last_refill_at + timedelta(days=days_supply)
-
-
 @api_router.post("/reminders", response_model=Reminder)
 async def create_reminder(data: ReminderCreate, current=Depends(get_current_user)):
     member = await db.members.find_one({"id": data.member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
@@ -3095,30 +3071,10 @@ async def create_reminder(data: ReminderCreate, current=Depends(get_current_user
             raise HTTPException(status_code=400, detail=f"Invalid time format: {slot.time}")
     times = data.times or []
 
-    # ---- Refill setup (medication only) ----
-    days_supply: Optional[int] = None
-    refill_reminder_days: Optional[int] = None
-    last_refill_at: Optional[datetime] = None
-    run_out_at: Optional[datetime] = None
-    if data.category == "medication" and data.days_supply is not None:
-        if data.days_supply <= 0 or data.days_supply > 365:
-            raise HTTPException(status_code=400, detail="days_supply must be between 1 and 365")
-        days_supply = data.days_supply
-        refill_reminder_days = data.refill_reminder_days or DEFAULT_REFILL_REMINDER_DAYS
-        if refill_reminder_days < 1 or refill_reminder_days > days_supply:
-            raise HTTPException(
-                status_code=400,
-                detail="refill_reminder_days must be between 1 and days_supply",
-            )
-        last_refill_at = datetime.now(timezone.utc)
-        run_out_at = _compute_run_out(last_refill_at, days_supply)
-
     rem = Reminder(
         owner_id=current["id"], family_group_id=current["family_group_id"], member_id=data.member_id, member_name=member["name"],
         category=data.category, title=data.title, dosage=data.dosage,
         times=times, time=times[0].time if times else "",
-        days_supply=days_supply, refill_reminder_days=refill_reminder_days,
-        last_refill_at=last_refill_at, run_out_at=run_out_at,
     )
     await db.reminders.insert_one(rem.model_dump())
     return rem
@@ -3141,84 +3097,8 @@ async def update_reminder(reminder_id: str, data: ReminderUpdate, current=Depend
         update["times"] = [s.model_dump() for s in data.times]
         update["time"] = data.times[0].time if data.times else ""
 
-    # ---- Refill fields (medication only). Validate + recompute run_out_at. ----
-    if rem.get("category") == "medication" and (
-        data.days_supply is not None
-        or data.refill_reminder_days is not None
-        or data.last_refill_at is not None
-    ):
-        # Disable refill tracking (explicit days_supply=0). Handle first so the
-        # subsequent 1..365 range check doesn't reject the disable signal.
-        if data.days_supply is not None and data.days_supply == 0:
-            update["days_supply"] = None
-            update["refill_reminder_days"] = None
-            update["last_refill_at"] = None
-            update["run_out_at"] = None
-        else:
-            new_days_supply = (
-                data.days_supply if data.days_supply is not None else rem.get("days_supply")
-            )
-            new_lead = (
-                data.refill_reminder_days
-                if data.refill_reminder_days is not None
-                else rem.get("refill_reminder_days")
-            )
-            new_last_refill = (
-                data.last_refill_at
-                if data.last_refill_at is not None
-                else rem.get("last_refill_at")
-            )
-            if new_days_supply is not None and (new_days_supply <= 0 or new_days_supply > 365):
-                raise HTTPException(status_code=400, detail="days_supply must be between 1 and 365")
-            if new_lead is not None and new_days_supply is not None and (
-                new_lead < 1 or new_lead > new_days_supply
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail="refill_reminder_days must be between 1 and days_supply",
-                )
-            # Default the lead time when enabling refill tracking for the first time.
-            if new_days_supply is not None and not new_lead:
-                new_lead = DEFAULT_REFILL_REMINDER_DAYS
-            # Anchor the refill clock if newly enabling.
-            if new_days_supply is not None and not new_last_refill:
-                new_last_refill = datetime.now(timezone.utc)
-            update["days_supply"] = new_days_supply
-            update["refill_reminder_days"] = new_lead
-            update["last_refill_at"] = new_last_refill
-            update["run_out_at"] = _compute_run_out(new_last_refill, new_days_supply)
-
     if update:
         await db.reminders.update_one({"id": reminder_id}, {"$set": update})
-    doc = await db.reminders.find_one({"id": reminder_id}, {"_id": 0})
-    return Reminder.model_validate(doc)
-
-
-@api_router.post("/reminders/{reminder_id}/mark-refilled", response_model=Reminder)
-async def mark_reminder_refilled(reminder_id: str, current=Depends(get_current_user)):
-    """Resets the refill clock — sets last_refill_at to now and recomputes run_out_at.
-    Returns 400 if the medication has no days_supply set.
-    """
-    rem = await db.reminders.find_one(
-        {"id": reminder_id, "family_group_id": current["family_group_id"]}, {"_id": 0}
-    )
-    if not rem:
-        raise HTTPException(status_code=404, detail="Reminder not found")
-    if not rem.get("days_supply"):
-        raise HTTPException(
-            status_code=400,
-            detail="Refill tracking is not enabled — set a days_supply first.",
-        )
-    now = datetime.now(timezone.utc)
-    await db.reminders.update_one(
-        {"id": reminder_id},
-        {
-            "$set": {
-                "last_refill_at": now,
-                "run_out_at": _compute_run_out(now, rem["days_supply"]),
-            }
-        },
-    )
     doc = await db.reminders.find_one({"id": reminder_id}, {"_id": 0})
     return Reminder.model_validate(doc)
 
@@ -4389,9 +4269,8 @@ _med_scheduler: Optional[med_scheduler.MedicationScheduler] = None
 async def medications_tick(current=Depends(get_current_user)):
     """Manually drive one medication-scheduler iteration.
 
-    Useful for testing the escalation flow without waiting for the 30-second
-    worker tick. Returns the counters from `process_pending_notifications`
-    AND `process_refill_notifications`.
+    Useful for testing the escalation flow without waiting for the 15-second
+    worker tick. Returns the counters from `process_pending_notifications`.
     Auth-required so it can't be hit anonymously.
     """
     counters = await med_scheduler.process_pending_notifications(
@@ -4399,11 +4278,7 @@ async def medications_tick(current=Depends(get_current_user)):
         push_to_user=push_to_user,
         push_to_family_group=push_to_family_group,
     )
-    refill_counters = await med_scheduler.process_refill_notifications(
-        db,
-        push_to_user=push_to_user,
-    )
-    return {"ok": True, **counters, **refill_counters}
+    return {"ok": True, **counters}
 
 
 @api_router.get("/medications/_stages/{reminder_id}")
@@ -5248,7 +5123,6 @@ async def _purge_legacy_demo_data():
             "alerts": 0,
             "medication_logs": 0,
             "med_notifications": 0,
-            "refill_notifications": 0,
         }
         for m in targets:
             mid = m.get("id")
@@ -5265,7 +5139,6 @@ async def _purge_legacy_demo_data():
                 "alerts",
                 "medication_logs",
                 "med_notifications",
-                "refill_notifications",
             ):
                 q: dict = {"member_id": mid}
                 if fgid:
