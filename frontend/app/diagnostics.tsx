@@ -58,6 +58,7 @@ import {
   LocationEngineState,
 } from '../src/locationEngine';
 import * as leonidas from '../src/leonidas';
+import * as Battery from 'expo-battery';
 import { PATROL_INTERVAL_SECONDS } from '../src/leonidas/types';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from '../src/diagBufferConfig';
 import { api } from '../src/api';
@@ -408,6 +409,8 @@ export default function DiagnosticsScreen() {
   // Build XX — GPS quality history fetched from backend location_history collection.
   const [gpsHistory, setGpsHistory] = useState<any[]>([]);
   const [gpsHistoryErr, setGpsHistoryErr] = useState<string | null>(null);
+  // TEMP DIAG — battery pipeline investigation.
+  const [deviceBatteryLevel, setDeviceBatteryLevel] = useState<number | null>(null);
 
   // Leonidas (Build 46) — snapshot + recovery log
   const [leoSnapshot, setLeoSnapshot] = useState<leonidas.LeonidasSnapshotForUI | null>(null);
@@ -527,6 +530,14 @@ export default function DiagnosticsScreen() {
         ? `http_${e.response.status}`
         : (e?.message || 'unknown').slice(0, 80);
       setGpsHistoryErr(msg);
+    }
+
+    // TEMP DIAG — sample device battery for the battery pipeline section.
+    try {
+      const level = await Battery.getBatteryLevelAsync();
+      setDeviceBatteryLevel(typeof level === 'number' ? level : null);
+    } catch (_e) {
+      setDeviceBatteryLevel(null);
     }
 
     setLoading(false);
@@ -1954,6 +1965,86 @@ export default function DiagnosticsScreen() {
             )}
           </View>
         </View>
+
+        {/* TEMP DIAG — Battery Pipeline (Joyce investigation). Remove after verification. */}
+        <CollapsibleSection
+          id="battery-pipeline"
+          title="Battery Pipeline (temp diag)"
+          hint={
+            'Compares the four battery readings at each layer: device OS → Transistor SDK → backend write → stored member doc. ' +
+            'Used to locate where the Joyce 74 % vs 79 % discrepancy originates. Remove after investigation is closed.'
+          }
+          expanded={!!expanded['battery-pipeline']}
+          onToggle={toggleSection}
+          defaultExpanded
+        >
+          <View style={styles.card}>
+            {loading ? (
+              <Text style={styles.muted}>Loading…</Text>
+            ) : (
+              <>
+                {/* Layer 1 — OS / expo-battery */}
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>① Device (OS / expo-battery): </Text>
+                  {deviceBatteryLevel != null
+                    ? `${Math.round(deviceBatteryLevel * 100)} %`
+                    : '— (unavailable on this device/platform)'}
+                </Text>
+
+                {/* Layers 2–4 from the most recent location_history entry */}
+                {gpsHistory.length === 0 ? (
+                  <Text style={[styles.muted, { marginTop: 6 }]}>
+                    No location_history entries yet — SDK layer data will appear after the next background upload.
+                  </Text>
+                ) : (() => {
+                  const latest = gpsHistory[0];
+                  const rb = latest.raw_battery;
+                  const sdkPct = rb?.level != null ? Math.round(Number(rb.level) * 100) : null;
+                  const storedPct = latest.battery_level != null ? Math.round(Number(latest.battery_level) * 100) : null;
+                  const acceptedAt = latest.accepted_at ? new Date(latest.accepted_at) : null;
+                  return (
+                    <>
+                      <Text style={[styles.entryLine, { marginTop: 4 }]}>
+                        <Text style={styles.entryK}>② Raw SDK (battery dict from PUT body): </Text>
+                        {rb != null
+                          ? `level=${sdkPct != null ? sdkPct + ' %' : '—'}  is_charging=${rb.is_charging != null ? String(rb.is_charging) : '—'}`
+                          : '— (null — SDK did not send battery in this upload)'}
+                      </Text>
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>③ Stored in location_history: </Text>
+                        {storedPct != null ? `${storedPct} %` : '— (null)'}
+                        {latest.is_charging != null ? `  charging=${String(latest.is_charging)}` : ''}
+                      </Text>
+                      <Text style={styles.entryLine}>
+                        <Text style={styles.entryK}>④ Upload accepted_at: </Text>
+                        {acceptedAt ? acceptedAt.toLocaleString() : '—'}
+                      </Text>
+                      {sdkPct != null && deviceBatteryLevel != null && (
+                        <Text style={[styles.entryLine, { marginTop: 6 }]}>
+                          <Text style={styles.entryK}>Delta device vs SDK: </Text>
+                          <Text style={Math.abs(sdkPct - Math.round(deviceBatteryLevel * 100)) > 5 ? styles.divergent : undefined}>
+                            {sdkPct - Math.round(deviceBatteryLevel * 100) > 0 ? '+' : ''}
+                            {sdkPct - Math.round(deviceBatteryLevel * 100)} pp
+                          </Text>
+                        </Text>
+                      )}
+                      <Text style={[styles.muted, { marginTop: 8, fontSize: 10 }]}>
+                        Showing most recent upload. Reload to refresh. Full history in GPS Quality History section.
+                      </Text>
+                    </>
+                  );
+                })()}
+              </>
+            )}
+          </View>
+          <TouchableOpacity
+            style={[styles.secondaryBtn, { marginTop: 8 }]}
+            onPress={reload}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.secondaryBtnText}>Reload</Text>
+          </TouchableOpacity>
+        </CollapsibleSection>
 
         {/* Build XX — GPS Quality History */}
         <CollapsibleSection

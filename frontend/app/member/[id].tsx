@@ -75,21 +75,6 @@ export default function MemberDetail() {
     }
   }, [member?.id, _renderedBatteryLevel]);
 
-  // Battery health indicator with hysteresis.
-  // Drops to "Needs Charging" at ≤ 20 %; recovers to "Battery OK" only
-  // after rising above 25 %.  Prevents the indicator from bouncing when
-  // the SDK reports values that straddle the threshold by a few percent.
-  const [battNeedsCharging, setBattNeedsCharging] = useState<boolean | null>(null);
-  useEffect(() => {
-    const level = (member as any)?.battery_level;
-    if (level == null) return;
-    setBattNeedsCharging(prev => {
-      if (prev === null) return level <= 0.20;      // first reading — no history
-      if (prev  && level >  0.25) return false;     // recovered above upper bound
-      if (!prev && level <= 0.20) return true;      // dropped to or below threshold
-      return prev;                                   // inside hysteresis band — hold
-    });
-  }, [_renderedBatteryLevel]);
 
   const load = async () => {
     try {
@@ -465,7 +450,7 @@ export default function MemberDetail() {
                         <Text style={[styles.batteryRowValue, styles.batteryRowValueOk]}>
                           🔌 Charging
                         </Text>
-                      ) : battNeedsCharging ? (
+                      ) : (member as any).battery_level <= 0.20 ? (
                         <Text style={[styles.batteryRowValue, styles.batteryRowValueLow]}>
                           🔴 Needs Charging
                         </Text>
