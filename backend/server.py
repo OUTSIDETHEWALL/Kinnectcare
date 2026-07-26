@@ -2656,10 +2656,16 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         update["battery_level"] = min(1.0, data.battery_level)
     if data.is_charging is not None:
         update["is_charging"] = data.is_charging
-    # CP3 — log what the backend actually received in this PUT body.
+    # TEMP DIAG — full battery provenance on every upload.
+    # Records: raw SDK battery dict → normalised values → prev vs new member doc.
+    # Remove once the Joyce 74 % vs 79 % discrepancy is resolved.
+    _prev_batt = prev_doc.get("battery_level") if prev_doc else None
+    _new_batt  = update.get("battery_level")          # None if guard rejected it
     logger.info(
-        f"batt_pipeline CP3_recv: member_id={member_id} "
-        f"battery_level={data.battery_level} is_charging={data.is_charging} "
+        f"batt_diag: member_id={member_id} "
+        f"raw_battery_dict={data.battery!r} "
+        f"normalised_level={data.battery_level!r} normalised_charging={data.is_charging!r} "
+        f"prev_member_battery={_prev_batt!r} new_member_battery={_new_batt!r} "
         f"in_update={'battery_level' in update}"
     )
 
@@ -2826,6 +2832,10 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 "provider":         raw_provider,
                 "event":            raw_event,
                 "coord_suppressed": coord_suppressed,
+                # TEMP DIAG — battery timeline. Remove after Joyce investigation.
+                "battery_level":    data.battery_level,
+                "is_charging":      data.is_charging,
+                "raw_battery":      data.battery,
             })
         except Exception:
             pass
