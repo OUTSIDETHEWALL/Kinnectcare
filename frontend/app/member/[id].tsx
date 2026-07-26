@@ -63,10 +63,7 @@ export default function MemberDetail() {
   }, []);
 
   // CP7 — log the battery value at the moment it renders.  Fires whenever
-  // the store pushes a new member record to this screen.  If this log shows
-  // 0.72 while MongoDB has 0.68, the gap is between the API response and the
-  // store.  If it shows the correct value but the UI still looks wrong, the
-  // gap is in how the JSX reads battery_level from the record.
+  // the store pushes a new member record to this screen.
   const _renderedBatteryLevel = (member as any)?.battery_level ?? null;
   useEffect(() => {
     if (member?.id) {
@@ -77,6 +74,22 @@ export default function MemberDetail() {
       );
     }
   }, [member?.id, _renderedBatteryLevel]);
+
+  // Battery health indicator with hysteresis.
+  // Drops to "Needs Charging" at ≤ 20 %; recovers to "Battery OK" only
+  // after rising above 25 %.  Prevents the indicator from bouncing when
+  // the SDK reports values that straddle the threshold by a few percent.
+  const [battNeedsCharging, setBattNeedsCharging] = useState<boolean | null>(null);
+  useEffect(() => {
+    const level = (member as any)?.battery_level;
+    if (level == null) return;
+    setBattNeedsCharging(prev => {
+      if (prev === null) return level <= 0.20;      // first reading — no history
+      if (prev  && level >  0.25) return false;     // recovered above upper bound
+      if (!prev && level <= 0.20) return true;      // dropped to or below threshold
+      return prev;                                   // inside hysteresis band — hold
+    });
+  }, [_renderedBatteryLevel]);
 
   const load = async () => {
     try {
@@ -442,19 +455,25 @@ export default function MemberDetail() {
                     ) : null}
                   </View>
                 </View>
-                {/* Build XX — Battery row inside the location card. */}
+                {/* Battery health indicator */}
                 {(member as any).battery_level != null && (
                   <>
                     <View style={styles.locDivider} />
                     <View style={styles.batteryRow}>
-                      <Text style={styles.batteryRowLabel}>🔋 Battery</Text>
-                      <Text style={[
-                        styles.batteryRowValue,
-                        (member as any).battery_level <= 0.15 && styles.batteryRowValueLow,
-                      ]}>
-                        {Math.round((member as any).battery_level * 100)}%
-                        {(member as any).is_charging ? ' (Charging)' : ''}
-                      </Text>
+                      <Text style={styles.batteryRowLabel}>Battery</Text>
+                      {(member as any).is_charging ? (
+                        <Text style={[styles.batteryRowValue, styles.batteryRowValueOk]}>
+                          🔌 Charging
+                        </Text>
+                      ) : battNeedsCharging ? (
+                        <Text style={[styles.batteryRowValue, styles.batteryRowValueLow]}>
+                          🔴 Needs Charging
+                        </Text>
+                      ) : (
+                        <Text style={[styles.batteryRowValue, styles.batteryRowValueOk]}>
+                          🟢 Battery OK
+                        </Text>
+                      )}
                     </View>
                   </>
                 )}
@@ -750,11 +769,12 @@ const styles = StyleSheet.create({
   locName: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary },
   locAge: { fontSize: 11, color: Colors.textTertiary, marginTop: 2 },  // kept for reference
   locFreshness: { fontSize: 14, fontWeight: '700', color: Colors.primary, marginTop: 4 },
-  // Build XX — battery row inside the location card.
+  // Battery health indicator row inside the location card.
   batteryRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 4 },
   batteryRowLabel: { fontSize: 14, color: Colors.textSecondary, fontWeight: '600' },
   batteryRowValue: { fontSize: 14, fontWeight: '700', color: Colors.textPrimary },
-  batteryRowValueLow: { color: Colors.warning },
+  batteryRowValueOk:  { color: Colors.success },
+  batteryRowValueLow: { color: Colors.error },
   // Check-in timeline
   timelineRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingVertical: 12, backgroundColor: Colors.surface, borderRadius: 14, paddingHorizontal: 14, marginBottom: 8, borderWidth: 1, borderColor: Colors.border },
   timelineRowBorder: {},
