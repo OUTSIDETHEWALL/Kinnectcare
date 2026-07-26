@@ -856,7 +856,7 @@ export default function Dashboard() {
               <Circle
                 cx={SOS_RING_SIZE / 2} cy={SOS_RING_SIZE / 2}
                 r={SOS_RING_RADIUS}
-                stroke="rgba(255,255,255,0.28)"
+                stroke="rgba(255,152,0,0.35)"
                 strokeWidth={6} fill="none"
               />
             )}
@@ -865,7 +865,7 @@ export default function Dashboard() {
               <AnimatedCircle
                 cx={SOS_RING_SIZE / 2} cy={SOS_RING_SIZE / 2}
                 r={SOS_RING_RADIUS}
-                stroke="white" strokeWidth={6} fill="none"
+                stroke="#FF9800" strokeWidth={6} fill="none"
                 strokeDasharray={`${SOS_CIRCUMFERENCE}`}
                 strokeDashoffset={sosDashOffset as any}
                 strokeLinecap="round"
