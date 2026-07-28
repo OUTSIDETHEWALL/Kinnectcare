@@ -4352,7 +4352,7 @@ async def reset_test_user(data: _ResetTestUserRequest, request: Request):
         raise HTTPException(status_code=503, detail="ADMIN_SECRET not configured on this server.")
     provided = (request.headers.get("X-Admin-Secret") or "").strip()
     if not provided or provided != admin_secret:
-        raise HTTPException(status_code=403, detail="Invalid or missing X-Admin-Secret header.")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     email = data.email.strip().lower()
 
