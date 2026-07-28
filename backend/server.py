@@ -4352,6 +4352,14 @@ async def reset_test_user(data: _ResetTestUserRequest, request: Request):
         raise HTTPException(status_code=503, detail="ADMIN_SECRET not configured on this server.")
     provided = (request.headers.get("X-Admin-Secret") or "").strip()
     if not provided or provided != admin_secret:
+        remote_ip = (request.client.host if request.client else "unknown")
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        logger.warning(
+            "[ADMIN] reset-test-user\n"
+            f"  Timestamp : {ts}\n"
+            f"  Status    : UNAUTHORIZED\n"
+            f"  Remote IP : {remote_ip}"
+        )
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     email = data.email.strip().lower()
@@ -4512,10 +4520,35 @@ async def reset_test_user(data: _ResetTestUserRequest, request: Request):
         else "\n".join(f"✗ {c}: {n} document(s) still present" for c, n in leftovers.items())
     )
 
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    deleted_lines = "\n".join(
+        f"  {k}: {v}" for k, v in deleted.items() if isinstance(v, int) and v > 0
+    ) or "  (nothing deleted)"
+    if verification_ok:
+        verification_audit = "  ✓ No remaining references found"
+    else:
+        verification_audit = "\n".join(
+            f"  ✗ {c}: {n} document(s) still present" for c, n in leftovers.items()
+        )
+    leftover_section = (
+        ""
+        if verification_ok
+        else (
+            "\nLeftovers:\n"
+            + "\n".join(f"  {c}: {n}" for c, n in leftovers.items())
+        )
+    )
     logger.warning(
-        f"reset_test_user: email={email!r} user_id={user_id} "
-        f"member_ids={member_ids} family_group_id={family_group_id} "
-        f"deleted={deleted} verification_ok={verification_ok} leftovers={leftovers}"
+        "[ADMIN] reset-test-user\n"
+        f"  Timestamp    : {ts}\n"
+        f"  Email        : {email}\n"
+        f"  Requested By : X-Admin-Secret authenticated\n"
+        f"  Status       : {'SUCCESS' if verification_ok else 'INCOMPLETE'}\n"
+        "\nDeleted:\n"
+        f"{deleted_lines}\n"
+        "\nVerification:\n"
+        f"{verification_audit}"
+        f"{leftover_section}"
     )
 
     return {
