@@ -4323,6 +4323,218 @@ async def medications_stages(reminder_id: str, current=Depends(get_current_user)
     return {"reminder_id": reminder_id, "stages": docs}
 
 
+# =============================================================================
+# INTERNAL DEVELOPER TOOLS  — never exposed in the app UI
+# =============================================================================
+
+class _ResetTestUserRequest(BaseModel):
+    email: EmailStr
+
+
+@api_router.post("/internal/reset-test-user", include_in_schema=False)
+async def reset_test_user(data: _ResetTestUserRequest, request: Request):
+    """Full wipe of a user account and every document that references it.
+
+    Developer-only.  Requires the ``X-Admin-Secret`` request header to
+    match the ``ADMIN_SECRET`` environment variable.  Intended for
+    controlled onboarding regression tests — after calling this endpoint
+    the target email address behaves exactly as if it had never been used
+    with Kinnship.
+
+    Returns a per-collection deletion count and a verification pass that
+    confirms zero documents remain for any of the user's identifiers.
+    If verification finds leftovers it lists them so the caller knows
+    the reset is incomplete.
+    """
+    # ── Auth ────────────────────────────────────────────────────────────────
+    admin_secret = os.environ.get("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        raise HTTPException(status_code=503, detail="ADMIN_SECRET not configured on this server.")
+    provided = (request.headers.get("X-Admin-Secret") or "").strip()
+    if not provided or provided != admin_secret:
+        raise HTTPException(status_code=403, detail="Invalid or missing X-Admin-Secret header.")
+
+    email = data.email.strip().lower()
+
+    # ── Resolve identifiers ─────────────────────────────────────────────────
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail=f"No user found with email {email!r}.")
+
+    user_id: str = user["id"]
+    family_group_id: Optional[str] = user.get("family_group_id")
+
+    # Collect every member_id this user owns or is linked to as a user account.
+    raw_members = await db.members.find(
+        {"$or": [{"owner_id": user_id}, {"user_id": user_id}]},
+        {"_id": 0, "id": 1},
+    ).to_list(500)
+    member_ids: List[str] = [m["id"] for m in raw_members if m.get("id")]
+
+    deleted: dict = {}
+
+    # ── Helper ──────────────────────────────────────────────────────────────
+    async def _wipe(collection: str, query: dict) -> int:
+        try:
+            r = await db[collection].delete_many(query)
+            return r.deleted_count
+        except Exception as exc:
+            logger.warning(f"reset_test_user: {collection} delete failed — {exc}")
+            return 0
+
+    def _member_or_user_query() -> dict:
+        """Match documents keyed by member_id, owner_id, or family_group_id."""
+        clauses: List[dict] = [{"owner_id": user_id}]
+        if member_ids:
+            clauses.append({"member_id": {"$in": member_ids}})
+        if family_group_id:
+            clauses.append({"family_group_id": family_group_id})
+        return {"$or": clauses}
+
+    # ── Deletions (leaf collections first, identity collections last) ────────
+
+    # OTP codes — keyed by email
+    deleted["otp_codes"] = await _wipe("otp_codes", {"email": email})
+
+    # Location diagnostics
+    loc_clauses: List[dict] = []
+    if member_ids:
+        loc_clauses.append({"member_id": {"$in": member_ids}})
+    loc_clauses.append({"writer_user_id": user_id})
+    if family_group_id:
+        loc_clauses.append({"family_group_id": family_group_id})
+    deleted["location_ingest_log"] = await _wipe(
+        "location_ingest_log", {"$or": loc_clauses}
+    )
+    loc_hist_clauses: List[dict] = []
+    if member_ids:
+        loc_hist_clauses.append({"member_id": {"$in": member_ids}})
+    if family_group_id:
+        loc_hist_clauses.append({"family_group_id": family_group_id})
+    deleted["location_history"] = await _wipe(
+        "location_history",
+        {"$or": loc_hist_clauses} if loc_hist_clauses else {"member_id": {"$in": []}},
+    )
+
+    # Scheduler bookkeeping
+    deleted["med_notifications"] = await _wipe("med_notifications", _member_or_user_query())
+
+    # Activity / history collections
+    deleted["medication_logs"] = await _wipe("medication_logs", _member_or_user_query())
+    deleted["checkins"]        = await _wipe("checkins",        _member_or_user_query())
+    deleted["alerts"]          = await _wipe("alerts",          _member_or_user_query())
+    deleted["reminders"]       = await _wipe("reminders",       _member_or_user_query())
+
+    # Checkin requests — target member OR requester/target user
+    cr_clauses: List[dict] = [
+        {"requester_id": user_id},
+        {"target_user_id": user_id},
+    ]
+    if member_ids:
+        cr_clauses.append({"member_id": {"$in": member_ids}})
+    if family_group_id:
+        cr_clauses.append({"family_group_id": family_group_id})
+    deleted["checkin_requests"] = await _wipe("checkin_requests", {"$or": cr_clauses})
+
+    # Members
+    deleted["members"] = await _wipe(
+        "members",
+        {"$or": [{"owner_id": user_id}, {"user_id": user_id}]},
+    )
+
+    # Family invites — sent by, accepted by, sent to (by email), or scoped to group
+    inv_clauses: List[dict] = [
+        {"invited_by_user_id": user_id},
+        {"accepted_by_user_id": user_id},
+        {"invitee_email": email},
+    ]
+    if family_group_id:
+        inv_clauses.append({"family_group_id": family_group_id})
+    deleted["family_invites"] = await _wipe("family_invites", {"$or": inv_clauses})
+
+    # Family group — only delete if this user is the sole remaining member.
+    # Guard against wiping a shared group that contains other users' data.
+    deleted["family_groups"] = 0
+    if family_group_id:
+        other_users_in_group = await db.users.count_documents(
+            {"family_group_id": family_group_id, "id": {"$ne": user_id}}
+        )
+        if other_users_in_group == 0:
+            deleted["family_groups"] = await _wipe(
+                "family_groups", {"id": family_group_id}
+            )
+        else:
+            logger.warning(
+                f"reset_test_user: family_group {family_group_id} has "
+                f"{other_users_in_group} other user(s) — skipping group deletion."
+            )
+            deleted["family_groups_skipped_reason"] = (
+                f"Group {family_group_id} still has {other_users_in_group} "
+                "other user(s); not deleted."
+            )
+
+    # User account — last
+    deleted["users"] = await _wipe("users", {"id": user_id})
+
+    # ── Verification ────────────────────────────────────────────────────────
+    # After deletion, confirm zero documents remain that reference any of the
+    # user's identifiers.  Any non-zero count means orphaned data is present.
+    verification_checks = {
+        "otp_codes":          {"email": email},
+        "location_ingest_log": {"$or": [{"writer_user_id": user_id}] + (
+            [{"member_id": {"$in": member_ids}}] if member_ids else []
+        )},
+        "location_history":   {"$or": ([{"member_id": {"$in": member_ids}}] if member_ids else [{"member_id": "__no_members__"}])},
+        "med_notifications":  _member_or_user_query(),
+        "medication_logs":    _member_or_user_query(),
+        "checkins":           _member_or_user_query(),
+        "alerts":             _member_or_user_query(),
+        "reminders":          _member_or_user_query(),
+        "checkin_requests":   {"$or": cr_clauses},
+        "members":            {"$or": [{"owner_id": user_id}, {"user_id": user_id}]},
+        "family_invites":     {"$or": inv_clauses},
+        "family_groups":      {"owner_user_id": user_id},
+        "users":              {"id": user_id},
+    }
+    leftovers: dict = {}
+    for coll, query in verification_checks.items():
+        try:
+            n = await db[coll].count_documents(query)
+            if n > 0:
+                leftovers[coll] = n
+        except Exception as exc:
+            logger.warning(f"reset_test_user verification: {coll} count failed — {exc}")
+
+    verification_ok = len(leftovers) == 0
+    verification_lines = (
+        "✓ No remaining references found"
+        if verification_ok
+        else "\n".join(f"✗ {c}: {n} document(s) still present" for c, n in leftovers.items())
+    )
+
+    logger.warning(
+        f"reset_test_user: email={email!r} user_id={user_id} "
+        f"member_ids={member_ids} family_group_id={family_group_id} "
+        f"deleted={deleted} verification_ok={verification_ok} leftovers={leftovers}"
+    )
+
+    return {
+        "status": "SUCCESS" if verification_ok else "INCOMPLETE",
+        "email": email,
+        "identifiers": {
+            "user_id": user_id,
+            "family_group_id": family_group_id,
+            "member_ids": member_ids,
+        },
+        "deleted": deleted,
+        "verification": {
+            "ok": verification_ok,
+            "summary": verification_lines,
+            "leftovers": leftovers,
+        },
+    }
+
+
 # Register family group routes (multi-user family invite & membership)
 api_router.include_router(fg.build_router(db, get_current_user, push_to_user=push_to_user, send_email=send_email_via_resend_async))
 
