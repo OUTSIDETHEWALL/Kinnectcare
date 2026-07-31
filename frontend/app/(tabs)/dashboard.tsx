@@ -1056,6 +1056,37 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
               ) : null}
             </>
           )}
+          {/* Battery status — hidden when battery_updated_at is absent or
+              older than 15 minutes so stale state is never surfaced. */}
+          {(() => {
+            const bLevel = (member as any).battery_level as number | null | undefined;
+            if (bLevel == null) return null;
+            const updatedAt = (member as any).battery_updated_at as string | null | undefined;
+            const ageMs = updatedAt ? Date.now() - new Date(updatedAt).getTime() : null;
+            if (ageMs === null || ageMs > 15 * 60 * 1000) return null;
+            const isCharging = (member as any).is_charging as boolean | null | undefined;
+            const pct = `${Math.round(bLevel * 100)}%`;
+            const isLow = bLevel <= 0.20;
+            if (isCharging) {
+              return (
+                <Text style={[styles.batteryLine, styles.batteryLineCharging]}>
+                  🔌 Charging • {pct}
+                </Text>
+              );
+            }
+            if (isLow) {
+              return (
+                <Text style={[styles.batteryLine, styles.batteryLineLow]}>
+                  🔴 Low Battery • {pct}
+                </Text>
+              );
+            }
+            return (
+              <Text style={[styles.batteryLine, styles.batteryLineOk]}>
+                🔋 {pct}
+              </Text>
+            );
+          })()}
           {/* Build #59 — hide the medication chip row entirely when
               there's no medication schedule at all.  Previously the
               row rendered "0/0 taken" for seniors with no meds set
@@ -1226,6 +1257,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, gap: 4,
   },
   _refreshAllText_unused: { color: Colors.primary, fontWeight: '700', fontSize: 13 },
+  batteryLine: { fontSize: 12, fontWeight: '600', marginTop: 4 },
+  batteryLineCharging: { color: Colors.success },
+  batteryLineLow:      { color: Colors.error },
+  batteryLineOk:       { color: Colors.textTertiary },
   medRow: { flexDirection: 'row', gap: 6, marginTop: 8, flexWrap: 'wrap' },
   medChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: Colors.tertiary, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 },
   medChipEmoji: { fontSize: 12 },
