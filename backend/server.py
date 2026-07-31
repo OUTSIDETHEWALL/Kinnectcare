@@ -2666,6 +2666,10 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # write > 100 %.
     _batt_incoming_ts = incoming_captured_at or server_now
     _batt_stored_ts   = prev_doc.get("battery_updated_at") if prev_doc else None
+    # Motor returns naive UTC datetimes; normalize before comparing against the
+    # always-aware incoming timestamp (codebase standard: UTC-aware throughout).
+    if _batt_stored_ts is not None and _batt_stored_ts.tzinfo is None:
+        _batt_stored_ts = _batt_stored_ts.replace(tzinfo=timezone.utc)
     _batt_write_ok    = (
         _batt_stored_ts is None
         or _batt_incoming_ts > _batt_stored_ts
@@ -2916,6 +2920,10 @@ async def patch_member_battery(
     server_now  = datetime.now(timezone.utc)
     incoming_ts = data.battery_updated_at or server_now
     stored_ts   = member_doc.get("battery_updated_at")
+    # Motor returns naive UTC datetimes; normalize before comparing against the
+    # always-aware incoming timestamp (codebase standard: UTC-aware throughout).
+    if stored_ts is not None and stored_ts.tzinfo is None:
+        stored_ts = stored_ts.replace(tzinfo=timezone.utc)
 
     if stored_ts is not None and incoming_ts <= stored_ts:
         logger.debug(
