@@ -229,6 +229,9 @@ export type Member = {
   battery_level?: number | null;
   // True when the device is plugged in or the battery is full.
   is_charging?: boolean | null;
+  // UTC ISO-8601 timestamp of the most recent successful battery reading.
+  // Null for member docs written before battery sync was introduced.
+  battery_updated_at?: string | null;
 };
 
 export type Alert = {

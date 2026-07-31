@@ -62,18 +62,6 @@ export default function MemberDetail() {
     return () => clearInterval(t);
   }, []);
 
-  // CP7 — log the battery value at the moment it renders.  Fires whenever
-  // the store pushes a new member record to this screen.
-  const _renderedBatteryLevel = (member as any)?.battery_level ?? null;
-  useEffect(() => {
-    if (member?.id) {
-      console.log(
-        `[batt_pipeline CP7_render] member_id=${member.id} ` +
-        `battery_level=${_renderedBatteryLevel} ` +
-        `is_charging=${(member as any)?.is_charging ?? null}`
-      );
-    }
-  }, [member?.id, _renderedBatteryLevel]);
 
 
   const load = async () => {
@@ -440,28 +428,43 @@ export default function MemberDetail() {
                     ) : null}
                   </View>
                 </View>
-                {/* Battery health indicator */}
-                {(member as any).battery_level != null && (
-                  <>
-                    <View style={styles.locDivider} />
-                    <View style={styles.batteryRow}>
-                      <Text style={styles.batteryRowLabel}>Battery</Text>
-                      {(member as any).is_charging ? (
-                        <Text style={[styles.batteryRowValue, styles.batteryRowValueOk]}>
-                          🔌 Charging
-                        </Text>
-                      ) : (member as any).battery_level <= 0.20 ? (
-                        <Text style={[styles.batteryRowValue, styles.batteryRowValueLow]}>
-                          🔴 Needs Charging
-                        </Text>
-                      ) : (
-                        <Text style={[styles.batteryRowValue, styles.batteryRowValueOk]}>
-                          🟢 Battery OK
-                        </Text>
-                      )}
-                    </View>
-                  </>
-                )}
+                {/* Battery health indicator
+                    Hidden when battery_updated_at is absent (never synced) or
+                    older than 15 minutes — stale state is worse than no state. */}
+                {(() => {
+                  const bLevel = (member as any).battery_level as number | null | undefined;
+                  if (bLevel == null) return null;
+                  const updatedAt = (member as any).battery_updated_at as string | null | undefined;
+                  const ageMs = updatedAt ? Date.now() - new Date(updatedAt).getTime() : null;
+                  const STALE_MS = 15 * 60 * 1000;
+                  if (ageMs === null || ageMs > STALE_MS) return null;
+                  const ageStr = formatTimeAgo(updatedAt);
+                  const isCharging = (member as any).is_charging as boolean | null | undefined;
+                  return (
+                    <>
+                      <View style={styles.locDivider} />
+                      <View style={styles.batteryRow}>
+                        <Text style={styles.batteryRowLabel}>Battery</Text>
+                        <View style={{ alignItems: 'flex-end' }}>
+                          {isCharging ? (
+                            <Text style={[styles.batteryRowValue, styles.batteryRowValueOk]}>
+                              🔌 Charging
+                            </Text>
+                          ) : bLevel <= 0.20 ? (
+                            <Text style={[styles.batteryRowValue, styles.batteryRowValueLow]}>
+                              🔴 Needs Charging
+                            </Text>
+                          ) : (
+                            <Text style={[styles.batteryRowValue, styles.batteryRowValueOk]}>
+                              🟢 Battery OK
+                            </Text>
+                          )}
+                          <Text style={styles.batteryAgeText}>Updated {ageStr}</Text>
+                        </View>
+                      </View>
+                    </>
+                  );
+                })()}
                 <View style={{ marginTop: 12 }}>
                   <MemberMap
                     latitude={member.latitude}
@@ -755,11 +758,12 @@ const styles = StyleSheet.create({
   locAge: { fontSize: 11, color: Colors.textTertiary, marginTop: 2 },  // kept for reference
   locFreshness: { fontSize: 14, fontWeight: '700', color: Colors.primary, marginTop: 4 },
   // Battery health indicator row inside the location card.
-  batteryRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 4 },
-  batteryRowLabel: { fontSize: 14, color: Colors.textSecondary, fontWeight: '600' },
+  batteryRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', paddingVertical: 4 },
+  batteryRowLabel: { fontSize: 14, color: Colors.textSecondary, fontWeight: '600', paddingTop: 2 },
   batteryRowValue: { fontSize: 14, fontWeight: '700', color: Colors.textPrimary },
   batteryRowValueOk:  { color: Colors.success },
   batteryRowValueLow: { color: Colors.error },
+  batteryAgeText: { fontSize: 11, color: Colors.textTertiary, marginTop: 2 },
   // Check-in timeline
   timelineRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingVertical: 12, backgroundColor: Colors.surface, borderRadius: 14, paddingHorizontal: 14, marginBottom: 8, borderWidth: 1, borderColor: Colors.border },
   timelineRowBorder: {},

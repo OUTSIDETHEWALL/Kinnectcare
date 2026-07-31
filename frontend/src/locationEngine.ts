@@ -332,6 +332,82 @@ let listenersAttached = false;
 let _lastActivityType: string | null = null;
 let _lastActivityIsMoving: boolean | null = null;
 
+// ============================================================
+//  Battery synchronisation (companion to SDK native transport)
+// ============================================================
+//
+// The Transistor SDK's native HTTP transport does not include battery
+// data in its location upload payloads.  Battery state is therefore
+// read explicitly via expo-battery and PATCHed to the backend on three
+// occasions:
+//   a) Every 60 s via the JS onHeartbeat callback (stationary case).
+//   b) Immediately on any charging-state change (plug / unplug events).
+//   c) On significant battery-level changes (OS fires roughly every 1 %).
+//
+// expo-battery MUST NOT be called from the headless task — the headless
+// context is a minimal JS engine that does not have the native module
+// bridge initialised.  All three paths above are JS-alive only.
+let batteryListenersAttached = false;
+
+async function readBatteryState(): Promise<{ level: number | null; isCharging: boolean | null }> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Battery = require('expo-battery');
+    const level = await Battery.getBatteryLevelAsync();
+    const state = await Battery.getBatteryStateAsync();
+    const isCharging: boolean =
+      state === Battery.BatteryState.CHARGING ||
+      state === Battery.BatteryState.FULL;
+    return {
+      level:      typeof level === 'number' && isFinite(level) && level >= 0 ? level : null,
+      isCharging,
+    };
+  } catch (_e) {
+    return { level: null, isCharging: null };
+  }
+}
+
+async function pushBatteryUpdate(): Promise<void> {
+  if (!cachedConfig) return;
+  const { level, isCharging } = await readBatteryState();
+  if (level === null && isCharging === null) return;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { api } = require('./api');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const ms = require('./store/memberStore');
+    const body: Record<string, unknown> = {
+      battery_updated_at: new Date().toISOString(),
+    };
+    if (level !== null)     body.battery_level = level;
+    if (isCharging !== null) body.is_charging  = isCharging;
+    const resp = await api.patch(
+      `/members/${cachedConfig.memberId}/battery`,
+      body,
+    );
+    if (resp?.data?.id) ms.upsertOne(resp.data);
+    void logEvent('battery_sync_ok', { level, isCharging });
+  } catch (e: any) {
+    void logEvent('battery_sync_error', { error: String(e?.message || e) });
+  }
+}
+
+function attachBatteryListeners(): void {
+  if (batteryListenersAttached || Platform.OS === 'web') return;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Battery = require('expo-battery');
+    // Fires immediately on plug / unplug — the most time-critical case.
+    Battery.addBatteryStateListener(() => { void pushBatteryUpdate(); });
+    // Fires on significant level changes (roughly every 1 % on Android).
+    Battery.addBatteryLevelListener(() => { void pushBatteryUpdate(); });
+    batteryListenersAttached = true;
+    void logEvent('battery_listeners_attached');
+  } catch (e: any) {
+    void logEvent('battery_listeners_failed', { error: String(e?.message || e) });
+  }
+}
+
 /**
  * One-time SDK event subscription.  These callbacks feed the
  * diagnostic ring buffer — they are READ-ONLY observers, they do not
@@ -475,6 +551,10 @@ function attachSdkListeners(lib: any): void {
           error: String(e?.message || e),
         });
       }
+      // Battery companion — read and PATCH on every heartbeat tick so
+      // the caregiver dashboard stays current even when stationary.
+      // This is JS-alive only; the headless task never calls expo-battery.
+      void pushBatteryUpdate();
     });
 
     // ---- Activity Recognition (Build 64 — Motion Timeline audit) ----
@@ -621,6 +701,13 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
 
   const config = buildSdkConfig(lib, cfg);
   cachedConfig = cfg;
+
+  // ----- Attach expo-battery listeners (idempotent) -----
+  // Must be called after cachedConfig is set so pushBatteryUpdate() can
+  // resolve the member ID and backend URL.  Also sends an initial reading
+  // immediately so the caregiver sees up-to-date battery on first launch.
+  attachBatteryListeners();
+  void pushBatteryUpdate();
 
   // ----- Snapshot pre-ready SDK state ─────────────────────────────
   // The key diagnostic for the blank-notification hypothesis: if

@@ -299,10 +299,14 @@ class FamilyMember(BaseModel):
     # Build XX — Battery telemetry from the monitored device (expo-battery).
     # Reported in every location PUT so caregivers can see why uploads may
     # eventually stop.  None for rows written before this build.
-    battery_level: Optional[float] = None  # 0.0–1.0
-    is_charging:   Optional[bool]  = None  # True when plugged in / full
+    battery_level:      Optional[float]    = None  # 0.0–1.0
+    is_charging:        Optional[bool]     = None  # True when plugged in / full
+    # UTC timestamp of the most recent successful battery reading.
+    # Used as the write-guard key so replay uploads can't overwrite
+    # a more recent plug/unplug event from the dedicated PATCH endpoint.
+    battery_updated_at: Optional[datetime] = None
 
-    @field_serializer("last_seen", "created_at", "checkin_interval_started_at", "captured_at", when_used='json')
+    @field_serializer("last_seen", "created_at", "checkin_interval_started_at", "captured_at", "battery_updated_at", when_used='json')
     def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
         return _to_utc_iso(v)
 
@@ -2485,7 +2489,8 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     try:
         prev_doc = await db.members.find_one(
             {"id": member_id, "family_group_id": current["family_group_id"]},
-            {"_id": 0, "last_seen": 1, "captured_at": 1, "name": 1, "low_battery_alerted": 1},
+            {"_id": 0, "last_seen": 1, "captured_at": 1, "name": 1, "low_battery_alerted": 1,
+             "battery_level": 1, "battery_updated_at": 1},
         )
         if prev_doc:
             prev_last_seen   = prev_doc.get("last_seen")
@@ -2648,26 +2653,30 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     if raw_heading is not None:
         update["gps_heading"] = raw_heading
 
-    # Battery telemetry.
-    # Guard: reject -1 (SDK "unavailable" sentinel on some platforms/emulators)
-    # and any other out-of-range value before storing.  Clamp the upper bound
-    # to 1.0 so a misbehaving client can't write > 100%.
-    if data.battery_level is not None and data.battery_level >= 0:
-        update["battery_level"] = min(1.0, data.battery_level)
-    if data.is_charging is not None:
-        update["is_charging"] = data.is_charging
-    # TEMP DIAG — full battery provenance on every upload.
-    # Records: raw SDK battery dict → normalised values → prev vs new member doc.
-    # Remove once the Joyce 74 % vs 79 % discrepancy is resolved.
-    _prev_batt = prev_doc.get("battery_level") if prev_doc else None
-    _new_batt  = update.get("battery_level")          # None if guard rejected it
-    logger.info(
-        f"batt_diag: member_id={member_id} "
-        f"raw_battery_dict={data.battery!r} "
-        f"normalised_level={data.battery_level!r} normalised_charging={data.is_charging!r} "
-        f"prev_member_battery={_prev_batt!r} new_member_battery={_new_batt!r} "
-        f"in_update={'battery_level' in update}"
+    # Battery telemetry — timestamp-guarded write.
+    #
+    # Only update battery_level / is_charging if the effective timestamp
+    # of this upload (captured_at when present, server_now otherwise) is
+    # strictly newer than battery_updated_at already stored.  This prevents
+    # a replay packet captured 8 minutes ago from overwriting a plug-in
+    # event that arrived more recently via PATCH /members/{id}/battery.
+    #
+    # Guard: also reject -1 (SDK "unavailable" sentinel) and values out
+    # of range.  Clamp upper bound to 1.0 so a misbehaving client can't
+    # write > 100 %.
+    _batt_incoming_ts = incoming_captured_at or server_now
+    _batt_stored_ts   = prev_doc.get("battery_updated_at") if prev_doc else None
+    _batt_write_ok    = (
+        _batt_stored_ts is None
+        or _batt_incoming_ts > _batt_stored_ts
     )
+    if _batt_write_ok:
+        if data.battery_level is not None and data.battery_level >= 0:
+            update["battery_level"]      = min(1.0, data.battery_level)
+            update["battery_updated_at"] = _batt_incoming_ts
+        if data.is_charging is not None:
+            update["is_charging"]        = data.is_charging
+            update["battery_updated_at"] = _batt_incoming_ts
 
     # Build XX — Low battery one-shot notification.
     # Fires at most once per drop below 15%; resets when battery recovers
@@ -2861,6 +2870,84 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         _trace_record_gps(member_id, data.latitude, data.longitude)
     except Exception as _e:
         pass
+    return FamilyMember(**doc)
+
+
+# ---------------------------------------------------------------------------
+# Battery-only update endpoint
+# ---------------------------------------------------------------------------
+
+class BatteryUpdate(BaseModel):
+    """Payload for the battery-only PATCH endpoint.
+
+    Sent from the JS onHeartbeat callback (~60 s while stationary) and from
+    expo-battery state-change listeners (immediate on plug / unplug and on
+    significant level changes).  Never carries GPS coordinates — the location
+    pipeline is completely separate.
+    """
+    battery_level:      Optional[float]    = None
+    is_charging:        Optional[bool]     = None
+    # Client-side UTC timestamp of when the battery reading was taken.
+    # Used as the write-guard key; defaults to server_now if absent.
+    battery_updated_at: Optional[datetime] = None
+
+
+@api_router.patch("/members/{member_id}/battery", response_model=FamilyMember)
+async def patch_member_battery(
+    member_id: str,
+    data: BatteryUpdate,
+    current: dict = Depends(get_current_user),
+):
+    """Battery-only update from the monitored device.
+
+    Only overwrites stored battery state when data.battery_updated_at is
+    strictly newer than the currently stored battery_updated_at — a stale
+    retransmission or out-of-order delivery can never clobber a fresh
+    plug-in event.  Returns the current member doc unchanged when the
+    guard rejects the write.
+    """
+    member_doc = await db.members.find_one(
+        {"id": member_id, "family_group_id": current["family_group_id"]},
+        {"_id": 0},
+    )
+    if not member_doc:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    server_now  = datetime.now(timezone.utc)
+    incoming_ts = data.battery_updated_at or server_now
+    stored_ts   = member_doc.get("battery_updated_at")
+
+    if stored_ts is not None and incoming_ts <= stored_ts:
+        logger.debug(
+            f"battery-patch: member={member_id} skipped — "
+            f"incoming {incoming_ts.isoformat()} <= stored {stored_ts.isoformat()}"
+        )
+        return FamilyMember(**member_doc)
+
+    update: Dict[str, Any] = {"battery_updated_at": incoming_ts}
+    if data.battery_level is not None and data.battery_level >= 0:
+        update["battery_level"] = min(1.0, data.battery_level)
+    if data.is_charging is not None:
+        update["is_charging"] = data.is_charging
+
+    if len(update) == 1:
+        # Only the timestamp — nothing substantive to write.
+        return FamilyMember(**member_doc)
+
+    await db.members.update_one(
+        {"id": member_id, "family_group_id": current["family_group_id"]},
+        {"$set": update},
+    )
+    logger.info(
+        f"battery-patch: member={member_id} "
+        f"level={data.battery_level!r} charging={data.is_charging!r} "
+        f"ts={incoming_ts.isoformat()} "
+        f"prev_ts={stored_ts.isoformat() if stored_ts else 'none'}"
+    )
+
+    doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Member not found after update")
     return FamilyMember(**doc)
 
 
