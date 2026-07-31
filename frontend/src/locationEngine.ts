@@ -348,6 +348,12 @@ let _lastActivityIsMoving: boolean | null = null;
 // context is a minimal JS engine that does not have the native module
 // bridge initialised.  All three paths above are JS-alive only.
 let batteryListenersAttached = false;
+// Module-level subscription refs — MUST be held to prevent GC.
+// React Native's event emitter removes a listener the moment its
+// Subscription object is garbage-collected.  Storing them here keeps
+// them alive for the lifetime of the JS runtime.
+let _battStateSubscription: any = null;
+let _battLevelSubscription: any = null;
 
 async function readBatteryState(): Promise<{ level: number | null; isCharging: boolean | null }> {
   try {
@@ -362,33 +368,68 @@ async function readBatteryState(): Promise<{ level: number | null; isCharging: b
       level:      typeof level === 'number' && isFinite(level) && level >= 0 ? level : null,
       isCharging,
     };
-  } catch (_e) {
+  } catch (e: any) {
+    void logEvent('battery_read_error', { error: String(e?.message || e) });
     return { level: null, isCharging: null };
   }
 }
 
-async function pushBatteryUpdate(): Promise<void> {
-  if (!cachedConfig) return;
+async function pushBatteryUpdate(source: string = 'unknown'): Promise<void> {
+  // Step 1 — guard: cachedConfig must be set (i.e. start() was called).
+  if (!cachedConfig) {
+    void logEvent('battery_push_skipped', { reason: 'no_cached_config', source });
+    return;
+  }
+  void logEvent('battery_push_start', { source, memberId: cachedConfig.memberId });
+
+  // Step 2 — read battery state from expo-battery.
   const { level, isCharging } = await readBatteryState();
-  if (level === null && isCharging === null) return;
+  void logEvent('battery_read_result', { level, isCharging, source });
+
+  if (level === null && isCharging === null) {
+    void logEvent('battery_push_skipped', { reason: 'no_data_from_expo_battery', source });
+    return;
+  }
+
+  // Step 3 — send PATCH to backend.
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { api } = require('./api');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const ms = require('./store/memberStore');
-    const body: Record<string, unknown> = {
-      battery_updated_at: new Date().toISOString(),
-    };
-    if (level !== null)     body.battery_level = level;
-    if (isCharging !== null) body.is_charging  = isCharging;
-    const resp = await api.patch(
-      `/members/${cachedConfig.memberId}/battery`,
-      body,
-    );
-    if (resp?.data?.id) ms.upsertOne(resp.data);
-    void logEvent('battery_sync_ok', { level, isCharging });
+    const ts = new Date().toISOString();
+    const body: Record<string, unknown> = { battery_updated_at: ts };
+    if (level !== null)      body.battery_level = level;
+    if (isCharging !== null) body.is_charging   = isCharging;
+
+    const url = `/members/${cachedConfig.memberId}/battery`;
+    void logEvent('battery_patch_sent', { url, level, isCharging, ts });
+
+    const resp = await api.patch(url, body);
+    const httpStatus: number = resp?.status ?? 0;
+    const hasId = !!(resp?.data?.id);
+
+    void logEvent('battery_patch_response', {
+      httpStatus,
+      hasId,
+      batteryLevel: resp?.data?.battery_level ?? null,
+      isCharging:   resp?.data?.is_charging ?? null,
+      batteryUpdatedAt: resp?.data?.battery_updated_at ?? null,
+    });
+
+    // Step 4 — push the fresh member doc into the store so the UI
+    // updates without waiting for the next /members poll.
+    if (hasId) {
+      ms.upsertOne(resp.data);
+      void logEvent('battery_store_updated', { memberId: resp.data.id });
+    }
   } catch (e: any) {
-    void logEvent('battery_sync_error', { error: String(e?.message || e) });
+    void logEvent('battery_patch_error', {
+      source,
+      error:  String(e?.message || e),
+      status: e?.response?.status ?? null,
+      data:   JSON.stringify(e?.response?.data ?? null).slice(0, 200),
+    });
   }
 }
 
@@ -397,10 +438,14 @@ function attachBatteryListeners(): void {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const Battery = require('expo-battery');
-    // Fires immediately on plug / unplug — the most time-critical case.
-    Battery.addBatteryStateListener(() => { void pushBatteryUpdate(); });
-    // Fires on significant level changes (roughly every 1 % on Android).
-    Battery.addBatteryLevelListener(() => { void pushBatteryUpdate(); });
+    // Store subscriptions at module scope — prevents GC from silently
+    // removing the listeners between heartbeat ticks.
+    _battStateSubscription = Battery.addBatteryStateListener(() => {
+      void pushBatteryUpdate('state_change');
+    });
+    _battLevelSubscription = Battery.addBatteryLevelListener(() => {
+      void pushBatteryUpdate('level_change');
+    });
     batteryListenersAttached = true;
     void logEvent('battery_listeners_attached');
   } catch (e: any) {
@@ -554,7 +599,7 @@ function attachSdkListeners(lib: any): void {
       // Battery companion — read and PATCH on every heartbeat tick so
       // the caregiver dashboard stays current even when stationary.
       // This is JS-alive only; the headless task never calls expo-battery.
-      void pushBatteryUpdate();
+      void pushBatteryUpdate('heartbeat');
     });
 
     // ---- Activity Recognition (Build 64 — Motion Timeline audit) ----
@@ -707,7 +752,7 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
   // resolve the member ID and backend URL.  Also sends an initial reading
   // immediately so the caregiver sees up-to-date battery on first launch.
   attachBatteryListeners();
-  void pushBatteryUpdate();
+  void pushBatteryUpdate('startup');
 
   // ----- Snapshot pre-ready SDK state ─────────────────────────────
   // The key diagnostic for the blank-notification hypothesis: if
