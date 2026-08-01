@@ -374,7 +374,7 @@ async function readBatteryState(): Promise<{ level: number | null; isCharging: b
   }
 }
 
-async function pushBatteryUpdate(source: string = 'unknown'): Promise<void> {
+export async function pushBatteryUpdate(source: string = 'unknown'): Promise<void> {
   // Step 1 — guard: cachedConfig must be set (i.e. start() was called).
   if (!cachedConfig) {
     void logEvent('battery_push_skipped', { reason: 'no_cached_config', source });
