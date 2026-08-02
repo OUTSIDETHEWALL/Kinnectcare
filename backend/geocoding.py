@@ -13,7 +13,7 @@ Feature flag : GEOCODE_BACKEND env var ("true" / "false", default "false").
 Cache        : db.geocode_cache, keyed on coordinates rounded to 4 decimal
                places (~11 m grid at mid-latitudes).  Two devices in the
                same parking lot share one cache entry and one API call.
-               TTL index (24 h) is created at startup by server.py.
+               TTL index (7 days) is created/updated at startup by server.py.
 
 Provider     : Google Geocoding REST API via httpx (async, 5 s timeout).
                Same parsing logic as the client-side geocodeWithGoogle so
@@ -67,7 +67,7 @@ _GOOGLE_KEY: str = (
 # ── Cache configuration ───────────────────────────────────────────────────────
 _COORD_PRECISION = 4          # 4 dp ≈ 11 m — enough to share cache across devices
 _CACHE_COLLECTION = "geocode_cache"
-CACHE_TTL = timedelta(hours=24)
+CACHE_TTL = timedelta(days=7)
 _PROVIDER_LABEL = "Google Geocoding API"
 
 
@@ -284,6 +284,7 @@ async def ensure_indexes(db) -> None:
         )
 
     # ── TTL index ─────────────────────────────────────────────────────────────
+    # Step 1: create the index if it does not exist yet.
     try:
         await db[_CACHE_COLLECTION].create_index(
             [("resolved_at", 1)],
@@ -293,3 +294,24 @@ async def ensure_indexes(db) -> None:
         logger.info(f"geocode_cache TTL index ensured ({CACHE_TTL})")
     except Exception as exc:
         logger.warning(f"geocode_cache index skipped: {exc!r}")
+
+    # Step 2: synchronise expireAfterSeconds on the existing index.
+    # create_index() is idempotent — it silently no-ops if an index with the
+    # same name already exists, even if expireAfterSeconds has changed.
+    # collMod updates the value in-place without dropping the index, so
+    # there is no window where the collection has no TTL enforcement.
+    try:
+        await db.command(
+            "collMod",
+            _CACHE_COLLECTION,
+            index={
+                "keyPattern": {"resolved_at": 1},
+                "expireAfterSeconds": int(CACHE_TTL.total_seconds()),
+            },
+        )
+        logger.info(
+            f"geocode_cache TTL confirmed at {int(CACHE_TTL.total_seconds())}s "
+            f"({CACHE_TTL}) via collMod"
+        )
+    except Exception as exc:
+        logger.warning(f"geocode_cache collMod skipped: {exc!r}")

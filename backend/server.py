@@ -2817,6 +2817,10 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             "location_name":           data.location_name,
             "backend_location_name":   _backend_location_name,
             "geocode_label_matched":   _geocode_label_matched,
+            # Approximate cache-hit indicator: True when backend label matches
+            # the client label (proxy for a warm cache entry, not a direct
+            # flag from the cache layer).  None when geocoding was skipped.
+            "geocode_cache_hit":       _geocode_cache_hit,
         })
     except Exception:
         pass
