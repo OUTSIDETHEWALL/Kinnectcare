@@ -975,6 +975,15 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
               // eslint-disable-next-line no-console
               console.log(`[refresh-pipeline] STAGE=gps_error request_id=${reqId} error=${e?.message || e}`);
             });
+            // Emergency context: also push battery so caregivers see the
+            // freshest level + charging state alongside the location fix.
+            // Reuses the existing battery pipeline — no new timers or polling.
+            // Only fires when a backend-initiated silent push wakes this device
+            // (SOS fanout or "Are You OK?" request), so zero cost during normal
+            // operation.
+            // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+            const { pushBatteryUpdate } = require('./locationEngine');
+            void (pushBatteryUpdate as (src: string) => Promise<void>)('refresh-push');
           }
           // Dismiss the just-arrived tray entry.  Fire-and-forget;
           // any failure here is purely cosmetic.

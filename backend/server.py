@@ -2817,6 +2817,10 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             "location_name":           data.location_name,
             "backend_location_name":   _backend_location_name,
             "geocode_label_matched":   _geocode_label_matched,
+            # Approximate cache-hit indicator: True when backend label matches
+            # the client label (proxy for a warm cache entry, not a direct
+            # flag from the cache layer).  None when geocoding was skipped.
+            "geocode_cache_hit":       _geocode_cache_hit,
         })
     except Exception:
         pass
@@ -3868,6 +3872,31 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
     # being torn down.  We respond to the client immediately (sub-100ms)
     # while push/SMS continues in the background.
     async def _sos_fanout():
+        # 0. Silent GPS + battery companion push.
+        #
+        # Mirrors the "Are You OK?" flow (see send_checkin_request).  Sending a
+        # data-only request_location_refresh push before the visible SOS banner
+        # gives Android's runtime a chance to wake the recipient's JS thread so
+        # the app can push a fresh GPS fix and battery reading.  If Doze / App
+        # Standby suppresses the background wake, the visible SOS still delivers
+        # normally — this push only improves the data freshness when the OS
+        # allows it.  Never blocks or delays the main SOS notification.
+        try:
+            await push_to_family_group(
+                current["family_group_id"],
+                "",  # empty title  → data-only push
+                "",  # empty body   → data-only push
+                {
+                    "type": "request_location_refresh",
+                    "_contentAvailable": True,
+                    "channelId": "silent_v2",
+                    "_source_tag": "sos_gps_refresh",
+                },
+                exclude_user_id=current["id"],
+            )
+        except Exception as e:
+            logger.warning(f"sos silent-refresh push failed (non-fatal): {e}")
+
         try:
             # Exclude the triggering user — they're the one calling 911 and
             # are mid-dialer-transition. Receiving their own SOS push during
