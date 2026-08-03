@@ -655,7 +655,7 @@ export default function Dashboard() {
   const needsAttentionColor =
     needsAttentionSeverity === 'critical' ? Colors.error :
     needsAttentionSeverity === 'medium'   ? Colors.warning :
-    Colors.success;
+    Colors.primary;  // match Members + Missed Meds green exactly
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -1252,10 +1252,10 @@ const styles = StyleSheet.create({
   },
   summaryCard: {
     marginHorizontal: 24, padding: 18, backgroundColor: Colors.surface, borderRadius: 20,
-    flexDirection: 'row', alignItems: 'center',
+    flexDirection: 'row', alignItems: 'flex-start',
     boxShadow: '0px 4px 12px rgba(27,94,53,0.06)', elevation: 2,
   },
-  summaryItem: { flex: 1, alignItems: 'center' },
+  summaryItem: { flex: 1, alignItems: 'center', justifyContent: 'flex-start' },
   summaryNum: { fontSize: 24, fontWeight: '800', color: Colors.primary },
   summaryLbl: { fontSize: 11, color: Colors.textTertiary, marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'center' },
   summaryDivider: { width: 1, height: 36, backgroundColor: Colors.border },
