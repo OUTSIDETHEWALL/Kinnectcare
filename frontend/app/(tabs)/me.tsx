@@ -48,6 +48,8 @@ import {
   stopBackgroundLocation, startBackgroundLocation,
 } from '../../src/backgroundLocation';
 import { fetchAll as refetchMembers } from '../../src/store/memberStore';
+import { getEngineLog } from '../../src/locationEngine';
+import { computeHealthItems, worstHealthStatus, HealthItem } from '../../src/healthCheck';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { formatTimezone, formatPhone } from '../../src/timeFormat';
 
@@ -148,6 +150,85 @@ function ReadRow({ label, value }: { label: string; value: string | null | undef
     </View>
   );
 }
+
+// ------ HealthIndicator ------------------------------------------------
+//
+// Shows a compact tappable banner when the engine health check has at
+// least one warn or error item.  Hidden in the healthy all-green case —
+// no clutter for users whose setup is working correctly.
+//
+// Does NOT require developer mode.  The goal is to surface "something is
+// wrong" to product owners and family admins who do not know the 7-tap
+// unlock.  Tapping always opens Diagnostics so they can share the full
+// health snapshot with support.
+
+const HEALTH_INDICATOR_COLORS = {
+  error:   { bg: '#FEF2F2', border: '#FECACA', text: '#B91C1C', icon: '#EF4444' },
+  warn:    { bg: '#FFFBEB', border: '#FDE68A', text: '#92400E', icon: '#F59E0B' },
+} as const;
+
+function HealthIndicator({
+  items,
+  onPress,
+}: {
+  items: HealthItem[];
+  onPress: () => void;
+}) {
+  const worst = worstHealthStatus(items);
+  if (worst === 'ok' || worst === 'unknown') return null;
+
+  const palette = HEALTH_INDICATOR_COLORS[worst];
+  // Show the first non-ok item's label as the headline.
+  const firstBad = items.find((i) => i.status === worst);
+  const badCount = items.filter((i) => i.status === 'error' || i.status === 'warn').length;
+  const headline = firstBad?.label ?? (worst === 'error' ? 'Location service issue detected' : 'Location service degraded');
+  const countSuffix = badCount > 1 ? ` (+${badCount - 1} more)` : '';
+
+  return (
+    <TouchableOpacity
+      testID="me-health-indicator"
+      onPress={onPress}
+      activeOpacity={0.8}
+      accessibilityRole="button"
+      accessibilityLabel="Location health issue — tap for details"
+      style={[
+        healthIndicatorStyles.banner,
+        { backgroundColor: palette.bg, borderColor: palette.border },
+      ]}
+    >
+      <Text style={[healthIndicatorStyles.icon, { color: palette.icon }]}>
+        {worst === 'error' ? '❌' : '⚠️'}
+      </Text>
+      <View style={{ flex: 1 }}>
+        <Text style={[healthIndicatorStyles.headline, { color: palette.text }]} numberOfLines={1}>
+          {headline}{countSuffix}
+        </Text>
+        <Text style={[healthIndicatorStyles.sub, { color: palette.text }]}>
+          Tap to view diagnostics
+        </Text>
+      </View>
+      <Text style={[healthIndicatorStyles.chevron, { color: palette.icon }]}>›</Text>
+    </TouchableOpacity>
+  );
+}
+
+const healthIndicatorStyles = StyleSheet.create({
+  banner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 12,
+    marginBottom: 2,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  icon:     { fontSize: 18, width: 22, textAlign: 'center' },
+  headline: { fontSize: 13.5, fontWeight: '700', lineHeight: 18 },
+  sub:      { fontSize: 11.5, fontWeight: '500', marginTop: 1, opacity: 0.75 },
+  chevron:  { fontSize: 22, fontWeight: '600', marginLeft: 2 },
+});
 
 // ------ Screen ---------------------------------------------------------
 
@@ -256,6 +337,11 @@ export default function MeScreen() {
   const [genderBusy, setGenderBusy] = useState(false);
   const [genderErr, setGenderErr] = useState<string | null>(null);
 
+  // Health indicator — loaded on focus from the engine log ring buffer.
+  // Only shown when at least one item is warn or error.  Tapping always
+  // navigates to Diagnostics (no devMode gate — that's the whole point).
+  const [healthItems, setHealthItems] = useState<HealthItem[]>([]);
+
   // Developer mode — hidden behind 7 taps on the App Version row in
   // the Software section (same UX as Android's "Build number" easter egg).
   // Persisted so it survives app restarts; session tap-counter resets on
@@ -347,6 +433,23 @@ export default function MeScreen() {
       })();
       return () => { cancelled = true; };
     }, [user?.id])
+  );
+
+  // Reload health status whenever the tab gains focus so the indicator
+  // reflects the current engine state without the user having to relaunch.
+  useFocusEffect(
+    React.useCallback(() => {
+      let cancelled = false;
+      (async () => {
+        try {
+          const log = await getEngineLog();
+          if (!cancelled) setHealthItems(computeHealthItems(log, Date.now()));
+        } catch (_e) {
+          // Non-fatal; indicator simply stays hidden.
+        }
+      })();
+      return () => { cancelled = true; };
+    }, [])
   );
 
   // Load the caller's own member record so we can show/edit age, phone, gender.
@@ -718,6 +821,11 @@ export default function MeScreen() {
             onEdit={openEditTimezone}
           />
         </View>
+
+        {/* Health indicator — shown only when something needs attention.
+            Always navigates to Diagnostics so non-developer users can
+            share a health snapshot without the 7-tap unlock. */}
+        <HealthIndicator items={healthItems} onPress={() => router.push('/diagnostics' as any)} />
 
         {/* Profile — member fields visible to your family */}
         {myMemberId ? (
