@@ -379,6 +379,135 @@ const summaryRowStyles = {
 };
 
 // ===========================================================
+//  HealthRow + computeHealthItems — Task 9 health check panel.
+//
+//  Plain-English status indicators derived from the engine log
+//  ring buffer.  No extra data sources required.
+//
+//  Status levels:
+//    ok      → ✅  (green, happy path)
+//    warn    → ⚠️  (amber, degraded but not broken)
+//    error   → ❌  (red, action needed)
+//    unknown → ⚪  (gray, no data yet)
+// ===========================================================
+
+type HealthStatus = 'ok' | 'warn' | 'error' | 'unknown';
+type HealthItem = { icon: string; label: string; status: HealthStatus };
+
+function healthIcon(s: HealthStatus): string {
+  if (s === 'ok')      return '✅';
+  if (s === 'warn')    return '⚠️';
+  if (s === 'error')   return '❌';
+  return '⚪';
+}
+
+function computeHealthItems(log: EngineLogEvent[], now: number): HealthItem[] {
+  const rev = [...log].reverse();
+
+  // 1 — Background service: most recent sdk_onEnabledChange
+  const enabledEvt = rev.find((e) => e.event === 'sdk_onEnabledChange') ?? null;
+  const bgStatus: HealthStatus =
+    enabledEvt === null ? 'unknown'
+    : enabledEvt.detail?.enabled ? 'ok'
+    : 'error';
+
+  // 2 — Last heartbeat: sdk_onHeartbeat or headless_task_invoked
+  //     ✅ < 2 min  ⚠ 2–10 min  ❌ > 10 min / no entry
+  const hbEvt = rev.find(
+    (e) => e.event === 'sdk_onHeartbeat' || e.event === 'headless_task_invoked',
+  ) ?? null;
+  const hbAge = hbEvt ? now - hbEvt.at : null;
+  const hbStatus: HealthStatus =
+    hbAge === null          ? 'error'
+    : hbAge < 2 * 60_000   ? 'ok'
+    : hbAge < 10 * 60_000  ? 'warn'
+    : 'error';
+
+  // 3 — Last location upload: sdk_onHttp with success=true
+  //     ✅ < 5 min  ⚠ 5–15 min  ❌ > 15 min / no entry
+  const uploadEvt = rev.find(
+    (e) => e.event === 'sdk_onHttp' && e.detail?.success === true,
+  ) ?? null;
+  const uploadAge = uploadEvt ? now - uploadEvt.at : null;
+  const uploadStatus: HealthStatus =
+    uploadAge === null          ? 'error'
+    : uploadAge < 5 * 60_000   ? 'ok'
+    : uploadAge < 15 * 60_000  ? 'warn'
+    : 'error';
+
+  // 4 — Battery listener: battery_listeners_attached event present
+  const battListenerEvt = rev.find((e) => e.event === 'battery_listeners_attached') ?? null;
+  const battStatus: HealthStatus = battListenerEvt ? 'ok' : 'unknown';
+
+  // 5 — Power Saver: most recent sdk_onPowerSaveChange
+  //     ✅ isPowerSaveMode=false  ❌ isPowerSaveMode=true  ⚪ no entry
+  const powerEvt = rev.find((e) => e.event === 'sdk_onPowerSaveChange') ?? null;
+  const powerStatus: HealthStatus =
+    powerEvt === null                        ? 'unknown'
+    : powerEvt.detail?.isPowerSaveMode       ? 'error'
+    : 'ok';
+
+  return [
+    {
+      icon:  healthIcon(bgStatus),
+      label: bgStatus === 'ok'      ? 'Background service running'
+             : bgStatus === 'error' ? 'Background service stopped'
+             : 'Background service: no data yet',
+      status: bgStatus,
+    },
+    {
+      icon:  healthIcon(hbStatus),
+      label: `Last heartbeat: ${hbAge === null ? 'none recorded' : formatAgeMs(hbAge)}`,
+      status: hbStatus,
+    },
+    {
+      icon:  healthIcon(uploadStatus),
+      label: `Last location upload: ${uploadAge === null ? 'none recorded' : formatAgeMs(uploadAge)}`,
+      status: uploadStatus,
+    },
+    {
+      icon:  healthIcon(battStatus),
+      label: battStatus === 'ok' ? 'Battery listener active' : 'Battery listener: not confirmed',
+      status: battStatus,
+    },
+    {
+      icon:  healthIcon(powerStatus),
+      label: powerStatus === 'ok'      ? 'Power Saver off'
+             : powerStatus === 'error' ? 'Power Saver detected'
+             : 'Power Saver: no data yet',
+      status: powerStatus,
+    },
+  ];
+}
+
+function HealthRow({ item, isLast = false }: { item: HealthItem; isLast?: boolean }) {
+  return (
+    <View style={[healthRowStyles.row, isLast && healthRowStyles.rowLast]}>
+      <Text style={healthRowStyles.icon}>{item.icon}</Text>
+      <Text style={healthRowStyles.label}>{item.label}</Text>
+    </View>
+  );
+}
+
+const healthRowStyles = {
+  row: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    paddingVertical: 11,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F3F4F6',
+  },
+  rowLast: { borderBottomWidth: 0 },
+  icon: {
+    fontSize: 17,
+    marginRight: 10,
+    width: 26,
+    textAlign: 'center' as const,
+  },
+  label: { fontSize: 14, color: '#111827', flex: 1 },
+};
+
+// ===========================================================
 //  CollapsibleSection — Build 46 wrapper.
 //
 //  Every Diagnostics section uses this so users can hide the noise
@@ -512,6 +641,13 @@ export default function DiagnosticsScreen() {
     };
   }, [engineLog]);
 
+  // Task 9 — Health check items derived from the engine log.
+  // Recomputed whenever engineLog changes (same cadence as diagSummary).
+  const healthItems = useMemo(
+    () => computeHealthItems(engineLog, Date.now()),
+    [engineLog],
+  );
+
   // Build 64 — Motion Timeline derived data.
   // Computed from engineLog so they stay in sync with the reload() cycle.
   const motionEvents = useMemo(
@@ -535,6 +671,7 @@ export default function DiagnosticsScreen() {
   // except Leonidas + Engine + Build/OTA, which are the most useful
   // panels for ongoing field testing.
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
+    health: true,    // Task 9 — Health Check panel, default open
     'build-ota': true,
     leonidas: true,
     engine: true,
@@ -992,6 +1129,27 @@ export default function DiagnosticsScreen() {
           Beta diagnostics. If support asks, tap <Text style={styles.bold}>Copy Log</Text> and
           paste into your reply. No personal data leaves your phone until you paste.
         </Text>
+
+        {/* =====================================================
+            Task 9 — Plain-English Health Check panel.
+            Product-owner-facing.  Answers "is the app working?"
+            without requiring interpretation of log lines.
+            Derived from the engine log ring buffer — no extra
+            data sources needed.  Expanded by default so it's
+            the first thing visible on scroll.
+            ===================================================== */}
+        <CollapsibleSection
+          id="health"
+          title="Health Check"
+          expanded={!!expanded.health}
+          onToggle={toggleSection}
+          hint="Is Kinnship working? Green = good · Amber = check soon · Red = needs attention."
+          testID="diagnostics-health"
+        >
+          {healthItems.map((item, i) => (
+            <HealthRow key={item.label} item={item} isLast={i === healthItems.length - 1} />
+          ))}
+        </CollapsibleSection>
 
         {/* =====================================================
             Build 46 — Clear ALL Diagnostics.
