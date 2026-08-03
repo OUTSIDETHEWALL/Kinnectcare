@@ -428,9 +428,9 @@ export default function MemberDetail() {
                     ) : null}
                   </View>
                 </View>
-                {/* Battery health indicator
-                    Hidden when battery_updated_at is absent (never synced) or
-                    older than 15 minutes — stale state is worse than no state. */}
+                {/* Battery detail — percentage + status + freshness timestamp.
+                    The family card shows status-only; this screen shows everything.
+                    Hidden when battery_updated_at is absent or older than 15 min. */}
                 {(() => {
                   const bLevel = (member as any).battery_level as number | null | undefined;
                   if (bLevel == null) return null;
@@ -440,25 +440,18 @@ export default function MemberDetail() {
                   if (ageMs === null || ageMs > STALE_MS) return null;
                   const ageStr = formatTimeAgo(updatedAt);
                   const isCharging = (member as any).is_charging as boolean | null | undefined;
+                  const pct = `${Math.round(bLevel * 100)}%`;
+                  const isLow = !isCharging && bLevel <= 0.20;
+                  const statusLabel = isCharging ? '🔌 Charging' : isLow ? '🔴 Battery Low' : '🟢 Battery OK';
+                  const statusValueStyle = isLow ? styles.batteryRowValueLow : styles.batteryRowValueOk;
                   return (
                     <>
                       <View style={styles.locDivider} />
                       <View style={styles.batteryRow}>
                         <Text style={styles.batteryRowLabel}>Battery</Text>
                         <View style={{ alignItems: 'flex-end' }}>
-                          {isCharging ? (
-                            <Text style={[styles.batteryRowValue, styles.batteryRowValueOk]}>
-                              🔌 Charging
-                            </Text>
-                          ) : bLevel <= 0.20 ? (
-                            <Text style={[styles.batteryRowValue, styles.batteryRowValueLow]}>
-                              🔴 Needs Charging
-                            </Text>
-                          ) : (
-                            <Text style={[styles.batteryRowValue, styles.batteryRowValueOk]}>
-                              🟢 Battery OK
-                            </Text>
-                          )}
+                          <Text style={[styles.batteryRowValue, statusValueStyle]}>{pct}</Text>
+                          <Text style={[styles.batteryAgeText, { fontWeight: '600' }]}>{statusLabel}</Text>
                           <Text style={styles.batteryAgeText}>Updated {ageStr}</Text>
                         </View>
                       </View>
