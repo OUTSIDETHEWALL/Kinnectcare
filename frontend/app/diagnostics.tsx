@@ -326,6 +326,59 @@ function formatMotionEvent(entry: EngineLogEvent): MotionFmt {
 }
 
 // ===========================================================
+//  SummaryRow + ageColor — Task 8 summary card helpers.
+// ===========================================================
+
+/**
+ * Returns a color based on how old the age is.
+ *  • null / undefined → gray (no data yet)
+ *  • < warnMs         → green (healthy)
+ *  • < critMs         → amber (degraded)
+ *  • ≥ critMs         → red (stale)
+ */
+function ageColor(
+  ageMs: number | null,
+  warnMs: number,
+  critMs: number,
+): string {
+  if (ageMs === null || ageMs === undefined || !Number.isFinite(ageMs)) return '#9CA3AF';
+  if (ageMs < warnMs) return '#10B981';
+  if (ageMs < critMs) return '#F59E0B';
+  return '#EF4444';
+}
+
+type SummaryRowProps = {
+  label: string;
+  value: string;
+  valueColor?: string;
+  isLast?: boolean;
+};
+
+function SummaryRow({ label, value, valueColor = '#111827', isLast = false }: SummaryRowProps) {
+  return (
+    <View style={[summaryRowStyles.row, isLast && summaryRowStyles.rowLast]}>
+      <Text style={summaryRowStyles.label}>{label}</Text>
+      <Text style={[summaryRowStyles.value, { color: valueColor }]}>{value}</Text>
+    </View>
+  );
+}
+
+// Defined outside StyleSheet.create because it's only used by SummaryRow.
+const summaryRowStyles = {
+  row: {
+    flexDirection: 'row' as const,
+    justifyContent: 'space-between' as const,
+    alignItems: 'center' as const,
+    paddingVertical: 7,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E7EB',
+  },
+  rowLast: { borderBottomWidth: 0 },
+  label: { fontSize: 13, color: '#6B7280', fontWeight: '500' as const },
+  value: { fontSize: 13, fontWeight: '700' as const },
+};
+
+// ===========================================================
 //  CollapsibleSection — Build 46 wrapper.
 //
 //  Every Diagnostics section uses this so users can hide the noise
@@ -426,6 +479,38 @@ export default function DiagnosticsScreen() {
   // in the Leonidas snapshot card.  Only ticks while the Leonidas panel
   // is expanded — see the gated effect below.
   const [nowTick, setNowTick] = useState<number>(Date.now());
+
+  // ── Diagnostics summary card (Task 8) ───────────────────────────────────
+  // Five at-a-glance values computed from the existing engine log ring buffer.
+  // Placed above the ScrollView so they are always visible without scrolling.
+  const diagSummary = useMemo(() => {
+    const now = Date.now();
+    const rev = [...engineLog].reverse();
+
+    const lastHeartbeatEvtRaw = rev.find(
+      (e) => e.event === 'sdk_onHeartbeat' || e.event === 'headless_task_invoked',
+    ) ?? null;
+    const lastHeadlessEvt = rev.find(
+      (e) => e.event === 'headless_task_invoked',
+    ) ?? null;
+    const lastUploadEvt = rev.find(
+      (e) => e.event === 'sdk_onHttp' && e.detail?.success === true,
+    ) ?? null;
+    const lastEnabledEvt = rev.find(
+      (e) => e.event === 'sdk_onEnabledChange',
+    ) ?? null;
+    const lastPowerSaveEvt = rev.find(
+      (e) => e.event === 'sdk_onPowerSaveChange',
+    ) ?? null;
+
+    return {
+      lastHeartbeatAge: lastHeartbeatEvtRaw ? now - lastHeartbeatEvtRaw.at : null,
+      lastHeadlessAge: lastHeadlessEvt ? now - lastHeadlessEvt.at : null,
+      lastUploadAge: lastUploadEvt ? now - lastUploadEvt.at : null,
+      bgServiceRunning: lastEnabledEvt ? (!!lastEnabledEvt.detail?.enabled) : null,
+      powerSaveOn: lastPowerSaveEvt ? (!!lastPowerSaveEvt.detail?.isPowerSaveMode) : null,
+    };
+  }, [engineLog]);
 
   // Build 64 — Motion Timeline derived data.
   // Computed from engineLog so they stay in sync with the reload() cycle.
@@ -853,6 +938,53 @@ export default function DiagnosticsScreen() {
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Diagnostics</Text>
         <View style={{ width: 44 }} />
+      </View>
+
+      {/* =====================================================
+          Task 8 — At-a-glance summary card.
+          Non-scrolling: lives between the nav header and the
+          ScrollView so it is always visible.  Five rows derived
+          from the engine log ring buffer — no extra data needed.
+          ===================================================== */}
+      <View style={styles.summaryCard}>
+        <SummaryRow
+          label="Last heartbeat"
+          value={formatAgeMs(diagSummary.lastHeartbeatAge)}
+          valueColor={ageColor(diagSummary.lastHeartbeatAge, 5 * 60_000, 30 * 60_000)}
+        />
+        <SummaryRow
+          label="Last headless task"
+          value={formatAgeMs(diagSummary.lastHeadlessAge)}
+          valueColor={ageColor(diagSummary.lastHeadlessAge, 5 * 60_000, 30 * 60_000)}
+        />
+        <SummaryRow
+          label="Last successful upload"
+          value={formatAgeMs(diagSummary.lastUploadAge)}
+          valueColor={ageColor(diagSummary.lastUploadAge, 5 * 60_000, 30 * 60_000)}
+        />
+        <SummaryRow
+          label="Background service"
+          value={
+            diagSummary.bgServiceRunning === null ? 'Unknown' :
+            diagSummary.bgServiceRunning ? 'RUNNING' : 'STOPPED'
+          }
+          valueColor={
+            diagSummary.bgServiceRunning === null ? '#9CA3AF' :
+            diagSummary.bgServiceRunning ? '#10B981' : '#EF4444'
+          }
+        />
+        <SummaryRow
+          label="Power Saver"
+          value={
+            diagSummary.powerSaveOn === null ? 'Unknown' :
+            diagSummary.powerSaveOn ? 'ON ⚠' : 'OFF'
+          }
+          valueColor={
+            diagSummary.powerSaveOn === null ? '#9CA3AF' :
+            diagSummary.powerSaveOn ? '#F59E0B' : '#10B981'
+          }
+          isLast
+        />
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll}>
@@ -2455,6 +2587,19 @@ const styles = StyleSheet.create({
   footer: {
     fontSize: 11.5, color: Colors.textTertiary, textAlign: 'center',
     marginTop: 14, lineHeight: 16,
+  },
+
+  // Task 8 — at-a-glance summary card (non-scrolling, between header and ScrollView)
+  summaryCard: {
+    marginHorizontal: 16,
+    marginTop: 10,
+    marginBottom: 6,
+    backgroundColor: Colors.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    paddingHorizontal: 14,
+    paddingVertical: 4,
   },
 
   // Refresh Pipeline row styles — Build XX
