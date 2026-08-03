@@ -10,3 +10,7 @@ packages = ["cargo", "libiconv", "libxcrypt", "rustc"]
 
 [userenv.shared]
 EXPO_PUBLIC_BACKEND_URL = "https://kinnectcare-production.up.railway.app"
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 120000
