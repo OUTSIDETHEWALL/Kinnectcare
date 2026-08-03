@@ -435,20 +435,31 @@ export default function MeScreen() {
     }, [user?.id])
   );
 
-  // Reload health status whenever the tab gains focus so the indicator
-  // reflects the current engine state without the user having to relaunch.
+  // Reload health status whenever the tab gains focus AND keep it current
+  // via a 60-second polling interval while the tab stays mounted.  The
+  // interval is started on focus and cleared on blur so there is zero
+  // CPU/battery cost while the user is on any other tab.
   useFocusEffect(
     React.useCallback(() => {
       let cancelled = false;
-      (async () => {
+
+      const refresh = async () => {
         try {
           const log = await getEngineLog();
           if (!cancelled) setHealthItems(computeHealthItems(log, Date.now()));
         } catch (_e) {
           // Non-fatal; indicator simply stays hidden.
         }
-      })();
-      return () => { cancelled = true; };
+      };
+
+      refresh(); // immediate read on focus
+
+      const timer = setInterval(refresh, 60_000); // poll every 60 s
+
+      return () => {
+        cancelled = true;
+        clearInterval(timer);
+      };
     }, [])
   );
 
