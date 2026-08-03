@@ -641,11 +641,13 @@ export default function DiagnosticsScreen() {
     };
   }, [engineLog, nowTick]);
 
-  // Task 9 — Health check items derived from the engine log.
-  // Recomputed whenever engineLog changes (same cadence as diagSummary).
+  // Task 9 / Task 11 — Health check items derived from the engine log.
+  // Uses nowTick (updated every second by the unconditional interval below)
+  // so "Last heartbeat: X min ago" and "Last location upload: X min ago"
+  // tick in real time and status icons flip without a manual reload.
   const healthItems = useMemo(
-    () => computeHealthItems(engineLog, Date.now()),
-    [engineLog],
+    () => computeHealthItems(engineLog, nowTick),
+    [engineLog, nowTick],
   );
 
   // Build 64 — Motion Timeline derived data.
