@@ -610,7 +610,52 @@ export default function Dashboard() {
   const family = members.filter(m => m.role === 'family');
   const sumOf = (id: string) => summary.find(s => s.member_id === id);
   const totalMedMissed = summary.reduce((a, s) => a + s.medication_missed, 0);
-  const totalCheckedIn = summary.filter(s => s.role === 'senior' && s.checked_in_today).length;
+
+  // Needs Attention — live count of currently active issues.
+  // Resolves automatically as conditions clear; no manual acknowledgement required.
+  // Sources: active SOS, battery low per-member, missed medications, missed daily check-in.
+  type NeedsAttentionSeverity = 'ok' | 'medium' | 'critical';
+  let needsAttentionCount = 0;
+  let needsAttentionSeverity: NeedsAttentionSeverity = 'ok';
+  const _bumpSeverity = (s: NeedsAttentionSeverity) => {
+    if (s === 'critical') needsAttentionSeverity = 'critical';
+    else if (s === 'medium' && needsAttentionSeverity !== 'critical') needsAttentionSeverity = 'medium';
+  };
+  // SOS in progress → critical
+  if (activeEmergency) {
+    needsAttentionCount += 1;
+    _bumpSeverity('critical');
+  }
+  for (const _m of members) {
+    // Battery low — any role; only when reading is fresh (≤15 min)
+    const _battAgeMs = _m.battery_updated_at
+      ? Date.now() - new Date(_m.battery_updated_at).getTime()
+      : null;
+    if (
+      _battAgeMs !== null && _battAgeMs <= 15 * 60 * 1000 &&
+      _m.battery_level != null && _m.battery_level <= 0.20 && !_m.is_charging
+    ) {
+      needsAttentionCount += 1;
+      _bumpSeverity('medium');
+    }
+    if (_m.role !== 'senior') continue;
+    const _s = sumOf(_m.id);
+    if (!_s) continue;
+    // Missed medications
+    if (_s.medication_missed > 0) {
+      needsAttentionCount += _s.medication_missed;
+      _bumpSeverity('medium');
+    }
+    // Missed daily check-in — only when a schedule is actually configured
+    if ((_m.daily_checkin_time || _m.checkin_interval_hours) && !_s.checked_in_today) {
+      needsAttentionCount += 1;
+      _bumpSeverity('medium');
+    }
+  }
+  const needsAttentionColor =
+    needsAttentionSeverity === 'critical' ? Colors.error :
+    needsAttentionSeverity === 'medium'   ? Colors.warning :
+    Colors.success;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -674,10 +719,10 @@ export default function Dashboard() {
           </View>
           <View style={styles.summaryDivider} />
           <View style={styles.summaryItem}>
-            <Text style={styles.summaryNum}>
-              {seniors.length > 0 ? `${totalCheckedIn} of ${seniors.length}` : '—'}
+            <Text style={[styles.summaryNum, { color: needsAttentionColor }]}>
+              {needsAttentionCount}
             </Text>
-            <Text style={styles.summaryLbl}>Checked in</Text>
+            <Text style={styles.summaryLbl}>Needs Attention</Text>
           </View>
           <View style={styles.summaryDivider} />
           <View style={styles.summaryItem}>
@@ -1056,8 +1101,9 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
               ) : null}
             </>
           )}
-          {/* Battery status — hidden when battery_updated_at is absent or
-              older than 15 minutes so stale state is never surfaced. */}
+          {/* Battery status — overview only on the family card; percentage
+              lives on the member detail screen (overview-first principle).
+              Hidden when battery_updated_at is absent or older than 15 min. */}
           {(() => {
             const bLevel = (member as any).battery_level as number | null | undefined;
             if (bLevel == null) return null;
@@ -1065,25 +1111,23 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
             const ageMs = updatedAt ? Date.now() - new Date(updatedAt).getTime() : null;
             if (ageMs === null || ageMs > 15 * 60 * 1000) return null;
             const isCharging = (member as any).is_charging as boolean | null | undefined;
-            const pct = `${Math.round(bLevel * 100)}%`;
-            const isLow = bLevel <= 0.20;
             if (isCharging) {
               return (
                 <Text style={[styles.batteryLine, styles.batteryLineCharging]}>
-                  🔌 Charging • {pct}
+                  🔌 Charging
                 </Text>
               );
             }
-            if (isLow) {
+            if (bLevel <= 0.20) {
               return (
                 <Text style={[styles.batteryLine, styles.batteryLineLow]}>
-                  🔴 Low Battery • {pct}
+                  🔴 Battery Low
                 </Text>
               );
             }
             return (
               <Text style={[styles.batteryLine, styles.batteryLineOk]}>
-                🔋 {pct}
+                🟢 Battery OK
               </Text>
             );
           })()}
