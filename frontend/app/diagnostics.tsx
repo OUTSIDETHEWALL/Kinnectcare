@@ -613,7 +613,7 @@ export default function DiagnosticsScreen() {
   // Five at-a-glance values computed from the existing engine log ring buffer.
   // Placed above the ScrollView so they are always visible without scrolling.
   const diagSummary = useMemo(() => {
-    const now = Date.now();
+    const now = nowTick;
     const rev = [...engineLog].reverse();
 
     const lastHeartbeatEvtRaw = rev.find(
@@ -639,7 +639,7 @@ export default function DiagnosticsScreen() {
       bgServiceRunning: lastEnabledEvt ? (!!lastEnabledEvt.detail?.enabled) : null,
       powerSaveOn: lastPowerSaveEvt ? (!!lastPowerSaveEvt.detail?.isPowerSaveMode) : null,
     };
-  }, [engineLog]);
+  }, [engineLog, nowTick]);
 
   // Task 9 — Health check items derived from the engine log.
   // Recomputed whenever engineLog changes (same cadence as diagSummary).
@@ -787,14 +787,15 @@ export default function DiagnosticsScreen() {
     return () => clearInterval(tick);
   }, [expanded.leonidas]);
 
-  // Build 46 — "Next Patrol" live countdown.  Independent 1-second tick
-  // gated on Leonidas-panel expansion, so the countdown updates smoothly
-  // without depending on the slower 4-s data refresh above.
+  // 1-second tick for live age displays.  Runs unconditionally while the
+  // Diagnostics screen is mounted so the summary card "X min ago" values
+  // and the Leonidas "Next Patrol" countdown both stay accurate without a
+  // manual reload.  A 1-second setInterval is effectively free — no
+  // AsyncStorage reads, no network calls, just a Date.now() assignment.
   useEffect(() => {
-    if (!expanded.leonidas) return;
     const t = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [expanded.leonidas]);
+  }, []);
 
   const fetchServerState = useCallback(async () => {
     setServerStateLoading(true);
