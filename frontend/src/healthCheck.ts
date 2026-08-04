@@ -62,8 +62,8 @@ export function computeOverallHealth(
   if (uploadAge !== null && uploadAge < 5 * 60_000) {
     return {
       level: 'ok',
-      headline: 'Kinnship is working normally',
-      subline: `Last location uploaded ${formatAgeMs(uploadAge)}`,
+      headline: 'Background monitoring is healthy',
+      subline: `Last successful upload: ${formatAgeMs(uploadAge)}`,
       uploadAgeMs: uploadAge,
     };
   }
@@ -73,7 +73,7 @@ export function computeOverallHealth(
     return {
       level: 'warn',
       headline: 'Monitoring may be delayed',
-      subline: `Last upload ${formatAgeMs(uploadAge)} — usually self-correcting`,
+      subline: `Last successful upload: ${formatAgeMs(uploadAge)} — usually self-correcting`,
       uploadAgeMs: uploadAge,
     };
   }
@@ -82,8 +82,8 @@ export function computeOverallHealth(
   if (uploadAge !== null) {
     return {
       level: 'error',
-      headline: 'Location updates have stopped',
-      subline: `No upload in ${formatAgeMs(uploadAge)} — check background permissions`,
+      headline: 'Monitoring appears to have stopped',
+      subline: `Last successful upload: ${formatAgeMs(uploadAge)} — check background permissions`,
       uploadAgeMs: uploadAge,
     };
   }
@@ -93,7 +93,7 @@ export function computeOverallHealth(
   if (engineExplicitlyDisabled) {
     return {
       level: 'error',
-      headline: 'Background tracking is off',
+      headline: 'Monitoring appears to have stopped',
       subline: 'The location engine is not running — check permissions',
       uploadAgeMs: null,
     };
@@ -102,7 +102,7 @@ export function computeOverallHealth(
   return {
     level: 'starting',
     headline: 'Kinnship is starting up',
-    subline: 'Waiting for first location upload — normal on a fresh start',
+    subline: 'Waiting for first successful upload',
     uploadAgeMs: null,
   };
 }

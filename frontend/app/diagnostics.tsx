@@ -1010,7 +1010,7 @@ export default function DiagnosticsScreen() {
         }> = {
           ok:       { bg: '#ECFDF5', border: '#6EE7B7', headline: '#065F46', sub: '#047857', icon: '🛡️' },
           warn:     { bg: '#FFFBEB', border: '#FDE68A', headline: '#92400E', sub: '#B45309', icon: '⚠️' },
-          error:    { bg: '#FEF2F2', border: '#FECACA', headline: '#991B1B', sub: '#DC2626', icon: '🔴' },
+          error:    { bg: '#FEF2F2', border: '#FECACA', headline: '#991B1B', sub: '#DC2626', icon: '❌' },
           starting: { bg: '#F9FAFB', border: '#E5E7EB', headline: '#374151', sub: '#6B7280', icon: '⏳' },
         };
         const t = heroTheme[level];
