@@ -686,7 +686,18 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
       id: 1,
       title: 'Kinnship is sharing your location',
       text: 'Your family can see where you are. Tap to pause.',
-      smallIcon: 'mipmap/ic_launcher',
+      // drawable/notification_icon is compiled into the APK by the
+      // expo-notifications plugin from kinnship-notification-icon-shield.png
+      // (192×192, pure white on transparent — satisfies Android 5.0+
+      // monochrome-only requirement for status bar small icons).
+      //
+      // DO NOT use mipmap/ic_launcher here.  ic_launcher is a full-colour
+      // adaptive icon.  Android OEMs that strictly enforce the monochrome
+      // rule (Samsung One UI, Xiaomi MIUI, etc.) replace any coloured small
+      // icon with a white square placeholder — which is exactly the symptom
+      // reported on Joyce's device.  Charles's device is on a more permissive
+      // firmware that renders coloured icons anyway, masking the bug.
+      smallIcon: 'drawable/notification_icon',
       channelName: 'Location sharing',
       priority: lib.NOTIFICATION_PRIORITY_LOW,
       sticky: true,
