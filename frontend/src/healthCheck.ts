@@ -99,6 +99,42 @@ export function computeOverallHealth(
     };
   }
 
+  // ── Heartbeat fallback ────────────────────────────────────────────────────
+  //
+  // Why sdk_onHttp may be absent even on a healthy device:
+  //   lib.onHttp() is subscribed inside attachSdkListeners(), which is only
+  //   called by startEngine().  The headless task handler runs in a minimal
+  //   JS context that does NOT call startEngine() / attachSdkListeners().
+  //   When the Transistor native SDK uploads location during a headless
+  //   wakeup (the normal background path), no onHttp JS callback fires and
+  //   therefore no sdk_onHttp entry lands in the ring buffer.
+  //
+  //   The heartbeat IS logged by the headless task via an explicit
+  //   logEvent('headless_task_invoked') call, so heartbeat evidence is
+  //   reliable even when upload evidence is absent.
+  //
+  // Consequence: returning 'starting' whenever sdk_onHttp is absent
+  //   misrepresents an engine that has been running for minutes as
+  //   "just launched."  A caregiver sees the hourglass while the heartbeat
+  //   row shows green — which looks like a contradiction.
+  //
+  // Fix: if a heartbeat is present, return 'warn' (amber) instead of
+  //   'starting' (gray).  Amber correctly communicates "engine is alive
+  //   but we haven't confirmed a location upload yet" — honest and not
+  //   falsely alarming.
+  const hbEvt = rev.find(
+    (e) => e.event === 'sdk_onHeartbeat' || e.event === 'headless_task_invoked',
+  ) ?? null;
+  if (hbEvt !== null) {
+    const hbAge = now - hbEvt.at;
+    return {
+      level: 'warn',
+      headline: 'Engine running, no upload confirmed yet',
+      subline: `Last heartbeat: ${formatAgeMs(hbAge)} — location uploads are confirmed when the app is in the foreground`,
+      uploadAgeMs: null,
+    };
+  }
+
   return {
     level: 'starting',
     headline: 'Kinnship is starting up',
