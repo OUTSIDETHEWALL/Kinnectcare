@@ -71,6 +71,9 @@ import {
   healthIcon,
   formatAgeMs,
   computeHealthItems,
+  computeOverallHealth,
+  OverallHealthResult,
+  OverallHealthLevel,
 } from '../src/healthCheck';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
@@ -381,10 +384,14 @@ const summaryRowStyles = {
 // ===========================================================
 
 function HealthRow({ item, isLast = false }: { item: HealthItem; isLast?: boolean }) {
+  // 'unknown' items are informational — no data yet, not a failure.
+  // Render them muted so they don't compete visually with genuine statuses.
+  const labelColor = item.status === 'unknown' ? '#9CA3AF' : '#111827';
+  const iconOpacity = item.status === 'unknown' ? 0.55 : 1;
   return (
     <View style={[healthRowStyles.row, isLast && healthRowStyles.rowLast]}>
-      <Text style={healthRowStyles.icon}>{item.icon}</Text>
-      <Text style={healthRowStyles.label}>{item.label}</Text>
+      <Text style={[healthRowStyles.icon, { opacity: iconOpacity }]}>{item.icon}</Text>
+      <Text style={[healthRowStyles.label, { color: labelColor }]}>{item.label}</Text>
     </View>
   );
 }
@@ -547,6 +554,14 @@ export default function DiagnosticsScreen() {
   // tick in real time and status icons flip without a manual reload.
   const healthItems = useMemo(
     () => computeHealthItems(engineLog, nowTick),
+    [engineLog, nowTick],
+  );
+
+  // Hero card — single overall verdict driven primarily by upload recency.
+  // This is the first thing a caregiver sees and answers "is Kinnship
+  // protecting my loved one right now?" before any detail panel.
+  const overallHealth = useMemo(
+    () => computeOverallHealth(engineLog, nowTick),
     [engineLog, nowTick],
   );
 
@@ -981,51 +996,34 @@ export default function DiagnosticsScreen() {
       </View>
 
       {/* =====================================================
-          Task 8 — At-a-glance summary card.
-          Non-scrolling: lives between the nav header and the
-          ScrollView so it is always visible.  Five rows derived
-          from the engine log ring buffer — no extra data needed.
+          Hero health card — replaces the raw 5-row summary.
+          Non-scrolling: always visible between the nav header
+          and the ScrollView.  Answers the one question that
+          matters: "Can I trust Kinnship is protecting my loved
+          one right now?"  Derived from upload recency — the
+          most direct evidence the full pipeline is working.
           ===================================================== */}
-      <View style={styles.summaryCard}>
-        <SummaryRow
-          label="Last heartbeat"
-          value={formatAgeMs(diagSummary.lastHeartbeatAge)}
-          valueColor={ageColor(diagSummary.lastHeartbeatAge, 5 * 60_000, 30 * 60_000)}
-        />
-        <SummaryRow
-          label="Last headless task"
-          value={formatAgeMs(diagSummary.lastHeadlessAge)}
-          valueColor={ageColor(diagSummary.lastHeadlessAge, 5 * 60_000, 30 * 60_000)}
-        />
-        <SummaryRow
-          label="Last successful upload"
-          value={formatAgeMs(diagSummary.lastUploadAge)}
-          valueColor={ageColor(diagSummary.lastUploadAge, 5 * 60_000, 30 * 60_000)}
-        />
-        <SummaryRow
-          label="Background service"
-          value={
-            diagSummary.bgServiceRunning === null ? 'Unknown' :
-            diagSummary.bgServiceRunning ? 'RUNNING' : 'STOPPED'
-          }
-          valueColor={
-            diagSummary.bgServiceRunning === null ? '#9CA3AF' :
-            diagSummary.bgServiceRunning ? '#10B981' : '#EF4444'
-          }
-        />
-        <SummaryRow
-          label="Power Saver"
-          value={
-            diagSummary.powerSaveOn === null ? 'Unknown' :
-            diagSummary.powerSaveOn ? 'ON ⚠' : 'OFF'
-          }
-          valueColor={
-            diagSummary.powerSaveOn === null ? '#9CA3AF' :
-            diagSummary.powerSaveOn ? '#F59E0B' : '#10B981'
-          }
-          isLast
-        />
-      </View>
+      {(() => {
+        const { level, headline, subline } = overallHealth;
+        const heroTheme: Record<OverallHealthLevel, {
+          bg: string; border: string; headline: string; sub: string; icon: string;
+        }> = {
+          ok:       { bg: '#ECFDF5', border: '#6EE7B7', headline: '#065F46', sub: '#047857', icon: '🛡️' },
+          warn:     { bg: '#FFFBEB', border: '#FDE68A', headline: '#92400E', sub: '#B45309', icon: '⚠️' },
+          error:    { bg: '#FEF2F2', border: '#FECACA', headline: '#991B1B', sub: '#DC2626', icon: '❌' },
+          starting: { bg: '#F9FAFB', border: '#E5E7EB', headline: '#374151', sub: '#6B7280', icon: '⏳' },
+        };
+        const t = heroTheme[level];
+        return (
+          <View style={[styles.heroCard, { backgroundColor: t.bg, borderColor: t.border }]}>
+            <Text style={styles.heroIcon}>{t.icon}</Text>
+            <View style={styles.heroTextBlock}>
+              <Text style={[styles.heroHeadline, { color: t.headline }]}>{headline}</Text>
+              <Text style={[styles.heroSubline, { color: t.sub }]}>{subline}</Text>
+            </View>
+          </View>
+        );
+      })()}
 
       <ScrollView contentContainerStyle={styles.scroll}>
         <Text style={styles.intro}>
@@ -2650,7 +2648,39 @@ const styles = StyleSheet.create({
     marginTop: 14, lineHeight: 16,
   },
 
-  // Task 8 — at-a-glance summary card (non-scrolling, between header and ScrollView)
+  // Hero health card — replaces Task 8 summary card.
+  // Always visible between the nav header and the ScrollView.
+  heroCard: {
+    marginHorizontal: 16,
+    marginTop: 10,
+    marginBottom: 6,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 12,
+  },
+  heroIcon: {
+    fontSize: 30,
+    lineHeight: 36,
+  },
+  heroTextBlock: {
+    flex: 1,
+  },
+  heroHeadline: {
+    fontSize: 16,
+    fontWeight: '800' as const,
+    marginBottom: 3,
+  },
+  heroSubline: {
+    fontSize: 13,
+    fontWeight: '500' as const,
+    lineHeight: 18,
+  },
+
+  // summaryCard kept for reference (no longer rendered)
   summaryCard: {
     marginHorizontal: 16,
     marginTop: 10,
