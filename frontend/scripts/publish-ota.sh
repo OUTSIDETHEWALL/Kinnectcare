@@ -216,9 +216,22 @@ echo ""
 #   Redirecting only stdout (>) leaves stderr on the terminal so progress is
 #   visible during the publish. The JSON file is then parsed in Step 8 for
 #   reliable per-platform update IDs — no text scraping needed.
+#
+# WHY EAS_SKIP_AUTO_FINGERPRINT=1:
+#   expo-cli's automatic fingerprint computation (introduced in eas-cli ~v12)
+#   has been observed hanging indefinitely during OTA publishes in this
+#   project — the CLI prints "Computing the project fingerprints is taking
+#   longer than expected..." and never proceeds, requiring a manual SIGINT.
+#   Fingerprinting is not needed here because Kinnship's runtime versioning
+#   is managed explicitly via the `runtimeVersion: { policy: "appVersion" }`
+#   field in app.config.js and the `versionCode` / build number bump process
+#   in the release runbook.  The fingerprint auto-detection is redundant and
+#   unreliable in the Replit execution environment.  Remove this flag only if
+#   Expo confirms the hang is fixed AND fingerprint-based runtime enforcement
+#   is intentionally adopted as part of the release process.
 EAS_JSON_FILE=/tmp/ota_publish_output.json
 cd "$FRONTEND_DIR"
-npx eas update \
+EAS_SKIP_AUTO_FINGERPRINT=1 npx eas update \
   --channel production \
   --message "$MESSAGE" \
   --non-interactive \
