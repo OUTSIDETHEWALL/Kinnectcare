@@ -10,7 +10,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
-import { api, Member, MemberSummary, getBillingStatus, BillingStatus, FamilyInvite, listFamilyInvites, revokeFamilyInvite } from '../../src/api';
+import { api, Member, MemberSummary, getBillingStatus, BillingStatus, FamilyInvite, listFamilyInvites, revokeFamilyInvite, Alert as ApiAlert } from '../../src/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { geocodeLabelForCoord, formatLastSeenAge } from '../../src/locationRefresh';
 import {
@@ -81,6 +81,12 @@ export default function Dashboard() {
   // yet ("🟡 Invitation Pending").  Fetched alongside /members and
   // refreshed on the same cadence.
   const [pendingInvites, setPendingInvites] = useState<FamilyInvite[]>([]);
+  // Unacknowledged alerts — fetched alongside /members and /summary on every
+  // load() so Needs Attention and Missed Meds reflect the same state as the
+  // Alerts tab.  Medication alert records persist across day rollovers; the
+  // /summary medication_missed count resets to 0 at midnight, which caused
+  // the dashboard to disagree with the Alerts tab on active escalations.
+  const [activeAlerts, setActiveAlerts] = useState<ApiAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState(false);
@@ -179,10 +185,15 @@ export default function Dashboard() {
         // this dashboard renders.  The dashboard is one of several
         // writers into the canonical store, not an owner of
         // independent state.
-        const [m, s, b] = await Promise.all([
+        const [m, s, b, ar] = await Promise.all([
           api.get('/members'),
           api.get('/summary'),
           getBillingStatus().catch(() => null),
+          // Fetch alerts in the same parallel burst so Needs Attention and
+          // Missed Meds counts are always consistent with the Alerts tab.
+          // Swallow errors — a failed /alerts fetch degrades gracefully to
+          // the summary-only count rather than blocking the dashboard load.
+          api.get('/alerts').catch(() => ({ data: [] })),
         ]);
         mRes = m;
         // Build #59 — fire the invites fetch in parallel too so the
@@ -271,6 +282,9 @@ export default function Dashboard() {
         // upsertMany replaces each member's full object reference.
         memberStore.upsertMany(Array.isArray(m.data) ? m.data : []);
         setSummary(s.data.members || []);
+        setActiveAlerts(
+          ((ar.data as ApiAlert[]) || []).filter((a: ApiAlert) => !a.acknowledged),
+        );
         if (b) setBilling(b);
         setLoadError(false);
         if (dlogId) await dashMarkSetState(dlogId).catch(() => {});
@@ -609,7 +623,15 @@ export default function Dashboard() {
   const seniors = members.filter(m => m.role === 'senior');
   const family = members.filter(m => m.role === 'family');
   const sumOf = (id: string) => summary.find(s => s.member_id === id);
-  const totalMedMissed = summary.reduce((a, s) => a + s.medication_missed, 0);
+
+  // Active medication alerts — unacknowledged alerts of type 'medication'.
+  // These persist across day rollovers, unlike summary.medication_missed which
+  // resets to 0 when reset_daily_reminder_statuses() runs at midnight.
+  // Using both sources (max of the two) ensures the tile count never drops to
+  // 0 while the Alerts tab still shows an active escalation.
+  const activeMedAlerts = activeAlerts.filter(a => a.type === 'medication');
+  const summaryMedMissed = summary.reduce((a, s) => a + s.medication_missed, 0);
+  const totalMedMissed = Math.max(summaryMedMissed, activeMedAlerts.length);
 
   // Needs Attention — live count of currently active issues.
   // Resolves automatically as conditions clear; no manual acknowledgement required.
@@ -641,9 +663,17 @@ export default function Dashboard() {
     if (_m.role !== 'senior') continue;
     const _s = sumOf(_m.id);
     if (!_s) continue;
-    // Missed medications
-    if (_s.medication_missed > 0) {
-      needsAttentionCount += _s.medication_missed;
+    // Missed medications — use the max of current reminder status and active
+    // unacknowledged medication alerts so the count stays accurate across day
+    // rollovers (reminder.status resets to 'pending' at midnight; the alert
+    // record remains unacknowledged until a family admin clears it).
+    const _memberMedAlerts = activeMedAlerts.filter(a => a.member_id === _m.id);
+    const _effectiveMissed = Math.max(
+      _s.medication_missed,
+      _memberMedAlerts.length,
+    );
+    if (_effectiveMissed > 0) {
+      needsAttentionCount += _effectiveMissed;
       _bumpSeverity('medium');
     }
     // Missed daily check-in — only when a schedule is actually configured

@@ -46,13 +46,34 @@ export type OverallHealthResult = {
 export function computeOverallHealth(
   log: EngineLogEvent[],
   now: number,
+  /** Optional: member.last_seen epoch ms from memberStore (populated by /members API).
+   *  Captures native background uploads that never produce a JS sdk_onHttp event
+   *  because onHttp() is only subscribed inside attachSdkListeners() / startEngine()
+   *  and headless task contexts do not call startEngine().  When present, this acts
+   *  as a second upload-evidence stream with identical freshness thresholds.
+   *  See Task #18 for the full headless logging gap investigation.
+   */
+  lastSeenMs?: number | null,
 ): OverallHealthResult {
   const rev = [...log].reverse();
 
+  // ── Primary signal: JS engine log sdk_onHttp success events ──────────────
   const uploadEvt = rev.find(
     (e) => e.event === 'sdk_onHttp' && e.detail?.success === true,
   ) ?? null;
-  const uploadAge = uploadEvt ? now - uploadEvt.at : null;
+  const logUploadAge = uploadEvt ? now - uploadEvt.at : null;
+
+  // ── Secondary signal: member.last_seen from the backend /members API ──────
+  // The dashboard reads this field via memberStore and it updates whenever the
+  // Transistor SDK delivers a location to the backend — including headless
+  // native uploads.  Use the more recent of the two sources.
+  const lastSeenAge = (lastSeenMs != null && lastSeenMs > 0 && lastSeenMs <= now)
+    ? now - lastSeenMs
+    : null;
+
+  const uploadAge = (logUploadAge !== null && lastSeenAge !== null)
+    ? Math.min(logUploadAge, lastSeenAge)
+    : logUploadAge ?? lastSeenAge;
 
   const enabledEvt = rev.find((e) => e.event === 'sdk_onEnabledChange') ?? null;
   const engineExplicitlyDisabled =
@@ -63,7 +84,7 @@ export function computeOverallHealth(
     return {
       level: 'ok',
       headline: 'Background monitoring is healthy',
-      subline: `Last successful upload: ${formatAgeMs(uploadAge)}`,
+      subline: `Last location confirmed: ${formatAgeMs(uploadAge)}`,
       uploadAgeMs: uploadAge,
     };
   }
@@ -73,7 +94,7 @@ export function computeOverallHealth(
     return {
       level: 'warn',
       headline: 'Monitoring may be delayed',
-      subline: `Last successful upload: ${formatAgeMs(uploadAge)} — usually self-correcting`,
+      subline: `Last location confirmed: ${formatAgeMs(uploadAge)} — usually self-correcting`,
       uploadAgeMs: uploadAge,
     };
   }
@@ -83,7 +104,7 @@ export function computeOverallHealth(
     return {
       level: 'error',
       headline: 'Monitoring appears to have stopped',
-      subline: `Last successful upload: ${formatAgeMs(uploadAge)} — check background permissions`,
+      subline: `Last location confirmed: ${formatAgeMs(uploadAge)} — check background permissions`,
       uploadAgeMs: uploadAge,
     };
   }

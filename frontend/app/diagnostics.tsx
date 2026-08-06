@@ -57,6 +57,7 @@ import {
   EngineLogEvent,
   LocationEngineState,
 } from '../src/locationEngine';
+import * as memberStore from '../src/store/memberStore';
 import * as leonidas from '../src/leonidas';
 import * as Battery from 'expo-battery';
 import { PATROL_INTERVAL_SECONDS } from '../src/leonidas/types';
@@ -560,10 +561,16 @@ export default function DiagnosticsScreen() {
   // Hero card — single overall verdict driven primarily by upload recency.
   // This is the first thing a caregiver sees and answers "is Kinnship
   // protecting my loved one right now?" before any detail panel.
-  const overallHealth = useMemo(
-    () => computeOverallHealth(engineLog, nowTick),
-    [engineLog, nowTick],
-  );
+  //
+  // lastSeenMs bridges the gap between the dashboard's member.last_seen
+  // (updated by every native background upload via /members API) and the
+  // engine log's sdk_onHttp events (only fired when the JS layer is awake).
+  // Without it, the hero card says "starting up" while the dashboard shows
+  // "Updated just now" — two screens disagreeing about the same upload.
+  const overallHealth = useMemo(() => {
+    const myLastSeenMs = memberStore.getMyLastSeenMs(user?.id ?? null);
+    return computeOverallHealth(engineLog, nowTick, myLastSeenMs);
+  }, [engineLog, nowTick, user?.id]);
 
   // Build 64 — Motion Timeline derived data.
   // Computed from engineLog so they stay in sync with the reload() cycle.
