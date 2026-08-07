@@ -2470,6 +2470,14 @@ async def check_low_battery(
                 f"Charging the phone will help maintain location updates."
             ),
         )
+        # TODO: If duplicate battery alerts are ever observed in production,
+        # add a unique index on active low-battery alerts (e.g. sparse unique
+        # on (family_group_id, member_id, type) where resolved==False).
+        # Current race window — PATCH /battery and PUT /location firing within
+        # the same sub-second window for the same member — is extremely small
+        # and acceptable for beta scale.  The low_battery_alerted flag written
+        # by whichever path wins gates all subsequent calls, so duplicates
+        # would only appear in the narrow window before either write lands.
         try:
             await db.alerts.insert_one(a.model_dump())
         except DuplicateKeyError:
