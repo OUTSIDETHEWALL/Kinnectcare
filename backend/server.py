@@ -2410,6 +2410,123 @@ async def delete_member(member_id: str, current=Depends(get_current_user)):
     return {"ok": True, "cascaded": cascade_counts}
 
 
+# ─── Battery alert thresholds ────────────────────────────────────────────────
+# Defined once at module level so both upload paths (PUT /location and
+# PATCH /battery) share a single source of truth.  Change here only.
+_BATTERY_TRIGGER_THRESHOLD = 0.15   # battery <= this  →  create alert + push
+_BATTERY_CLEAR_THRESHOLD   = 0.25   # battery >= this  →  auto-resolve + reset flag
+# The 10-point hysteresis band prevents the alert from bouncing on and off
+# when battery hovers near the trigger (e.g. 14.9% → alert, 15.1% → clear,
+# 14.8% → new alert → caregiver push spam).
+
+
+async def check_low_battery(
+    *,
+    member_id: str,
+    family_group_id: str,
+    owner_id: str,
+    exclude_user_id: str,
+    battery_level: float,
+    prev_doc: dict,
+) -> dict:
+    """Evaluate low-battery threshold and manage the battery alert lifecycle.
+
+    Returns a dict of member-document fields to merge into the caller's
+    pending $set update.  The helper NEVER writes to db.members directly;
+    the caller persists the returned fields, allowing them to be batched
+    with the caller's own update (atomically where possible).
+
+    Call with the *pre-write* member snapshot as prev_doc so that
+    low_battery_alerted reflects the state before this invocation.
+
+    Trigger  (battery <= 15 %, not yet alerted):
+      • Inserts a db.alerts record (type='low_battery', severity='warning').
+      • Sends a push to all caregivers via push_to_family_group().
+      • Returns {"low_battery_alerted": True}.
+
+    Recovery (battery >= 25 %, currently alerted):
+      • Resolves the most recent unresolved low_battery alert in db.alerts.
+      • Returns {"low_battery_alerted": False}.
+
+    No-op (battery in hysteresis band, or flag already matches state):
+      • Returns {}.
+    """
+    _was_alerted = bool(prev_doc.get("low_battery_alerted", False))
+    _member_name = prev_doc.get("name") or "Your family member"
+    _battery_pct = round(battery_level * 100)
+
+    if battery_level <= _BATTERY_TRIGGER_THRESHOLD and not _was_alerted:
+        # ── Trigger: create alert record + push ──────────────────────────────
+        a = Alert(
+            owner_id=owner_id,
+            family_group_id=family_group_id,
+            member_id=member_id,
+            member_name=_member_name,
+            type="low_battery",
+            severity="warning",
+            title=f"{_member_name}'s battery is low",
+            message=(
+                f"{_member_name}'s phone battery is at {_battery_pct}%. "
+                f"Charging the phone will help maintain location updates."
+            ),
+        )
+        try:
+            await db.alerts.insert_one(a.model_dump())
+        except DuplicateKeyError:
+            # A concurrent call on the other upload path already inserted the
+            # alert for this discharge cycle.  Return the flag update so the
+            # member document is still marked; skip the push to avoid a
+            # duplicate notification.
+            logger.debug(
+                f"check_low_battery: duplicate insert skipped for member={member_id}"
+            )
+            return {"low_battery_alerted": True}
+        try:
+            await push_to_family_group(
+                family_group_id,
+                title=f"{_member_name}'s battery is low",
+                body=(
+                    f"{_member_name}'s phone battery is at {_battery_pct}%. "
+                    f"Charging the phone will help maintain location updates."
+                ),
+                data={
+                    "type": "low_battery",
+                    "member_id": member_id,
+                    "alert_id": a.id,
+                },
+                exclude_user_id=exclude_user_id,
+            )
+            logger.info(
+                f"check_low_battery: alert created + push sent "
+                f"member={member_id} battery={_battery_pct}%"
+            )
+        except Exception as _be:
+            logger.warning(
+                f"check_low_battery: push failed for member={member_id}: {_be}"
+            )
+        return {"low_battery_alerted": True}
+
+    if battery_level >= _BATTERY_CLEAR_THRESHOLD and _was_alerted:
+        # ── Recovery: auto-resolve the open alert ────────────────────────────
+        now_utc = datetime.now(timezone.utc)
+        await db.alerts.update_one(
+            {
+                "member_id": member_id,
+                "family_group_id": family_group_id,
+                "type": "low_battery",
+                "resolved": {"$ne": True},
+            },
+            {"$set": {"resolved": True, "resolved_at": now_utc}},
+        )
+        logger.info(
+            f"check_low_battery: auto-resolved for member={member_id} "
+            f"battery={_battery_pct}%"
+        )
+        return {"low_battery_alerted": False}
+
+    return {}
+
+
 @api_router.put("/members/{member_id}/location", response_model=FamilyMember)
 async def update_member_location(member_id: str, data: LocationUpdate, current=Depends(get_current_user)):
     # ============================================================
@@ -2682,37 +2799,21 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             update["is_charging"]        = data.is_charging
             update["battery_updated_at"] = _batt_incoming_ts
 
-    # Build XX — Low battery one-shot notification.
-    # Fires at most once per drop below 15%; resets when battery recovers
-    # above the threshold so a second drop triggers a second notification.
-    _LOW_BATTERY_THRESHOLD = 0.15
+    # Battery alert lifecycle — delegated to shared helper.
+    # check_low_battery() owns all threshold logic (15 % trigger / 25 % clear),
+    # hysteresis, alert record creation, push fanout, and auto-resolution.
+    # The returned dict is merged into `update` so the flag change is written
+    # in the same atomic $set as the location fields below.
     if data.battery_level is not None and prev_doc is not None:
-        _was_alerted    = bool(prev_doc.get("low_battery_alerted", False))
-        _member_name    = prev_doc.get("name") or "Your family member"
-        _battery_pct    = round(data.battery_level * 100)
-        if data.battery_level <= _LOW_BATTERY_THRESHOLD and not _was_alerted:
-            update["low_battery_alerted"] = True
-            try:
-                await push_to_family_group(
-                    current["family_group_id"],
-                    title=f"{_member_name}'s battery is low",
-                    body=(
-                        f"{_member_name}'s phone battery is low ({_battery_pct}%). "
-                        f"Charging the phone will help maintain location updates."
-                    ),
-                    data={"type": "low_battery", "member_id": member_id},
-                    exclude_user_id=current["id"],
-                )
-                logger.info(
-                    f"low-battery notification sent: member={member_id} "
-                    f"battery={_battery_pct}%"
-                )
-            except Exception as _be:
-                logger.warning(f"low-battery notification failed: {_be}")
-        elif data.battery_level > _LOW_BATTERY_THRESHOLD and _was_alerted:
-            # Battery has recovered; reset the flag so the next drop triggers
-            # a fresh notification.
-            update["low_battery_alerted"] = False
+        _batt_update = await check_low_battery(
+            member_id=member_id,
+            family_group_id=current["family_group_id"],
+            owner_id=current["id"],
+            exclude_user_id=current["id"],
+            battery_level=data.battery_level,
+            prev_doc=prev_doc,
+        )
+        update.update(_batt_update)
 
     # Strip map-visible coordinate fields for replay catch-up points.
     # last_seen + captured_at remain in `update` so heartbeat monitoring
@@ -2956,6 +3057,26 @@ async def patch_member_battery(
         f"ts={incoming_ts.isoformat()} "
         f"prev_ts={stored_ts.isoformat() if stored_ts else 'none'}"
     )
+
+    # Battery alert lifecycle — same helper as PUT /location.
+    # This is the path that catches threshold crossings on stationary devices
+    # where the Transistor SDK hasn't uploaded a new location yet.  member_doc
+    # is the pre-write snapshot, so low_battery_alerted reflects state before
+    # this call even though battery_level was just written above.
+    if data.battery_level is not None:
+        _batt_update = await check_low_battery(
+            member_id=member_id,
+            family_group_id=current["family_group_id"],
+            owner_id=current["id"],
+            exclude_user_id=current["id"],
+            battery_level=data.battery_level,
+            prev_doc=member_doc,
+        )
+        if _batt_update:
+            await db.members.update_one(
+                {"id": member_id, "family_group_id": current["family_group_id"]},
+                {"$set": _batt_update},
+            )
 
     doc = await db.members.find_one({"id": member_id}, {"_id": 0})
     if not doc:
