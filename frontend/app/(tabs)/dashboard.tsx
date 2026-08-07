@@ -630,6 +630,14 @@ export default function Dashboard() {
   // Using both sources (max of the two) ensures the tile count never drops to
   // 0 while the Alerts tab still shows an active escalation.
   const activeMedAlerts = activeAlerts.filter(a => a.type === 'medication');
+  // Unresolved low_battery alerts — used as a fallback signal in Needs Attention
+  // so the count stays non-zero even when member.battery_level has gone stale or
+  // risen into the hysteresis band (15% trigger / 25% clear).  Filtering by
+  // !a.resolved (not just !a.acknowledged) ensures auto-resolved alerts don't
+  // double-count with the real-time member.battery_level check below.
+  const activeBattAlerts = activeAlerts.filter(
+    a => a.type === 'low_battery' && !a.resolved,
+  );
   const summaryMedMissed = summary.reduce((a, s) => a + s.medication_missed, 0);
   const totalMedMissed = Math.max(summaryMedMissed, activeMedAlerts.length);
 
@@ -649,14 +657,25 @@ export default function Dashboard() {
     _bumpSeverity('critical');
   }
   for (const _m of members) {
-    // Battery low — any role; only when reading is fresh (≤15 min)
+    // Battery low — any role.
+    // Two evidence sources OR'd together so neither alone can miss an event:
+    //   1. Real-time: member.battery_level <= 20% and fresh (≤15 min) — catches
+    //      the immediate drop before an alert record has been written.
+    //   2. Persistent: unresolved low_battery alert in db.alerts — survives
+    //      stale battery readings and the hysteresis band (alert stays active
+    //      until battery >= 25%, even if the level reading is now 16-24%).
+    // OR prevents double-counting: a member counts as +1 regardless of how many
+    // evidence sources are active simultaneously.
     const _battAgeMs = _m.battery_updated_at
       ? Date.now() - new Date(_m.battery_updated_at).getTime()
       : null;
-    if (
-      _battAgeMs !== null && _battAgeMs <= 15 * 60 * 1000 &&
-      _m.battery_level != null && _m.battery_level <= 0.20 && !_m.is_charging
-    ) {
+    const _memberBattAlerts = activeBattAlerts.filter(a => a.member_id === _m.id);
+    const _hasBatteryIssue = (
+      (_battAgeMs !== null && _battAgeMs <= 15 * 60 * 1000 &&
+       _m.battery_level != null && _m.battery_level <= 0.20 && !_m.is_charging)
+      || _memberBattAlerts.length > 0
+    );
+    if (_hasBatteryIssue) {
       needsAttentionCount += 1;
       _bumpSeverity('medium');
     }
