@@ -205,26 +205,26 @@ function registerHeadlessTaskOnce(): void {
         // computeOverallHealth() and computeHealthItems() already search
         // will now be populated from the headless path as well.
         //
-        // The Transistor HeadlessEvent for 'http' carries response data
-        // as event.response (SDK ≥ 4.x): { success, status, responseText, url }.
-        // Fall back to the event root for older SDK shapes.
-        const response = event?.response ?? event;
-        const success: boolean = !!response?.success;
-        const status: number | null = typeof response?.status === 'number' ? response.status : null;
-        const rawUrl: string = typeof response?.url === 'string' ? response.url : '';
-        // Strip query strings so the path stays readable in the ring buffer.
-        const path: string = rawUrl.split('?')[0];
+        // The Transistor HeadlessEvent contract (HeadlessEvent.d.ts):
+        //   event.name   — event type string (e.g. 'http')
+        //   event.params — event-specific payload (HttpEvent: { success, status, responseText })
+        //
+        // HttpEvent does not carry a `url` field in the SDK's declared interface,
+        // so `path` is left empty; success/status/responseText are the key signals.
+        const params = event?.params ?? {};
+        const success: boolean = !!params?.success;
+        const status: number | null = typeof params?.status === 'number' ? params.status : null;
         // Capture a truncated response body for data-integrity confirmation
         // (same 400-char limit used by the foreground onHttp handler).
         let bodyHead: string | null = null;
         try {
-          const rt: string | undefined = response?.responseText;
+          const rt: string | undefined = params?.responseText;
           if (typeof rt === 'string' && rt.length > 0) {
             bodyHead = rt.length > 400 ? rt.slice(0, 400) + '…' : rt;
           }
         } catch (_e) { /* best-effort */ }
 
-        await logEvent('sdk_onHttp', { success, status, path, bodyHead });
+        await logEvent('sdk_onHttp', { success, status, path: '', bodyHead });
 
         // Upsert into memberStore when the upload succeeded and we have
         // a parseable response body — keeps the local store consistent
@@ -233,7 +233,7 @@ function registerHeadlessTaskOnce(): void {
         // uses it internally, so this is safe to call here.
         if (success && bodyHead !== null) {
           try {
-            const fullRt: string | undefined = response?.responseText;
+            const fullRt: string | undefined = params?.responseText;
             if (typeof fullRt === 'string' && fullRt.length > 0 && fullRt.length < 16_000) {
               const obj = JSON.parse(fullRt);
               if (obj && typeof obj === 'object' && obj.id) {
