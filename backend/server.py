@@ -2418,6 +2418,30 @@ async def get_member(member_id: str, current=Depends(get_current_user)):
     doc = await db.members.find_one({"id": member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Member not found")
+    # ── Lazy reverse geocoding (mirrors GET /members) ─────────────────────────
+    # Uploads clear location_name so the raw DB doc will have null here.
+    # Resolve the address before returning so this endpoint and the list
+    # endpoint always agree on the human-readable label for the same coordinates.
+    lat = doc.get("latitude")
+    lon = doc.get("longitude")
+    if lat is not None and lon is not None and not doc.get("location_name"):
+        try:
+            name, _ = await asyncio.wait_for(
+                geocoding.resolve_location_name(db, lat, lon, client_label=None),
+                timeout=2.0,
+            )
+            if name:
+                doc["location_name"] = name
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"lazy_geocode single: member={member_id} timed out after 2 s "
+                "— returning without address; next fetch retries"
+            )
+        except Exception as _lge:
+            logger.warning(
+                f"lazy_geocode single: member={member_id} "
+                f"lat={lat} lon={lon} raised {_lge!r}"
+            )
     return FamilyMember(**doc)
 
 
