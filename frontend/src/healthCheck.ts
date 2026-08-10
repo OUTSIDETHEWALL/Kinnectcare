@@ -151,7 +151,7 @@ export function computeOverallHealth(
     return {
       level: 'warn',
       headline: 'Engine running, no upload confirmed yet',
-      subline: `Last heartbeat: ${formatAgeMs(hbAge)} — location uploads are confirmed when the app is in the foreground`,
+      subline: `Last heartbeat: ${formatAgeMs(hbAge)} — upload confirmation expected within the next minute`,
       uploadAgeMs: null,
     };
   }
