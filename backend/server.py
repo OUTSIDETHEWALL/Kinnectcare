@@ -4527,6 +4527,164 @@ async def diagnostics_my_members(current=Depends(get_current_user)):
     }
 
 
+@api_router.get("/diagnostics/family-snapshot")
+async def diagnostics_family_snapshot(current=Depends(get_current_user)):
+    """Task #21 Deliverable 2 — Side-by-side device comparison.
+
+    Returns all members in the caller's family group with location-
+    freshness and device-snapshot fields so the Diagnostics screen
+    can show Charles's and Joyce's pipeline state side-by-side without
+    either of them needing to touch the other's phone.
+
+    Included per member:
+      • id, name, role
+      • last_seen       — when the backend last received any upload
+      • captured_at     — GPS-capture timestamp from the Transistor SDK
+      • is_moving       — SDK movement state at the time of the last upload
+      • battery_level / is_charging
+      • gps_accuracy / gps_speed
+      • device_snapshot — pipeline timestamps last pushed by that device
+        (null if the device has never pushed one, i.e. still on an
+        older build that predates this endpoint)
+
+    All datetime fields are returned as UTC ISO-8601 strings.
+    """
+    group_id = current.get("family_group_id")
+    if not group_id:
+        return {"members": [], "fetched_at": datetime.now(timezone.utc).isoformat()}
+
+    docs = await db.members.find(
+        {"family_group_id": group_id},
+        {
+            "_id": 0,
+            "id": 1,
+            "name": 1,
+            "role": 1,
+            "status": 1,
+            "last_seen": 1,
+            "captured_at": 1,
+            "is_moving": 1,
+            "battery_level": 1,
+            "is_charging": 1,
+            "gps_accuracy": 1,
+            "gps_speed": 1,
+            # Task #21 — per-device pipeline-timestamp snapshot (set by
+            # PUT /members/{id}/device-snapshot from the JS heartbeat).
+            "device_snapshot": 1,
+        },
+    ).to_list(50)
+
+    server_now = datetime.now(timezone.utc)
+    out = []
+    for d in docs:
+        for k in ("last_seen", "captured_at"):
+            v = d.get(k)
+            if hasattr(v, "isoformat"):
+                d[k] = _to_utc_iso(v)
+        # Compute ages relative to the server clock for easy display.
+        last_seen_iso = d.get("last_seen")
+        if last_seen_iso:
+            try:
+                ls_dt = datetime.fromisoformat(last_seen_iso)
+                if ls_dt.tzinfo is None:
+                    ls_dt = ls_dt.replace(tzinfo=timezone.utc)
+                d["last_seen_age_ms"] = int((server_now - ls_dt).total_seconds() * 1000)
+            except Exception:
+                d["last_seen_age_ms"] = None
+        else:
+            d["last_seen_age_ms"] = None
+
+        # Normalise device_snapshot datetimes if any sneaked in as BSON Date.
+        ds = d.get("device_snapshot")
+        if isinstance(ds, dict):
+            for k in ("at",):
+                v = ds.get(k)
+                if hasattr(v, "isoformat"):
+                    ds[k] = _to_utc_iso(v)
+        out.append(d)
+
+    return {
+        "family_group_id": group_id,
+        "fetched_at": server_now.isoformat(),
+        "members": out,
+    }
+
+
+class DeviceSnapshotUpdate(BaseModel):
+    """Pipeline-timestamp snapshot pushed by the Transistor JS heartbeat.
+
+    The client (locationEngine.ts) sends this whenever the last HTTP upload
+    was >5 min old — the *stale-detection* path.  The field names match the
+    PipelineTimestamps type on the client so the two sides are easy to compare.
+
+    All *_age_ms fields represent milliseconds since that pipeline stage last
+    fired, as measured on the device at the time of the push.  None / absent
+    means the stage has never fired on this device since the last app install.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    at: Optional[str] = None           # ISO timestamp of the snapshot
+    device_model: Optional[str] = None
+    ota_update_id: Optional[str] = None
+    ota_channel: Optional[str] = None
+    app_state: Optional[str] = None    # "active" | "background" | "inactive"
+    listeners_attached: Optional[bool] = None
+    # SDK state
+    sdk_enabled: Optional[bool] = None
+    sdk_is_moving: Optional[bool] = None
+    sdk_tracking_mode: Optional[str] = None
+    # Per-stage ages (ms)
+    activity_age_ms: Optional[float] = None
+    motion_age_ms: Optional[float] = None
+    location_age_ms: Optional[float] = None
+    hb_js_age_ms: Optional[float] = None
+    hl_inv_age_ms: Optional[float] = None
+    hl_hb_age_ms: Optional[float] = None
+    http_att_age_ms: Optional[float] = None
+    http_ok_age_ms: Optional[float] = None
+
+
+@api_router.put("/members/{member_id}/device-snapshot", status_code=204)
+async def put_device_snapshot(
+    member_id: str,
+    data: DeviceSnapshotUpdate,
+    current: dict = Depends(get_current_user),
+):
+    """Task #21 Deliverable 2 — Store per-stage pipeline timestamps.
+
+    Called by the JS heartbeat stale-detection path (locationEngine.ts
+    pushDeviceSnapshotToBackend) when the last HTTP upload is >5 min old.
+    Stores the snapshot in the member document under `device_snapshot` so
+    the family-snapshot endpoint can surface it alongside last_seen /
+    is_moving / battery for cross-device comparison in Diagnostics.
+
+    Unauthenticated writes are rejected; the member must belong to the
+    caller's family group.  Any member of the family group may write their
+    own snapshot.
+
+    Returns 204 No Content — the client doesn't need a response body here.
+    """
+    group_id = current.get("family_group_id")
+    member_doc = await db.members.find_one(
+        {"id": member_id, "family_group_id": group_id},
+        {"_id": 0, "id": 1},
+    )
+    if not member_doc:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    # Store the entire payload verbatim under `device_snapshot` — no field-
+    # level merge needed because the client always sends the full snapshot.
+    # model_dump(exclude_unset=True) drops fields the client didn't send so
+    # we don't wipe previously stored values with nulls from an older build.
+    snapshot = data.model_dump(exclude_unset=True)
+    snapshot["stored_at"] = datetime.now(timezone.utc).isoformat()
+
+    await db.members.update_one(
+        {"id": member_id, "family_group_id": group_id},
+        {"$set": {"device_snapshot": snapshot}},
+    )
+
+
 @api_router.get("/health")
 async def health():
     """Lightweight liveness probe. Returns immediately without

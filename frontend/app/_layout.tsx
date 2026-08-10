@@ -3,6 +3,8 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from '../src/AuthContext';
 import { useEffect, useState, useRef } from 'react';import { View, ActivityIndicator, AppState, Platform, Linking } from 'react-native';
+import Constants from 'expo-constants';
+import * as Updates from 'expo-updates';
 import { Colors } from '../src/theme';
 import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink, refreshPushTokenIfStale, dismissStaleAreYouOkNotifs } from '../src/push';
 import { isOnboardingDone, markOnboardingDone } from '../src/onboardingStore';
@@ -113,6 +115,18 @@ function RootNav() {
   //  "app_backgrounded at 21:14, no SDK heartbeat since 21:13 →
   //  engine not running in background").
   useEffect(() => {
+    // Task #21 Deliverable 1 — inject device identity so engine_snapshot_stale
+    // events carry device model, build number, and OTA group ID without needing
+    // native module imports in locationEngine.ts itself.
+    locationEngine.setDeviceInfo({
+      model:       (Constants.deviceName as string | null) ?? null,
+      buildNumber: (Constants.expoConfig?.ios?.buildNumber as string | null)
+                   ?? (Constants as any)?.nativeBuildVersion
+                   ?? null,
+      otaUpdateId: (Updates as any)?.updateId ?? null,
+      otaChannel:  (Updates as any)?.channel  ?? null,
+    });
+
     void locationEngine.logEvent('app_launched', {
       platform: Platform.OS,
       initialAppState: AppState.currentState,
