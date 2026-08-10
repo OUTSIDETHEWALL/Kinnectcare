@@ -184,6 +184,255 @@ describe('computeHealthItems / worstHealthStatus — polling transitions', () =>
   });
 });
 
+// ─── Log-clear mid-session: indicator hides then re-surfaces ─────────────────
+//
+// Reproduces the scenario described in Task #23:
+//   1. The Me tab has a healthy log from a previous session.
+//   2. The user taps "Clear log" on Diagnostics → clearEngineLog() resets the
+//      in-memory buffer so getEngineLog() returns [].
+//   3. The next Me-tab poll calls computeHealthItems([], now).
+//      Every item must be 'unknown' and worstHealthStatus must return
+//      'unknown' so the indicator is hidden (not stuck on the last error).
+//   4. On the poll after that, a new sdk_onEnabledChange or sdk_onHttp event
+//      has arrived.  The indicator must re-surface with the correct status.
+
+describe('log-clear mid-session — indicator hides then re-surfaces', () => {
+  beforeEach(() => { seq = 0; });
+
+  // ── A. Immediate clear: computeHealthItems([], now) → all unknown ─────────
+
+  it('computeHealthItems([]) returns all-unknown items', () => {
+    const now = 3_000_000;
+    const items = computeHealthItems([], now);
+
+    expect(items.length).toBeGreaterThan(0);
+    items.forEach((item) => {
+      expect(item.status).toBe('unknown');
+    });
+  });
+
+  it('worstHealthStatus is "unknown" for an empty log (indicator hidden)', () => {
+    const now = 3_000_000;
+    const items = computeHealthItems([], now);
+    expect(worstHealthStatus(items)).toBe('unknown');
+  });
+
+  // ── B. Full mid-session sequence: healthy → cleared → new event ───────────
+
+  it('hides indicator after clear even when the previous log was error-level', () => {
+    const t0 = 3_000_000;
+
+    // Build a log that has a confirmed error (engine disabled + old upload)
+    const errorLog: EngineLogEvent[] = [
+      makeEvent('sdk_onEnabledChange', t0 - 2_000, { enabled: false }),
+      makeEvent('sdk_onHttp',          t0 - 20 * 60_000, { success: true }), // 20 min → error
+    ];
+
+    // Before clear: indicator is at error level
+    const itemsBefore = computeHealthItems(errorLog, t0);
+    expect(worstHealthStatus(itemsBefore)).toBe('error');
+
+    // User taps "Clear log" — buffer resets to []
+    const clearedLog: EngineLogEvent[] = [];
+
+    // Next poll: all unknown, indicator hidden
+    const itemsAfterClear = computeHealthItems(clearedLog, t0 + 60_000);
+    expect(worstHealthStatus(itemsAfterClear)).toBe('unknown');
+    itemsAfterClear.forEach((item) => {
+      expect(item.status).toBe('unknown');
+    });
+  });
+
+  it('re-surfaces indicator (error) on the next poll once sdk_onEnabledChange(false) arrives', () => {
+    const t0 = 3_000_000;
+
+    // Log has been cleared
+    const log: EngineLogEvent[] = [];
+
+    // Poll 1 (immediately after clear): all unknown, indicator hidden
+    const poll1 = computeHealthItems(log, t0);
+    expect(worstHealthStatus(poll1)).toBe('unknown');
+
+    // New event arrives: engine disabled
+    log.push(makeEvent('sdk_onEnabledChange', t0 + 30_000, { enabled: false }));
+
+    // Poll 2 (60 s after clear): indicator must re-surface as error
+    const poll2 = computeHealthItems(log, t0 + 60_000);
+    const bgItem = poll2.find((i) => i.label.includes('Background service stopped'));
+    expect(bgItem).toBeDefined();
+    expect(bgItem!.status).toBe('error');
+    expect(worstHealthStatus(poll2)).toBe('error');
+  });
+
+  it('re-surfaces indicator (ok) on the next poll once a fresh upload event arrives', () => {
+    const t0 = 3_000_000;
+
+    // Log has been cleared
+    const log: EngineLogEvent[] = [];
+
+    // Poll 1: all unknown, indicator hidden
+    const poll1 = computeHealthItems(log, t0);
+    expect(worstHealthStatus(poll1)).toBe('unknown');
+
+    // New events arrive after the clear: engine enabled + recent upload
+    log.push(makeEvent('sdk_onEnabledChange',    t0 + 10_000, { enabled: true }));
+    log.push(makeEvent('battery_listeners_attached', t0 + 10_000));
+    log.push(makeEvent('sdk_onHttp',             t0 + 50_000, { success: true })); // 10 s before next poll
+
+    // Poll 2 (60 s after clear): upload is 10 s old → ok; no warn/error items
+    const poll2 = computeHealthItems(log, t0 + 60_000);
+
+    const uploadItem = poll2.find((i) => i.label.includes('Last location uploaded'));
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem!.status).toBe('ok');
+
+    // Indicator is hidden (worst is 'ok' or 'unknown', never 'warn'/'error')
+    const worst = worstHealthStatus(poll2);
+    expect(['ok', 'unknown']).toContain(worst);
+  });
+
+  // ── C. HealthIndicator render contract: hidden for 'unknown', shown for error/warn
+
+  it('indicator is hidden (unknown) → shown (error) within one poll cycle', () => {
+    const t0 = 3_000_000;
+    const log: EngineLogEvent[] = [];
+
+    // Poll 1: cleared log → worst unknown → indicator HIDDEN
+    const items1 = computeHealthItems(log, t0);
+    const worst1 = worstHealthStatus(items1);
+    // HealthIndicator returns null when worst is 'ok' or 'unknown'
+    expect(worst1 === 'ok' || worst1 === 'unknown').toBe(true);
+
+    // Engine stops mid-session
+    log.push(makeEvent('sdk_onEnabledChange', t0 + 5_000, { enabled: false }));
+
+    // Poll 2 (60 s later): worst is 'error' → indicator SHOWN
+    const items2 = computeHealthItems(log, t0 + 60_000);
+    expect(worstHealthStatus(items2)).toBe('error');
+  });
+});
+
+// ─── computeHealthItems — lastHttpSuccessMs persistent timestamp ──────────────
+//
+// Verifies that the optional third parameter keeps the upload row green even
+// when the ring buffer has been flooded with failure entries and the last
+// successful sdk_onHttp was evicted.
+
+describe('computeHealthItems — lastHttpSuccessMs fills the eviction gap', () => {
+  beforeEach(() => { seq = 0; });
+
+  // ── A. Ring buffer full of failures, persistent key has a recent success ──
+
+  it('shows ok upload status from lastHttpSuccessMs when ring buffer has only failures', () => {
+    const now = 5_000_000;
+    // Ring buffer has three recent failure entries but zero successes.
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onHttp', now - 2 * 60_000, { success: false }),
+      makeEvent('sdk_onHttp', now - 90_000,     { success: false }),
+      makeEvent('sdk_onHttp', now - 30_000,     { success: false }),
+    ];
+    // Persistent key records a success 2 min ago.
+    const lastHttpSuccessMs = now - 2 * 60_000;
+    const items = computeHealthItems(log, now, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    // 2 min < 5 min threshold → ok
+    expect(uploadItem.status).toBe('ok');
+  });
+
+  it('shows warn from lastHttpSuccessMs when ring buffer has only failures and key is 8 min old', () => {
+    const now = 5_000_000;
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onHttp', now - 30_000, { success: false }),
+    ];
+    const lastHttpSuccessMs = now - 8 * 60_000; // 8 min → warn
+    const items = computeHealthItems(log, now, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('warn');
+  });
+
+  // ── B. Both sources present — picks the more recent one ───────────────────
+
+  it('uses the ring-buffer success when it is more recent than lastHttpSuccessMs', () => {
+    const now = 5_000_000;
+    // Ring buffer: success 1 min ago
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onHttp', now - 60_000, { success: true }),
+    ];
+    // Persistent key: success 10 min ago (staler)
+    const lastHttpSuccessMs = now - 10 * 60_000;
+    const items = computeHealthItems(log, now, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    // Ring buffer wins: 1 min → ok
+    expect(uploadItem.status).toBe('ok');
+  });
+
+  it('uses lastHttpSuccessMs when it is more recent than the ring-buffer success', () => {
+    const now = 5_000_000;
+    // Ring buffer: success 20 min ago (error territory alone)
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onHttp', now - 20 * 60_000, { success: true }),
+    ];
+    // Persistent key: success 2 min ago (fresher)
+    const lastHttpSuccessMs = now - 2 * 60_000;
+    const items = computeHealthItems(log, now, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    // Persistent key wins: 2 min → ok
+    expect(uploadItem.status).toBe('ok');
+  });
+
+  // ── C. Edge cases: null / future / absent ────────────────────────────────
+
+  it('shows unknown when both ring buffer and lastHttpSuccessMs are absent', () => {
+    const now = 5_000_000;
+    const log: EngineLogEvent[] = [];
+    const items = computeHealthItems(log, now, null);
+
+    const uploadItem = items.find((i) => i.label.includes('waiting for first upload'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('unknown');
+  });
+
+  it('ignores lastHttpSuccessMs of 0 (sentinel / unset)', () => {
+    const now = 5_000_000;
+    const log: EngineLogEvent[] = [];
+    const items = computeHealthItems(log, now, 0);
+
+    const uploadItem = items.find((i) => i.label.includes('waiting for first upload'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('unknown');
+  });
+
+  it('ignores lastHttpSuccessMs that is in the future (clock skew guard)', () => {
+    const now = 5_000_000;
+    const log: EngineLogEvent[] = [];
+    const items = computeHealthItems(log, now, now + 60_000);
+
+    const uploadItem = items.find((i) => i.label.includes('waiting for first upload'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('unknown');
+  });
+
+  it('existing tests pass unchanged when lastHttpSuccessMs is omitted', () => {
+    const now = 5_000_000;
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onHttp', now - 2 * 60_000, { success: true }),
+    ];
+    // No third argument — backward-compatible
+    const items = computeHealthItems(log, now);
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('ok');
+  });
+});
+
 // ─── computeOverallHealth — Diagnostics hero card verdict ────────────────────
 
 describe('computeOverallHealth — hero card upload-stop scenarios', () => {

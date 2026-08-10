@@ -122,6 +122,26 @@ function recordPipelineTs(stage: PtsKey): void {
 /** Per-stage timestamps keyed by stage name.  null = this stage has never fired. */
 export type PipelineTimestamps = { [K in PtsKey]: number | null };
 
+/** Read just the last-successful HTTP upload timestamp from its dedicated
+ *  persistent key.  Faster than reading all pipeline timestamps when only
+ *  the upload health row needs a fallback.
+ *
+ *  Returns the epoch-ms of the last confirmed 200/201 upload, or null if
+ *  no successful upload has been recorded on this device yet.
+ *
+ *  This key is written by BOTH the foreground onHttp handler and the
+ *  headless HTTP event handler, so it stays current regardless of whether
+ *  the main JS runtime was alive at upload time.
+ */
+export async function getLastHttpSuccessTs(): Promise<number | null> {
+  try {
+    const raw = await AsyncStorage.getItem(PTS_KEYS.http_success);
+    return raw ? Number(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Read all pipeline timestamps from AsyncStorage.  Safe to call from anywhere. */
 export async function getPipelineTimestamps(): Promise<PipelineTimestamps> {
   const pairs = await Promise.all(
@@ -292,6 +312,15 @@ function registerHeadlessTaskOnce(): void {
         } catch (_e) { /* best-effort */ }
 
         await logEvent('sdk_onHttp', { success, status, path: '', bodyHead });
+
+        // Persist the last-successful-upload timestamp in its own
+        // dedicated AsyncStorage key so it survives ring-buffer eviction.
+        // If the 50-entry buffer fills with failure entries, computeHealthItems()
+        // can still find evidence that uploads are working by reading this key
+        // directly (via getLastHttpSuccessTs / getPipelineTimestamps).
+        if (success) {
+          recordPipelineTs('http_success');
+        }
 
         // Upsert into memberStore when the upload succeeded and we have
         // a parseable response body — keeps the local store consistent
