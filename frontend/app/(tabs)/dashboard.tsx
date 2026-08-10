@@ -6,7 +6,7 @@ import {
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
@@ -69,6 +69,9 @@ const SOS_CIRCUMFERENCE = 2 * Math.PI * SOS_RING_RADIUS; // ≈ 508.9
 export default function Dashboard() {
   const router = useRouter();
   const { user, logout } = useAuth();
+  // Safe area insets — used to keep the SOS FAB clear of the navigation bar
+  // on all device/navigation configurations (gesture, Samsung buttons, Pixel, etc.)
+  const insets = useSafeAreaInsets();
   // Build 47 — Dashboard no longer owns a local copy of the members
   // array.  Every consumer reads from `memberStore` so coordinates,
   // last_seen, location_name, and accuracy can never drift apart
@@ -618,7 +621,8 @@ export default function Dashboard() {
     if (sosDialingRef.current) return;
     setSosHolding(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); // finger-down feedback
-    Animated.spring(sosScale, { toValue: 0.92, useNativeDriver: true, friction: 8, tension: 120 }).start();
+    // Enlarge 7 % on hold-start so the user gets physical confirmation the gesture registered.
+    Animated.spring(sosScale, { toValue: 1.07, useNativeDriver: true, friction: 8, tension: 120 }).start();
     sosHoldProgress.setValue(0);
     sosHoldAnim.current = Animated.timing(sosHoldProgress, {
       toValue: 1,
@@ -630,6 +634,8 @@ export default function Dashboard() {
       setSosHolding(false);
       sosHoldProgress.setValue(0);
       Animated.spring(sosScale, { toValue: 1, useNativeDriver: true, friction: 6 }).start();
+      // Stronger haptic on hold-complete — physical confirmation that SOS activated.
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       startCountdown();
     });
   }, [sosHoldProgress, sosScale, startCountdown]);
@@ -986,7 +992,7 @@ export default function Dashboard() {
           Issue 2: hidden while an SOS is already active (the red emergency banner
           communicates the state; the FAB is redundant and adds visual clutter).
           Reappears automatically once the emergency resolves. */}
-      {!activeEmergency && <View style={styles.sosFabContainer} pointerEvents="box-none">
+      {!activeEmergency && <View style={[styles.sosFabContainer, { bottom: 32 + insets.bottom }]} pointerEvents="box-none">
         <View style={{ width: SOS_RING_SIZE, height: SOS_RING_SIZE, alignItems: 'center', justifyContent: 'center' }}>
           <Svg width={SOS_RING_SIZE} height={SOS_RING_SIZE} style={StyleSheet.absoluteFill}>
             {/* Track ring — faint background arc, only visible while holding */}
@@ -1420,9 +1426,10 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', padding: 24, marginHorizontal: 24, marginTop: 8 },
   emptyText: { color: Colors.textTertiary, marginTop: 8, textAlign: 'center' },
   sosFabContainer: {
-    // Issue 2 — standard Android FAB position: bottom-right, 24 dp from right edge,
-    // 32 dp above the bottom navigation bar. No longer centres over the scroll content.
-    position: 'absolute', bottom: 32, right: 24,
+    // Issue 2 — standard Android FAB position: bottom-right, 24 dp from right edge.
+    // bottom is NOT set here — applied inline as (32 + insets.bottom) so the FAB
+    // clears the nav bar on gesture navigation, Samsung buttons, and Pixel nav alike.
+    position: 'absolute', right: 24,
     alignItems: 'center', gap: 8,
   },
   sosFab: {
