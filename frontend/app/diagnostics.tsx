@@ -616,6 +616,7 @@ export default function DiagnosticsScreen() {
     engine: true,
     pipeline: true,  // Build XX — Refresh Pipeline investigation, default open
     'pipeline-ts': true, // Task #21 — Pipeline Timestamps, default open
+    'device-comparison': true, // Task #30 — open by default so stale events are visible immediately
   });
   const expansionLoadedRef = useRef(false);
 
@@ -1646,6 +1647,41 @@ export default function DiagnosticsScreen() {
               </Text>
             );
 
+            // ── First-failing-stage auto-detection ─────────────────────────────
+            // Pipeline stage order matches the data flow from SDK activity
+            // recognition through to the confirmed HTTP upload.  The first
+            // stage whose age exceeds the crit threshold (15 min) is the
+            // root-cause stage — the point where the pipeline stopped.
+            //
+            // Note: all *_age_ms values in device_snapshot are ages AT THE
+            // TIME the snapshot was pushed (not "now"), so a stage showing
+            // 8 min at snapshot time when the snapshot itself is 12 min old
+            // means the actual current age is ~20 min.  The "Snapshot age"
+            // row below provides the offset context.
+            const SNAPSHOT_STAGE_ORDER: { label: string; snapshotKey: string }[] = [
+              { label: 'Activity cb',      snapshotKey: 'activity_age_ms' },
+              { label: 'Motion cb',        snapshotKey: 'motion_age_ms' },
+              { label: 'Location cb',      snapshotKey: 'location_age_ms' },
+              { label: 'Heartbeat JS',     snapshotKey: 'hb_js_age_ms' },
+              { label: 'Headless invoked', snapshotKey: 'hl_inv_age_ms' },
+              { label: 'HTTP success',     snapshotKey: 'http_ok_age_ms' },
+            ];
+            const SNAP_CRIT_MS = 15 * 60_000;
+
+            /** Returns the label of the first pipeline stage whose age
+             *  exceeded SNAP_CRIT_MS at snapshot time, or null if all
+             *  stages were healthy (or the snapshot is absent). */
+            const getFirstFailingStage = (ds: any): string | null => {
+              if (!ds) return null;
+              for (const { label, snapshotKey } of SNAPSHOT_STAGE_ORDER) {
+                const ageMs: number | null | undefined = ds[snapshotKey];
+                if (ageMs !== null && ageMs !== undefined && ageMs >= SNAP_CRIT_MS) {
+                  return label;
+                }
+              }
+              return null;
+            };
+
             // Comparison rows: label + accessor function.
             type RowDef = { label: string; render: (m: any) => ReactNode };
             const rows: RowDef[] = [
@@ -1738,6 +1774,43 @@ export default function DiagnosticsScreen() {
                 <Text style={[styles.muted, { marginBottom: 6, fontSize: 11 }]}>
                   Fetched {fetchedAgo}s ago · {members.length} member{members.length !== 1 ? 's' : ''} · family group {(familySnapshot.data.family_group_id ?? '').slice(0, 8)}
                 </Text>
+
+                {/* ── First-failing-stage summary card ─────────────────────────────
+                    Automatically answers "which pipeline stage stopped first?"
+                    Visible only once at least one member has pushed a snapshot.
+                    When this card shows a red entry, that IS the root-cause stage.
+                    ─────────────────────────────────────────────────────────────── */}
+                {members.some((m) => m.device_snapshot) && (
+                  <View style={{ backgroundColor: '#1F2937', borderRadius: 6, padding: 10, marginBottom: 8 }}>
+                    <Text style={{ color: '#9CA3AF', fontSize: 11, fontWeight: '700', marginBottom: 4 }}>
+                      🔍 FIRST FAILING STAGE (auto-detected from snapshot)
+                    </Text>
+                    {members.map((m) => {
+                      const firstFailing = getFirstFailingStage(m.device_snapshot);
+                      return (
+                        <View key={m.id} style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3 }}>
+                          <Text style={{ color: '#D1D5DB', fontSize: 12, fontWeight: '700', width: 72 }} numberOfLines={1}>
+                            {m.name?.split(' ')[0] ?? '?'}:
+                          </Text>
+                          {!m.device_snapshot ? (
+                            <Text style={{ color: '#6B7280', fontSize: 12, fontStyle: 'italic' }}>no snapshot yet</Text>
+                          ) : firstFailing ? (
+                            <Text style={{ color: '#EF4444', fontWeight: '700', fontSize: 12 }}>
+                              ❌ {firstFailing}
+                            </Text>
+                          ) : (
+                            <Text style={{ color: '#10B981', fontWeight: '700', fontSize: 12 }}>
+                              ✓ all stages healthy at snapshot time
+                            </Text>
+                          )}
+                        </View>
+                      );
+                    })}
+                    <Text style={{ color: '#6B7280', fontSize: 10, marginTop: 6 }}>
+                      Ages are at snapshot time — add "Snapshot age" for current effective age
+                    </Text>
+                  </View>
+                )}
 
                 {/* Column header row */}
                 <View style={{ flexDirection: 'row', backgroundColor: '#1F2937', paddingVertical: 6, paddingHorizontal: 4, borderRadius: 4, marginBottom: 2 }}>

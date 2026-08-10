@@ -209,13 +209,27 @@ export default function Alerts() {
                   </TouchableOpacity>
                 )}
                 <Text style={styles.alertMeta}>{a.member_name} · {formatRelativeLocal(a.created_at)}</Text>
-                <TouchableOpacity
-                  testID={`alert-ack-${a.id}`}
-                  onPress={() => ack(a.id)}
-                  style={[styles.ackBtn, { borderColor: t.fg }]}
-                >
-                  <Text style={[styles.ackText, { color: t.fg }]}>Acknowledge</Text>
-                </TouchableOpacity>
+                <View style={styles.actionRow}>
+                  {a.type === 'low_battery' && !!a.member_phone && (
+                    <TouchableOpacity
+                      testID={`alert-call-${a.id}`}
+                      onPress={() => Linking.openURL(`tel:${a.member_phone}`)}
+                      style={[styles.callBtn, { borderColor: t.fg, backgroundColor: t.bg }]}
+                      accessibilityLabel={`Call ${a.member_name}`}
+                      accessibilityRole="button"
+                    >
+                      <Icon name="call-outline" size={14} color={t.fg} />
+                      <Text style={[styles.callText, { color: t.fg }]}>Call {a.member_name.split(' ')[0]}</Text>
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity
+                    testID={`alert-ack-${a.id}`}
+                    onPress={() => ack(a.id)}
+                    style={[styles.ackBtn, { borderColor: t.fg }]}
+                  >
+                    <Text style={[styles.ackText, { color: t.fg }]}>Acknowledge</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             </View>
           );
@@ -274,7 +288,13 @@ const styles = StyleSheet.create({
   },
   mapHintText: { color: '#FFFFFF', fontSize: 11, fontWeight: '700' },
   alertMeta: { fontSize: 12, color: Colors.textTertiary, marginTop: 6 },
-  ackBtn: { marginTop: 10, alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, borderWidth: 1, backgroundColor: Colors.surface },
+  actionRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  callBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, borderWidth: 1,
+  },
+  callText: { fontWeight: '700', fontSize: 13 },
+  ackBtn: { alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, borderWidth: 1, backgroundColor: Colors.surface },
   ackText: { fontWeight: '700', fontSize: 13 },
   clearedCard: {
     marginHorizontal: 24, marginTop: 8, padding: 14, borderRadius: 14,

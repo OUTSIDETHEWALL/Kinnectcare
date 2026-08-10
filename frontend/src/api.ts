@@ -245,6 +245,9 @@ export type Alert = {
   latitude?: number;
   longitude?: number;
   acknowledged: boolean;
+  // Build 28 — Phone number of the alert's member, included so the alerts
+  // list can render a direct "Call" button without a second member fetch.
+  member_phone?: string | null;
   // Build 50 — Explicit resolve fields for SOS incident-screen workflow.
   resolved?: boolean;
   resolved_at?: string | null;

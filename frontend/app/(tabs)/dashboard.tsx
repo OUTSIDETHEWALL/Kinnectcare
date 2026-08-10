@@ -86,6 +86,13 @@ export default function Dashboard() {
   // Alerts tab.  Medication alert records persist across day rollovers; the
   // /summary medication_missed count resets to 0 at midnight, which caused
   // the dashboard to disagree with the Alerts tab on active escalations.
+  //
+  // Persistence: the last-known set of unacknowledged alerts is written to
+  // AsyncStorage on every successful /alerts fetch.  On mount (including after
+  // a force-kill restart) the cached snapshot is restored immediately so Needs
+  // Attention shows the correct non-zero count before the first network round-
+  // trip completes, and if /alerts fails we preserve the cached state rather
+  // than silently resetting to 0.
   const [activeAlerts, setActiveAlerts] = useState<ApiAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -107,6 +114,27 @@ export default function Dashboard() {
         await AsyncStorage.setItem(key, '1');
         setShowWelcomeBanner(true);
         setTimeout(() => setShowWelcomeBanner(false), 3000);
+      } catch (_e) {}
+    })();
+  }, [user?.id]);
+
+  // Restore cached alerts from AsyncStorage on mount so Needs Attention shows
+  // the correct non-zero count immediately after a force-kill restart, before
+  // the first /alerts network round-trip completes.
+  useEffect(() => {
+    if (!user?.id) return;
+    (async () => {
+      try {
+        const key = `@kinnship/active_alerts_v1_${user.id}`;
+        const cached = await AsyncStorage.getItem(key);
+        if (cached) {
+          const parsed = JSON.parse(cached) as ApiAlert[];
+          // Only restore alerts that are still unacknowledged.  Resolved alerts
+          // that were auto-cleared in a prior session must not reappear after a
+          // restart — the server is the source of truth and will correct the
+          // count on the next successful /alerts fetch.
+          setActiveAlerts(parsed.filter((a: ApiAlert) => !a.acknowledged));
+        }
       } catch (_e) {}
     })();
   }, [user?.id]);
@@ -191,9 +219,11 @@ export default function Dashboard() {
           getBillingStatus().catch(() => null),
           // Fetch alerts in the same parallel burst so Needs Attention and
           // Missed Meds counts are always consistent with the Alerts tab.
-          // Swallow errors — a failed /alerts fetch degrades gracefully to
-          // the summary-only count rather than blocking the dashboard load.
-          api.get('/alerts').catch(() => ({ data: [] })),
+          // Return null on failure (not { data: [] }) so the caller can
+          // distinguish "server returned empty list" from "fetch failed and we
+          // should preserve the previously cached state" — avoiding the silent
+          // reset-to-0 that would drop Needs Attention after a restart.
+          api.get('/alerts').catch(() => null),
         ]);
         mRes = m;
         // Build #59 — fire the invites fetch in parallel too so the
@@ -282,9 +312,26 @@ export default function Dashboard() {
         // upsertMany replaces each member's full object reference.
         memberStore.upsertMany(Array.isArray(m.data) ? m.data : []);
         setSummary(s.data.members || []);
-        setActiveAlerts(
-          ((ar.data as ApiAlert[]) || []).filter((a: ApiAlert) => !a.acknowledged),
-        );
+        // Only update activeAlerts when the fetch actually succeeded (ar !== null).
+        // When /alerts fails, ar is null and we preserve the previous state
+        // (either the in-memory value from the last successful fetch, or the
+        // AsyncStorage snapshot restored on mount) so Needs Attention never
+        // drops to 0 just because of a transient network error.
+        if (ar !== null) {
+          const freshAlerts = ((ar.data as ApiAlert[]) || []).filter(
+            (a: ApiAlert) => !a.acknowledged,
+          );
+          setActiveAlerts(freshAlerts);
+          // Persist the fresh snapshot so it survives a force-kill restart.
+          // Keyed by user id so a sign-out / sign-in to a different account
+          // never serves stale alerts from the previous session.
+          if (user?.id) {
+            try {
+              const cacheKey = `@kinnship/active_alerts_v1_${user.id}`;
+              await AsyncStorage.setItem(cacheKey, JSON.stringify(freshAlerts));
+            } catch (_e) {}
+          }
+        }
         if (b) setBilling(b);
         setLoadError(false);
         if (dlogId) await dashMarkSetState(dlogId).catch(() => {});

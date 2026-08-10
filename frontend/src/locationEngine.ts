@@ -859,8 +859,20 @@ function attachSdkListeners(lib: any): void {
           const pts = await getPipelineTimestamps();
           const now = Date.now();
           const httpOkAge = pts.http_success !== null ? now - pts.http_success : null;
+          const sdkSt = await lib.getState().catch(() => null);
+
+          // Always push pipeline timestamps to the backend on every JS heartbeat
+          // so Charles's Device Comparison table in Diagnostics shows fresh
+          // pipeline ages for both devices during healthy operation — not only
+          // after a stale-upload event.  The PUT endpoint writes a single field
+          // in the member doc; at <1 KB per call and ~60 s cadence, the added
+          // load is negligible.
+          void pushDeviceSnapshotToBackend(pts, now, sdkSt);
+
+          // Only log the verbose stale snapshot when uploads are actually stale
+          // (>5 min since last confirmed HTTP success).  This keeps the ring
+          // buffer free of noise during healthy operation.
           if (httpOkAge === null || httpOkAge > 5 * 60 * 1000) {
-            const sdkSt = await lib.getState().catch(() => null);
             // Deliverable 1 — structured snapshot with all required fields.
             // AppState.currentState reads synchronously from the React Native
             // AppState module (safe to call from any async context).
@@ -888,11 +900,6 @@ function attachSdkListeners(lib: any): void {
               sdk_trackingMode:   sdkSt?.trackingMode ?? null,
               listeners_attached: listenersAttached,
             });
-
-            // Deliverable 2 — push pipeline timestamps to backend so Charles
-            // can compare his device vs Joyce's in the Diagnostics screen.
-            // Uses the same cachedConfig as battery pushes.
-            void pushDeviceSnapshotToBackend(pts, now, sdkSt);
           }
         } catch (_e) { /* never abort onHeartbeat for a diagnostic snapshot */ }
       })();

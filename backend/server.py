@@ -414,6 +414,10 @@ class Alert(BaseModel):
     resolved_at: Optional[datetime] = None
     resolved_by_user_id: Optional[str] = None
     resolved_by_name: Optional[str] = None
+    # Build 28 — Phone number of the member this alert is about, included so
+    # the alerts list can render a direct "Call" button without a second fetch.
+    # Optional: older alert documents and alert types that don't need it omit it.
+    member_phone: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @field_serializer("created_at", when_used='json')
@@ -2522,6 +2526,9 @@ async def check_low_battery(
 
     Recovery (battery >= 25 %, currently alerted):
       • Resolves the most recent unresolved low_battery alert in db.alerts.
+      • Sends a recovery push to all caregivers: "{name}'s phone is charging —
+        location tracking is back to normal."  Gated by _was_alerted so it
+        fires at most once per discharge/recovery cycle.
       • Returns {"low_battery_alerted": False}.
 
     No-op (battery in hysteresis band, or flag already matches state):
@@ -2533,11 +2540,13 @@ async def check_low_battery(
 
     if battery_level <= _BATTERY_TRIGGER_THRESHOLD and not _was_alerted:
         # ── Trigger: create alert record + push ──────────────────────────────
+        _member_phone = prev_doc.get("phone") or None
         a = Alert(
             owner_id=owner_id,
             family_group_id=family_group_id,
             member_id=member_id,
             member_name=_member_name,
+            member_phone=_member_phone,
             type="low_battery",
             severity="warning",
             title=f"{_member_name}'s battery is low",
@@ -2599,13 +2608,17 @@ async def check_low_battery(
             },
             {"$set": {"resolved": True, "resolved_at": now_utc}},
         )
+        # Proactive recovery push — caregivers have no other way to know the
+        # phone is back to normal without opening the app.  Gated by
+        # _was_alerted so it fires at most once per discharge/recovery cycle,
+        # matching the one-shot design of the trigger push above.
         try:
             await push_to_family_group(
                 family_group_id,
                 title=f"{_member_name}'s phone is charging",
                 body=(
                     f"{_member_name}'s battery is back up to {_battery_pct}%. "
-                    f"Location updates will continue normally."
+                    f"Location tracking is back to normal."
                 ),
                 data={
                     "type": "battery_recovered",
@@ -6187,4 +6200,3 @@ async def _heal_missing_self_member_rows():
         })
     except Exception as e:
         logger.warning(f"_heal_missing_self_member_rows skipped: {e}")
-
