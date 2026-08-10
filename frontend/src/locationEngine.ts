@@ -185,9 +185,69 @@ function registerHeadlessTaskOnce(): void {
           });
         }
       }
-      // Other event types (location, motionchange, http) are
-      // observability only — we don't need to act on them in
-      // headless context, the SDK already handled them natively.
+
+      if (name === 'http') {
+        // ── Headless HTTP upload confirmation ─────────────────────────
+        //
+        // The Transistor SDK delivers http events to the headless task
+        // whenever its native HTTP transport completes a location upload
+        // (success or failure) while the main JS runtime is frozen.
+        // This is the PRIMARY upload evidence path for users who keep
+        // Kinnship entirely in the background.
+        //
+        // lib.onHttp() inside attachSdkListeners() only fires when the
+        // main JS runtime is alive (foreground or just-backgrounded).
+        // For background-only users, that listener never fires so the
+        // ring buffer stays empty and the Health Check always shows
+        // "waiting for first upload" — a false alarm.
+        //
+        // Writing sdk_onHttp here means the same ring buffer key that
+        // computeOverallHealth() and computeHealthItems() already search
+        // will now be populated from the headless path as well.
+        //
+        // The Transistor HeadlessEvent for 'http' carries response data
+        // as event.response (SDK ≥ 4.x): { success, status, responseText, url }.
+        // Fall back to the event root for older SDK shapes.
+        const response = event?.response ?? event;
+        const success: boolean = !!response?.success;
+        const status: number | null = typeof response?.status === 'number' ? response.status : null;
+        const rawUrl: string = typeof response?.url === 'string' ? response.url : '';
+        // Strip query strings so the path stays readable in the ring buffer.
+        const path: string = rawUrl.split('?')[0];
+        // Capture a truncated response body for data-integrity confirmation
+        // (same 400-char limit used by the foreground onHttp handler).
+        let bodyHead: string | null = null;
+        try {
+          const rt: string | undefined = response?.responseText;
+          if (typeof rt === 'string' && rt.length > 0) {
+            bodyHead = rt.length > 400 ? rt.slice(0, 400) + '…' : rt;
+          }
+        } catch (_e) { /* best-effort */ }
+
+        await logEvent('sdk_onHttp', { success, status, path, bodyHead });
+
+        // Upsert into memberStore when the upload succeeded and we have
+        // a parseable response body — keeps the local store consistent
+        // with the backend without waiting for the next /members poll.
+        // AsyncStorage is available in the headless context; memberStore
+        // uses it internally, so this is safe to call here.
+        if (success && bodyHead !== null) {
+          try {
+            const fullRt: string | undefined = response?.responseText;
+            if (typeof fullRt === 'string' && fullRt.length > 0 && fullRt.length < 16_000) {
+              const obj = JSON.parse(fullRt);
+              if (obj && typeof obj === 'object' && obj.id) {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const ms = require('./store/memberStore');
+                ms.upsertOne(obj);
+              }
+            }
+          } catch (_e) { /* parse/upsert failure — next /members poll will catch up */ }
+        }
+      }
+
+      // Other event types (location, motionchange) are observability
+      // only — the SDK already handled them natively.
     } catch (_e) {
       // Any uncaught throw in a headless task could destabilize the
       // SDK's native service; defensive top-level catch.
