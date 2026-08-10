@@ -12,7 +12,7 @@ import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, MemberSummary, getBillingStatus, BillingStatus, FamilyInvite, listFamilyInvites, revokeFamilyInvite, Alert as ApiAlert } from '../../src/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { geocodeLabelForCoord, formatLastSeenAge } from '../../src/locationRefresh';
+import { formatLastSeenAge } from '../../src/locationRefresh';
 import {
   requestRefresh as requestMemberRefresh,
   clearIfNewer as clearRefreshIfNewer,
@@ -411,12 +411,10 @@ export default function Dashboard() {
             try {
               const memberId = await AsyncStorage.getItem('kc_my_member_id_v1');
               if (!memberId) return;
-              const label = await geocodeLabelForCoord(pos.coords.latitude, pos.coords.longitude);
               const body: any = {
                 latitude: pos.coords.latitude,
                 longitude: pos.coords.longitude,
               };
-              if (label) body.location_name = label;
               const resp = await api.put(`/members/${memberId}/location`, body);
               // Build 48 — upsert canonical post-write doc into store so
               // Dashboard and Member screen see the fresh timestamp
@@ -482,16 +480,10 @@ export default function Dashboard() {
         }
 
         const pos = await Location.getCurrentPositionAsync({});
-        // v1.2.7 — reverse-geocode so the dashboard's
-        // `📍 {member.location_name}` label refreshes too, not just
-        // the lat/lon under the hood.  Best-effort; caller's PUT
-        // omits location_name if geocode failed.
-        const label = await geocodeLabelForCoord(pos.coords.latitude, pos.coords.longitude);
         const body: any = {
           latitude: pos.coords.latitude,
           longitude: pos.coords.longitude,
         };
-        if (label) body.location_name = label;
         // Build 48 — upsert the post-write Member doc into the
         // canonical store so the senior's own Dashboard re-renders
         // with the fresh timestamp instantly.

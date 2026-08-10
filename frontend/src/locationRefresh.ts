@@ -600,15 +600,10 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
     let respLat: number | null = null;
     let respLon: number | null = null;
     let writeMismatch = false;
-    // v1.2.7 — reverse-geocode the fix so the PUT carries an honest
-    // `location_name` for the dashboard label.  Best-effort: if the
-    // geocoder fails or returns nothing useful we still PUT the
-    // coords; the backend retains the previous label rather than
-    // overwriting with junk.
-    // Build XX: use the internal diagnostic variant so the log entry
-    // records exactly which path ran and why any fallback occurred.
-    const geocodeDiag = await _geocodeLabelWithDiag(lat, lon);
-    const locationName = geocodeDiag.label;
+    // Geocoding removed from upload path.  The backend resolves location_name
+    // lazily inside GET /members using its MongoDB cache (7-day TTL, 11 m
+    // grid).  A Google API call now happens at most once per area per week,
+    // only when a caregiver actually opens the dashboard — never on every upload.
 
     // Build 62 — Battery telemetry.  Best-effort; never blocks the upload.
     let batteryLevel: number | null = null;
@@ -625,7 +620,6 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
 
     try {
       const body: any = { latitude: lat, longitude: lon };
-      if (locationName) body.location_name = locationName;
       if (batteryLevel !== null) body.battery_level = batteryLevel;
       if (isCharging !== null) body.is_charging = isCharging;
       const resp = await api.put(`/members/${memberId}/location`, body);
@@ -677,10 +671,6 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
       respLat: respLat !== null ? roundCoord(respLat) : null,
       respLon: respLon !== null ? roundCoord(respLon) : null,
       writeMismatch,
-      // Build XX — geocoder observability fields.
-      locationName:           locationName || null,
-      geocoderPath:           geocodeDiag.geocoderPath,
-      geocoderFallbackReason: geocodeDiag.geocoderFallbackReason,
     });
   } catch (_e) {
     // Never let a refresh failure crash the foreground transition.

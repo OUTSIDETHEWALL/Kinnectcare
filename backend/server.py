@@ -2271,6 +2271,34 @@ async def list_members(current=Depends(get_current_user)):
             f"member_id={d.get('id')} member_name={d.get('name')!r} "
             f"battery_level={d.get('battery_level')} is_charging={d.get('is_charging')}"
         )
+    # ── Lazy reverse geocoding ────────────────────────────────────────────────
+    # Resolve a human-readable address only when this endpoint is called,
+    # not during every location upload.  Uploads clear location_name so this
+    # block always sees a fresh coordinate pair.
+    #
+    # Conditions: member has lat/lon AND location_name is absent or null.
+    # Sentinel strings ("Location Sharing Off", "Unknown") are non-null so
+    # they pass through untouched.
+    #
+    # geocoding.resolve_location_name checks the MongoDB geocode_cache first
+    # (7-day TTL, 11 m grid).  A Google Geocoding API call only happens on a
+    # true cache miss — typically the first view after the member enters a new
+    # area.  All subsequent views within the TTL window are free cache hits.
+    for d in docs:
+        lat = d.get("latitude")
+        lon = d.get("longitude")
+        if lat is not None and lon is not None and not d.get("location_name"):
+            try:
+                name, _ = await geocoding.resolve_location_name(
+                    db, lat, lon, client_label=None
+                )
+                if name:
+                    d["location_name"] = name
+            except Exception as _lge:
+                logger.warning(
+                    f"lazy_geocode: member={d.get('id')} "
+                    f"lat={lat} lon={lon} raised {_lge!r}"
+                )
     return [FamilyMember(**d) for d in docs]
 
 
@@ -2699,43 +2727,11 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     }
     if incoming_captured_at is not None:
         update["captured_at"] = incoming_captured_at
-    if data.location_name:
-        update["location_name"] = data.location_name
-    # ── Backend geocoding (Stage 1) ──────────────────────────────────────────
-    # When USE_BACKEND_GEOCODING=true the server resolves location_name from
-    # the uploaded coordinates using Google Geocoding REST + a MongoDB cache,
-    # overwriting any client-provided label.  All family members then see the
-    # same canonical name for the same coordinates regardless of which platform
-    # geocoder fired on the sender's device.
-    #
-    # When the flag is off (default) this block is a complete no-op: the
-    # existing client-provided label flows through unchanged.
-    #
-    # Diff logging: when the flag is on, every mismatch between the backend
-    # label and the client label is written to location_ingest_log so the beta
-    # period produces concrete evidence of divergence before the client-side
-    # geocoding code is removed (Stage 2).
-    _backend_location_name: Optional[str] = None
-    _geocode_label_matched: Optional[bool] = None
-    _geocode_cache_hit: Optional[bool] = None
-    if not coord_suppressed and data.latitude is not None and data.longitude is not None:
-        try:
-            _backend_location_name, _geocode_label_matched = \
-                await geocoding.resolve_location_name(
-                    db,
-                    data.latitude,
-                    data.longitude,
-                    client_label=data.location_name,
-                )
-            if _backend_location_name:
-                # Canonical backend label overwrites the client-provided value.
-                update["location_name"] = _backend_location_name
-                # Determine cache hit: if the value was already in the DB we
-                # didn't call the Google API.  resolve_location_name logs this
-                # internally; we surface it in location_ingest_log as well.
-                _geocode_cache_hit = _geocode_label_matched  # approximate — see below
-        except Exception as _ge:
-            logger.warning(f"geocoding: resolve_location_name raised: {_ge!r}")
+    # Lazy geocoding migration: clear the stored name on every real-coordinate
+    # upload so GET /members will resolve it fresh from current coordinates.
+    # The coord_suppressed pop below removes this for replay catch-up points,
+    # preserving whatever name the caregiver map pin already shows.
+    update["location_name"] = None
     # Build 64 — Persist the SDK's movement state so TrackingStatusPill can
     # apply movement-aware freshness thresholds instead of the old 72-hour
     # engine-health gate.  `is_moving` arrives as a top-level extra field
@@ -2920,16 +2916,9 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             "write_accepted":       write_accepted,
             "rejection_reason":     rejection_reason,
             "coord_suppressed":     coord_suppressed,
-            # Geocoder observability — client-provided label and beta-period
-            # backend diff fields.  All three backend_* fields are None when
-            # USE_BACKEND_GEOCODING=false (flag off, no comparison made).
-            "location_name":           data.location_name,
-            "backend_location_name":   _backend_location_name,
-            "geocode_label_matched":   _geocode_label_matched,
-            # Approximate cache-hit indicator: True when backend label matches
-            # the client label (proxy for a warm cache entry, not a direct
-            # flag from the cache layer).  None when geocoding was skipped.
-            "geocode_cache_hit":       _geocode_cache_hit,
+            # Geocoding is now lazy (resolved in GET /members, not here).
+            # location_name is intentionally cleared on each upload so the
+            # read path always resolves from fresh coordinates.
         })
     except Exception:
         pass
