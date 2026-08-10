@@ -2564,7 +2564,7 @@ async def check_low_battery(
         return {"low_battery_alerted": True}
 
     if battery_level >= _BATTERY_CLEAR_THRESHOLD and _was_alerted:
-        # ── Recovery: auto-resolve the open alert ────────────────────────────
+        # ── Recovery: auto-resolve the open alert + notify caregivers ────────
         now_utc = datetime.now(timezone.utc)
         await db.alerts.update_one(
             {
@@ -2575,10 +2575,28 @@ async def check_low_battery(
             },
             {"$set": {"resolved": True, "resolved_at": now_utc}},
         )
-        logger.info(
-            f"check_low_battery: auto-resolved for member={member_id} "
-            f"battery={_battery_pct}%"
-        )
+        try:
+            await push_to_family_group(
+                family_group_id,
+                title=f"{_member_name}'s phone is charging",
+                body=(
+                    f"{_member_name}'s battery is back up to {_battery_pct}%. "
+                    f"Location updates will continue normally."
+                ),
+                data={
+                    "type": "battery_recovered",
+                    "member_id": member_id,
+                },
+                exclude_user_id=exclude_user_id,
+            )
+            logger.info(
+                f"check_low_battery: auto-resolved + recovery push sent "
+                f"member={member_id} battery={_battery_pct}%"
+            )
+        except Exception as _be:
+            logger.warning(
+                f"check_low_battery: recovery push failed for member={member_id}: {_be}"
+            )
         return {"low_battery_alerted": False}
 
     return {}

@@ -1,6 +1,6 @@
 """
 test_battery_alert_lifecycle.py — Unit tests for check_low_battery()
-Tasks #19 and #20 (Battery Alert Reliability sprint)
+Tasks #19, #20, and #27 (Battery Alert Reliability sprint)
 
 Uses unittest.mock to isolate the helper from MongoDB and push fanout
 so these tests run without a live database or Expo push service.
@@ -8,7 +8,7 @@ so these tests run without a live database or Expo push service.
 Acceptance test coverage (from sprint spec):
   Test 1 — Trigger:    battery 20% → 15%  → alert created, push sent, flag set
   Test 2 — No dup:     battery stays at 10% → no second alert, no second push
-  Test 3 — Recovery:   battery 10% → 26%  → alert resolved, flag cleared, no push
+  Test 3 — Recovery:   battery 10% → 26%  → alert resolved, flag cleared, push sent
   Test 4 — Re-trigger: battery 26% → 14%  → new alert, new push, lifecycle repeats
   Hysteresis:          battery rises to 16–24% → no recovery (below 25% clear band)
 """
@@ -190,10 +190,31 @@ class TestRecovery:
         result = _call(battery_level=0.26, was_alerted=True)
         assert result == {"low_battery_alerted": False}
 
-    def test_no_push_on_recovery(self, mock_db, mock_push):
-        """Recovery is silent — no push is sent to caregivers."""
+    def test_push_sent_on_recovery(self, mock_db, mock_push):
+        """Recovery sends a push so caregivers know the phone is charging again."""
         _call(battery_level=0.26, was_alerted=True)
-        mock_push.assert_not_called()
+        mock_push.assert_called_once()
+
+    def test_recovery_push_type(self, mock_db, mock_push):
+        """Push data must carry type='battery_recovered' so the client routes it correctly."""
+        _call(battery_level=0.26, was_alerted=True)
+        data_arg = mock_push.call_args[1].get("data") or mock_push.call_args[0][3]
+        assert data_arg["type"] == "battery_recovered"
+        assert data_arg["member_id"] == MEMBER_ID
+
+    def test_recovery_push_content(self, mock_db, mock_push):
+        """Push title and body must mention the member name and current battery %."""
+        _call(battery_level=0.26, was_alerted=True, name="Joyce")
+        kwargs = mock_push.call_args[1]
+        assert "Joyce" in kwargs["title"]
+        assert "charging" in kwargs["title"].lower()
+        assert "26%" in kwargs["body"]
+
+    def test_recovery_push_excludes_owner(self, mock_db, mock_push):
+        """The monitored device's owner must not receive their own recovery push."""
+        _call(battery_level=0.26, was_alerted=True)
+        kwargs = mock_push.call_args[1]
+        assert kwargs.get("exclude_user_id") == OWNER_ID
 
     def test_exactly_at_clear_threshold(self, mock_db, mock_push):
         """battery_level == 0.25 must recover (condition is >=, not >)."""
