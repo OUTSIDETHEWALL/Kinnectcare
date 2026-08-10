@@ -2280,25 +2280,49 @@ async def list_members(current=Depends(get_current_user)):
     # Sentinel strings ("Location Sharing Off", "Unknown") are non-null so
     # they pass through untouched.
     #
-    # geocoding.resolve_location_name checks the MongoDB geocode_cache first
-    # (7-day TTL, 11 m grid).  A Google Geocoding API call only happens on a
-    # true cache miss — typically the first view after the member enters a new
-    # area.  All subsequent views within the TTL window are free cache hits.
+    # Protection 1 — request-local dedup map (_req_geo).
+    #   If two family members share the same rounded coordinate (same 11 m
+    #   grid cell, e.g. spouses at home), the second lookup is served from
+    #   this in-request dict at zero cost — no MongoDB round-trip, no Google
+    #   call.  The Mongo geocode_cache protects across requests; this map
+    #   protects within a single GET /members response.
+    #
+    # Protection 2 — per-resolve asyncio timeout (2 s).
+    #   A Mongo cache hit returns in ~1 ms.  Only a true Google cache-miss
+    #   is slow (network round-trip + parsing).  If Google is unavailable or
+    #   slow the member is returned without an address rather than blocking
+    #   the dashboard.  The next GET /members refresh retries automatically.
+    #   Location tracking is never affected — this only controls the label.
+    _req_geo: Dict[str, str] = {}
     for d in docs:
         lat = d.get("latitude")
         lon = d.get("longitude")
         if lat is not None and lon is not None and not d.get("location_name"):
-            try:
-                name, _ = await geocoding.resolve_location_name(
-                    db, lat, lon, client_label=None
-                )
-                if name:
-                    d["location_name"] = name
-            except Exception as _lge:
-                logger.warning(
-                    f"lazy_geocode: member={d.get('id')} "
-                    f"lat={lat} lon={lon} raised {_lge!r}"
-                )
+            cache_key = geocoding._cache_key(lat, lon)
+            if cache_key in _req_geo:
+                # Same rounded coordinate already resolved this request — free.
+                d["location_name"] = _req_geo[cache_key]
+            else:
+                try:
+                    name, _ = await asyncio.wait_for(
+                        geocoding.resolve_location_name(
+                            db, lat, lon, client_label=None
+                        ),
+                        timeout=2.0,
+                    )
+                    if name:
+                        d["location_name"] = name
+                        _req_geo[cache_key] = name
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"lazy_geocode: member={d.get('id')} timed out after 2 s "
+                        "— returning without address; next refresh retries"
+                    )
+                except Exception as _lge:
+                    logger.warning(
+                        f"lazy_geocode: member={d.get('id')} "
+                        f"lat={lat} lon={lon} raised {_lge!r}"
+                    )
     return [FamilyMember(**d) for d in docs]
 
 
