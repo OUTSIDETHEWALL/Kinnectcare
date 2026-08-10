@@ -2522,14 +2522,11 @@ async def check_low_battery(
                 f"Charging the phone will help maintain location updates."
             ),
         )
-        # TODO: If duplicate battery alerts are ever observed in production,
-        # add a unique index on active low-battery alerts (e.g. sparse unique
-        # on (family_group_id, member_id, type) where resolved==False).
-        # Current race window — PATCH /battery and PUT /location firing within
-        # the same sub-second window for the same member — is extremely small
-        # and acceptable for beta scale.  The low_battery_alerted flag written
-        # by whichever path wins gates all subsequent calls, so duplicates
-        # would only appear in the narrow window before either write lands.
+        # Race-safe: a partial unique index on (family_group_id, member_id, type)
+        # filtered to resolved=False (see _ensure_alert_dedup_index below)
+        # guarantees that only one concurrent insert can succeed per discharge
+        # cycle.  The DuplicateKeyError catch below handles the loser path so
+        # only a single push reaches caregivers.
         try:
             await db.alerts.insert_one(a.model_dump())
         except DuplicateKeyError:
@@ -2567,7 +2564,7 @@ async def check_low_battery(
         return {"low_battery_alerted": True}
 
     if battery_level >= _BATTERY_CLEAR_THRESHOLD and _was_alerted:
-        # ── Recovery: auto-resolve the open alert ────────────────────────────
+        # ── Recovery: auto-resolve the open alert + notify caregivers ────────
         now_utc = datetime.now(timezone.utc)
         await db.alerts.update_one(
             {
@@ -2578,10 +2575,28 @@ async def check_low_battery(
             },
             {"$set": {"resolved": True, "resolved_at": now_utc}},
         )
-        logger.info(
-            f"check_low_battery: auto-resolved for member={member_id} "
-            f"battery={_battery_pct}%"
-        )
+        try:
+            await push_to_family_group(
+                family_group_id,
+                title=f"{_member_name}'s phone is charging",
+                body=(
+                    f"{_member_name}'s battery is back up to {_battery_pct}%. "
+                    f"Location updates will continue normally."
+                ),
+                data={
+                    "type": "battery_recovered",
+                    "member_id": member_id,
+                },
+                exclude_user_id=exclude_user_id,
+            )
+            logger.info(
+                f"check_low_battery: auto-resolved + recovery push sent "
+                f"member={member_id} battery={_battery_pct}%"
+            )
+        except Exception as _be:
+            logger.warning(
+                f"check_low_battery: recovery push failed for member={member_id}: {_be}"
+            )
         return {"low_battery_alerted": False}
 
     return {}
@@ -5333,6 +5348,74 @@ async def _ensure_alert_dedup_index():
         logger.info("alerts uniq_alert_slot index ensured.")
     except Exception as e:
         logger.warning(f"alerts uniq_alert_slot index ensure skipped: {e}")
+
+    # ── Low-battery dedup index ──────────────────────────────────────────────
+    # Partial unique index on (family_group_id, member_id) scoped exclusively
+    # to unresolved low_battery alerts.  This causes the second concurrent
+    # insert_one() in check_low_battery() to raise DuplicateKeyError, which
+    # that helper already catches to skip the duplicate push.
+    #
+    # The filter is intentionally narrow: only documents where
+    # type=="low_battery" AND resolved==False are covered.  All other alert
+    # types (missed_checkin, sos, medication, etc.) are unaffected — they are
+    # excluded from the index's partial filter and therefore never block each
+    # other.
+    #
+    # Pre-migration: before creating the index, we resolve any leftover
+    # duplicate unresolved low_battery docs from the same (family_group_id,
+    # member_id) pair.  Without this step, index creation on a populated DB
+    # would fail with "E11000 duplicate key" if such duplicates already exist.
+    # We keep the most-recently-created doc per pair unresolved and resolve the
+    # rest so the index can be built cleanly.
+    try:
+        pipeline = [
+            {
+                "$match": {
+                    "type": "low_battery",
+                    "resolved": False,
+                }
+            },
+            {
+                "$sort": {"created_at": -1}
+            },
+            {
+                "$group": {
+                    "_id": {
+                        "family_group_id": "$family_group_id",
+                        "member_id": "$member_id",
+                    },
+                    "ids": {"$push": "$id"},
+                }
+            },
+        ]
+        async for group in db.alerts.aggregate(pipeline):
+            duplicate_ids = group["ids"][1:]  # keep [0] (newest), resolve the rest
+            if duplicate_ids:
+                now_utc = datetime.now(timezone.utc)
+                res = await db.alerts.update_many(
+                    {"id": {"$in": duplicate_ids}},
+                    {"$set": {"resolved": True, "resolved_at": now_utc}},
+                )
+                logger.info(
+                    f"low_battery dedup pre-migration: resolved {res.modified_count} "
+                    f"duplicate(s) for member={group['_id']['member_id']}"
+                )
+    except Exception as e:
+        logger.warning(f"low_battery dedup pre-migration skipped: {e}")
+
+    try:
+        await db.alerts.create_index(
+            [
+                ("family_group_id", 1),
+                ("member_id", 1),
+            ],
+            unique=True,
+            partialFilterExpression={"type": "low_battery", "resolved": False},
+            name="uniq_active_low_battery_per_member",
+        )
+        logger.info("alerts uniq_active_low_battery_per_member index ensured.")
+    except Exception as e:
+        logger.warning(f"alerts uniq_active_low_battery_per_member index ensure skipped: {e}")
 
     # ============================================================
     #  P5 of beta stabilization sprint: AUTOMATIC DATA RETENTION
