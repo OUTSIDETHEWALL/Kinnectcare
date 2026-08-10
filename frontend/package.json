@@ -11,7 +11,8 @@
     "lint": "expo lint",
     "ota:publish": "bash scripts/publish-ota.sh",
     "normalize-lockfile": "bash scripts/normalize-lockfile.sh",
-    "build:android": "bash scripts/build-android.sh"
+    "build:android": "bash scripts/build-android.sh",
+    "test": "jest"
   },
   "dependencies": {
     "@babel/runtime": "^7.20.6",
@@ -67,9 +68,13 @@
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
+    "@babel/preset-env": "^8.0.2",
+    "@types/jest": "^30.0.0",
     "@types/react": "~19.1.0",
     "eslint": "^9.25.0",
     "eslint-config-expo": "~10.0.0",
+    "jest": "^30.4.2",
+    "jest-expo": "^57.0.4",
     "typescript": "~5.9.3"
   },
   "private": true,
