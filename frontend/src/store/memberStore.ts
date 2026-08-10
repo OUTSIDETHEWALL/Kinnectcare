@@ -239,9 +239,28 @@ export function upsertOne(incoming: MemberRecord, seq: number | null = null): vo
     }
     fetchSeq[id] = seq;
   }
-  const next = { ...state.members, [id]: incoming };
+  // ── Lazy-geocoding location_name preservation ────────────────────────────
+  // Uploads clear location_name on the backend so the lazy resolver on
+  // GET /members always sees fresh coordinates.  The PUT response therefore
+  // carries location_name = null even though a valid address was already
+  // resolved moments earlier.  Without this guard, every upload causes a
+  // visible "Unknown → Bullhead City" flicker.
+  //
+  // Rule: if the incoming record has no location_name but the store already
+  // holds one, carry the existing value forward until the next GET /members
+  // (or geocoded GET /members/{id}) replaces it with a freshly-resolved name.
+  // Sentinel strings ("Location Sharing Off") are non-null so they pass
+  // through untouched; null/undefined from upload responses are caught here.
+  const prevLocationName = (prev as any)?.location_name ?? null;
+  const incomingLocationName = (incoming as any)?.location_name ?? null;
+  const record: MemberRecord =
+    !incomingLocationName && prevLocationName
+      ? ({ ...incoming, location_name: prevLocationName } as MemberRecord)
+      : incoming;
+  const committedLocationName = (record as any).location_name ?? null;
+  const next = { ...state.members, [id]: record };
   commit(next, [id]);
-  notifyLegacy(incoming);
+  notifyLegacy(record);
   // Log after commit so the entry reflects committed state.
   try {
     logPipelineEvent({
@@ -251,7 +270,7 @@ export function upsertOne(incoming: MemberRecord, seq: number | null = null): vo
       prevLastSeen: prev?.last_seen ?? null,
       newLastSeen: incoming.last_seen ?? null,
       prevLocationName: (prev as any)?.location_name ?? null,
-      newLocationName: (incoming as any).location_name ?? null,
+      newLocationName: committedLocationName,   // reflects preserved value if incoming was null
       lastSeenDeltaMs: computeLastSeenDelta(prev?.last_seen, incoming.last_seen),
       droppedBySeq: false,
       // CP6 — battery pipeline: prev vs new value entering the store.
@@ -282,7 +301,13 @@ export function upsertMany(incoming: MemberRecord[]): void {
     // Bump the per-id seq so any in-flight fetchOne with an older seq
     // can't clobber this fresh data.
     fetchSeq[m.id] = nextSeq++;
-    next[m.id] = m;
+    // Preserve a previously-resolved location_name if the incoming record
+    // has none (e.g. geocoding timed out on this GET /members call).
+    const existingName = (state.members[m.id] as any)?.location_name ?? null;
+    const incomingName = (m as any)?.location_name ?? null;
+    next[m.id] = (!incomingName && existingName)
+      ? ({ ...m, location_name: existingName } as MemberRecord)
+      : m;
     touched.push(m.id);
   }
   commit(next, touched);
