@@ -61,3 +61,4 @@ OTA updates (`yarn ota:publish`) are not affected — EAS OTA bundling runs on E
 - Move slowly and correctly rather than quickly with new problems.
 - No speculative fixes. No assumptions without live evidence.
 - State confidence levels explicitly on every diagnosis and repair.
+- After every OTA publish, always show the update group ID prominently so Charles can verify it on his phone.
