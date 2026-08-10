@@ -61,7 +61,7 @@
  * because the SDK gates GPS acquisition tightly (single sample, no
  * keep-alive).
  */
-import { Platform } from 'react-native';
+import { Platform, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
@@ -451,6 +451,35 @@ let cachedConfig: LocationEngineConfig | null = null;
 let isReady = false;
 let listenersAttached = false;
 
+// ============================================================
+//  Device info injection (Task #21 — engine snapshot enrichment)
+// ============================================================
+//
+// _layout.tsx calls setDeviceInfo() once at startup so the stale
+// snapshot event can include device model, binary build number, and
+// OTA group ID without importing Constants/Updates here (which would
+// risk native-module loading order issues in the headless context).
+//
+// The snapshot push also uses this config to reach the backend.
+export type DeviceInfo = {
+  model: string | null;          // e.g. "Pixel 8 Pro" or "SM-G998U"
+  buildNumber: string | null;    // nativeBuildVersion
+  otaUpdateId: string | null;    // expo-updates updateId
+  otaChannel: string | null;     // expo-updates channel
+};
+let _deviceInfo: DeviceInfo = {
+  model: null,
+  buildNumber: null,
+  otaUpdateId: null,
+  otaChannel: null,
+};
+
+/** Called once from _layout.tsx at startup — provides device metadata
+ *  for the automatic stale snapshot (Task #21 Deliverable 1). */
+export function setDeviceInfo(info: DeviceInfo): void {
+  _deviceInfo = info;
+}
+
 // Activity-change dedup — onActivityChange fires every
 // activityRecognitionInterval (10 s) even when the activity is
 // unchanged.  Only log when the type OR the moving-state changes so the
@@ -557,6 +586,58 @@ export async function pushBatteryUpdate(source: string = 'unknown'): Promise<voi
       status: e?.response?.status ?? null,
       data:   JSON.stringify(e?.response?.data ?? null).slice(0, 200),
     });
+  }
+}
+
+// ============================================================
+//  Device snapshot push (Task #21 Deliverable 2)
+// ============================================================
+//
+// Called from the stale-detection path on every JS heartbeat where
+// the last HTTP upload is >5 min old.  Sends a lightweight payload
+// to the backend so Charles's Diagnostics screen can show both phones'
+// pipeline state side-by-side without Charles needing to physically
+// touch Joyce's phone.
+//
+// Uses the same cachedConfig / require('./api') pattern as
+// pushBatteryUpdate() — safe in JS-alive (foreground/just-backgrounded)
+// context only.  NOT called from the headless task.
+async function pushDeviceSnapshotToBackend(
+  pts: PipelineTimestamps,
+  now: number,
+  sdkSt: any,
+): Promise<void> {
+  if (!cachedConfig) return;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { api } = require('./api');
+    const body = {
+      at:                  new Date(now).toISOString(),
+      // Device identity
+      device_model:        _deviceInfo.model,
+      ota_update_id:       _deviceInfo.otaUpdateId,
+      ota_channel:         _deviceInfo.otaChannel,
+      // App state
+      app_state:           AppState.currentState,
+      listeners_attached:  listenersAttached,
+      // SDK state
+      sdk_enabled:         sdkSt?.enabled      ?? null,
+      sdk_is_moving:       sdkSt?.isMoving     ?? null,
+      sdk_tracking_mode:   sdkSt?.trackingMode ?? null,
+      // Per-stage pipeline ages (ms since last callback; null = never fired)
+      activity_age_ms:     pts.activity           !== null ? now - pts.activity           : null,
+      motion_age_ms:       pts.motion             !== null ? now - pts.motion             : null,
+      location_age_ms:     pts.location           !== null ? now - pts.location           : null,
+      hb_js_age_ms:        pts.heartbeat_js       !== null ? now - pts.heartbeat_js       : null,
+      hl_inv_age_ms:       pts.headless_invoked   !== null ? now - pts.headless_invoked   : null,
+      hl_hb_age_ms:        pts.headless_heartbeat !== null ? now - pts.headless_heartbeat : null,
+      http_att_age_ms:     pts.http_attempt       !== null ? now - pts.http_attempt       : null,
+      http_ok_age_ms:      pts.http_success       !== null ? now - pts.http_success       : null,
+    };
+    await api.put(`/members/${cachedConfig.memberId}/device-snapshot`, body);
+  } catch (_e) {
+    // Never surface push errors — this is a best-effort diagnostic path.
+    void logEvent('device_snapshot_push_error', { error: String((_e as any)?.message || _e) });
   }
 }
 
@@ -733,12 +814,17 @@ function attachSdkListeners(lib: any): void {
       // This is JS-alive only; the headless task never calls expo-battery.
       void pushBatteryUpdate('heartbeat');
 
-      // ── Task #21: Automatic stale snapshot ────────────────────────────
+      // ── Task #21: Automatic stale snapshot (Deliverable 1) ───────────────
       // If the JS heartbeat is firing but the last confirmed HTTP upload
       // is >5 min old, log a full engine snapshot so we have a structured
       // record of what the engine believed during the gap — no manual
       // trigger needed.  Threshold is deliberately shorter than the 15-min
       // health-check warning so we catch the stale condition early.
+      //
+      // Additionally, push a compact version of the pipeline timestamps to
+      // the backend so Charles's Diagnostics screen can show both devices'
+      // state side-by-side (Deliverable 2).  The push is fire-and-forget —
+      // it must never block or throw in the onHeartbeat path.
       void (async () => {
         try {
           const pts = await getPipelineTimestamps();
@@ -746,21 +832,38 @@ function attachSdkListeners(lib: any): void {
           const httpOkAge = pts.http_success !== null ? now - pts.http_success : null;
           if (httpOkAge === null || httpOkAge > 5 * 60 * 1000) {
             const sdkSt = await lib.getState().catch(() => null);
+            // Deliverable 1 — structured snapshot with all required fields.
+            // AppState.currentState reads synchronously from the React Native
+            // AppState module (safe to call from any async context).
             await logEvent('engine_snapshot_stale', {
-              trigger:           'js_heartbeat',
-              http_ok_age_ms:    httpOkAge,
-              motion_age_ms:     pts.motion             !== null ? now - pts.motion             : null,
-              activity_age_ms:   pts.activity           !== null ? now - pts.activity           : null,
-              location_age_ms:   pts.location           !== null ? now - pts.location           : null,
-              hb_js_age_ms:      pts.heartbeat_js       !== null ? now - pts.heartbeat_js       : null,
-              hl_inv_age_ms:     pts.headless_invoked   !== null ? now - pts.headless_invoked   : null,
-              hl_hb_age_ms:      pts.headless_heartbeat !== null ? now - pts.headless_heartbeat : null,
-              http_att_age_ms:   pts.http_attempt       !== null ? now - pts.http_attempt       : null,
-              sdk_enabled:       sdkSt?.enabled   ?? null,
-              sdk_isMoving:      sdkSt?.isMoving  ?? null,
-              sdk_trackingMode:  sdkSt?.trackingMode ?? null,
+              trigger:            'js_heartbeat',
+              // Device identity (injected by _layout.tsx at startup)
+              device_model:       _deviceInfo.model,
+              build_number:       _deviceInfo.buildNumber,
+              ota_update_id:      _deviceInfo.otaUpdateId,
+              ota_channel:        _deviceInfo.otaChannel,
+              // App lifecycle
+              app_state:          AppState.currentState,
+              // Per-stage pipeline ages
+              http_ok_age_ms:     httpOkAge,
+              http_att_age_ms:    pts.http_attempt       !== null ? now - pts.http_attempt       : null,
+              motion_age_ms:      pts.motion             !== null ? now - pts.motion             : null,
+              activity_age_ms:    pts.activity           !== null ? now - pts.activity           : null,
+              location_age_ms:    pts.location           !== null ? now - pts.location           : null,
+              hb_js_age_ms:       pts.heartbeat_js       !== null ? now - pts.heartbeat_js       : null,
+              hl_inv_age_ms:      pts.headless_invoked   !== null ? now - pts.headless_invoked   : null,
+              hl_hb_age_ms:       pts.headless_heartbeat !== null ? now - pts.headless_heartbeat : null,
+              // SDK state
+              sdk_enabled:        sdkSt?.enabled      ?? null,
+              sdk_isMoving:       sdkSt?.isMoving     ?? null,
+              sdk_trackingMode:   sdkSt?.trackingMode ?? null,
               listeners_attached: listenersAttached,
             });
+
+            // Deliverable 2 — push pipeline timestamps to backend so Charles
+            // can compare his device vs Joyce's in the Diagnostics screen.
+            // Uses the same cachedConfig as battery pushes.
+            void pushDeviceSnapshotToBackend(pts, now, sdkSt);
           }
         } catch (_e) { /* never abort onHeartbeat for a diagnostic snapshot */ }
       })();

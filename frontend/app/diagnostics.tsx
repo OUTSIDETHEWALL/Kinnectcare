@@ -499,6 +499,10 @@ export default function DiagnosticsScreen() {
   const [serverState, setServerState] = useState<any>(null);
   const [serverStateLoading, setServerStateLoading] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Task #21 Deliverable 2 — side-by-side device comparison.
+  // Fetched from /api/diagnostics/family-snapshot on demand.
+  const [familySnapshot, setFamilySnapshot] = useState<any>(null);
+  const [familySnapshotLoading, setFamilySnapshotLoading] = useState(false);
   // Build XX — GPS quality history fetched from backend location_history collection.
   const [gpsHistory, setGpsHistory] = useState<any[]>([]);
   const [gpsHistoryErr, setGpsHistoryErr] = useState<string | null>(null);
@@ -751,6 +755,23 @@ export default function DiagnosticsScreen() {
       });
     } finally {
       setServerStateLoading(false);
+    }
+  }, []);
+
+  // Task #21 Deliverable 2 — Fetch family-snapshot for cross-device comparison.
+  const fetchFamilySnapshot = useCallback(async () => {
+    setFamilySnapshotLoading(true);
+    try {
+      const r = await api.get('/diagnostics/family-snapshot');
+      setFamilySnapshot({ at: Date.now(), data: r.data, err: null });
+    } catch (e: any) {
+      setFamilySnapshot({
+        at: Date.now(),
+        data: null,
+        err: e?.response?.status ? `http_${e.response.status}` : (e?.message || 'unknown'),
+      });
+    } finally {
+      setFamilySnapshotLoading(false);
     }
   }, []);
 
@@ -1549,6 +1570,227 @@ export default function DiagnosticsScreen() {
           >
             <Text style={styles.secondaryBtnText}>Copy pipeline timestamps</Text>
           </TouchableOpacity>
+        </CollapsibleSection>
+
+        {/* =====================================================
+            Task #21 Deliverable 2 — Device Comparison
+            Side-by-side table of Charles vs Joyce (or any two
+            family members) so Charles can see exactly which
+            pipeline stage diverges while Joyce is stale.
+
+            Data sources:
+              • last_seen / captured_at / is_moving / battery —
+                from the backend members collection (updated on
+                every native SDK upload, visible even when the JS
+                heartbeat is silent).
+              • device_snapshot — pipeline timestamps pushed by
+                the device heartbeat stale-detection path
+                (locationEngine.pushDeviceSnapshotToBackend).
+
+            The column that goes stale while others stay fresh
+            is the first failing stage.
+        ===================================================== */}
+        <CollapsibleSection
+          id="device-comparison"
+          title="Device Comparison (Side-by-Side)"
+          expanded={!!expanded['device-comparison']}
+          onToggle={toggleSection}
+          hint="Compare all family members' upload freshness and pipeline state at the same instant. Fetch from server to refresh."
+          testID="diagnostics-device-comparison"
+        >
+          <TouchableOpacity
+            style={[styles.secondaryBtn, { marginBottom: 8 }]}
+            onPress={fetchFamilySnapshot}
+            disabled={familySnapshotLoading}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.secondaryBtnText}>
+              {familySnapshotLoading ? '⏳  Fetching…' : '🔄  Fetch Device Comparison'}
+            </Text>
+          </TouchableOpacity>
+
+          {familySnapshot?.err ? (
+            <View style={styles.card}>
+              <Text style={[styles.entry, { color: '#EF4444' }]}>
+                Error: {familySnapshot.err}
+              </Text>
+            </View>
+          ) : familySnapshot?.data ? (() => {
+            const members: any[] = familySnapshot.data.members ?? [];
+            const fetchedAt: number = familySnapshot.at ?? Date.now();
+            const fetchedAgo = Math.round((nowTick - fetchedAt) / 1000);
+
+            // Helper: format an age in ms with colour coding.
+            const ageCell = (ageMs: number | null | undefined, warn = 5 * 60_000, crit = 15 * 60_000): ReactNode => {
+              if (ageMs === null || ageMs === undefined) {
+                return <Text style={{ color: '#6B7280', fontSize: 12 }}>—</Text>;
+              }
+              const color = ageMs < warn ? '#10B981' : ageMs < crit ? '#F59E0B' : '#EF4444';
+              const s = Math.round(ageMs / 1000);
+              const label = s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+              return <Text style={{ color, fontWeight: '700', fontSize: 12 }}>{label} ago</Text>;
+            };
+
+            const boolCell = (val: boolean | null | undefined, trueLabel = 'YES', falseLabel = 'NO'): ReactNode => {
+              if (val === null || val === undefined) return <Text style={{ color: '#6B7280', fontSize: 12 }}>—</Text>;
+              return <Text style={{ color: val ? '#10B981' : '#EF4444', fontWeight: '700', fontSize: 12 }}>{val ? trueLabel : falseLabel}</Text>;
+            };
+
+            const strCell = (val: string | null | undefined): ReactNode => (
+              <Text style={{ color: '#374151', fontSize: 12 }} numberOfLines={1}>
+                {val ?? '—'}
+              </Text>
+            );
+
+            // Comparison rows: label + accessor function.
+            type RowDef = { label: string; render: (m: any) => ReactNode };
+            const rows: RowDef[] = [
+              {
+                label: 'Last backend upload',
+                render: (m) => ageCell(m.last_seen_age_ms, 5 * 60_000, 15 * 60_000),
+              },
+              {
+                label: 'GPS captured',
+                render: (m) => {
+                  if (!m.captured_at) return <Text style={{ color: '#6B7280', fontSize: 12 }}>—</Text>;
+                  try {
+                    const ageMs = fetchedAt - new Date(m.captured_at).getTime();
+                    return ageCell(ageMs, 5 * 60_000, 15 * 60_000);
+                  } catch { return <Text style={{ color: '#6B7280', fontSize: 12 }}>—</Text>; }
+                },
+              },
+              {
+                label: 'Moving (SDK)',
+                render: (m) => boolCell(m.is_moving, 'MOVING', 'STILL'),
+              },
+              {
+                label: 'Battery',
+                render: (m) => {
+                  if (m.battery_level === null || m.battery_level === undefined) return <Text style={{ color: '#6B7280', fontSize: 12 }}>—</Text>;
+                  const pct = Math.round((m.battery_level ?? 0) * 100);
+                  const color = pct >= 30 ? '#10B981' : pct >= 15 ? '#F59E0B' : '#EF4444';
+                  return <Text style={{ color, fontWeight: '700', fontSize: 12 }}>{pct}%{m.is_charging ? ' ⚡' : ''}</Text>;
+                },
+              },
+              {
+                label: 'GPS accuracy',
+                render: (m) => m.gps_accuracy != null
+                  ? <Text style={{ color: '#374151', fontSize: 12 }}>{Math.round(m.gps_accuracy)}m</Text>
+                  : <Text style={{ color: '#6B7280', fontSize: 12 }}>—</Text>,
+              },
+              // device_snapshot fields (pushed by JS heartbeat stale-detection)
+              {
+                label: 'Activity cb (device)',
+                render: (m) => ageCell(m.device_snapshot?.activity_age_ms, 5 * 60_000, 15 * 60_000),
+              },
+              {
+                label: 'Motion cb (device)',
+                render: (m) => ageCell(m.device_snapshot?.motion_age_ms, 5 * 60_000, 15 * 60_000),
+              },
+              {
+                label: 'Location cb (device)',
+                render: (m) => ageCell(m.device_snapshot?.location_age_ms, 5 * 60_000, 15 * 60_000),
+              },
+              {
+                label: 'Heartbeat JS (device)',
+                render: (m) => ageCell(m.device_snapshot?.hb_js_age_ms, 5 * 60_000, 15 * 60_000),
+              },
+              {
+                label: 'Headless invoked (device)',
+                render: (m) => ageCell(m.device_snapshot?.hl_inv_age_ms, 5 * 60_000, 15 * 60_000),
+              },
+              {
+                label: 'HTTP success (device)',
+                render: (m) => ageCell(m.device_snapshot?.http_ok_age_ms, 5 * 60_000, 15 * 60_000),
+              },
+              {
+                label: 'Listeners attached (device)',
+                render: (m) => boolCell(m.device_snapshot?.listeners_attached),
+              },
+              {
+                label: 'SDK enabled (device)',
+                render: (m) => boolCell(m.device_snapshot?.sdk_enabled),
+              },
+              {
+                label: 'AppState (device)',
+                render: (m) => strCell(m.device_snapshot?.app_state),
+              },
+              {
+                label: 'Snapshot age',
+                render: (m) => {
+                  const ds = m.device_snapshot;
+                  if (!ds?.at && !ds?.stored_at) return <Text style={{ color: '#6B7280', fontSize: 12 }}>never pushed</Text>;
+                  try {
+                    const tsStr = ds.at || ds.stored_at;
+                    const ageMs = fetchedAt - new Date(tsStr).getTime();
+                    return ageCell(ageMs, 10 * 60_000, 60 * 60_000);
+                  } catch { return <Text style={{ color: '#6B7280', fontSize: 12 }}>—</Text>; }
+                },
+              },
+            ];
+
+            return (
+              <View>
+                <Text style={[styles.muted, { marginBottom: 6, fontSize: 11 }]}>
+                  Fetched {fetchedAgo}s ago · {members.length} member{members.length !== 1 ? 's' : ''} · family group {(familySnapshot.data.family_group_id ?? '').slice(0, 8)}
+                </Text>
+
+                {/* Column header row */}
+                <View style={{ flexDirection: 'row', backgroundColor: '#1F2937', paddingVertical: 6, paddingHorizontal: 4, borderRadius: 4, marginBottom: 2 }}>
+                  <Text style={{ flex: 1.4, color: '#9CA3AF', fontSize: 11, fontWeight: '700' }}>Stage</Text>
+                  {members.map((m) => (
+                    <Text key={m.id} style={{ flex: 1, color: '#F9FAFB', fontSize: 11, fontWeight: '700', textAlign: 'center' }} numberOfLines={1}>
+                      {m.name?.split(' ')[0] ?? '?'}
+                    </Text>
+                  ))}
+                </View>
+
+                {/* Data rows */}
+                {rows.map((row, ri) => (
+                  <View key={`cr-${ri}`} style={{
+                    flexDirection: 'row',
+                    paddingVertical: 6,
+                    paddingHorizontal: 4,
+                    backgroundColor: ri % 2 === 0 ? '#F9FAFB' : '#FFFFFF',
+                    borderBottomWidth: StyleSheet.hairlineWidth,
+                    borderBottomColor: '#E5E7EB',
+                  }}>
+                    <Text style={{ flex: 1.4, fontSize: 11, color: '#374151' }} numberOfLines={2}>
+                      {row.label}
+                    </Text>
+                    {members.map((m) => (
+                      <View key={`${m.id}-${ri}`} style={{ flex: 1, alignItems: 'center' }}>
+                        {row.render(m)}
+                      </View>
+                    ))}
+                  </View>
+                ))}
+
+                {/* Copy action */}
+                <TouchableOpacity
+                  style={[styles.secondaryBtn, { marginTop: 10 }]}
+                  onPress={async () => {
+                    try {
+                      await Clipboard.setStringAsync(JSON.stringify(familySnapshot.data, null, 2));
+                      Alert.alert('Copied', 'Device comparison JSON copied to clipboard.');
+                    } catch (_e) {}
+                  }}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.secondaryBtnText}>Copy comparison JSON</Text>
+                </TouchableOpacity>
+              </View>
+            );
+          })() : (
+            <View style={styles.card}>
+              <Text style={styles.muted}>
+                Tap "Fetch Device Comparison" to load both devices' upload freshness and
+                pipeline state from the server. Green = &lt;5 min · Amber = 5-15 min · Red = &gt;15 min.{'\n\n'}
+                The "device_snapshot" rows only appear once each device has been stale for &gt;5 min
+                and has pushed its pipeline timestamps to the backend.
+              </Text>
+            </View>
+          )}
         </CollapsibleSection>
 
         {/* =====================================================
