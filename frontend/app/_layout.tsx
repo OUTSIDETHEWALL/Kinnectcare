@@ -120,6 +120,40 @@ function RootNav() {
     const sub = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
         void locationEngine.logEvent('app_foregrounded');
+        // Task #21 — Before/After snapshot for root cause investigation.
+        //
+        // If Joyce's location is stale and opening the app immediately
+        // restores uploads, the diff between the snapshot fired by the
+        // stale-detection heartbeat and THIS snapshot identifies the
+        // exact restoring action — without needing to guess.
+        //
+        // Specifically: if listeners_attached is true here but the JS
+        // heartbeat snapshot showed callbacks had gone silent, something
+        // in the foreground path re-connected the SDK bridge even though
+        // the listenersAttached guard never reset.
+        void (async () => {
+          try {
+            const [pts, sdkSt] = await Promise.all([
+              locationEngine.getPipelineTimestamps(),
+              locationEngine.getState(),
+            ]);
+            const now = Date.now();
+            void locationEngine.logEvent('app_foregrounded_snapshot', {
+              listeners_attached:  locationEngine.isListenersAttached(),
+              sdk_enabled:         sdkSt.enabled,
+              sdk_isMoving:        sdkSt.isMoving,
+              sdk_trackingMode:    sdkSt.trackingMode,
+              motion_age_ms:       pts.motion             !== null ? now - pts.motion             : null,
+              activity_age_ms:     pts.activity           !== null ? now - pts.activity           : null,
+              location_age_ms:     pts.location           !== null ? now - pts.location           : null,
+              hb_js_age_ms:        pts.heartbeat_js       !== null ? now - pts.heartbeat_js       : null,
+              hl_inv_age_ms:       pts.headless_invoked   !== null ? now - pts.headless_invoked   : null,
+              hl_hb_age_ms:        pts.headless_heartbeat !== null ? now - pts.headless_heartbeat : null,
+              http_att_age_ms:     pts.http_attempt       !== null ? now - pts.http_attempt       : null,
+              http_ok_age_ms:      pts.http_success       !== null ? now - pts.http_success       : null,
+            });
+          } catch (_e) { /* never abort app lifecycle for a diagnostic snapshot */ }
+        })();
       } else if (next === 'background' || next === 'inactive') {
         void locationEngine.logEvent('app_backgrounded', { state: next });
       }
