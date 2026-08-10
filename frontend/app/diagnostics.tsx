@@ -56,6 +56,9 @@ import {
   clearEngineLog,
   EngineLogEvent,
   LocationEngineState,
+  getPipelineTimestamps,
+  isListenersAttached,
+  PipelineTimestamps,
 } from '../src/locationEngine';
 import * as memberStore from '../src/store/memberStore';
 import * as leonidas from '../src/leonidas';
@@ -502,6 +505,10 @@ export default function DiagnosticsScreen() {
   // TEMP DIAG — battery pipeline investigation.
   const [deviceBatteryLevel, setDeviceBatteryLevel] = useState<number | null>(null);
 
+  // Task #21 — Pipeline timestamps (per-stage AsyncStorage timestamps).
+  const [pipelineTs, setPipelineTs] = useState<PipelineTimestamps | null>(null);
+  const [listenersAttachedFlag, setListenersAttachedFlag] = useState<boolean>(false);
+
   // Leonidas (Build 46) — snapshot + recovery log
   const [leoSnapshot, setLeoSnapshot] = useState<leonidas.LeonidasSnapshotForUI | null>(null);
   const [leoLog, setLeoLog] = useState<leonidas.RecoveryLogEntry[]>([]);
@@ -600,6 +607,7 @@ export default function DiagnosticsScreen() {
     leonidas: true,
     engine: true,
     pipeline: true,  // Build XX — Refresh Pipeline investigation, default open
+    'pipeline-ts': true, // Task #21 — Pipeline Timestamps, default open
   });
   const expansionLoadedRef = useRef(false);
 
@@ -684,6 +692,15 @@ export default function DiagnosticsScreen() {
       setDeviceBatteryLevel(typeof level === 'number' ? level : null);
     } catch (_e) {
       setDeviceBatteryLevel(null);
+    }
+
+    // Task #21 — pipeline timestamps.
+    try {
+      const pts = await getPipelineTimestamps();
+      setPipelineTs(pts);
+      setListenersAttachedFlag(isListenersAttached());
+    } catch (_e) {
+      setPipelineTs(null);
     }
 
     setLoading(false);
@@ -1438,6 +1455,99 @@ export default function DiagnosticsScreen() {
             activeOpacity={0.85}
           >
             <Text style={styles.secondaryBtnText}>Copy motion timeline</Text>
+          </TouchableOpacity>
+        </CollapsibleSection>
+
+        {/* =====================================================
+            Task #21 — Pipeline Timestamps
+            Side-by-side table of per-stage last-seen timestamps.
+            The first stage whose timestamp diverges from Charles's
+            is the first failing stage in the pipeline.
+        ===================================================== */}
+        <CollapsibleSection
+          id="pipeline-ts"
+          title="Pipeline Timestamps"
+          expanded={!!expanded['pipeline-ts']}
+          onToggle={toggleSection}
+          testID="diagnostics-pipeline-ts"
+          defaultExpanded
+        >
+          {(() => {
+            const now = nowTick;
+            const pts = pipelineTs;
+
+            const stages: { label: string; key: keyof PipelineTimestamps; note?: string }[] = [
+              { label: 'Activity callback',   key: 'activity',           note: 'Android Activity Recognition' },
+              { label: 'Motion callback',      key: 'motion',             note: 'onMotionChange (moving↔stationary)' },
+              { label: 'Location callback',    key: 'location',           note: 'onLocation (GPS fix received)' },
+              { label: 'Heartbeat (JS)',        key: 'heartbeat_js',       note: 'onHeartbeat — JS runtime alive' },
+              { label: 'Headless invoked',     key: 'headless_invoked',   note: 'HeadlessTask — any event' },
+              { label: 'Headless heartbeat',   key: 'headless_heartbeat', note: 'HeadlessTask — getCurrentPosition ok' },
+              { label: 'HTTP attempt',         key: 'http_attempt',       note: 'onHttp — any upload' },
+              { label: 'HTTP success',         key: 'http_success',       note: 'onHttp — 200/201 confirmed' },
+            ];
+
+            // Find the first stage older than 5 min while a later stage is fresh.
+            // That divergence is the leading indicator of the failing stage.
+            const STALE_MS = 5 * 60 * 1000;
+
+            return (
+              <View style={styles.card}>
+                {/* Listeners guard row */}
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#374151' }}>
+                  <Text style={[styles.entryK, { flex: 1 }]}>listeners_attached</Text>
+                  <Text style={[styles.entry, { fontWeight: '700', color: listenersAttachedFlag ? '#10B981' : '#EF4444' }]}>
+                    {listenersAttachedFlag ? 'YES' : 'NO — callbacks are deaf'}
+                  </Text>
+                </View>
+
+                {stages.map(({ label, key, note }) => {
+                  const ts = pts?.[key] ?? null;
+                  const ageMs = ts !== null ? now - ts : null;
+                  const isStale = ageMs !== null && ageMs > STALE_MS;
+                  const isMissing = ts === null;
+
+                  return (
+                    <View key={key} style={{ paddingVertical: 4, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#374151' }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                        <Text style={[styles.entryK, { flex: 1 }]}>{label}</Text>
+                        <Text style={[styles.entry, { fontWeight: '600', color: isMissing ? '#6B7280' : isStale ? '#EF4444' : '#10B981' }]}>
+                          {isMissing
+                            ? 'never'
+                            : ageMs !== null && ageMs < 60_000
+                              ? `${Math.round(ageMs / 1000)}s ago`
+                              : formatAgeMs(ageMs ?? 0)}
+                        </Text>
+                      </View>
+                      {note ? <Text style={[styles.muted, { fontSize: 10, marginTop: 1 }]}>{note}</Text> : null}
+                    </View>
+                  );
+                })}
+
+                <Text style={[styles.muted, { marginTop: 8, fontSize: 11 }]}>
+                  Red = last seen &gt;5 min ago. First red row in this sequence is the first failing pipeline stage.
+                </Text>
+              </View>
+            );
+          })()}
+
+          <TouchableOpacity
+            style={[styles.secondaryBtn, { marginTop: 8 }]}
+            onPress={async () => {
+              if (!pipelineTs) return;
+              const now = Date.now();
+              const lines = [
+                `Pipeline Timestamps — ${new Date(now).toISOString()}`,
+                `listeners_attached: ${listenersAttachedFlag}`,
+                ...Object.entries(pipelineTs).map(([k, v]) =>
+                  `${k}: ${v === null ? 'never' : `${formatAgeMs(now - v)} ago (${new Date(v).toISOString()})`}`
+                ),
+              ];
+              await Clipboard.setStringAsync(lines.join('\n'));
+            }}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.secondaryBtnText}>Copy pipeline timestamps</Text>
           </TouchableOpacity>
         </CollapsibleSection>
 
