@@ -6,7 +6,7 @@ import {
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
@@ -43,6 +43,8 @@ import * as Haptics from 'expo-haptics';
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 const SOS_FAB_SIZE = 114; // accessibility: ~30% larger than original 88dp for tremor / dexterity users
+// Issue 3 — ring enlarged so it stays visible even with a thumb on the button.
+// Button stays 114 dp; ring grows ~27 % so ~28 dp of ring extends beyond the thumb on each side.
 
 // ── Embedded map preview ──────────────────────────────────────────────────────
 // Uses the Google Static Maps API (a plain image URL) rather than a WebView so
@@ -60,13 +62,16 @@ function buildStaticMapUrl(lat: number, lon: number): string {
     `&key=${_STATIC_MAPS_KEY}`
   );
 }
-const SOS_RING_SIZE = 134; // FAB + 10 px gap each side for the progress ring
-const SOS_RING_RADIUS = 64; // (SOS_RING_SIZE / 2) - (strokeWidth / 2)
-const SOS_CIRCUMFERENCE = 2 * Math.PI * SOS_RING_RADIUS; // ≈ 402.1
+const SOS_RING_SIZE = 170; // FAB (114) + 28 px visible ring gap each side — stays visible under a thumb
+const SOS_RING_RADIUS = 81; // (SOS_RING_SIZE / 2) - (strokeWidth / 2) = 85 - 4
+const SOS_CIRCUMFERENCE = 2 * Math.PI * SOS_RING_RADIUS; // ≈ 508.9
 
 export default function Dashboard() {
   const router = useRouter();
   const { user, logout } = useAuth();
+  // Safe area insets — used to keep the SOS FAB clear of the navigation bar
+  // on all device/navigation configurations (gesture, Samsung buttons, Pixel, etc.)
+  const insets = useSafeAreaInsets();
   // Build 47 — Dashboard no longer owns a local copy of the members
   // array.  Every consumer reads from `memberStore` so coordinates,
   // last_seen, location_name, and accuracy can never drift apart
@@ -616,7 +621,8 @@ export default function Dashboard() {
     if (sosDialingRef.current) return;
     setSosHolding(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); // finger-down feedback
-    Animated.spring(sosScale, { toValue: 0.92, useNativeDriver: true, friction: 8, tension: 120 }).start();
+    // Enlarge 7 % on hold-start so the user gets physical confirmation the gesture registered.
+    Animated.spring(sosScale, { toValue: 1.07, useNativeDriver: true, friction: 8, tension: 120 }).start();
     sosHoldProgress.setValue(0);
     sosHoldAnim.current = Animated.timing(sosHoldProgress, {
       toValue: 1,
@@ -628,6 +634,8 @@ export default function Dashboard() {
       setSosHolding(false);
       sosHoldProgress.setValue(0);
       Animated.spring(sosScale, { toValue: 1, useNativeDriver: true, friction: 6 }).start();
+      // Stronger haptic on hold-complete — physical confirmation that SOS activated.
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       startCountdown();
     });
   }, [sosHoldProgress, sosScale, startCountdown]);
@@ -980,8 +988,11 @@ export default function Dashboard() {
         </View>
       )}
 
-      {/* SOS FAB — press and hold 2.5 s to trigger the countdown. */}
-      <View style={styles.sosFabContainer} pointerEvents="box-none">
+      {/* SOS FAB — press and hold 2.5 s to trigger the countdown.
+          Issue 2: hidden while an SOS is already active (the red emergency banner
+          communicates the state; the FAB is redundant and adds visual clutter).
+          Reappears automatically once the emergency resolves. */}
+      {!activeEmergency && <View style={[styles.sosFabContainer, { bottom: 32 + insets.bottom }]} pointerEvents="box-none">
         <View style={{ width: SOS_RING_SIZE, height: SOS_RING_SIZE, alignItems: 'center', justifyContent: 'center' }}>
           <Svg width={SOS_RING_SIZE} height={SOS_RING_SIZE} style={StyleSheet.absoluteFill}>
             {/* Track ring — faint background arc, only visible while holding */}
@@ -990,7 +1001,7 @@ export default function Dashboard() {
                 cx={SOS_RING_SIZE / 2} cy={SOS_RING_SIZE / 2}
                 r={SOS_RING_RADIUS}
                 stroke="rgba(255,152,0,0.35)"
-                strokeWidth={6} fill="none"
+                strokeWidth={8} fill="none"
               />
             )}
             {/* Progress arc — fills clockwise from 12 o'clock */}
@@ -998,7 +1009,7 @@ export default function Dashboard() {
               <AnimatedCircle
                 cx={SOS_RING_SIZE / 2} cy={SOS_RING_SIZE / 2}
                 r={SOS_RING_RADIUS}
-                stroke="#FF9800" strokeWidth={6} fill="none"
+                stroke="#FF9800" strokeWidth={8} fill="none"
                 strokeDasharray={`${SOS_CIRCUMFERENCE}`}
                 strokeDashoffset={sosDashOffset as any}
                 strokeLinecap="round"
@@ -1021,7 +1032,7 @@ export default function Dashboard() {
         <Text style={[styles.sosFabLabel, sosHolding && styles.sosFabLabelHolding]}>
           {sosHolding ? 'Release to cancel' : 'Hold for SOS'}
         </Text>
-      </View>
+      </View>}
     </SafeAreaView>
   );
 }
@@ -1415,7 +1426,10 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', padding: 24, marginHorizontal: 24, marginTop: 8 },
   emptyText: { color: Colors.textTertiary, marginTop: 8, textAlign: 'center' },
   sosFabContainer: {
-    position: 'absolute', bottom: 18, left: 0, right: 0,
+    // Issue 2 — standard Android FAB position: bottom-right, 24 dp from right edge.
+    // bottom is NOT set here — applied inline as (32 + insets.bottom) so the FAB
+    // clears the nav bar on gesture navigation, Samsung buttons, and Pixel nav alike.
+    position: 'absolute', right: 24,
     alignItems: 'center', gap: 8,
   },
   sosFab: {

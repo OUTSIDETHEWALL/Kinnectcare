@@ -37,6 +37,19 @@ export default function SOSConfirmation() {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      {/* Issue 1 — obvious "Back to Dashboard" control at the very top of the page.
+          Replaces the previous nav-header breadcrumb which looked like static text. */}
+      <View style={styles.backRow}>
+        <TouchableOpacity
+          testID="sos-back-dashboard"
+          onPress={() => router.replace('/(tabs)/dashboard')}
+          activeOpacity={0.85}
+          style={styles.backBtn}
+        >
+          <Text style={styles.backBtnText}>← Back to Dashboard</Text>
+        </TouchableOpacity>
+      </View>
+
       <View style={styles.content}>
         <Animated.View style={[styles.iconWrap, { transform: [{ scale }] }]}>
           <Text style={styles.iconText}>🆘</Text>
@@ -115,7 +128,19 @@ function StatusRow({
 
 const styles = StyleSheet.create({
   safe: {
-    flex: 1, backgroundColor: Colors.background, justifyContent: 'space-between',
+    // justifyContent removed — backRow + content(flex:1) + bottom handles spacing naturally.
+    flex: 1, backgroundColor: Colors.background,
+  },
+  backRow: {
+    paddingHorizontal: 20, paddingTop: 12, paddingBottom: 4,
+  },
+  backBtn: {
+    height: 52, backgroundColor: Colors.primary, borderRadius: 14,
+    alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  backBtnText: {
+    color: '#FFFFFF', fontSize: 16, fontWeight: '800', letterSpacing: 0.2,
   },
   content: {
     flex: 1, alignItems: 'center', justifyContent: 'center',
