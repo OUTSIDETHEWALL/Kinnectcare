@@ -12,7 +12,7 @@
  * from locationEngine (erased at runtime).
  */
 
-import { computeHealthItems, worstHealthStatus, HealthItem } from '../healthCheck';
+import { computeHealthItems, worstHealthStatus, computeOverallHealth, HealthItem } from '../healthCheck';
 import type { EngineLogEvent } from '../locationEngine';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -181,5 +181,191 @@ describe('computeHealthItems / worstHealthStatus — polling transitions', () =>
     expect(worstHealthStatus([ok, unknown]))              .toBe('unknown');
     expect(worstHealthStatus([ok]))                       .toBe('ok');
     expect(worstHealthStatus([]))                         .toBe('ok');
+  });
+});
+
+// ─── computeOverallHealth — Diagnostics hero card verdict ────────────────────
+
+describe('computeOverallHealth — hero card upload-stop scenarios', () => {
+  beforeEach(() => { seq = 0; });
+
+  const NOW = 2_000_000;
+
+  // ── 1. Recent JS-log upload → ok ─────────────────────────────────────────
+
+  it('returns ok when JS-log upload is < 5 min old', () => {
+    const log = [
+      makeEvent('sdk_onHttp', NOW - 2 * 60_000, { success: true }), // 2 min ago
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('ok');
+    expect(result.uploadAgeMs).toBeCloseTo(2 * 60_000, -2);
+    expect(result.headline).toMatch(/healthy/i);
+  });
+
+  // ── 2. Recent lastSeenMs → ok (even when log upload is absent) ────────────
+
+  it('returns ok when lastSeenMs is < 5 min old and JS log has no upload', () => {
+    const log: EngineLogEvent[] = [];
+    const lastSeenMs = NOW - 3 * 60_000; // 3 min ago
+    const result = computeOverallHealth(log, NOW, lastSeenMs);
+    expect(result.level).toBe('ok');
+    expect(result.uploadAgeMs).toBeCloseTo(3 * 60_000, -2);
+  });
+
+  // ── 3. Recent lastSeenMs beats a stale JS-log upload → ok ────────────────
+  //
+  // The JS log has an upload that is 20 min old (error territory), but
+  // member.last_seen shows a recent backend delivery 2 min ago.
+  // The function should pick the fresher signal and return ok.
+
+  it('lastSeenMs takes precedence over a stale JS-log upload age', () => {
+    const log = [
+      makeEvent('sdk_onHttp', NOW - 20 * 60_000, { success: true }), // 20 min → error alone
+    ];
+    const lastSeenMs = NOW - 2 * 60_000; // 2 min → ok
+    const result = computeOverallHealth(log, NOW, lastSeenMs);
+    expect(result.level).toBe('ok');
+    // uploadAgeMs should reflect the fresher source
+    expect(result.uploadAgeMs).toBeCloseTo(2 * 60_000, -2);
+  });
+
+  // ── 4. Upload 5–15 min old → warn ────────────────────────────────────────
+
+  it('returns warn when upload is between 5 and 15 min old', () => {
+    const log = [
+      makeEvent('sdk_onHttp', NOW - 10 * 60_000, { success: true }), // 10 min ago
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('warn');
+    expect(result.headline).toMatch(/delayed/i);
+  });
+
+  it('returns warn when lastSeenMs is between 5 and 15 min old (no JS log upload)', () => {
+    const log: EngineLogEvent[] = [];
+    const lastSeenMs = NOW - 8 * 60_000; // 8 min ago
+    const result = computeOverallHealth(log, NOW, lastSeenMs);
+    expect(result.level).toBe('warn');
+  });
+
+  // ── 5. Upload > 15 min old → error ───────────────────────────────────────
+
+  it('returns error when JS-log upload is > 15 min old', () => {
+    const log = [
+      makeEvent('sdk_onHttp', NOW - 20 * 60_000, { success: true }), // 20 min ago
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('error');
+    expect(result.headline).toMatch(/stopped/i);
+  });
+
+  it('returns error when lastSeenMs is > 15 min old and no JS log upload', () => {
+    const log: EngineLogEvent[] = [];
+    const lastSeenMs = NOW - 20 * 60_000; // 20 min ago
+    const result = computeOverallHealth(log, NOW, lastSeenMs);
+    expect(result.level).toBe('error');
+  });
+
+  // ── 6. Engine explicitly disabled (no upload) → error ────────────────────
+
+  it('returns error when engine is explicitly disabled and there is no upload', () => {
+    const log = [
+      makeEvent('sdk_onEnabledChange', NOW - 5_000, { enabled: false }),
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('error');
+    expect(result.uploadAgeMs).toBeNull();
+    expect(result.headline).toMatch(/stopped/i);
+  });
+
+  // ── 7. Heartbeat present, no upload → warn (not starting) ────────────────
+  //
+  // A sdk_onHeartbeat or headless_task_invoked event proves the engine is
+  // alive.  Returning 'starting' here would be misleading — it should be
+  // 'warn' (engine alive, upload not yet confirmed).
+
+  it('returns warn (not starting) when a sdk_onHeartbeat is present but no upload', () => {
+    const log = [
+      makeEvent('sdk_onHeartbeat', NOW - 45_000), // 45 s ago
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('warn');
+    expect(result.uploadAgeMs).toBeNull();
+    expect(result.headline).toMatch(/running/i);
+  });
+
+  it('returns warn (not starting) when a headless_task_invoked is present but no upload', () => {
+    const log = [
+      makeEvent('headless_task_invoked', NOW - 30_000),
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('warn');
+    expect(result.uploadAgeMs).toBeNull();
+  });
+
+  // ── 8. No upload, no heartbeat, no disable event → starting ──────────────
+
+  it('returns starting when both upload and heartbeat evidence are absent', () => {
+    const log: EngineLogEvent[] = [];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('starting');
+    expect(result.uploadAgeMs).toBeNull();
+  });
+
+  it('returns starting when log has unrelated events but no upload or heartbeat', () => {
+    const log = [
+      makeEvent('battery_listeners_attached', NOW - 1_000),
+      makeEvent('sdk_onPowerSaveChange', NOW - 2_000, { isPowerSaveMode: false }),
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('starting');
+  });
+
+  // ── 9. lastSeenMs edge cases ──────────────────────────────────────────────
+
+  it('ignores lastSeenMs of 0 (sentinel / unset)', () => {
+    const log: EngineLogEvent[] = [];
+    const result = computeOverallHealth(log, NOW, 0);
+    expect(result.level).toBe('starting');
+  });
+
+  it('ignores lastSeenMs that is null', () => {
+    const log: EngineLogEvent[] = [];
+    const result = computeOverallHealth(log, NOW, null);
+    expect(result.level).toBe('starting');
+  });
+
+  it('ignores lastSeenMs that is in the future (clock skew guard)', () => {
+    const log: EngineLogEvent[] = [];
+    const result = computeOverallHealth(log, NOW, NOW + 60_000); // 1 min in the future
+    expect(result.level).toBe('starting');
+  });
+
+  // ── 10. Both signals present: picks the fresher of the two ───────────────
+
+  it('uses Math.min of logUploadAge and lastSeenAge when both are present', () => {
+    // JS log: 12 min old (warn territory)
+    // lastSeenMs: 2 min old (ok territory)
+    // Result should be ok because lastSeenMs is fresher
+    const log = [
+      makeEvent('sdk_onHttp', NOW - 12 * 60_000, { success: true }),
+    ];
+    const lastSeenMs = NOW - 2 * 60_000;
+    const result = computeOverallHealth(log, NOW, lastSeenMs);
+    expect(result.level).toBe('ok');
+    expect(result.uploadAgeMs).toBeCloseTo(2 * 60_000, -2);
+  });
+
+  it('uses Math.min when JS log is fresher than lastSeenMs', () => {
+    // JS log: 2 min old (ok territory)
+    // lastSeenMs: 12 min old (warn territory)
+    // Result should be ok because JS log is fresher
+    const log = [
+      makeEvent('sdk_onHttp', NOW - 2 * 60_000, { success: true }),
+    ];
+    const lastSeenMs = NOW - 12 * 60_000;
+    const result = computeOverallHealth(log, NOW, lastSeenMs);
+    expect(result.level).toBe('ok');
+    expect(result.uploadAgeMs).toBeCloseTo(2 * 60_000, -2);
   });
 });
