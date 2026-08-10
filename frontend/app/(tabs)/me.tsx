@@ -48,7 +48,7 @@ import {
   stopBackgroundLocation, startBackgroundLocation,
 } from '../../src/backgroundLocation';
 import { fetchAll as refetchMembers } from '../../src/store/memberStore';
-import { getEngineLog } from '../../src/locationEngine';
+import { getEngineLog, getLastHttpSuccessTs } from '../../src/locationEngine';
 import { computeHealthItems, worstHealthStatus, HealthItem } from '../../src/healthCheck';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { formatTimezone, formatPhone } from '../../src/timeFormat';
@@ -445,8 +445,11 @@ export default function MeScreen() {
 
       const refresh = async () => {
         try {
-          const log = await getEngineLog();
-          if (!cancelled) setHealthItems(computeHealthItems(log, Date.now()));
+          const [log, lastHttpSuccessMs] = await Promise.all([
+            getEngineLog(),
+            getLastHttpSuccessTs(),
+          ]);
+          if (!cancelled) setHealthItems(computeHealthItems(log, Date.now(), lastHttpSuccessMs));
         } catch (_e) {
           // Non-fatal; indicator simply stays hidden.
         }

@@ -312,6 +312,127 @@ describe('log-clear mid-session — indicator hides then re-surfaces', () => {
   });
 });
 
+// ─── computeHealthItems — lastHttpSuccessMs persistent timestamp ──────────────
+//
+// Verifies that the optional third parameter keeps the upload row green even
+// when the ring buffer has been flooded with failure entries and the last
+// successful sdk_onHttp was evicted.
+
+describe('computeHealthItems — lastHttpSuccessMs fills the eviction gap', () => {
+  beforeEach(() => { seq = 0; });
+
+  // ── A. Ring buffer full of failures, persistent key has a recent success ──
+
+  it('shows ok upload status from lastHttpSuccessMs when ring buffer has only failures', () => {
+    const now = 5_000_000;
+    // Ring buffer has three recent failure entries but zero successes.
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onHttp', now - 2 * 60_000, { success: false }),
+      makeEvent('sdk_onHttp', now - 90_000,     { success: false }),
+      makeEvent('sdk_onHttp', now - 30_000,     { success: false }),
+    ];
+    // Persistent key records a success 2 min ago.
+    const lastHttpSuccessMs = now - 2 * 60_000;
+    const items = computeHealthItems(log, now, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    // 2 min < 5 min threshold → ok
+    expect(uploadItem.status).toBe('ok');
+  });
+
+  it('shows warn from lastHttpSuccessMs when ring buffer has only failures and key is 8 min old', () => {
+    const now = 5_000_000;
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onHttp', now - 30_000, { success: false }),
+    ];
+    const lastHttpSuccessMs = now - 8 * 60_000; // 8 min → warn
+    const items = computeHealthItems(log, now, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('warn');
+  });
+
+  // ── B. Both sources present — picks the more recent one ───────────────────
+
+  it('uses the ring-buffer success when it is more recent than lastHttpSuccessMs', () => {
+    const now = 5_000_000;
+    // Ring buffer: success 1 min ago
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onHttp', now - 60_000, { success: true }),
+    ];
+    // Persistent key: success 10 min ago (staler)
+    const lastHttpSuccessMs = now - 10 * 60_000;
+    const items = computeHealthItems(log, now, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    // Ring buffer wins: 1 min → ok
+    expect(uploadItem.status).toBe('ok');
+  });
+
+  it('uses lastHttpSuccessMs when it is more recent than the ring-buffer success', () => {
+    const now = 5_000_000;
+    // Ring buffer: success 20 min ago (error territory alone)
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onHttp', now - 20 * 60_000, { success: true }),
+    ];
+    // Persistent key: success 2 min ago (fresher)
+    const lastHttpSuccessMs = now - 2 * 60_000;
+    const items = computeHealthItems(log, now, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    // Persistent key wins: 2 min → ok
+    expect(uploadItem.status).toBe('ok');
+  });
+
+  // ── C. Edge cases: null / future / absent ────────────────────────────────
+
+  it('shows unknown when both ring buffer and lastHttpSuccessMs are absent', () => {
+    const now = 5_000_000;
+    const log: EngineLogEvent[] = [];
+    const items = computeHealthItems(log, now, null);
+
+    const uploadItem = items.find((i) => i.label.includes('waiting for first upload'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('unknown');
+  });
+
+  it('ignores lastHttpSuccessMs of 0 (sentinel / unset)', () => {
+    const now = 5_000_000;
+    const log: EngineLogEvent[] = [];
+    const items = computeHealthItems(log, now, 0);
+
+    const uploadItem = items.find((i) => i.label.includes('waiting for first upload'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('unknown');
+  });
+
+  it('ignores lastHttpSuccessMs that is in the future (clock skew guard)', () => {
+    const now = 5_000_000;
+    const log: EngineLogEvent[] = [];
+    const items = computeHealthItems(log, now, now + 60_000);
+
+    const uploadItem = items.find((i) => i.label.includes('waiting for first upload'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('unknown');
+  });
+
+  it('existing tests pass unchanged when lastHttpSuccessMs is omitted', () => {
+    const now = 5_000_000;
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onHttp', now - 2 * 60_000, { success: true }),
+    ];
+    // No third argument — backward-compatible
+    const items = computeHealthItems(log, now);
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('ok');
+  });
+});
+
 // ─── computeOverallHealth — Diagnostics hero card verdict ────────────────────
 
 describe('computeOverallHealth — hero card upload-stop scenarios', () => {

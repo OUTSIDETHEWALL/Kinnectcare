@@ -174,7 +174,26 @@ export function formatAgeMs(ms: number | null): string {
   return `${h}h ago`;
 }
 
-export function computeHealthItems(log: EngineLogEvent[], now: number): HealthItem[] {
+export function computeHealthItems(
+  log: EngineLogEvent[],
+  now: number,
+  /** Optional: epoch-ms of the last confirmed successful upload, read from the
+   *  dedicated persistent AsyncStorage key (getLastHttpSuccessTs()).
+   *
+   *  Why this exists: the ring buffer (50 entries) is shared by ALL event types.
+   *  After PR #74 the headless path also writes sdk_onHttp on failure, so during
+   *  a network-error storm the buffer can fill with failure entries and evict the
+   *  most recent success.  computeHealthItems() would then find no success in the
+   *  buffer and flip the upload row to ❌ even though uploads are actually working.
+   *
+   *  This key is written by both the foreground onHttp listener and the headless
+   *  HTTP event handler (getLastHttpSuccessTs / PTS_KEYS.http_success) and is
+   *  immune to eviction.  When provided, the function takes the more-recent of
+   *  the ring-buffer evidence and this persistent timestamp, ensuring the upload
+   *  row stays green whenever the device has recently confirmed a successful upload.
+   */
+  lastHttpSuccessMs?: number | null,
+): HealthItem[] {
   const rev = [...log].reverse();
 
   // 1 — Background service: most recent sdk_onEnabledChange.
@@ -204,10 +223,25 @@ export function computeHealthItems(log: EngineLogEvent[], now: number): HealthIt
 
   // 3 — Last location upload: sdk_onHttp with success=true.
   //     ✅ < 5 min  ⚠ 5–15 min  ❌ > 15 min  ℹ no entry yet
+  //
+  //     Two evidence streams are combined with Math.min (pick the fresher):
+  //       a) Ring buffer: scan for the most recent sdk_onHttp with success=true.
+  //          Can be evicted when the buffer fills with failure entries.
+  //       b) lastHttpSuccessMs: a dedicated persistent AsyncStorage key that is
+  //          immune to ring-buffer eviction.  Written by both the foreground
+  //          onHttp listener and the headless HTTP event handler.
   const uploadEvt = rev.find(
     (e) => e.event === 'sdk_onHttp' && e.detail?.success === true,
   ) ?? null;
-  const uploadAge = uploadEvt ? now - uploadEvt.at : null;
+  const bufferUploadAge = uploadEvt ? now - uploadEvt.at : null;
+  const persistedUploadAge =
+    lastHttpSuccessMs != null && lastHttpSuccessMs > 0 && lastHttpSuccessMs <= now
+      ? now - lastHttpSuccessMs
+      : null;
+  const uploadAge =
+    bufferUploadAge !== null && persistedUploadAge !== null
+      ? Math.min(bufferUploadAge, persistedUploadAge)
+      : bufferUploadAge ?? persistedUploadAge;
   const uploadStatus: HealthStatus =
     uploadAge === null          ? 'unknown'
     : uploadAge < 5 * 60_000   ? 'ok'

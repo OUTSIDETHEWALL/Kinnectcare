@@ -564,9 +564,13 @@ export default function DiagnosticsScreen() {
   // Uses nowTick (updated every second by the unconditional interval below)
   // so "Last heartbeat: X min ago" and "Last location upload: X min ago"
   // tick in real time and status icons flip without a manual reload.
+  // Pass the persistent last-successful-upload timestamp so the upload row
+  // stays green even when the ring buffer has been flooded with failure
+  // entries and the last successful sdk_onHttp event was evicted.
+  // pipelineTs is already loaded by reload() via getPipelineTimestamps().
   const healthItems = useMemo(
-    () => computeHealthItems(engineLog, nowTick),
-    [engineLog, nowTick],
+    () => computeHealthItems(engineLog, nowTick, pipelineTs?.http_success ?? null),
+    [engineLog, nowTick, pipelineTs],
   );
 
   // Hero card — single overall verdict driven primarily by upload recency.
