@@ -86,6 +86,66 @@ function bgGeo(): any | null {
 }
 
 // ============================================================
+//  Pipeline Timestamp Tracking (Task #21 — root cause investigation)
+// ============================================================
+//
+// One AsyncStorage key per pipeline stage.  Written fire-and-forget at each
+// callback site so Charles can read the most-recent timestamp for every stage
+// from Diagnostics without scanning the full ring buffer.
+//
+// The goal is to answer: "Which stage went silent while earlier stages were
+// still active?"  If motion callbacks are fresh but HTTP uploads are 2 hours
+// old, the fault is between motion detection and the upload — not in the
+// foreground service or the GPS.
+//
+// Keys are intentionally short (written on every callback tick).
+const PTS_PREFIX = 'kc_pts_';
+const PTS_KEYS = {
+  motion:             `${PTS_PREFIX}motion`,    // onMotionChange
+  activity:           `${PTS_PREFIX}activity`,  // onActivityChange
+  location:           `${PTS_PREFIX}loc`,       // onLocation (success path)
+  heartbeat_js:       `${PTS_PREFIX}hb_js`,     // onHeartbeat (JS runtime alive)
+  headless_invoked:   `${PTS_PREFIX}hl_inv`,    // HeadlessTask — any event
+  headless_heartbeat: `${PTS_PREFIX}hl_hb`,     // HeadlessTask — heartbeat ok
+  http_attempt:       `${PTS_PREFIX}http_att`,  // onHttp — any call
+  http_success:       `${PTS_PREFIX}http_ok`,   // onHttp — 200/201 success
+  listeners_attached: `${PTS_PREFIX}attached`,  // attachSdkListeners completed
+} as const;
+
+type PtsKey = keyof typeof PTS_KEYS;
+
+/** Write current epoch ms for one pipeline stage.  Fire-and-forget — never throws. */
+function recordPipelineTs(stage: PtsKey): void {
+  AsyncStorage.setItem(PTS_KEYS[stage], String(Date.now())).catch(() => {});
+}
+
+/** Per-stage timestamps keyed by stage name.  null = this stage has never fired. */
+export type PipelineTimestamps = { [K in PtsKey]: number | null };
+
+/** Read all pipeline timestamps from AsyncStorage.  Safe to call from anywhere. */
+export async function getPipelineTimestamps(): Promise<PipelineTimestamps> {
+  const pairs = await Promise.all(
+    (Object.entries(PTS_KEYS) as [PtsKey, string][]).map(async ([stage, key]) => {
+      try {
+        const raw = await AsyncStorage.getItem(key);
+        return [stage, raw ? Number(raw) : null] as [PtsKey, number | null];
+      } catch {
+        return [stage, null] as [PtsKey, number | null];
+      }
+    }),
+  );
+  return Object.fromEntries(pairs) as PipelineTimestamps;
+}
+
+/** True if SDK JS listeners have been attached in this runtime instance.
+ *  False means the listenersAttached guard was never cleared — if the native
+ *  SDK bridge reset without a full JS process restart, callbacks won't fire
+ *  and this stays true while the SDK is deaf. */
+export function isListenersAttached(): boolean {
+  return listenersAttached;
+}
+
+// ============================================================
 //  Headless task registration (v1.2.2 / build 42)
 // ============================================================
 //
@@ -135,6 +195,12 @@ function registerHeadlessTaskOnce(): void {
       // JS context, so logBuffer/logBufferLoaded always begin at their
       // defaults; loadLogBuffer() reads from AsyncStorage to pick up the
       // persisted ring buffer before appending.
+      //
+      // Task #21: record headless invocation timestamp so Diagnostics can
+      // show whether the headless task is still firing while JS callbacks
+      // have gone silent — this distinguishes "headless alive, JS dead"
+      // from "entire background pipeline stopped".
+      recordPipelineTs('headless_invoked');
       await logEvent('headless_task_invoked', { eventName: name ?? 'unknown' });
 
       if (name === 'heartbeat') {
@@ -148,6 +214,7 @@ function registerHeadlessTaskOnce(): void {
             timeout: 30,
             extras: { source: 'headless-heartbeat' },
           });
+          recordPipelineTs('headless_heartbeat');
           await logEvent('headless_heartbeat_ok');
         } catch (e: any) {
           await logEvent('headless_heartbeat_error', {
@@ -523,6 +590,7 @@ function attachSdkListeners(lib: any): void {
   try {
     lib.onLocation(
       (loc: any) => {
+        recordPipelineTs('location');
         void logEvent('sdk_onLocation', {
           // Round to 0.01 deg for privacy in logs.  Real PUT uses full
           // precision via the SDK's native HTTP transport.
@@ -542,6 +610,7 @@ function attachSdkListeners(lib: any): void {
       },
     );
     lib.onMotionChange((evt: any) => {
+      recordPipelineTs('motion');
       void logEvent('sdk_onMotionChange', {
         isMoving: !!evt?.isMoving,
       });
@@ -577,6 +646,7 @@ function attachSdkListeners(lib: any): void {
       // size; the leading 400 chars of `{"id":...,"latitude":...,
       // "longitude":...,"last_seen":"..."}` is plenty to confirm
       // identity and freshness.
+      recordPipelineTs('http_attempt');
       let bodyHead: string | null = null;
       let parsed: any = null;
       try {
@@ -600,6 +670,7 @@ function attachSdkListeners(lib: any): void {
           // any parse failure simply skips the upsert and the
           // next /members poll picks up the change instead.
           if (evt?.success === true && (evt?.status === 200 || evt?.status === 201) && rt.length < 16_000) {
+            recordPipelineTs('http_success');
             try {
               const obj = JSON.parse(rt);
               if (obj && typeof obj === 'object' && obj.id) {
@@ -638,6 +709,7 @@ function attachSdkListeners(lib: any): void {
       void logEvent('sdk_onEnabledChange', { enabled });
     });
     lib.onHeartbeat(async () => {
+      recordPipelineTs('heartbeat_js');
       void logEvent('sdk_onHeartbeat');
       // JS-alive companion to the headless task above.  When the app
       // is foregrounded (or just-backgrounded and JS still attached),
@@ -660,6 +732,38 @@ function attachSdkListeners(lib: any): void {
       // the caregiver dashboard stays current even when stationary.
       // This is JS-alive only; the headless task never calls expo-battery.
       void pushBatteryUpdate('heartbeat');
+
+      // ── Task #21: Automatic stale snapshot ────────────────────────────
+      // If the JS heartbeat is firing but the last confirmed HTTP upload
+      // is >5 min old, log a full engine snapshot so we have a structured
+      // record of what the engine believed during the gap — no manual
+      // trigger needed.  Threshold is deliberately shorter than the 15-min
+      // health-check warning so we catch the stale condition early.
+      void (async () => {
+        try {
+          const pts = await getPipelineTimestamps();
+          const now = Date.now();
+          const httpOkAge = pts.http_success !== null ? now - pts.http_success : null;
+          if (httpOkAge === null || httpOkAge > 5 * 60 * 1000) {
+            const sdkSt = await lib.getState().catch(() => null);
+            await logEvent('engine_snapshot_stale', {
+              trigger:           'js_heartbeat',
+              http_ok_age_ms:    httpOkAge,
+              motion_age_ms:     pts.motion             !== null ? now - pts.motion             : null,
+              activity_age_ms:   pts.activity           !== null ? now - pts.activity           : null,
+              location_age_ms:   pts.location           !== null ? now - pts.location           : null,
+              hb_js_age_ms:      pts.heartbeat_js       !== null ? now - pts.heartbeat_js       : null,
+              hl_inv_age_ms:     pts.headless_invoked   !== null ? now - pts.headless_invoked   : null,
+              hl_hb_age_ms:      pts.headless_heartbeat !== null ? now - pts.headless_heartbeat : null,
+              http_att_age_ms:   pts.http_attempt       !== null ? now - pts.http_attempt       : null,
+              sdk_enabled:       sdkSt?.enabled   ?? null,
+              sdk_isMoving:      sdkSt?.isMoving  ?? null,
+              sdk_trackingMode:  sdkSt?.trackingMode ?? null,
+              listeners_attached: listenersAttached,
+            });
+          }
+        } catch (_e) { /* never abort onHeartbeat for a diagnostic snapshot */ }
+      })();
     });
 
     // ---- Activity Recognition (Build 64 — Motion Timeline audit) ----
@@ -686,12 +790,14 @@ function attachSdkListeners(lib: any): void {
         if (activity !== _lastActivityType || isMoving !== _lastActivityIsMoving) {
           _lastActivityType = activity;
           _lastActivityIsMoving = isMoving;
+          recordPipelineTs('activity');
           void logEvent('sdk_onActivityChange', { activity, confidence, isMoving });
         }
       });
     }
 
     listenersAttached = true;
+    recordPipelineTs('listeners_attached');
     void logEvent('sdk_listeners_attached');
   } catch (e: any) {
     void logEvent('sdk_listeners_failed', {
