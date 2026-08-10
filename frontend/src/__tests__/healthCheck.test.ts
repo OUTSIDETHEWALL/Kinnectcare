@@ -184,6 +184,134 @@ describe('computeHealthItems / worstHealthStatus — polling transitions', () =>
   });
 });
 
+// ─── Log-clear mid-session: indicator hides then re-surfaces ─────────────────
+//
+// Reproduces the scenario described in Task #23:
+//   1. The Me tab has a healthy log from a previous session.
+//   2. The user taps "Clear log" on Diagnostics → clearEngineLog() resets the
+//      in-memory buffer so getEngineLog() returns [].
+//   3. The next Me-tab poll calls computeHealthItems([], now).
+//      Every item must be 'unknown' and worstHealthStatus must return
+//      'unknown' so the indicator is hidden (not stuck on the last error).
+//   4. On the poll after that, a new sdk_onEnabledChange or sdk_onHttp event
+//      has arrived.  The indicator must re-surface with the correct status.
+
+describe('log-clear mid-session — indicator hides then re-surfaces', () => {
+  beforeEach(() => { seq = 0; });
+
+  // ── A. Immediate clear: computeHealthItems([], now) → all unknown ─────────
+
+  it('computeHealthItems([]) returns all-unknown items', () => {
+    const now = 3_000_000;
+    const items = computeHealthItems([], now);
+
+    expect(items.length).toBeGreaterThan(0);
+    items.forEach((item) => {
+      expect(item.status).toBe('unknown');
+    });
+  });
+
+  it('worstHealthStatus is "unknown" for an empty log (indicator hidden)', () => {
+    const now = 3_000_000;
+    const items = computeHealthItems([], now);
+    expect(worstHealthStatus(items)).toBe('unknown');
+  });
+
+  // ── B. Full mid-session sequence: healthy → cleared → new event ───────────
+
+  it('hides indicator after clear even when the previous log was error-level', () => {
+    const t0 = 3_000_000;
+
+    // Build a log that has a confirmed error (engine disabled + old upload)
+    const errorLog: EngineLogEvent[] = [
+      makeEvent('sdk_onEnabledChange', t0 - 2_000, { enabled: false }),
+      makeEvent('sdk_onHttp',          t0 - 20 * 60_000, { success: true }), // 20 min → error
+    ];
+
+    // Before clear: indicator is at error level
+    const itemsBefore = computeHealthItems(errorLog, t0);
+    expect(worstHealthStatus(itemsBefore)).toBe('error');
+
+    // User taps "Clear log" — buffer resets to []
+    const clearedLog: EngineLogEvent[] = [];
+
+    // Next poll: all unknown, indicator hidden
+    const itemsAfterClear = computeHealthItems(clearedLog, t0 + 60_000);
+    expect(worstHealthStatus(itemsAfterClear)).toBe('unknown');
+    itemsAfterClear.forEach((item) => {
+      expect(item.status).toBe('unknown');
+    });
+  });
+
+  it('re-surfaces indicator (error) on the next poll once sdk_onEnabledChange(false) arrives', () => {
+    const t0 = 3_000_000;
+
+    // Log has been cleared
+    const log: EngineLogEvent[] = [];
+
+    // Poll 1 (immediately after clear): all unknown, indicator hidden
+    const poll1 = computeHealthItems(log, t0);
+    expect(worstHealthStatus(poll1)).toBe('unknown');
+
+    // New event arrives: engine disabled
+    log.push(makeEvent('sdk_onEnabledChange', t0 + 30_000, { enabled: false }));
+
+    // Poll 2 (60 s after clear): indicator must re-surface as error
+    const poll2 = computeHealthItems(log, t0 + 60_000);
+    const bgItem = poll2.find((i) => i.label.includes('Background service stopped'));
+    expect(bgItem).toBeDefined();
+    expect(bgItem!.status).toBe('error');
+    expect(worstHealthStatus(poll2)).toBe('error');
+  });
+
+  it('re-surfaces indicator (ok) on the next poll once a fresh upload event arrives', () => {
+    const t0 = 3_000_000;
+
+    // Log has been cleared
+    const log: EngineLogEvent[] = [];
+
+    // Poll 1: all unknown, indicator hidden
+    const poll1 = computeHealthItems(log, t0);
+    expect(worstHealthStatus(poll1)).toBe('unknown');
+
+    // New events arrive after the clear: engine enabled + recent upload
+    log.push(makeEvent('sdk_onEnabledChange',    t0 + 10_000, { enabled: true }));
+    log.push(makeEvent('battery_listeners_attached', t0 + 10_000));
+    log.push(makeEvent('sdk_onHttp',             t0 + 50_000, { success: true })); // 10 s before next poll
+
+    // Poll 2 (60 s after clear): upload is 10 s old → ok; no warn/error items
+    const poll2 = computeHealthItems(log, t0 + 60_000);
+
+    const uploadItem = poll2.find((i) => i.label.includes('Last location uploaded'));
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem!.status).toBe('ok');
+
+    // Indicator is hidden (worst is 'ok' or 'unknown', never 'warn'/'error')
+    const worst = worstHealthStatus(poll2);
+    expect(['ok', 'unknown']).toContain(worst);
+  });
+
+  // ── C. HealthIndicator render contract: hidden for 'unknown', shown for error/warn
+
+  it('indicator is hidden (unknown) → shown (error) within one poll cycle', () => {
+    const t0 = 3_000_000;
+    const log: EngineLogEvent[] = [];
+
+    // Poll 1: cleared log → worst unknown → indicator HIDDEN
+    const items1 = computeHealthItems(log, t0);
+    const worst1 = worstHealthStatus(items1);
+    // HealthIndicator returns null when worst is 'ok' or 'unknown'
+    expect(worst1 === 'ok' || worst1 === 'unknown').toBe(true);
+
+    // Engine stops mid-session
+    log.push(makeEvent('sdk_onEnabledChange', t0 + 5_000, { enabled: false }));
+
+    // Poll 2 (60 s later): worst is 'error' → indicator SHOWN
+    const items2 = computeHealthItems(log, t0 + 60_000);
+    expect(worstHealthStatus(items2)).toBe('error');
+  });
+});
+
 // ─── computeOverallHealth — Diagnostics hero card verdict ────────────────────
 
 describe('computeOverallHealth — hero card upload-stop scenarios', () => {
