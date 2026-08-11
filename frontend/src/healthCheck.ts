@@ -54,6 +54,20 @@ export function computeOverallHealth(
    *  See Task #18 for the full headless logging gap investigation.
    */
   lastSeenMs?: number | null,
+  /** Optional: epoch-ms of the last confirmed successful upload, read from the
+   *  dedicated persistent AsyncStorage key (getLastHttpSuccessTs()).
+   *
+   *  Why this exists: the ring buffer (50 entries) is shared by ALL event types.
+   *  During a network-error storm the buffer can fill with failure entries and
+   *  evict the most recent success.  computeOverallHealth() would then find no
+   *  success in the buffer and fall back to warn or starting even though
+   *  kc_pts_http_ok proves a successful upload just happened.
+   *
+   *  This mirrors the lastHttpSuccessMs pattern already used by computeHealthItems().
+   *  When provided, the function takes the most-recent of all three evidence
+   *  streams (ring buffer, lastSeenMs, lastHttpSuccessMs).
+   */
+  lastHttpSuccessMs?: number | null,
 ): OverallHealthResult {
   const rev = [...log].reverse();
 
@@ -71,9 +85,18 @@ export function computeOverallHealth(
     ? now - lastSeenMs
     : null;
 
-  const uploadAge = (logUploadAge !== null && lastSeenAge !== null)
-    ? Math.min(logUploadAge, lastSeenAge)
-    : logUploadAge ?? lastSeenAge;
+  // ── Tertiary signal: persistent AsyncStorage key kc_pts_http_ok ───────────
+  // Immune to ring-buffer eviction.  Written by both the foreground onHttp
+  // listener and the headless HTTP event handler (recordPipelineTs).
+  const httpSuccessAge = (lastHttpSuccessMs != null && lastHttpSuccessMs > 0 && lastHttpSuccessMs <= now)
+    ? now - lastHttpSuccessMs
+    : null;
+
+  // Combine all three evidence streams — pick the freshest (lowest age).
+  const candidateAges = [logUploadAge, lastSeenAge, httpSuccessAge].filter(
+    (a): a is number => a !== null,
+  );
+  const uploadAge = candidateAges.length > 0 ? Math.min(...candidateAges) : null;
 
   const enabledEvt = rev.find((e) => e.event === 'sdk_onEnabledChange') ?? null;
   const engineExplicitlyDisabled =

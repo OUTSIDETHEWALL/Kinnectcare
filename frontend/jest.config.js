@@ -8,6 +8,8 @@ module.exports = {
         presets: [
           ['@babel/preset-env', { targets: { node: 'current' } }],
           ['@babel/preset-typescript', { allowDeclareFields: true }],
+          // Required for .tsx component tests (alerts screen, etc.)
+          ['@babel/preset-react', { runtime: 'automatic' }],
         ],
       },
     ],

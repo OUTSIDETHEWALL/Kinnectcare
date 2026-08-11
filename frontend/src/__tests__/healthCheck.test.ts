@@ -12,7 +12,7 @@
  * from locationEngine (erased at runtime).
  */
 
-import { computeHealthItems, worstHealthStatus, computeOverallHealth, HealthItem } from '../healthCheck';
+import { computeHealthItems, worstHealthStatus, computeOverallHealth, formatAgeMs, HealthItem } from '../healthCheck';
 import type { EngineLogEvent } from '../locationEngine';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -616,5 +616,428 @@ describe('computeOverallHealth — hero card upload-stop scenarios', () => {
     const result = computeOverallHealth(log, NOW, lastSeenMs);
     expect(result.level).toBe('ok');
     expect(result.uploadAgeMs).toBeCloseTo(2 * 60_000, -2);
+  });
+});
+
+// ─── computeOverallHealth — lastHttpSuccessMs persistent timestamp ────────────
+//
+// Mirrors the lastHttpSuccessMs tests for computeHealthItems (Task #41) but
+// targets the hero card function.  The scenario: the ring buffer has been
+// flooded with failure entries (evicting the last sdk_onHttp success), AND
+// lastSeenMs is null (fresh device / first /members poll not yet returned).
+// Without lastHttpSuccessMs the hero card falls back to warn or starting.
+// With a recent lastHttpSuccessMs it must return ok.
+
+describe('computeOverallHealth — lastHttpSuccessMs fills the eviction gap', () => {
+  beforeEach(() => { seq = 0; });
+
+  const NOW = 7_000_000;
+
+  // Helper: build a ring buffer filled with N failure entries and no successes.
+  function failureBuffer(count: number): EngineLogEvent[] {
+    return Array.from({ length: count }, (_, i) =>
+      makeEvent('sdk_onHttp', NOW - (count - i) * 10_000, { success: false }),
+    );
+  }
+
+  // ── A. Ring buffer full of failures, persistent key has a recent success ───
+  //
+  // This is the exact eviction scenario for the hero card.  Without
+  // lastHttpSuccessMs the function finds no upload evidence and falls back to
+  // the heartbeat/starting path.  With a 2-min-old key it must return ok.
+
+  it('returns ok when ring buffer has only failures but lastHttpSuccessMs is < 5 min old', () => {
+    const log = failureBuffer(50);
+    const result = computeOverallHealth(log, NOW, null, NOW - 2 * 60_000);
+    expect(result.level).toBe('ok');
+    expect(result.uploadAgeMs).toBeCloseTo(2 * 60_000, -2);
+    expect(result.headline).toMatch(/healthy/i);
+  });
+
+  it('returns warn when ring buffer has only failures and lastHttpSuccessMs is 8 min old', () => {
+    const log = failureBuffer(50);
+    const result = computeOverallHealth(log, NOW, null, NOW - 8 * 60_000);
+    expect(result.level).toBe('warn');
+    expect(result.uploadAgeMs).toBeCloseTo(8 * 60_000, -2);
+  });
+
+  it('returns error when ring buffer has only failures and lastHttpSuccessMs is 20 min old', () => {
+    const log = failureBuffer(10);
+    const result = computeOverallHealth(log, NOW, null, NOW - 20 * 60_000);
+    expect(result.level).toBe('error');
+    expect(result.uploadAgeMs).toBeCloseTo(20 * 60_000, -2);
+  });
+
+  // ── B. All three sources present — picks the freshest ─────────────────────
+
+  it('picks lastHttpSuccessMs when it is fresher than both ring buffer and lastSeenMs', () => {
+    // Ring buffer: 20 min old (error alone)
+    // lastSeenMs: 10 min old (warn alone)
+    // lastHttpSuccessMs: 2 min old (ok) — should win
+    const log = [makeEvent('sdk_onHttp', NOW - 20 * 60_000, { success: true })];
+    const result = computeOverallHealth(log, NOW, NOW - 10 * 60_000, NOW - 2 * 60_000);
+    expect(result.level).toBe('ok');
+    expect(result.uploadAgeMs).toBeCloseTo(2 * 60_000, -2);
+  });
+
+  it('picks lastSeenMs when it is fresher than both ring buffer and lastHttpSuccessMs', () => {
+    // Ring buffer: 20 min old (error alone)
+    // lastSeenMs: 2 min old (ok) — should win
+    // lastHttpSuccessMs: 10 min old (warn alone)
+    const log = [makeEvent('sdk_onHttp', NOW - 20 * 60_000, { success: true })];
+    const result = computeOverallHealth(log, NOW, NOW - 2 * 60_000, NOW - 10 * 60_000);
+    expect(result.level).toBe('ok');
+    expect(result.uploadAgeMs).toBeCloseTo(2 * 60_000, -2);
+  });
+
+  it('picks ring buffer when it is fresher than both lastSeenMs and lastHttpSuccessMs', () => {
+    // Ring buffer: 1 min old (ok) — should win
+    // lastSeenMs: 10 min old (warn alone)
+    // lastHttpSuccessMs: 12 min old (warn alone)
+    const log = [makeEvent('sdk_onHttp', NOW - 60_000, { success: true })];
+    const result = computeOverallHealth(log, NOW, NOW - 10 * 60_000, NOW - 12 * 60_000);
+    expect(result.level).toBe('ok');
+    expect(result.uploadAgeMs).toBeCloseTo(60_000, -2);
+  });
+
+  // ── C. Edge cases: null / 0 / future ──────────────────────────────────────
+
+  it('ignores lastHttpSuccessMs of null (treated as absent)', () => {
+    const log: EngineLogEvent[] = [];
+    const result = computeOverallHealth(log, NOW, null, null);
+    expect(result.level).toBe('starting');
+    expect(result.uploadAgeMs).toBeNull();
+  });
+
+  it('ignores lastHttpSuccessMs of 0 (sentinel / unset)', () => {
+    const log: EngineLogEvent[] = [];
+    const result = computeOverallHealth(log, NOW, null, 0);
+    expect(result.level).toBe('starting');
+    expect(result.uploadAgeMs).toBeNull();
+  });
+
+  it('ignores lastHttpSuccessMs that is in the future (clock skew guard)', () => {
+    const log: EngineLogEvent[] = [];
+    const result = computeOverallHealth(log, NOW, null, NOW + 60_000);
+    expect(result.level).toBe('starting');
+    expect(result.uploadAgeMs).toBeNull();
+  });
+
+  // ── D. Backward-compatible: existing callers that pass only 3 args ─────────
+
+  it('existing callers that omit lastHttpSuccessMs continue to work unchanged', () => {
+    const log = [makeEvent('sdk_onHttp', NOW - 2 * 60_000, { success: true })];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('ok');
+    expect(result.uploadAgeMs).toBeCloseTo(2 * 60_000, -2);
+  });
+
+  it('existing callers that pass lastSeenMs but not lastHttpSuccessMs continue to work', () => {
+    const log: EngineLogEvent[] = [];
+    const result = computeOverallHealth(log, NOW, NOW - 3 * 60_000);
+    expect(result.level).toBe('ok');
+    expect(result.uploadAgeMs).toBeCloseTo(3 * 60_000, -2);
+  });
+
+  // ── E. Hero card stays ok after a log clear when lastHttpSuccessMs survives ─
+  //
+  // clearEngineLog() wipes the ring buffer (LOG_KEY) but NOT the pipeline
+  // timestamp keys (kc_pts_*).  The hero card must stay green from the
+  // surviving key even with an empty log and no lastSeenMs yet.
+
+  it('returns ok after a log clear when lastHttpSuccessMs is recent and lastSeenMs is absent', () => {
+    const clearedLog: EngineLogEvent[] = [];
+    const result = computeOverallHealth(clearedLog, NOW, null, NOW - 3 * 60_000);
+    expect(result.level).toBe('ok');
+    expect(result.uploadAgeMs).toBeCloseTo(3 * 60_000, -2);
+  });
+
+  it('returns starting after a log clear when both lastSeenMs and lastHttpSuccessMs are absent', () => {
+    const clearedLog: EngineLogEvent[] = [];
+    const result = computeOverallHealth(clearedLog, NOW, null, null);
+    expect(result.level).toBe('starting');
+    expect(result.uploadAgeMs).toBeNull();
+  });
+});
+
+// ─── Network-error burst recovery — upload row with lastHttpSuccessMs ─────────
+//
+// Confirms the field scenario described in Task #41:
+//
+//   Device goes into airplane mode for ~10 minutes.  The Transistor SDK keeps
+//   retrying uploads; each retry fires an onHttp callback with success=false.
+//   After ~50 failure entries the ring buffer is FULL and every successful
+//   sdk_onHttp entry has been evicted.
+//
+//   When connectivity is restored and the next upload succeeds:
+//     • The foreground onHttp handler writes kc_pts_http_ok (recordPipelineTs).
+//     • The headless HTTP handler writes the same key for background uploads.
+//     • computeHealthItems() receives the key value as lastHttpSuccessMs.
+//
+//   Critical sub-case: after a manual "Clear engine log", the ring buffer is
+//   wiped but kc_pts_http_ok is a SEPARATE AsyncStorage key that clearEngineLog()
+//   never touches.  The upload row must remain green from the persistent key
+//   rather than regressing to 'unknown' (the no-evidence state).
+
+describe('network-error burst recovery — upload row with lastHttpSuccessMs', () => {
+  beforeEach(() => { seq = 0; });
+
+  const NOW = 9_000_000;
+
+  // Helper: build a ring buffer filled with N failure entries and no successes.
+  // Used to simulate the airplane-mode burst that evicts the last success entry.
+  function failureBuffer(count: number): EngineLogEvent[] {
+    return Array.from({ length: count }, (_, i) =>
+      makeEvent('sdk_onHttp', NOW - (count - i) * 10_000, { success: false }),
+    );
+  }
+
+  // ── 1. Full 50-entry ring buffer of failures + recent persistent key → ok ──
+  //
+  // This is the exact eviction scenario Task #41 guards against.  The ring
+  // buffer (50 entries) is saturated with failure entries; the last success was
+  // evicted.  computeHealthItems() would show ❌ without lastHttpSuccessMs.
+  // With the key (2 min old), it must show ✅.
+
+  it('upload row stays ok when a 50-entry failure buffer evicts the last success but lastHttpSuccessMs is recent', () => {
+    const log = failureBuffer(50); // all failures, no success entry survives
+    const lastHttpSuccessMs = NOW - 2 * 60_000; // 2 min ago — ok territory
+
+    const items = computeHealthItems(log, NOW, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('ok'); // persistent key saves the row
+    expect(uploadItem.icon).toBe('✅');
+  });
+
+  it('upload row is ❌ when a 50-entry failure buffer evicts the last success AND no persistent key', () => {
+    // Baseline: without lastHttpSuccessMs the row would have flipped to error.
+    const log = failureBuffer(50);
+
+    const items = computeHealthItems(log, NOW); // no third arg
+
+    const uploadItem = items.find((i) => i.label.includes('waiting for first upload'))!;
+    // No success in buffer, no persistent key → 'unknown'
+    // (If a prior success is present but all entries are failures, the scan
+    //  finds nothing → unknown, not error.  Error requires an old success.)
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('unknown');
+  });
+
+  // ── 2. After "Clear engine log", upload row stays green from persistent key ─
+  //
+  // clearEngineLog() wipes the ring buffer (LOG_KEY) but NOT the pipeline
+  // timestamp keys (kc_pts_*).  This sub-case confirms computeHealthItems()
+  // uses the surviving key even with an empty log.
+
+  it('upload row stays ok after a log clear if lastHttpSuccessMs is recent (< 5 min)', () => {
+    // Log has been cleared — same state as immediately after "Clear engine log".
+    const clearedLog: EngineLogEvent[] = [];
+    const lastHttpSuccessMs = NOW - 3 * 60_000; // 3 min ago
+
+    const items = computeHealthItems(clearedLog, NOW, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    // 3 min < 5 min threshold → ok; NOT 'unknown' despite the empty log.
+    expect(uploadItem.status).toBe('ok');
+  });
+
+  it('upload row shows warn after a log clear if lastHttpSuccessMs is 8 min old', () => {
+    const clearedLog: EngineLogEvent[] = [];
+    const lastHttpSuccessMs = NOW - 8 * 60_000; // 8 min → warn
+
+    const items = computeHealthItems(clearedLog, NOW, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('warn'); // 5–15 min window
+  });
+
+  it('upload row shows error after a log clear if lastHttpSuccessMs is 20 min old', () => {
+    const clearedLog: EngineLogEvent[] = [];
+    const lastHttpSuccessMs = NOW - 20 * 60_000; // 20 min → error
+
+    const items = computeHealthItems(clearedLog, NOW, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('error'); // > 15 min threshold
+  });
+
+  it('upload row is unknown after a log clear when lastHttpSuccessMs is also absent', () => {
+    // Baseline: neither ring buffer nor persistent key has evidence.
+    const clearedLog: EngineLogEvent[] = [];
+
+    const items = computeHealthItems(clearedLog, NOW, null);
+
+    const uploadItem = items.find((i) => i.label.includes('waiting for first upload'))!;
+    expect(uploadItem).toBeDefined();
+    expect(uploadItem.status).toBe('unknown'); // honest — no evidence at all
+  });
+
+  // ── 3. Label text is correct when the persistent key is the sole source ─────
+  //
+  // The upload row label must say "Last location uploaded: Xm ago" (not the
+  // "waiting for first upload" placeholder) whenever lastHttpSuccessMs provides
+  // the evidence, even when the ring buffer has no success entry.
+
+  it('upload row label reads "Last location uploaded" (not "waiting") when lastHttpSuccessMs is the only source', () => {
+    const log: EngineLogEvent[] = []; // empty — no ring-buffer evidence
+    const lastHttpSuccessMs = NOW - 90_000; // 1.5 min ago
+
+    const items = computeHealthItems(log, NOW, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.startsWith('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    // Must NOT fall back to the "waiting" placeholder
+    const placeholder = items.find((i) => i.label.includes('waiting for first upload'));
+    expect(placeholder).toBeUndefined();
+  });
+
+  // ── 4. Recovery sequence: burst then success then more failures ───────────
+  //
+  // Simulates the exact airplane-mode recovery: the device uploads once after
+  // connectivity is restored (writing kc_pts_http_ok), then a few retries fail
+  // again.  The upload row must stay green because the persistent key records
+  // the recovery timestamp, not the subsequent failures.
+
+  it('upload row stays ok after recovery even if more failures arrive after the first success', () => {
+    // After recovery: one success sandwiched between failures
+    const successTs = NOW - 90_000; // 1.5 min ago
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onHttp', NOW - 5 * 60_000, { success: false }),
+      makeEvent('sdk_onHttp', NOW - 4 * 60_000, { success: false }),
+      makeEvent('sdk_onHttp', successTs,         { success: true }),  // recovery upload
+      makeEvent('sdk_onHttp', NOW - 60_000,      { success: false }),
+      makeEvent('sdk_onHttp', NOW - 30_000,      { success: false }),
+    ];
+    // The persistent key records the recovery timestamp
+    const lastHttpSuccessMs = successTs;
+
+    const items = computeHealthItems(log, NOW, lastHttpSuccessMs);
+
+    const uploadItem = items.find((i) => i.label.includes('Last location uploaded'))!;
+    expect(uploadItem).toBeDefined();
+    // The ring buffer scan finds the success (it wasn't evicted in this scenario)
+    // AND the persistent key confirms it — both agree on ok.
+    expect(uploadItem.status).toBe('ok');
+  });
+
+  // ── 5. worstHealthStatus does not propagate error from full failure buffer ──
+  //
+  // When lastHttpSuccessMs is recent, the overall health banner must not show ❌
+  // just because failure entries dominate the buffer.
+
+  it('worstHealthStatus is not error when lastHttpSuccessMs is recent despite failure-only buffer', () => {
+    const log = failureBuffer(50);
+    const lastHttpSuccessMs = NOW - 2 * 60_000;
+
+    const items = computeHealthItems(log, NOW, lastHttpSuccessMs);
+    const worst = worstHealthStatus(items);
+
+    // worst may be 'ok' or 'unknown' (other rows like heartbeat may be unknown)
+    // — but must NOT be 'error' from the failure-filled buffer alone.
+    expect(worst).not.toBe('error');
+  });
+});
+
+// ─── formatAgeMs — human-readable age strings shown in health sublines ────────
+//
+// formatAgeMs produces every timestamp shown in the Diagnostics and Me tab
+// health sublines ("2m ago", "1h ago", etc.).  A regression here corrupts
+// the text across the entire health UI with zero visual indication.
+
+describe('formatAgeMs — timestamp formatting', () => {
+  // ── Degenerate / invalid inputs → em-dash ────────────────────────────────
+
+  it('returns "—" for null', () => {
+    expect(formatAgeMs(null)).toBe('—');
+  });
+
+  it('returns "—" for undefined', () => {
+    // Cast needed because the TypeScript signature says null, but the guard
+    // also covers undefined (JavaScript callers may omit the argument).
+    expect(formatAgeMs(undefined as unknown as null)).toBe('—');
+  });
+
+  it('returns "—" for NaN', () => {
+    expect(formatAgeMs(NaN)).toBe('—');
+  });
+
+  it('returns "—" for +Infinity', () => {
+    expect(formatAgeMs(Infinity)).toBe('—');
+  });
+
+  it('returns "—" for -Infinity', () => {
+    expect(formatAgeMs(-Infinity)).toBe('—');
+  });
+
+  // ── Seconds range ─────────────────────────────────────────────────────────
+
+  it('returns "0s ago" for 0 ms', () => {
+    expect(formatAgeMs(0)).toBe('0s ago');
+  });
+
+  it('returns "45s ago" for 45 000 ms', () => {
+    expect(formatAgeMs(45_000)).toBe('45s ago');
+  });
+
+  it('crosses into the minutes branch at 59 999 ms (rounds to 60 s — boundary check)', () => {
+    // Math.round(59999 / 1000) = 60; 60 is not < 60 so the minutes branch fires.
+    // m = Math.round(60 / 60) = 1 → "1m ago".
+    // This test documents the exact rounding boundary so any change to the
+    // threshold is caught immediately.
+    expect(formatAgeMs(59_999)).toBe('1m ago');
+  });
+
+  it('returns "59s ago" for 59 000 ms', () => {
+    expect(formatAgeMs(59_000)).toBe('59s ago');
+  });
+
+  // ── Minutes range ─────────────────────────────────────────────────────────
+
+  it('returns "2m ago" for 90 000 ms (rounds 1.5 min → 2)', () => {
+    // s = Math.round(90000 / 1000) = 90; m = Math.round(90 / 60) = 2
+    expect(formatAgeMs(90_000)).toBe('2m ago');
+  });
+
+  it('returns "1m ago" for 60 000 ms', () => {
+    expect(formatAgeMs(60_000)).toBe('1m ago');
+  });
+
+  it('returns "10m ago" for 600 000 ms', () => {
+    expect(formatAgeMs(600_000)).toBe('10m ago');
+  });
+
+  // ── Hours range ───────────────────────────────────────────────────────────
+
+  it('returns "1h ago" for 3 600 000 ms (exactly 60 min)', () => {
+    // s = 3600; m = 60; h = Math.round(60/60) = 1
+    expect(formatAgeMs(3_600_000)).toBe('1h ago');
+  });
+
+  it('returns "2h ago" for 7 200 000 ms', () => {
+    expect(formatAgeMs(7_200_000)).toBe('2h ago');
+  });
+
+  // ── Negative values — must not crash; documents expected output ───────────
+  //
+  // Negative ms means the recorded timestamp is in the future relative to
+  // `now`, which can happen if the device clock is skewed.  formatAgeMs does
+  // not guard against this, so it propagates through as a negative-prefixed
+  // string.  The tests below document the actual behavior so a silent change
+  // is caught.
+
+  it('does not throw for negative values', () => {
+    expect(() => formatAgeMs(-1_000)).not.toThrow();
+  });
+
+  it('returns a string (not "—") for small negative values', () => {
+    // -1 000 ms: s = Math.round(-1) = -1 < 60 → "-1s ago"
+    const result = formatAgeMs(-1_000);
+    expect(typeof result).toBe('string');
+    expect(result).not.toBe('—');
   });
 });
