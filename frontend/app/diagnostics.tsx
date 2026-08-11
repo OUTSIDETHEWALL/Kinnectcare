@@ -582,10 +582,21 @@ export default function DiagnosticsScreen() {
   // engine log's sdk_onHttp events (only fired when the JS layer is awake).
   // Without it, the hero card says "starting up" while the dashboard shows
   // "Updated just now" — two screens disagreeing about the same upload.
+  //
+  // pipelineTs?.http_success (kc_pts_http_ok) is the third evidence stream:
+  // a persistent AsyncStorage key immune to ring-buffer eviction.  It keeps
+  // the hero card green even when a failure burst has evicted the last success
+  // from the ring buffer and lastSeenMs is not yet populated (fresh device /
+  // first /members poll pending).
   const overallHealth = useMemo(() => {
     const myLastSeenMs = memberStore.getMyLastSeenMs(user?.id ?? null);
-    return computeOverallHealth(engineLog, nowTick, myLastSeenMs);
-  }, [engineLog, nowTick, user?.id]);
+    return computeOverallHealth(
+      engineLog,
+      nowTick,
+      myLastSeenMs,
+      pipelineTs?.http_success ?? null,
+    );
+  }, [engineLog, nowTick, user?.id, pipelineTs]);
 
   // Build 64 — Motion Timeline derived data.
   // Computed from engineLog so they stay in sync with the reload() cycle.

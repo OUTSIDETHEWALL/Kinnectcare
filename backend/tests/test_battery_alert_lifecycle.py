@@ -74,6 +74,10 @@ def mock_db():
     m = MagicMock()
     m.alerts.insert_one = AsyncMock()
     m.alerts.update_one = AsyncMock()
+    # find_one_and_update returns a doc by default (simulates finding an
+    # unresolved alert to resolve).  Tests that want to simulate the "already
+    # resolved by a concurrent caller" path override return_value to None.
+    m.alerts.find_one_and_update = AsyncMock(return_value={"_id": "alert-id-001"})
     m.members.update_one = AsyncMock()
     with patch.object(server, "db", m):
         yield m
@@ -176,9 +180,9 @@ class TestRecovery:
 
     def test_alert_resolved(self, mock_db, mock_push):
         _call(battery_level=0.26, was_alerted=True)
-        mock_db.alerts.update_one.assert_called_once()
-        filt = mock_db.alerts.update_one.call_args[0][0]
-        upd  = mock_db.alerts.update_one.call_args[0][1]
+        mock_db.alerts.find_one_and_update.assert_called_once()
+        filt = mock_db.alerts.find_one_and_update.call_args[0][0]
+        upd  = mock_db.alerts.find_one_and_update.call_args[0][1]
         assert filt["type"] == "low_battery"
         assert filt["member_id"] == MEMBER_ID
         assert filt["family_group_id"] == FAMILY_GROUP_ID
@@ -220,11 +224,41 @@ class TestRecovery:
         """battery_level == 0.25 must recover (condition is >=, not >)."""
         result = _call(battery_level=0.25, was_alerted=True)
         assert result == {"low_battery_alerted": False}
-        mock_db.alerts.update_one.assert_called_once()
+        mock_db.alerts.find_one_and_update.assert_called_once()
 
     def test_no_alert_insert_on_recovery(self, mock_db, mock_push):
         _call(battery_level=0.30, was_alerted=True)
         mock_db.alerts.insert_one.assert_not_called()
+
+
+# ── Test 5: Concurrent recovery dedup ─────────────────────────────────────────
+
+class TestConcurrentRecovery:
+    """Both upload paths recover at the same moment — exactly one push must fire."""
+
+    def test_first_caller_sends_push(self, mock_db, mock_push):
+        """When find_one_and_update returns a document the caller sends the push."""
+        # Default mock returns a doc (simulates winning the race).
+        _call(battery_level=0.26, was_alerted=True)
+        mock_push.assert_called_once()
+
+    def test_second_caller_skips_push(self, mock_db, mock_push):
+        """When find_one_and_update returns None (already resolved) the push is skipped."""
+        mock_db.alerts.find_one_and_update.return_value = None
+        _call(battery_level=0.26, was_alerted=True)
+        mock_push.assert_not_called()
+
+    def test_second_caller_still_clears_flag(self, mock_db, mock_push):
+        """The flag update is always returned, even when the push is skipped."""
+        mock_db.alerts.find_one_and_update.return_value = None
+        result = _call(battery_level=0.26, was_alerted=True)
+        assert result == {"low_battery_alerted": False}
+
+    def test_second_caller_still_calls_find_one_and_update(self, mock_db, mock_push):
+        """The resolve attempt is always made; only the push is conditional."""
+        mock_db.alerts.find_one_and_update.return_value = None
+        _call(battery_level=0.26, was_alerted=True)
+        mock_db.alerts.find_one_and_update.assert_called_once()
 
 
 # ── Test 4: Re-trigger after recovery ─────────────────────────────────────────

@@ -2599,7 +2599,15 @@ async def check_low_battery(
     if battery_level >= _BATTERY_CLEAR_THRESHOLD and _was_alerted:
         # ── Recovery: auto-resolve the open alert + notify caregivers ────────
         now_utc = datetime.now(timezone.utc)
-        await db.alerts.update_one(
+        # Race-safe: find_one_and_update returns the pre-update document only
+        # when a matching unresolved alert is found.  If a concurrent upload
+        # path (PUT /location and PATCH /battery both fire at the same moment)
+        # already resolved the alert, the filter won't match and the return
+        # value is None — that caller skips the push entirely, ensuring exactly
+        # one "phone is charging" notification reaches caregivers per recovery
+        # cycle.  This mirrors the DuplicateKeyError guard used on the trigger
+        # path (see insert_one above).
+        _resolved_doc = await db.alerts.find_one_and_update(
             {
                 "member_id": member_id,
                 "family_group_id": family_group_id,
@@ -2608,31 +2616,39 @@ async def check_low_battery(
             },
             {"$set": {"resolved": True, "resolved_at": now_utc}},
         )
-        # Proactive recovery push — caregivers have no other way to know the
-        # phone is back to normal without opening the app.  Gated by
-        # _was_alerted so it fires at most once per discharge/recovery cycle,
-        # matching the one-shot design of the trigger push above.
-        try:
-            await push_to_family_group(
-                family_group_id,
-                title=f"{_member_name}'s phone is charging",
-                body=(
-                    f"{_member_name}'s battery is back up to {_battery_pct}%. "
-                    f"Location tracking is back to normal."
-                ),
-                data={
-                    "type": "battery_recovered",
-                    "member_id": member_id,
-                },
-                exclude_user_id=exclude_user_id,
-            )
-            logger.info(
-                f"check_low_battery: auto-resolved + recovery push sent "
-                f"member={member_id} battery={_battery_pct}%"
-            )
-        except Exception as _be:
-            logger.warning(
-                f"check_low_battery: recovery push failed for member={member_id}: {_be}"
+        if _resolved_doc is not None:
+            # This caller performed the resolve — send the one recovery push.
+            # Proactive recovery push — caregivers have no other way to know the
+            # phone is back to normal without opening the app.
+            try:
+                await push_to_family_group(
+                    family_group_id,
+                    title=f"{_member_name}'s phone is charging",
+                    body=(
+                        f"{_member_name}'s battery is back up to {_battery_pct}%. "
+                        f"Location tracking is back to normal."
+                    ),
+                    data={
+                        "type": "battery_recovered",
+                        "member_id": member_id,
+                    },
+                    exclude_user_id=exclude_user_id,
+                )
+                logger.info(
+                    f"check_low_battery: auto-resolved + recovery push sent "
+                    f"member={member_id} battery={_battery_pct}%"
+                )
+            except Exception as _be:
+                logger.warning(
+                    f"check_low_battery: recovery push failed for member={member_id}: {_be}"
+                )
+        else:
+            # A concurrent recovery call on the other upload path already
+            # resolved the alert and sent the push.  Skip the push to avoid
+            # a duplicate notification.
+            logger.debug(
+                f"check_low_battery: recovery dedup — alert already resolved "
+                f"by concurrent call for member={member_id}"
             )
         return {"low_battery_alerted": False}
 
