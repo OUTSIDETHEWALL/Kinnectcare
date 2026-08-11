@@ -1693,6 +1693,30 @@ export default function DiagnosticsScreen() {
               return null;
             };
 
+            /**
+             * Returns how many ms have elapsed since the device_snapshot was
+             * pushed, measured from `nowTick` (the live 1-second clock).
+             * Returns null if the snapshot has no timestamp.
+             */
+            const getSnapshotElapsedMs = (m: any): number | null => {
+              const ds = m.device_snapshot;
+              if (!ds?.at && !ds?.stored_at) return null;
+              try {
+                return nowTick - new Date(ds.at || ds.stored_at).getTime();
+              } catch { return null; }
+            };
+
+            /**
+             * Effective age = stage_age_at_snapshot_push + elapsed_since_push.
+             * Returns null if either component is missing.
+             */
+            const effectiveSnapshotAgeMs = (m: any, stageAgeMs: number | null | undefined): number | null => {
+              if (stageAgeMs === null || stageAgeMs === undefined) return null;
+              const elapsed = getSnapshotElapsedMs(m);
+              if (elapsed === null) return null;
+              return elapsed + stageAgeMs;
+            };
+
             // Comparison rows: label + accessor function.
             type RowDef = { label: string; render: (m: any) => ReactNode };
             const rows: RowDef[] = [
@@ -1729,30 +1753,31 @@ export default function DiagnosticsScreen() {
                   ? <Text style={{ color: '#374151', fontSize: 12 }}>{Math.round(m.gps_accuracy)}m</Text>
                   : <Text style={{ color: '#6B7280', fontSize: 12 }}>—</Text>,
               },
-              // device_snapshot fields (pushed by JS heartbeat stale-detection)
+              // device_snapshot fields (pushed by JS heartbeat stale-detection).
+              // Ages are shown as effective current age = stage_age_at_snapshot + elapsed_since_snapshot.
               {
                 label: 'Activity cb (device)',
-                render: (m) => ageCell(m.device_snapshot?.activity_age_ms, 5 * 60_000, 15 * 60_000),
+                render: (m) => ageCell(effectiveSnapshotAgeMs(m, m.device_snapshot?.activity_age_ms), 5 * 60_000, 15 * 60_000),
               },
               {
                 label: 'Motion cb (device)',
-                render: (m) => ageCell(m.device_snapshot?.motion_age_ms, 5 * 60_000, 15 * 60_000),
+                render: (m) => ageCell(effectiveSnapshotAgeMs(m, m.device_snapshot?.motion_age_ms), 5 * 60_000, 15 * 60_000),
               },
               {
                 label: 'Location cb (device)',
-                render: (m) => ageCell(m.device_snapshot?.location_age_ms, 5 * 60_000, 15 * 60_000),
+                render: (m) => ageCell(effectiveSnapshotAgeMs(m, m.device_snapshot?.location_age_ms), 5 * 60_000, 15 * 60_000),
               },
               {
                 label: 'Heartbeat JS (device)',
-                render: (m) => ageCell(m.device_snapshot?.hb_js_age_ms, 5 * 60_000, 15 * 60_000),
+                render: (m) => ageCell(effectiveSnapshotAgeMs(m, m.device_snapshot?.hb_js_age_ms), 5 * 60_000, 15 * 60_000),
               },
               {
                 label: 'Headless invoked (device)',
-                render: (m) => ageCell(m.device_snapshot?.hl_inv_age_ms, 5 * 60_000, 15 * 60_000),
+                render: (m) => ageCell(effectiveSnapshotAgeMs(m, m.device_snapshot?.hl_inv_age_ms), 5 * 60_000, 15 * 60_000),
               },
               {
                 label: 'HTTP success (device)',
-                render: (m) => ageCell(m.device_snapshot?.http_ok_age_ms, 5 * 60_000, 15 * 60_000),
+                render: (m) => ageCell(effectiveSnapshotAgeMs(m, m.device_snapshot?.http_ok_age_ms), 5 * 60_000, 15 * 60_000),
               },
               {
                 label: 'Listeners attached (device)',
@@ -1853,6 +1878,13 @@ export default function DiagnosticsScreen() {
                     ))}
                   </View>
                 ))}
+
+                {/* Footnote — effective-age approximation */}
+                {members.some((m) => m.device_snapshot) && (
+                  <Text style={{ color: '#6B7280', fontSize: 10, fontStyle: 'italic', marginTop: 8, lineHeight: 14 }}>
+                    * Device pipeline ages shown as effective current age (stage age at snapshot + time elapsed since snapshot). Approximate — snapshot was captured at a single point in time, not continuously.
+                  </Text>
+                )}
 
                 {/* Copy action */}
                 <TouchableOpacity
