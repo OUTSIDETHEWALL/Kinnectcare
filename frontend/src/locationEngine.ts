@@ -1112,27 +1112,6 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
     // Activity Recognition / motion detection
     activityRecognitionInterval: 10000,
     minimumActivityRecognitionConfidence: 75,
-    // Sprint 1 motion recovery — eliminate Activity Recognition back-off.
-    //
-    // Transistor SDK default elasticity = 3: each heartbeat cycle without
-    // detected movement multiplies the next AR poll interval by 3.
-    // After Joyce's phone sits still for several hours the AR poll interval
-    // can reach 270 s or more (10 s × 3^N).  When she finally starts
-    // driving, Android may take minutes to deliver the first motionchange
-    // event — which is exactly the stale-location symptom we are
-    // investigating.
-    //
-    // elasticity: 1 disables the back-off entirely and keeps AR polling
-    // at activityRecognitionInterval (10 s) regardless of how long the
-    // phone has been stationary.  Battery cost is negligible: AR uses
-    // the accelerometer / fused-sensor stack, not GPS.  Power-budget
-    // impact is far smaller than one extra GPS fix per hour.
-    //
-    // Evidence: SDK docs + Transistor GitHub issue #1567 confirm that
-    // high elasticity is the #1 cause of slow stationary-to-moving
-    // transitions after long idle periods.  If drive-test logs show
-    // motionchange firing quickly at elasticity:1, this was the root cause.
-    elasticity: 1,
 
     // Heartbeat — fires onHeartbeat every N seconds while STILL.  Used
     // here purely as a "the SDK is alive" signal in the diagnostic log.
