@@ -59,6 +59,7 @@ import {
   getPipelineTimestamps,
   isListenersAttached,
   PipelineTimestamps,
+  triggerDeviceSnapshotNow,
 } from '../src/locationEngine';
 import * as memberStore from '../src/store/memberStore';
 import * as leonidas from '../src/leonidas';
@@ -512,6 +513,9 @@ export default function DiagnosticsScreen() {
   // Task #21 — Pipeline timestamps (per-stage AsyncStorage timestamps).
   const [pipelineTs, setPipelineTs] = useState<PipelineTimestamps | null>(null);
   const [listenersAttachedFlag, setListenersAttachedFlag] = useState<boolean>(false);
+  // Task #53 — "Push snapshot now" test button state.
+  const [snapshotPushing, setSnapshotPushing] = useState<boolean>(false);
+  const [snapshotPushResult, setSnapshotPushResult] = useState<string | null>(null);
 
   // Leonidas (Build 46) — snapshot + recovery log
   const [leoSnapshot, setLeoSnapshot] = useState<leonidas.LeonidasSnapshotForUI | null>(null);
@@ -747,6 +751,21 @@ export default function DiagnosticsScreen() {
     }, 4000);
     return () => clearInterval(tick);
   }, [expanded.leonidas]);
+
+  // Task #52 — Device Comparison auto-refresh.
+  // Mirrors the Leonidas pattern above: runs only while the section is
+  // expanded, fires every 60 s (one full heartbeat cycle), and clears
+  // itself the moment the section collapses.  An initial fetch is NOT
+  // fired here — the manual "Fetch Device Comparison" button (or any
+  // prior fetch this session) already has the first payload.  The
+  // interval keeps it current without requiring repeated manual taps.
+  useEffect(() => {
+    if (!expanded['device-comparison']) return;
+    const tick = setInterval(() => {
+      fetchFamilySnapshot().catch(() => { /* swallow — fetchFamilySnapshot sets its own error state */ });
+    }, 60_000);
+    return () => clearInterval(tick);
+  }, [expanded['device-comparison'], fetchFamilySnapshot]);
 
   // 1-second tick for live age displays.  Runs unconditionally while the
   // Diagnostics screen is mounted so the summary card "X min ago" values
@@ -1586,6 +1605,45 @@ export default function DiagnosticsScreen() {
           >
             <Text style={styles.secondaryBtnText}>Copy pipeline timestamps</Text>
           </TouchableOpacity>
+
+          {/* Task #53 — Force-push snapshot for plumbing validation */}
+          <TouchableOpacity
+            style={[
+              styles.secondaryBtn,
+              { marginTop: 8, opacity: snapshotPushing ? 0.6 : 1 },
+            ]}
+            onPress={async () => {
+              if (snapshotPushing) return;
+              setSnapshotPushing(true);
+              setSnapshotPushResult(null);
+              const result = await triggerDeviceSnapshotNow();
+              setSnapshotPushing(false);
+              if (result.ok) {
+                setSnapshotPushResult('✓ Snapshot pushed — tap "Fetch Device Comparison" to verify');
+              } else {
+                setSnapshotPushResult(`✗ ${result.error}`);
+              }
+            }}
+            disabled={snapshotPushing}
+            activeOpacity={0.85}
+            testID="diagnostics-push-snapshot-btn"
+          >
+            <Text style={styles.secondaryBtnText}>
+              {snapshotPushing ? '⏳  Pushing…' : '📤  Push my snapshot now (test)'}
+            </Text>
+          </TouchableOpacity>
+          {snapshotPushResult !== null ? (
+            <Text style={[
+              styles.muted,
+              {
+                marginTop: 6,
+                fontSize: 12,
+                color: snapshotPushResult.startsWith('✓') ? '#10B981' : '#EF4444',
+              },
+            ]}>
+              {snapshotPushResult}
+            </Text>
+          ) : null}
         </CollapsibleSection>
 
         {/* =====================================================
