@@ -317,7 +317,7 @@ export function computeHealthItems(
       label:  hbAge === null
               ? 'Background heartbeat: waiting for first event'
               : (uploadRecent && hbAge >= 10 * 60_000)
-                ? `Last background heartbeat: ${formatAgeMs(hbAge)} — uploading via motion events`
+                ? `Background tracking active — last heartbeat: ${formatAgeMs(hbAge)}`
                 : `Last background heartbeat: ${formatAgeMs(hbAge)}`,
       status: hbStatus,
     },

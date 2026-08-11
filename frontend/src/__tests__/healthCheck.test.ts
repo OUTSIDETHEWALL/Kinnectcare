@@ -216,8 +216,8 @@ describe('computeHealthItems / worstHealthStatus — polling transitions', () =>
     expect(hbItem).toBeDefined();
     // Must NOT be error — uploads prove the engine is alive and moving
     expect(hbItem.status).toBe('ok');
-    // Label must explain the motion-path state, not just show a stale timestamp
-    expect(hbItem.label).toContain('uploading via motion events');
+    // Label must lead with reassurance, not a technical timestamp
+    expect(hbItem.label).toContain('Background tracking active');
 
     // The overall worst status must not be 'error' — this is a healthy device
     expect(worstHealthStatus(items)).not.toBe('error');
