@@ -182,6 +182,66 @@ describe('computeHealthItems / worstHealthStatus — polling transitions', () =>
     expect(worstHealthStatus([ok]))                       .toBe('ok');
     expect(worstHealthStatus([]))                         .toBe('ok');
   });
+
+  // ── 7. SDK heartbeat suppression during motion ────────────────────────────
+  //
+  // The Transistor SDK only fires heartbeat events when the device is
+  // STATIONARY.  While the device is moving, locations upload via motion
+  // events (sdk_onHttp fires) but sdk_onHeartbeat does NOT fire.
+  //
+  // Regression guard: a device that has been driving for >10 minutes will
+  // have a stale heartbeat timestamp (hbAge > 10 min → previously 'error').
+  // When uploads are recent (< 5 min), the stale heartbeat must NOT produce
+  // a ❌ — it must show ✅ and explain "uploading via motion events".
+  //
+  // This reproduces the exact inconsistency Charles observed:
+  //   ✅ Background monitoring is healthy
+  //   ✅ Last location confirmed: 14 seconds ago
+  //   ✅ Last location uploaded: 45 seconds ago
+  //   ❌ Last background heartbeat: 1 hour ago   ← was false-negative
+
+  it('heartbeat row shows ok (not error) when heartbeat is >10 min old but uploads are recent', () => {
+    const now = 1_000_000;
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onEnabledChange', now - 2_000,         { enabled: true }),
+      makeEvent('sdk_onHeartbeat',     now - 65 * 60_000),  // 65 min ago — device was stationary then
+      makeEvent('sdk_onHttp',          now - 45_000,        { success: true }), // 45 s ago — device is moving now
+    ];
+
+    const items = computeHealthItems(log, now);
+
+    const hbItem = items.find((i) =>
+      i.label.includes('heartbeat') || i.label.includes('Heartbeat'),
+    )!;
+    expect(hbItem).toBeDefined();
+    // Must NOT be error — uploads prove the engine is alive and moving
+    expect(hbItem.status).toBe('ok');
+    // Label must explain the motion-path state, not just show a stale timestamp
+    expect(hbItem.label).toContain('uploading via motion events');
+
+    // The overall worst status must not be 'error' — this is a healthy device
+    expect(worstHealthStatus(items)).not.toBe('error');
+  });
+
+  it('heartbeat row shows error when heartbeat AND uploads are both stale', () => {
+    const now = 1_000_000;
+    const log: EngineLogEvent[] = [
+      makeEvent('sdk_onEnabledChange', now - 2_000,          { enabled: true }),
+      makeEvent('sdk_onHeartbeat',     now - 65 * 60_000),   // 65 min ago
+      makeEvent('sdk_onHttp',          now - 20 * 60_000,    { success: true }), // 20 min ago — genuinely stale
+    ];
+
+    const items = computeHealthItems(log, now);
+
+    const hbItem = items.find((i) =>
+      i.label.includes('heartbeat') || i.label.includes('Heartbeat'),
+    )!;
+    expect(hbItem).toBeDefined();
+    // Both heartbeat and upload are stale — this IS a genuine failure
+    expect(hbItem.status).toBe('error');
+    // Label must NOT say "uploading via motion events" — uploads are not recent
+    expect(hbItem.label).not.toContain('uploading via motion events');
+  });
 });
 
 // ─── Log-clear mid-session: indicator hides then re-surfaces ─────────────────

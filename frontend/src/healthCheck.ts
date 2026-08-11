@@ -227,25 +227,11 @@ export function computeHealthItems(
     : enabledEvt.detail?.enabled   ? 'ok'
     : 'error';
 
-  // 2 — Last heartbeat: sdk_onHeartbeat or headless_task_invoked.
-  //     ✅ < 2 min  ⚠ 2–10 min  ❌ > 10 min  ℹ no entry yet (not an error)
-  //
-  //     Crucially: absence of a heartbeat in the log does NOT mean the
-  //     engine is broken.  Heartbeats only fire ~60 s after start, and
-  //     the log is cleared between sessions.  Treat null as 'unknown',
-  //     not 'error' — the upload age check (item 3) is the real signal.
-  const hbEvt = rev.find(
-    (e) => e.event === 'sdk_onHeartbeat' || e.event === 'headless_task_invoked',
-  ) ?? null;
-  const hbAge = hbEvt ? now - hbEvt.at : null;
-  const hbStatus: HealthStatus =
-    hbAge === null         ? 'unknown'
-    : hbAge < 2 * 60_000  ? 'ok'
-    : hbAge < 10 * 60_000 ? 'warn'
-    : 'error';
-
-  // 3 — Last location upload: sdk_onHttp with success=true.
+  // 2 — Last location upload: sdk_onHttp with success=true.
   //     ✅ < 5 min  ⚠ 5–15 min  ❌ > 15 min  ℹ no entry yet
+  //
+  //     Computed FIRST so item 3 (heartbeat) can use uploadAge to avoid a
+  //     false-negative.  See the heartbeat comment below for full reasoning.
   //
   //     Two evidence streams are combined with Math.min (pick the fresher):
   //       a) Ring buffer: scan for the most recent sdk_onHttp with success=true.
@@ -269,6 +255,39 @@ export function computeHealthItems(
     uploadAge === null          ? 'unknown'
     : uploadAge < 5 * 60_000   ? 'ok'
     : uploadAge < 15 * 60_000  ? 'warn'
+    : 'error';
+
+  // 3 — Last heartbeat: sdk_onHeartbeat or headless_task_invoked.
+  //     ✅ < 2 min  ⚠ 2–10 min  ❌ > 10 min  ℹ no entry yet (not an error)
+  //
+  //     IMPORTANT — SDK motion-path suppression:
+  //     The Transistor BackgroundGeolocation SDK only fires heartbeat events
+  //     when the device is STATIONARY.  When the device is moving, the SDK
+  //     sends continuous location events via the motion path instead.  Those
+  //     events produce sdk_onHttp entries (captured by uploadAge above) but do
+  //     NOT produce sdk_onHeartbeat entries.
+  //
+  //     Consequence: a device that has been driving for >10 minutes will show a
+  //     stale heartbeat timestamp even though the engine is perfectly healthy.
+  //     Without accounting for this, hbStatus evaluates to 'error' (❌) while
+  //     the upload row simultaneously shows ✅ — an apparent contradiction that
+  //     is actually consistent with normal motion-path operation.
+  //
+  //     Fix: when uploadAge < 5 min the device is demonstrably uploading
+  //     locations.  A stale heartbeat in that window means the device is moving
+  //     (heartbeat correctly suppressed by the SDK), not that the engine failed.
+  //     Cap hbStatus at 'ok' in that case.  Only surface 'error' when both the
+  //     heartbeat AND uploads are stale — that is the genuine failure state.
+  const hbEvt = rev.find(
+    (e) => e.event === 'sdk_onHeartbeat' || e.event === 'headless_task_invoked',
+  ) ?? null;
+  const hbAge = hbEvt ? now - hbEvt.at : null;
+  const uploadRecent = uploadAge !== null && uploadAge < 5 * 60_000;
+  const hbStatus: HealthStatus =
+    hbAge === null                                  ? 'unknown'
+    : hbAge < 2 * 60_000                           ? 'ok'
+    : hbAge < 10 * 60_000                          ? 'warn'
+    : uploadRecent                                  ? 'ok'   // motion path active — heartbeat correctly suppressed
     : 'error';
 
   // 4 — Battery listener: battery_listeners_attached event present.
@@ -297,7 +316,9 @@ export function computeHealthItems(
       icon:   healthIcon(hbStatus),
       label:  hbAge === null
               ? 'Background heartbeat: waiting for first event'
-              : `Last background heartbeat: ${formatAgeMs(hbAge)}`,
+              : (uploadRecent && hbAge >= 10 * 60_000)
+                ? `Last background heartbeat: ${formatAgeMs(hbAge)} — uploading via motion events`
+                : `Last background heartbeat: ${formatAgeMs(hbAge)}`,
       status: hbStatus,
     },
     {
