@@ -748,6 +748,21 @@ export default function DiagnosticsScreen() {
     return () => clearInterval(tick);
   }, [expanded.leonidas]);
 
+  // Task #52 — Device Comparison auto-refresh.
+  // Mirrors the Leonidas pattern above: runs only while the section is
+  // expanded, fires every 60 s (one full heartbeat cycle), and clears
+  // itself the moment the section collapses.  An initial fetch is NOT
+  // fired here — the manual "Fetch Device Comparison" button (or any
+  // prior fetch this session) already has the first payload.  The
+  // interval keeps it current without requiring repeated manual taps.
+  useEffect(() => {
+    if (!expanded['device-comparison']) return;
+    const tick = setInterval(() => {
+      fetchFamilySnapshot().catch(() => { /* swallow — fetchFamilySnapshot sets its own error state */ });
+    }, 60_000);
+    return () => clearInterval(tick);
+  }, [expanded['device-comparison'], fetchFamilySnapshot]);
+
   // 1-second tick for live age displays.  Runs unconditionally while the
   // Diagnostics screen is mounted so the summary card "X min ago" values
   // and the Leonidas "Next Patrol" countdown both stay accurate without a
