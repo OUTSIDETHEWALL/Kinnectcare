@@ -380,11 +380,32 @@ function registerHeadlessTaskOnce(): void {
             });
           } else {
             _lastMotionRecoveryTs = nowMs;
+            // ── Pipeline instrumentation (Charles addendum) ──────────────
+            // Log every step so a single real-world drive tells us exactly
+            // where the chain succeeds or fails, without guessing.
+            await logEvent('motion_recovery_start', {
+              source: 'headless',
+              secondsSinceLast: Math.floor(msSinceLast / 1000),
+            });
             try {
-              await lib.getCurrentPosition({
+              await logEvent('getCurrentPosition_start', { source: 'headless' });
+              const loc = await lib.getCurrentPosition({
                 samples: 1, persist: true, timeout: 30,
                 extras: { source: 'headless-motionchange' },
               });
+              // GPS fix received — coordinates available, SDK will auto-upload
+              // because persist:true.  Round to 0.01° (~1.1 km) for privacy.
+              await logEvent('gps_fix_received', {
+                source: 'headless',
+                lat: round01(loc?.coords?.latitude),
+                lng: round01(loc?.coords?.longitude),
+                accuracy: typeof loc?.coords?.accuracy === 'number'
+                  ? Math.round(loc.coords.accuracy) : null,
+              });
+              // Native HTTP transport will fire the PUT automatically via
+              // autoSync — we cannot observe the exact moment the socket
+              // opens, but persist:true guarantees it will happen.
+              await logEvent('upload_queued', { source: 'headless', persist: true });
               recordPipelineTs('headless_heartbeat');
               await logEvent('headless_motionchange_getCurrentPosition_ok');
             } catch (e: any) {
@@ -803,11 +824,25 @@ function attachSdkListeners(lib: any): void {
           });
         } else {
           _lastMotionRecoveryTs = nowMs;
+          // ── Pipeline instrumentation (Charles addendum) ──────────────
+          void logEvent('motion_recovery_start', {
+            source: 'js',
+            secondsSinceLast: Math.floor(msSinceLast / 1000),
+          });
           try {
-            await lib.getCurrentPosition({
+            void logEvent('getCurrentPosition_start', { source: 'js' });
+            const loc = await lib.getCurrentPosition({
               samples: 1, persist: true, timeout: 30,
               extras: { source: 'js-motionchange' },
             });
+            void logEvent('gps_fix_received', {
+              source: 'js',
+              lat: round01(loc?.coords?.latitude),
+              lng: round01(loc?.coords?.longitude),
+              accuracy: typeof loc?.coords?.accuracy === 'number'
+                ? Math.round(loc.coords.accuracy) : null,
+            });
+            void logEvent('upload_queued', { source: 'js', persist: true });
             void logEvent('motionchange_getCurrentPosition_ok');
           } catch (e: any) {
             void logEvent('motionchange_getCurrentPosition_error', {
@@ -890,6 +925,21 @@ function attachSdkListeners(lib: any): void {
         path: (evt?.url || '').split('?')[0],
         bodyHead,
       });
+      // Explicit named events alongside sdk_onHttp (Charles addendum):
+      // "Upload succeeds" and "Upload fails" as unambiguous ring buffer
+      // entries so a single drive's log answers the question without
+      // decoding the success boolean inside sdk_onHttp.
+      if (evt?.success) {
+        void logEvent('http_upload_success', {
+          status: evt?.status,
+          path: (evt?.url || '').split('?')[0],
+        });
+      } else {
+        void logEvent('http_upload_failure', {
+          status: evt?.status,
+          path: (evt?.url || '').split('?')[0],
+        });
+      }
       // Fire upsert AFTER the diagnostic log so the log entry stays
       // a faithful record of what the backend returned even if the
       // upsert throws for some reason.  Use a require()'d ref to the
@@ -1062,6 +1112,27 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
     // Activity Recognition / motion detection
     activityRecognitionInterval: 10000,
     minimumActivityRecognitionConfidence: 75,
+    // Sprint 1 motion recovery — eliminate Activity Recognition back-off.
+    //
+    // Transistor SDK default elasticity = 3: each heartbeat cycle without
+    // detected movement multiplies the next AR poll interval by 3.
+    // After Joyce's phone sits still for several hours the AR poll interval
+    // can reach 270 s or more (10 s × 3^N).  When she finally starts
+    // driving, Android may take minutes to deliver the first motionchange
+    // event — which is exactly the stale-location symptom we are
+    // investigating.
+    //
+    // elasticity: 1 disables the back-off entirely and keeps AR polling
+    // at activityRecognitionInterval (10 s) regardless of how long the
+    // phone has been stationary.  Battery cost is negligible: AR uses
+    // the accelerometer / fused-sensor stack, not GPS.  Power-budget
+    // impact is far smaller than one extra GPS fix per hour.
+    //
+    // Evidence: SDK docs + Transistor GitHub issue #1567 confirm that
+    // high elasticity is the #1 cause of slow stationary-to-moving
+    // transitions after long idle periods.  If drive-test logs show
+    // motionchange firing quickly at elasticity:1, this was the root cause.
+    elasticity: 1,
 
     // Heartbeat — fires onHeartbeat every N seconds while STILL.  Used
     // here purely as a "the SDK is alive" signal in the diagnostic log.
