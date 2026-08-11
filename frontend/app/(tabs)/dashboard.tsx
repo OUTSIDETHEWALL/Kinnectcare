@@ -134,11 +134,15 @@ export default function Dashboard() {
         const cached = await AsyncStorage.getItem(key);
         if (cached) {
           const parsed = JSON.parse(cached) as ApiAlert[];
-          // Only restore alerts that are still unacknowledged.  Resolved alerts
-          // that were auto-cleared in a prior session must not reappear after a
-          // restart — the server is the source of truth and will correct the
-          // count on the next successful /alerts fetch.
-          setActiveAlerts(parsed.filter((a: ApiAlert) => !a.acknowledged));
+          // Only restore alerts that are still active: unacknowledged AND
+          // unresolved.  A battery_recovered push resolves the low_battery alert
+          // on the backend before the cache is refreshed; if the caregiver
+          // force-kills and restarts the app we must not flash a stale "Needs
+          // Attention: 1" from the old snapshot.  Filtering by !resolved here
+          // (in addition to !acknowledged) ensures a pre-recovery cache entry
+          // cannot re-surface after a restart — the server is the source of
+          // truth and the next /alerts fetch will write a clean snapshot.
+          setActiveAlerts(parsed.filter((a: ApiAlert) => !a.acknowledged && !a.resolved));
         }
       } catch (_e) {}
     })();
@@ -323,8 +327,19 @@ export default function Dashboard() {
         // AsyncStorage snapshot restored on mount) so Needs Attention never
         // drops to 0 just because of a transient network error.
         if (ar !== null) {
+          // Filter to only active alerts: unacknowledged AND unresolved.
+          // The battery_recovered path resolves the low_battery alert on the
+          // backend without setting acknowledged=True, so filtering by
+          // !acknowledged alone would keep a resolved alert in state and in the
+          // AsyncStorage cache.  Adding !resolved here ensures:
+          //   1. setActiveAlerts() never holds a resolved alert.
+          //   2. The AsyncStorage snapshot written below is clean, so a
+          //      subsequent force-kill restart cannot flash a stale
+          //      "Needs Attention: 1" from a pre-recovery cache entry.
+          // activeBattAlerts (line ~667) already applies !resolved for display,
+          // but defence-in-depth at the write site prevents any re-surface path.
           const freshAlerts = ((ar.data as ApiAlert[]) || []).filter(
-            (a: ApiAlert) => !a.acknowledged,
+            (a: ApiAlert) => !a.acknowledged && !a.resolved,
           );
           setActiveAlerts(freshAlerts);
           // Persist the fresh snapshot so it survives a force-kill restart.
@@ -419,7 +434,15 @@ export default function Dashboard() {
     //
     //   3. Notification arrival — refetch whenever ANY push lands
     //      while focused (member checked in, fall, missed check-in,
-    //      etc.).  Uses Notifications.addNotificationReceivedListener
+    //      battery_recovered, etc.).  This covers the foreground path
+    //      for battery recovery: when Joyce's phone is plugged in,
+    //      check_low_battery() resolves the low_battery alert and sends
+    //      a battery_recovered push; this listener fires load() so
+    //      Needs Attention drops to 0 immediately without waiting for
+    //      the 60 s poll.  AppState 'active' (handler #2 above) covers
+    //      the background path — if the push arrives while the app is
+    //      backgrounded, load() fires the instant the caregiver opens
+    //      the app.  Uses Notifications.addNotificationReceivedListener
     //      directly so it stacks with the global routing listener in
     //      _layout.tsx without clobbering it.
     //

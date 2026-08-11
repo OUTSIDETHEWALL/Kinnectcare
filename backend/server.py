@@ -5717,6 +5717,66 @@ async def _migrate_alerts_backfill_v50():
 
 
 # =========================================================================
+# Build 48 — One-time backfill of member_phone onto existing low_battery alerts.
+#
+# Problem: member_phone was added to the Alert model in Build 28 and is only
+# written on newly-created low_battery alerts.  Pre-existing unacknowledged
+# low_battery alerts have no member_phone so caregivers never see the Call
+# button for those older rows.
+#
+# Fix: at startup, sweep every low_battery alert that is missing member_phone,
+# look up the corresponding member doc by member_id, and copy member.phone.
+#
+# Safety model:
+#   A. SENTINEL DOC — short-circuits on every subsequent boot.
+#   B. Only writes when member.phone is non-empty; never sets a blank string.
+#   C. Never crashes startup — any exception is caught and logged.
+# =========================================================================
+@app.on_event("startup")
+async def _migrate_alerts_phone_backfill_v48():
+    try:
+        if await db.migrations.find_one({"_id": MIGRATION_ID_ALERTS_PHONE_BACKFILL_V48}):
+            return
+
+        now = datetime.now(timezone.utc)
+        updated = 0
+
+        # Find all low_battery alerts where member_phone is absent or null.
+        cursor = db.alerts.find(
+            {"type": "low_battery", "member_phone": {"$in": [None, ""]}}
+        )
+        async for alert in cursor:
+            member_id = alert.get("member_id")
+            if not member_id:
+                continue
+            member = await db.family_members.find_one({"id": member_id})
+            if not member:
+                continue
+            phone = (member.get("phone") or "").strip()
+            if not phone:
+                continue
+            res = await db.alerts.update_one(
+                {"_id": alert["_id"]},
+                {"$set": {"member_phone": phone}},
+            )
+            if res.modified_count:
+                updated += 1
+
+        logger.info(
+            f"[startup] alerts phone backfill v48: backfilled member_phone on "
+            f"{updated} low_battery alert(s)"
+        )
+
+        await db.migrations.update_one(
+            {"_id": MIGRATION_ID_ALERTS_PHONE_BACKFILL_V48},
+            {"$set": {"_id": MIGRATION_ID_ALERTS_PHONE_BACKFILL_V48, "run_at": now, "updated": updated}},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"alerts phone backfill v48 migration skipped: {e}")
+
+
+# =========================================================================
 # Build 62 — One-time ghost-invite heal migration.
 #
 # Problem: the Build #61 live ghost-heal inside GET /family-group/invites
@@ -5737,6 +5797,8 @@ async def _migrate_alerts_backfill_v50():
 #      never touched, even if the sentinel were somehow deleted and the
 #      migration re-ran.
 # =========================================================================
+MIGRATION_ID_ALERTS_PHONE_BACKFILL_V48 = "alerts_phone_backfill_v48"
+
 MIGRATION_ID_INVITE_GHOST_HEAL_V62 = "invite_ghost_heal_v62"
 
 

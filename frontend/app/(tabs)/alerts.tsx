@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator, Linking, Platform, Alert as RNAlert } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
@@ -7,6 +7,8 @@ import { Colors } from '../../src/theme';
 import { api, Alert } from '../../src/api';
 import { formatRelativeLocal } from '../../src/timeFormat';
 import MemberMap from '../../src/MemberMap';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useAuth } from '../../src/AuthContext';
 
 function alertIcon(type: string) {
   if (type === 'missed_checkin') return 'time-outline';
@@ -43,6 +45,7 @@ function severityTheme(sev: string) {
 }
 
 export default function Alerts() {
+  const { user } = useAuth();
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -52,23 +55,72 @@ export default function Alerts() {
     setLoadError(false);
     try {
       const r = await api.get('/alerts');
-      setAlerts(r.data);
+      const fresh = r.data as Alert[];
+      setAlerts(fresh);
+      // Persist the fresh list so it survives a force-kill restart.
+      if (user?.id) {
+        try {
+          await AsyncStorage.setItem(`@kinnship/alerts_v1_${user.id}`, JSON.stringify(fresh));
+        } catch (_e) {}
+      }
     } catch (_e) {
+      // On failure preserve the existing state (cache or last successful fetch)
+      // rather than blanking the list — the user should see stale alerts
+      // rather than a misleading empty screen.
       setLoadError(true);
     }
   };
 
   useFocusEffect(useCallback(() => {
-    setLoading(true);
-    load().finally(() => setLoading(false));
+    let cancelled = false;
+
+    const hydrateAndRefresh = async () => {
+      // Step 1 — Read the AsyncStorage cache synchronously before starting the
+      // network fetch.  If a cached list exists, populate state immediately and
+      // dismiss the full-screen spinner so caregivers see their alerts right
+      // away after a force-kill restart, even while the network request is
+      // still in flight.
+      let hasCached = false;
+      if (user?.id) {
+        try {
+          const cached = await AsyncStorage.getItem(`@kinnship/alerts_v1_${user.id}`);
+          if (cached && !cancelled) {
+            setAlerts(JSON.parse(cached) as Alert[]);
+            hasCached = true;
+          }
+        } catch (_e) {}
+      }
+
+      // Step 2 — Only keep the full-screen spinner up when there is genuinely
+      // nothing to show yet (no cache, no prior in-memory data).  When cached
+      // data exists, the spinner is dismissed so the list is visible while the
+      // background refresh completes.
+      if (!hasCached && !cancelled) {
+        setLoading(true);
+      } else if (!cancelled) {
+        setLoading(false);
+      }
+
+      // Step 3 — Network refresh (non-blocking when cache exists).
+      await load();
+      if (!cancelled) setLoading(false);
+    };
+
+    hydrateAndRefresh();
+
     // Poll briefly after focus to catch in-flight SOS background fanout
     // and other late-arriving alerts (Bug 3 — SOS not appearing in Alerts).
     // The /sos endpoint inserts the alert row synchronously BEFORE the
     // push fanout, so within ~1s of dialer dismiss the row exists.
-    const t1 = setTimeout(() => { load(); }, 1500);
-    const t2 = setTimeout(() => { load(); }, 4000);
-    return () => { clearTimeout(t1); clearTimeout(t2); };
-  }, []));
+    const t1 = setTimeout(() => { if (!cancelled) load(); }, 1500);
+    const t2 = setTimeout(() => { if (!cancelled) load(); }, 4000);
+    return () => {
+      cancelled = true;
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]));
 
   const ack = async (id: string) => {
     try {
@@ -103,6 +155,13 @@ export default function Alerts() {
             try {
               await api.delete('/alerts');
               setAlerts([]);
+              // Invalidate the cache so a force-kill restart after a clear-all
+              // doesn't restore stale alerts from a prior session.
+              if (user?.id) {
+                try {
+                  await AsyncStorage.removeItem(`@kinnship/alerts_v1_${user.id}`);
+                } catch (_e) {}
+              }
             } catch (_e) {
               RNAlert.alert('Could not clear', 'Please check your connection and try again.');
             }
@@ -150,7 +209,26 @@ export default function Alerts() {
         contentContainerStyle={{ paddingBottom: 40 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.primary} />}
       >
-        {loadError && (
+        {/* When a fetch fails but we have cached/previous alerts, show a compact
+            offline banner so the caregiver can see the cached list rather than
+            a blank screen.  Only show the full error card when we have no data
+            at all — i.e. first launch with no connectivity and no prior cache. */}
+        {loadError && alerts.length > 0 && (
+          <View style={styles.offlineBanner}>
+            <Icon name="cloud-offline-outline" size={18} color={Colors.error} />
+            <Text style={styles.offlineBannerText}>Showing cached alerts · couldn't refresh</Text>
+            <TouchableOpacity
+              testID="alerts-retry"
+              onPress={load}
+              activeOpacity={0.8}
+              style={styles.offlineRetryBtn}
+            >
+              <Text style={styles.offlineRetryText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {loadError && alerts.length === 0 && (
           <View style={styles.errorCard}>
             <Icon name="cloud-offline-outline" size={40} color={Colors.error} />
             <Text style={styles.errorTitle}>Couldn't load alerts.</Text>
@@ -317,4 +395,28 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.error, borderRadius: 999,
   },
   retryText: { color: Colors.surface, fontWeight: '700', fontSize: 15 },
+  // Compact offline banner shown when a refresh fails but cached alerts exist.
+  // Keeps the list visible rather than replacing it with the full error card.
+  offlineBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginHorizontal: 24,
+    marginTop: 10,
+    marginBottom: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: Colors.errorBg || '#FEE2E2',
+    borderWidth: 1,
+    borderColor: Colors.error,
+  },
+  offlineBannerText: { flex: 1, fontSize: 13, color: Colors.error, fontWeight: '600' },
+  offlineRetryBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: Colors.error,
+    borderRadius: 999,
+  },
+  offlineRetryText: { color: Colors.surface, fontWeight: '700', fontSize: 12 },
 });
