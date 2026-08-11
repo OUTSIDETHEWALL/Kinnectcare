@@ -365,17 +365,33 @@ function registerHeadlessTaskOnce(): void {
           (event?.event?.isMoving) ?? (event?.isMoving)
         );
         if (isMoving) {
-          try {
-            await lib.getCurrentPosition({
-              samples: 1, persist: true, timeout: 30,
-              extras: { source: 'headless-motionchange' },
+          // Cooldown gate: Android Activity Recognition can re-evaluate
+          // confidence and deliver multiple motionchange(isMoving:true)
+          // events within the same minute.  Without this guard a long
+          // drive could trigger dozens of getCurrentPosition calls.
+          // 60-second window matches the heartbeat interval — at worst
+          // we duplicate the heartbeat's upload once per minute, which
+          // is idempotent on the backend (server keeps newer last_seen).
+          const nowMs = Date.now();
+          const msSinceLast = nowMs - _lastMotionRecoveryTs;
+          if (msSinceLast < MOTION_RECOVERY_COOLDOWN_MS) {
+            await logEvent('headless_motionchange_recovery_throttled', {
+              secondsAgo: Math.floor(msSinceLast / 1000),
             });
-            recordPipelineTs('headless_heartbeat');
-            await logEvent('headless_motionchange_getCurrentPosition_ok');
-          } catch (e: any) {
-            await logEvent('headless_motionchange_getCurrentPosition_error', {
-              error: String(e?.message || e),
-            });
+          } else {
+            _lastMotionRecoveryTs = nowMs;
+            try {
+              await lib.getCurrentPosition({
+                samples: 1, persist: true, timeout: 30,
+                extras: { source: 'headless-motionchange' },
+              });
+              recordPipelineTs('headless_heartbeat');
+              await logEvent('headless_motionchange_getCurrentPosition_ok');
+            } catch (e: any) {
+              await logEvent('headless_motionchange_getCurrentPosition_error', {
+                error: String(e?.message || e),
+              });
+            }
           }
         } else {
           await logEvent('headless_motionchange_stationary');
@@ -556,6 +572,13 @@ export function setDeviceInfo(info: DeviceInfo): void {
 // consumed in the first few minutes.
 let _lastActivityType: string | null = null;
 let _lastActivityIsMoving: boolean | null = null;
+// Cooldown gate shared by the headless motionchange handler and the
+// JS-alive onMotionChange listener.  Both live in the same JS module
+// scope so a single variable covers both paths within a process lifetime.
+// Resets to 0 on cold start — the first motionchange after engine init
+// always fires, which is the desired behaviour.
+let _lastMotionRecoveryTs = 0;
+const MOTION_RECOVERY_COOLDOWN_MS = 60_000; // 60 s — matches heartbeat interval
 
 // ============================================================
 //  Battery synchronisation (companion to SDK native transport)
@@ -768,16 +791,29 @@ function attachSdkListeners(lib: any): void {
       // the upload doesn't wait for the next 60-second heartbeat tick.
       // native autoSync will also fire; the two uploads are idempotent.
       if (evt?.isMoving) {
-        try {
-          await lib.getCurrentPosition({
-            samples: 1, persist: true, timeout: 30,
-            extras: { source: 'js-motionchange' },
+        // Same 60-second cooldown gate as the headless handler.
+        // _lastMotionRecoveryTs is module-level and shared between both
+        // paths — a headless event that already fired 10 s ago will also
+        // suppress a redundant JS-alive call here.
+        const nowMs = Date.now();
+        const msSinceLast = nowMs - _lastMotionRecoveryTs;
+        if (msSinceLast < MOTION_RECOVERY_COOLDOWN_MS) {
+          void logEvent('motionchange_recovery_throttled', {
+            secondsAgo: Math.floor(msSinceLast / 1000),
           });
-          void logEvent('motionchange_getCurrentPosition_ok');
-        } catch (e: any) {
-          void logEvent('motionchange_getCurrentPosition_error', {
-            error: String(e?.message || e),
-          });
+        } else {
+          _lastMotionRecoveryTs = nowMs;
+          try {
+            await lib.getCurrentPosition({
+              samples: 1, persist: true, timeout: 30,
+              extras: { source: 'js-motionchange' },
+            });
+            void logEvent('motionchange_getCurrentPosition_ok');
+          } catch (e: any) {
+            void logEvent('motionchange_getCurrentPosition_error', {
+              error: String(e?.message || e),
+            });
+          }
         }
       }
     });
