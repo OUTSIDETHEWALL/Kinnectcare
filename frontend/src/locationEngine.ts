@@ -715,43 +715,71 @@ export async function pushBatteryUpdate(source: string = 'unknown'): Promise<voi
 // Uses the same cachedConfig / require('./api') pattern as
 // pushBatteryUpdate() — safe in JS-alive (foreground/just-backgrounded)
 // context only.  NOT called from the headless task.
+
+/**
+ * Test helper — push the current device snapshot to the backend immediately,
+ * regardless of upload health.  Intended for use from the Diagnostics screen
+ * so Charles can confirm the full round-trip (device → backend →
+ * family-snapshot endpoint) without waiting for a real stale event.
+ *
+ * Returns `{ ok: true }` on success, or `{ ok: false, error: string }` on
+ * failure (including "not configured yet" when the engine has never been
+ * started).
+ */
+export async function triggerDeviceSnapshotNow(): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!cachedConfig) {
+    return { ok: false, error: 'Engine not configured — start the location engine first' };
+  }
+  try {
+    const pts = await getPipelineTimestamps();
+    const now = Date.now();
+    const lib = bgGeo();
+    let sdkSt: any = null;
+    if (lib) {
+      try { sdkSt = await lib.getState(); } catch (_e) { /* best-effort */ }
+    }
+    await pushDeviceSnapshotToBackend(pts, now, sdkSt);
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
 async function pushDeviceSnapshotToBackend(
   pts: PipelineTimestamps,
   now: number,
   sdkSt: any,
 ): Promise<void> {
   if (!cachedConfig) return;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { api } = require('./api');
-    const body = {
-      at:                  new Date(now).toISOString(),
-      // Device identity
-      device_model:        _deviceInfo.model,
-      ota_update_id:       _deviceInfo.otaUpdateId,
-      ota_channel:         _deviceInfo.otaChannel,
-      // App state
-      app_state:           AppState.currentState,
-      listeners_attached:  listenersAttached,
-      // SDK state
-      sdk_enabled:         sdkSt?.enabled      ?? null,
-      sdk_is_moving:       sdkSt?.isMoving     ?? null,
-      sdk_tracking_mode:   sdkSt?.trackingMode ?? null,
-      // Per-stage pipeline ages (ms since last callback; null = never fired)
-      activity_age_ms:     pts.activity           !== null ? now - pts.activity           : null,
-      motion_age_ms:       pts.motion             !== null ? now - pts.motion             : null,
-      location_age_ms:     pts.location           !== null ? now - pts.location           : null,
-      hb_js_age_ms:        pts.heartbeat_js       !== null ? now - pts.heartbeat_js       : null,
-      hl_inv_age_ms:       pts.headless_invoked   !== null ? now - pts.headless_invoked   : null,
-      hl_hb_age_ms:        pts.headless_heartbeat !== null ? now - pts.headless_heartbeat : null,
-      http_att_age_ms:     pts.http_attempt       !== null ? now - pts.http_attempt       : null,
-      http_ok_age_ms:      pts.http_success       !== null ? now - pts.http_success       : null,
-    };
-    await api.put(`/members/${cachedConfig.memberId}/device-snapshot`, body);
-  } catch (_e) {
-    // Never surface push errors — this is a best-effort diagnostic path.
-    void logEvent('device_snapshot_push_error', { error: String((_e as any)?.message || _e) });
-  }
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { api } = require('./api');
+  const body = {
+    at:                  new Date(now).toISOString(),
+    // Device identity
+    device_model:        _deviceInfo.model,
+    ota_update_id:       _deviceInfo.otaUpdateId,
+    ota_channel:         _deviceInfo.otaChannel,
+    // App state
+    app_state:           AppState.currentState,
+    listeners_attached:  listenersAttached,
+    // SDK state
+    sdk_enabled:         sdkSt?.enabled      ?? null,
+    sdk_is_moving:       sdkSt?.isMoving     ?? null,
+    sdk_tracking_mode:   sdkSt?.trackingMode ?? null,
+    // Per-stage pipeline ages (ms since last callback; null = never fired)
+    activity_age_ms:     pts.activity           !== null ? now - pts.activity           : null,
+    motion_age_ms:       pts.motion             !== null ? now - pts.motion             : null,
+    location_age_ms:     pts.location           !== null ? now - pts.location           : null,
+    hb_js_age_ms:        pts.heartbeat_js       !== null ? now - pts.heartbeat_js       : null,
+    hl_inv_age_ms:       pts.headless_invoked   !== null ? now - pts.headless_invoked   : null,
+    hl_hb_age_ms:        pts.headless_heartbeat !== null ? now - pts.headless_heartbeat : null,
+    http_att_age_ms:     pts.http_attempt       !== null ? now - pts.http_attempt       : null,
+    http_ok_age_ms:      pts.http_success       !== null ? now - pts.http_success       : null,
+  };
+  // Throws on network/auth/server error — callers decide whether to swallow
+  // (heartbeat path: best-effort fire-and-forget) or propagate
+  // (triggerDeviceSnapshotNow: diagnostic path that must report real failures).
+  await api.put(`/members/${cachedConfig.memberId}/device-snapshot`, body);
 }
 
 function attachBatteryListeners(): void {
@@ -1009,7 +1037,14 @@ function attachSdkListeners(lib: any): void {
           // after a stale-upload event.  The PUT endpoint writes a single field
           // in the member doc; at <1 KB per call and ~60 s cadence, the added
           // load is negligible.
-          void pushDeviceSnapshotToBackend(pts, now, sdkSt);
+          //
+          // Best-effort: swallow network/server errors here so a transient
+          // backend hiccup never disturbs the heartbeat pipeline.
+          try {
+            await pushDeviceSnapshotToBackend(pts, now, sdkSt);
+          } catch (_e) {
+            void logEvent('device_snapshot_push_error', { error: String((_e as any)?.message || _e) });
+          }
 
           // Only log the verbose stale snapshot when uploads are actually stale
           // (>5 min since last confirmed HTTP success).  This keeps the ring
