@@ -4161,9 +4161,17 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         except Exception as e:
             logger.warning(f"sos SMS fanout failed: {e}")
 
-    # Schedule the fanout and IMMEDIATELY return.  We don't await the task,
-    # so it continues running in the event loop independently of the request
-    # lifecycle.  Strong ref via _BG_TASKS prevents GC.
+    # Schedule the fanout and IMMEDIATELY return.
+    #
+    # asyncio.create_task() schedules _sos_fanout as an independent Task on
+    # the event loop before this coroutine yields.  By the time HTTP 200 is
+    # returned the Task exists and is queued — the push/SMS work is guaranteed
+    # to run regardless of what happens to the parent request coroutine.
+    #
+    # Note: an earlier version of this comment mentioned asyncio.shield().
+    # shield() prevents cancellation propagating FROM a parent await — it
+    # is irrelevant here because we never await the task.  The protection
+    # against premature GC comes solely from _BG_TASKS holding a strong ref.
     task = asyncio.create_task(_sos_fanout())
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
