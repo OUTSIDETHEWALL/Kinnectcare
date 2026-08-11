@@ -992,7 +992,7 @@ export default function Dashboard() {
           Issue 2: hidden while an SOS is already active (the red emergency banner
           communicates the state; the FAB is redundant and adds visual clutter).
           Reappears automatically once the emergency resolves. */}
-      {!activeEmergency && <View style={[styles.sosFabContainer, { bottom: 32 + insets.bottom }]} pointerEvents="box-none">
+      {!activeEmergency && <View style={[styles.sosFabContainer, { bottom: 12 + insets.bottom }]} pointerEvents="box-none">
         <View style={{ width: SOS_RING_SIZE, height: SOS_RING_SIZE, alignItems: 'center', justifyContent: 'center' }}>
           <Svg width={SOS_RING_SIZE} height={SOS_RING_SIZE} style={StyleSheet.absoluteFill}>
             {/* Track ring — faint background arc, only visible while holding */}
@@ -1030,7 +1030,7 @@ export default function Dashboard() {
           </Pressable>
         </View>
         <Text style={[styles.sosFabLabel, sosHolding && styles.sosFabLabelHolding]}>
-          {sosHolding ? 'Release to cancel' : 'Hold for SOS'}
+          {sosHolding ? 'Release to cancel' : 'Press & Hold for SOS'}
         </Text>
       </View>}
     </SafeAreaView>
@@ -1426,11 +1426,12 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', padding: 24, marginHorizontal: 24, marginTop: 8 },
   emptyText: { color: Colors.textTertiary, marginTop: 8, textAlign: 'center' },
   sosFabContainer: {
-    // Issue 2 — standard Android FAB position: bottom-right, 24 dp from right edge.
-    // bottom is NOT set here — applied inline as (32 + insets.bottom) so the FAB
+    // Standard Android FAB position: bottom-right, 24 dp from right edge.
+    // bottom is NOT set here — applied inline as (12 + insets.bottom) so the FAB
     // clears the nav bar on gesture navigation, Samsung buttons, and Pixel nav alike.
+    // Sprint 1: moved 20 dp lower than the original 32 dp base offset.
     position: 'absolute', right: 24,
-    alignItems: 'center', gap: 8,
+    alignItems: 'center', gap: 4,
   },
   sosFab: {
     width: SOS_FAB_SIZE, height: SOS_FAB_SIZE, borderRadius: SOS_FAB_SIZE / 2,
@@ -1440,8 +1441,8 @@ const styles = StyleSheet.create({
     ...Platform.select({ android: { elevation: 10 } }),
   },
   sosFabIcon: { fontSize: 34, lineHeight: 40 },
-  sosFabLabel: { fontSize: 13, fontWeight: '700', color: Colors.textTertiary, letterSpacing: 0.4 },
-  sosFabLabelHolding: { color: Colors.sos, fontWeight: '700' },
+  sosFabLabel: { fontSize: 18, fontWeight: '800', color: Colors.sos },
+  sosFabLabelHolding: { color: Colors.sos, fontWeight: '800' },
   // 3-2-1 countdown overlay
   sosCountdownOverlay: {
     ...StyleSheet.absoluteFillObject,
