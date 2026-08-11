@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Platform,
+  Linking, Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -62,7 +63,37 @@ export default function SOSSending() {
       // Step 4 — success
       setStep('done');
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      // Hold the ✓ state briefly so all three rows are visible before navigating.
+
+      // Step 5 — launch 911 dialer NOW that the backend has confirmed the
+      // SOS and push notifications are on their way to caregivers.
+      //
+      // Design principle (Charles addendum): the family notification and the
+      // 911 call are related but must not depend on each other.  Caregivers
+      // are already notified at this point regardless of whether the user
+      // reaches a 911 operator.  Failure to open the dialer is non-fatal —
+      // we show an explicit prompt so the user can call manually.
+      try {
+        const canDial = await Linking.canOpenURL('tel:911');
+        if (canDial) {
+          await Linking.openURL('tel:911');
+        } else {
+          // Tablet, Wi-Fi-only device, or dialer app missing
+          Alert.alert(
+            '🆘 Call 911 Now',
+            'Your family has been notified. Please call 911 manually.',
+            [{ text: 'OK' }],
+          );
+        }
+      } catch (_e) {
+        // Dialer rejected the intent — warn the user explicitly
+        Alert.alert(
+          '🆘 Call 911 Now',
+          'Your family has been notified. Please call 911 manually.',
+          [{ text: 'OK' }],
+        );
+      }
+
+      // Brief pause — success rows stay visible before navigating.
       await new Promise<void>(resolve => setTimeout(resolve, 900));
       router.replace('/sos-confirmation');
     } catch (e: any) {

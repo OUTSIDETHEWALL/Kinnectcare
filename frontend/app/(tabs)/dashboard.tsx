@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
-  RefreshControl, Alert as RNAlert, Linking, ActivityIndicator, Animated, Pressable, Platform,
+  RefreshControl, ActivityIndicator, Animated, Pressable, Platform,
   AppState,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -390,6 +390,9 @@ export default function Dashboard() {
     // reported as a perceived perf regression.
     setLoading((prev) => members.length === 0 ? true : prev);
     load('focus').finally(() => setLoading(false));
+    // Reset SOS dialing mutex on every focus return so the FAB is never
+    // permanently locked after the user returns from an SOS flow.
+    sosDialingRef.current = false;
 
     // ============================================================
     //  v1.2.2 — Dashboard freshness improvements
@@ -553,36 +556,15 @@ export default function Dashboard() {
     setRefreshing(false);
   };
 
-  // launchSOS — fires the phone dialer only. GPS + /sos API are handled
-  // by the /sos-sending screen after navigation.
-  //
-  // v6.6 ordering preserved: the countdown overlay's setSosCounting(false)
-  // runs in the same setInterval tick as this call; the dialer fires in
-  // setTimeout(0) — after React commits the state but before any other JS
-  // work queues up. No RN Modal is involved so no competing Android window.
-  const launchSOS = useCallback(() => {
-    if (sosDialingRef.current) return;
-    sosDialingRef.current = true;
-    const dialOnce = () => Linking.openURL('tel:911');
-    setTimeout(() => {
-      dialOnce().catch(() => {
-        setTimeout(() => {
-          dialOnce().catch(() => {
-            RNAlert.alert(
-              '🆘 Call 911',
-              "Your phone's dialer couldn't be opened. Please dial 911 manually right now.",
-              [{ text: 'OK' }],
-            );
-          });
-        }, 250);
-      });
-    }, 0);
-    setTimeout(() => { sosDialingRef.current = false; }, 3000);
-  }, []);
-
   // startCountdown — begins the 3-2-1 overlay after the hold completes.
-  // Each tick fires a light haptic. At zero: heavy haptic, dialer fires,
-  // navigate to /sos-sending which owns GPS + API.
+  // Each tick fires a light haptic. At zero: heavy haptic, then navigate
+  // to /sos-sending which owns GPS + POST /sos + 911 dialer launch.
+  //
+  // The 911 dialer is launched by sos-sending AFTER the backend confirms
+  // the SOS — caregivers are notified before the user enters the phone app.
+  // If the backend call fails, the error screen offers Retry and does NOT
+  // open the dialer, preventing a silent failure where the user assumes
+  // their family was notified when they were not.
   const startCountdown = useCallback(() => {
     setSosCounting(true);
     setSosCountdown(3);
@@ -599,11 +581,11 @@ export default function Dashboard() {
         // Close overlay synchronously in this tick — v6.6 ordering.
         setSosCounting(false);
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-        launchSOS();
+        sosDialingRef.current = true; // prevent re-trigger during navigation
         router.push('/sos-sending');
       }
     }, 1000);
-  }, [launchSOS, router]);
+  }, [router]);
 
   const cancelCountdown = useCallback(() => {
     if (sosCountdownRef.current) {
