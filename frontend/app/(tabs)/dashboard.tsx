@@ -1133,16 +1133,13 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
         : '🔴';
 
   // v1.3.2 — live refresh indicator + relative "last updated" timestamp.
-  // We subscribe to the locationRefreshState bus per-member and re-tick
-  // every 20 s so the "X min ago" label stays accurate without a
-  // full dashboard refetch.
+  // The "X min ago" age label is derived from member.last_seen at render time.
+  // Re-renders are driven by the memberStore (useSyncExternalStore) whenever
+  // new data arrives — no external ticker needed.  The old 20-second forceTick
+  // interval has been removed: it caused every card to redraw on a fixed clock
+  // even when nothing changed, producing visible flicker and wasting CPU/battery.
   const [refreshing, setRefreshing] = useState(false);
   useEffect(() => subscribeRefreshing(member.id, setRefreshing), [member.id]);
-  const [, forceTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => forceTick((n) => n + 1), 20_000);
-    return () => clearInterval(id);
-  }, []);
   const seenMs = member.last_seen ? new Date(member.last_seen).getTime() : 0;
   const ageLabel = seenMs ? formatTimeAgo(seenMs) : '';
 
@@ -1207,13 +1204,17 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
           )}
           {/* Battery status — overview only on the family card; percentage
               lives on the member detail screen (overview-first principle).
-              Hidden when battery_updated_at is absent or older than 15 min. */}
+              Hidden when battery_updated_at is absent or older than 4 hours.
+              4-hour threshold (was 15 min): stationary devices update battery
+              via native SDK location uploads every ~60 s; 4 hours provides a
+              meaningful upper bound while tolerating extended offline gaps
+              without permanently hiding state caregivers rely on. */}
           {(() => {
             const bLevel = (member as any).battery_level as number | null | undefined;
             if (bLevel == null) return null;
             const updatedAt = (member as any).battery_updated_at as string | null | undefined;
             const ageMs = updatedAt ? Date.now() - new Date(updatedAt).getTime() : null;
-            if (ageMs === null || ageMs > 15 * 60 * 1000) return null;
+            if (ageMs === null || ageMs > 4 * 60 * 60 * 1000) return null;
             const isCharging = (member as any).is_charging as boolean | null | undefined;
             if (isCharging) {
               return (
