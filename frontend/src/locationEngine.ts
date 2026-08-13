@@ -107,6 +107,7 @@ const PTS_KEYS = {
   heartbeat_js:       `${PTS_PREFIX}hb_js`,     // onHeartbeat (JS runtime alive)
   headless_invoked:   `${PTS_PREFIX}hl_inv`,    // HeadlessTask — any event
   headless_heartbeat: `${PTS_PREFIX}hl_hb`,     // HeadlessTask — heartbeat ok
+  headless_battery:   `${PTS_PREFIX}hl_bat`,    // HeadlessTask — battery PATCH sent
   http_attempt:       `${PTS_PREFIX}http_att`,  // onHttp — any call
   http_success:       `${PTS_PREFIX}http_ok`,   // onHttp — 200/201 success
   listeners_attached: `${PTS_PREFIX}attached`,  // attachSdkListeners completed
@@ -178,11 +179,13 @@ export function isListenersAttached(): boolean {
 // behavior (no GPS while still) leads to stale locations.
 //
 // The headless task must be MINIMAL:
-//   • Pure Transistor SDK calls only (no AsyncStorage, no fetch,
-//     no other library calls that aren't guaranteed to be initialised
-//     in the headless JS context).
-//   • Short-running — the headless engine has a strict time budget
-//     before Android terminates it (~30 seconds).
+//   • Transistor SDK calls + AsyncStorage (via logEvent) + fetch for
+//     the explicit battery PATCH (see below) are allowed.  Native
+//     module bridges that require a foreground activity context
+//     (expo-battery, react-native-permissions, etc.) must NOT be used.
+//   • Short-running — call only what is necessary; the headless engine
+//     is not subject to a hard Android timeout but should return
+//     promptly to avoid blocking the SDK's event queue.
 //   • Stateless — the headless JS context doesn't share memory with
 //     the main app.  Use SDK config (already persisted natively) to
 //     pass URL / JWT / headers.
@@ -228,7 +231,7 @@ function registerHeadlessTaskOnce(): void {
         // HTTP transport.  No-op if permission was revoked at the OS
         // level since we last started.
         try {
-          await lib.getCurrentPosition({
+          const pos = await lib.getCurrentPosition({
             samples: 1,
             persist: true,
             timeout: 30,
@@ -236,6 +239,87 @@ function registerHeadlessTaskOnce(): void {
           });
           recordPipelineTs('headless_heartbeat');
           await logEvent('headless_heartbeat_ok');
+
+          // ── Headless battery PATCH ──────────────────────────────────────
+          //
+          // The Transistor SDK's native location upload includes battery data
+          // (battery.level / battery.is_charging) and the backend extracts it
+          // via LocationUpdate._normalize_payload().  However, that path has
+          // historically been unreliable: if the JS runtime died while alive
+          // (leaving battery_updated_at anchored to a wall-clock PATCH
+          // timestamp), subsequent native uploads with GPS-clock captured_at
+          // timestamps could fail the write guard.
+          //
+          // This explicit PATCH is a fully independent battery update path
+          // that runs from the headless context using:
+          //   • Battery values from the SDK's native reading in the position
+          //     result — no expo-battery bridge, no foreground-only API.
+          //   • JWT + upload URL from the SDK's persisted SQLite config via
+          //     lib.getState() — no shared memory with the main app needed.
+          //
+          // Result: battery_updated_at advances every ~60 s even when the
+          // main JS runtime has been killed by Android, preventing the
+          // caregiver's battery row from going stale during long stationary
+          // periods (the original 19-hour disappearance bug).
+          try {
+            const battLevel: number | undefined = pos?.battery?.level;
+            const battCharging: boolean | undefined = pos?.battery?.is_charging;
+            if (
+              typeof battLevel === 'number' && battLevel >= 0 &&
+              typeof battCharging === 'boolean'
+            ) {
+              const sdkState = await lib.getState();
+              const locationUrl: string = sdkState?.url ?? '';
+              const jwt: string = sdkState?.authorization?.accessToken ?? '';
+              // URL shape: https://HOST/api/members/MEMBER_ID/location
+              const memberMatch = locationUrl.match(/\/members\/([^/]+)\/location/);
+              const memberId = memberMatch?.[1] ?? '';
+              const baseUrl = locationUrl.split('/api/members/')[0] ?? '';
+              if (memberId && jwt && baseUrl) {
+                const ts = new Date().toISOString();
+                const battUrl = `${baseUrl}/api/members/${memberId}/battery`;
+                await Promise.race([
+                  fetch(battUrl, {
+                    method: 'PATCH',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${jwt}`,
+                    },
+                    body: JSON.stringify({
+                      battery_level: battLevel,
+                      is_charging: battCharging,
+                      battery_updated_at: ts,
+                    }),
+                  }),
+                  // Safety timeout — never block the headless engine queue
+                  // for more than 6 s waiting for a slow network response.
+                  new Promise<never>((_, rej) =>
+                    setTimeout(() => rej(new Error('headless-battery-patch-timeout')), 6000),
+                  ),
+                ]);
+                recordPipelineTs('headless_battery');
+                await logEvent('headless_battery_patch_ok', { battLevel, battCharging });
+              } else {
+                await logEvent('headless_battery_patch_skipped', {
+                  reason: 'missing_member_id_or_jwt',
+                  hasMemberId: !!memberId,
+                  hasJwt: !!jwt,
+                  hasBaseUrl: !!baseUrl,
+                });
+              }
+            } else {
+              await logEvent('headless_battery_patch_skipped', {
+                reason: 'invalid_battery_values',
+                battLevel: battLevel ?? null,
+                battCharging: battCharging ?? null,
+              });
+            }
+          } catch (battE: any) {
+            await logEvent('headless_battery_patch_error', {
+              error: String(battE?.message || battE),
+            });
+          }
+          // ── End headless battery PATCH ──────────────────────────────────
         } catch (e: any) {
           await logEvent('headless_heartbeat_error', {
             error: String(e?.message || e),
@@ -602,20 +686,34 @@ let _lastMotionRecoveryTs = 0;
 const MOTION_RECOVERY_COOLDOWN_MS = 60_000; // 60 s — matches heartbeat interval
 
 // ============================================================
-//  Battery synchronisation (companion to SDK native transport)
+//  Battery synchronisation — three paths
 // ============================================================
 //
-// The Transistor SDK's native HTTP transport does not include battery
-// data in its location upload payloads.  Battery state is therefore
-// read explicitly via expo-battery and PATCHed to the backend on three
-// occasions:
-//   a) Every 60 s via the JS onHeartbeat callback (stationary case).
-//   b) Immediately on any charging-state change (plug / unplug events).
-//   c) On significant battery-level changes (OS fires roughly every 1 %).
+// Battery state reaches the backend through three independent paths:
 //
-// expo-battery MUST NOT be called from the headless task — the headless
-// context is a minimal JS engine that does not have the native module
-// bridge initialised.  All three paths above are JS-alive only.
+//   a) JS-alive heartbeat (every 60 s, stationary case):
+//      pushBatteryUpdate('heartbeat') → PATCH /battery.
+//      Uses expo-battery.  Requires the main JS runtime to be alive.
+//
+//   b) JS-alive state-change / level-change listeners:
+//      pushBatteryUpdate('charging-state'|'level-change') → PATCH /battery.
+//      Fires on plug/unplug events and ~1% level changes.  JS-alive only.
+//
+//   c) Headless heartbeat (runs even when the main JS runtime is killed):
+//      HeadlessTask fires getCurrentPosition() → on success, explicit
+//      PATCH /battery using battery data from the position result.
+//      Also, the SDK's native location upload always includes
+//      battery.level / battery.is_charging in its JSON payload; the
+//      backend extracts these via LocationUpdate._normalize_payload().
+//
+// Path (c) is the critical reliability path for long stationary periods:
+// Android aggressively kills the main JS runtime on Samsung and other
+// battery-optimised devices after 15–60 minutes of background inactivity.
+// Without path (c), battery_updated_at stops advancing and the caregiver's
+// battery row disappears after the dashboard's staleness threshold.
+//
+// expo-battery MUST NOT be called from the headless task — it requires a
+// foreground activity context that the headless engine does not have.
 let batteryListenersAttached = false;
 // Module-level subscription refs — MUST be held to prevent GC.
 // React Native's event emitter removes a listener the moment its

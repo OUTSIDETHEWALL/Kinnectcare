@@ -2317,6 +2317,30 @@ async def list_members(current=Depends(get_current_user)):
                     if name:
                         d["location_name"] = name
                         _req_geo[cache_key] = name
+                        # Write the resolved name back to the DB so the next
+                        # GET /members returns it directly without a cache
+                        # round-trip.
+                        #
+                        # Conditional guard: only set the name if the document
+                        # still has the SAME coordinates we just resolved AND
+                        # location_name is still null.  This prevents a race
+                        # where a newer phone upload already moved the member
+                        # to different coordinates (and cleared location_name
+                        # for them) — in that case we must NOT overwrite, or
+                        # lazy geocoding will see a non-null name and skip the
+                        # fresh resolve for the new position.
+                        _member_id = d.get("id")
+                        asyncio.create_task(
+                            db.members.update_one(
+                                {
+                                    "id": _member_id,
+                                    "latitude": lat,
+                                    "longitude": lon,
+                                    "location_name": None,
+                                },
+                                {"$set": {"location_name": name}},
+                            )
+                        )
                 except asyncio.TimeoutError:
                     logger.warning(
                         f"lazy_geocode: member={d.get('id')} timed out after 2 s "
@@ -2436,6 +2460,21 @@ async def get_member(member_id: str, current=Depends(get_current_user)):
             )
             if name:
                 doc["location_name"] = name
+                # Conditional write-back — same guard as list_members:
+                # only persist if the document still has the same coordinates
+                # and a null location_name, so a concurrent upload that
+                # already moved to new coordinates cannot be overwritten.
+                asyncio.create_task(
+                    db.members.update_one(
+                        {
+                            "id": member_id,
+                            "latitude": lat,
+                            "longitude": lon,
+                            "location_name": None,
+                        },
+                        {"$set": {"location_name": name}},
+                    )
+                )
         except asyncio.TimeoutError:
             logger.warning(
                 f"lazy_geocode single: member={member_id} timed out after 2 s "
@@ -2824,6 +2863,18 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # The coord_suppressed pop below removes this for replay catch-up points,
     # preserving whatever name the caregiver map pin already shows.
     update["location_name"] = None
+    # Task #66 — warn in Railway logs when geocoding is disabled but real
+    # coordinates are flowing.  Every such upload will leave location_name=None
+    # in the DB, causing caregivers to see "Unknown" on the dashboard.
+    # The warning fires once per upload so Railway's log stream makes the
+    # misconfiguration visible without digging into env-var settings.
+    if not geocoding.GEOCODE_BACKEND_ENABLED:
+        logger.warning(
+            "geocoding_disabled_upload: USE_BACKEND_GEOCODING is off — "
+            f"member={member.get('id')} "
+            "location_name will remain null; GET /members will show 'Unknown'. "
+            "Set USE_BACKEND_GEOCODING=true in Railway to fix."
+        )
     # Build 64 — Persist the SDK's movement state so TrackingStatusPill can
     # apply movement-aware freshness thresholds instead of the old 72-hour
     # engine-health gate.  `is_moving` arrives as a top-level extra field
@@ -4513,6 +4564,54 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
 
 
 # ========== Diagnostics ==========
+
+@api_router.get("/diagnostics/health")
+async def diagnostics_health(current=Depends(get_current_user)):
+    """Task #66 — Geocoding configuration health check.
+
+    Surfaces the live geocoding flag state so Charles can verify the feature
+    is active without digging through Railway environment variables.
+
+    Fields
+    ------
+    geocoding_enabled     True when USE_BACKEND_GEOCODING=true is set in Railway.
+                          False means every location upload will leave
+                          location_name=null — caregivers see "Unknown".
+
+    geocoding_key_present True when GOOGLE_MAPS_API_KEY (or its fallback
+                          EXPO_PUBLIC_GOOGLE_MAPS_API_KEY) is non-empty.
+                          False means backend geocoding is enabled but will
+                          silently fail on every API call.
+
+    geocoding_key_source  Which env var supplied the key, or "MISSING" when
+                          neither is set.  Does not reveal the key value.
+
+    geocoding_healthy     Convenience boolean — True only when both the flag
+                          is on AND a key is present.  Use this in monitoring.
+    """
+    # Determine key source (mirrors geocoding.ensure_indexes logic).
+    import os as _os
+    if _os.environ.get("GOOGLE_MAPS_API_KEY", "").strip():
+        key_source = "GOOGLE_MAPS_API_KEY"
+        key_present = True
+    elif _os.environ.get("EXPO_PUBLIC_GOOGLE_MAPS_API_KEY", "").strip():
+        key_source = "EXPO_PUBLIC_GOOGLE_MAPS_API_KEY (fallback)"
+        key_present = True
+    else:
+        key_source = "MISSING"
+        key_present = False
+
+    enabled = geocoding.GEOCODE_BACKEND_ENABLED
+    healthy = enabled and key_present
+
+    return {
+        "geocoding_enabled": enabled,
+        "geocoding_key_present": key_present,
+        "geocoding_key_source": key_source,
+        "geocoding_healthy": healthy,
+    }
+
+
 @api_router.get("/diagnostics/refresh-traces")
 async def diagnostics_refresh_traces(
     member_id: Optional[str] = None,
@@ -4702,9 +4801,10 @@ async def diagnostics_family_snapshot(current=Depends(get_current_user)):
 class DeviceSnapshotUpdate(BaseModel):
     """Pipeline-timestamp snapshot pushed by the Transistor JS heartbeat.
 
-    The client (locationEngine.ts) sends this whenever the last HTTP upload
-    was >5 min old — the *stale-detection* path.  The field names match the
-    PipelineTimestamps type on the client so the two sides are easy to compare.
+    The client (locationEngine.ts → pushDeviceSnapshotToBackend) sends this on
+    every JS heartbeat (~60 s cadence), regardless of whether uploads are stale
+    or fresh.  The field names match the PipelineTimestamps type on the client
+    so the two sides are easy to compare.
 
     All *_age_ms fields represent milliseconds since that pipeline stage last
     fired, as measured on the device at the time of the push.  None / absent
@@ -4741,8 +4841,14 @@ async def put_device_snapshot(
 ):
     """Task #21 Deliverable 2 — Store per-stage pipeline timestamps.
 
-    Called by the JS heartbeat stale-detection path (locationEngine.ts
-    pushDeviceSnapshotToBackend) when the last HTTP upload is >5 min old.
+    Called by locationEngine.ts → pushDeviceSnapshotToBackend() on every JS
+    heartbeat (~60 s cadence), regardless of whether uploads are stale or
+    fresh.  This means Charles's Device Comparison table shows current
+    pipeline ages for Joyce during normal healthy operation — not only after
+    an upload gap is detected.  The stale-detection log entry
+    (engine_snapshot_stale) is a separate concern gated at > 5 min in the
+    client; the PUT itself is unconditional.
+
     Stores the snapshot in the member document under `device_snapshot` so
     the family-snapshot endpoint can surface it alongside last_seen /
     is_moving / battery for cross-device comparison in Diagnostics.
