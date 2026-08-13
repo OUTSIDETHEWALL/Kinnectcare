@@ -2919,33 +2919,16 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
 
     # Battery telemetry — timestamp-guarded write.
     #
-    # Write-guard timestamp: always use server_now, not incoming_captured_at.
+    # Only update battery_level / is_charging if the effective timestamp
+    # of this upload (captured_at when present, server_now otherwise) is
+    # strictly newer than battery_updated_at already stored.  This prevents
+    # a replay packet captured 8 minutes ago from overwriting a plug-in
+    # event that arrived more recently via PATCH /members/{id}/battery.
     #
-    # Previous design used the GPS capture timestamp as the battery write-guard
-    # key.  That caused a systematic false-rejection:
-    #
-    #   1. JS heartbeat fires at T=0 → pushBatteryUpdate() → PATCH /battery
-    #      sets battery_updated_at = T+0 (wall-clock).
-    #   2. Same heartbeat triggers native location upload with GPS timestamp
-    #      T-Δ (GPS clock lags wall-clock by a few seconds due to hardware
-    #      latency or OS scheduling).
-    #   3. Write-guard: T-Δ > T+0 → False → battery from location upload
-    #      silently rejected.
-    #
-    # Over time this made the native-transport battery path unreliable:
-    # battery_updated_at was only ever advanced by PATCH /battery (JS-alive),
-    # not by PUT /location (native transport, works even when JS is dead).
-    #
-    # Using server_now means any location upload — regardless of GPS clock
-    # drift or replayed captures — advances battery_updated_at to "now".
-    # The PATCH /battery endpoint already uses server_now for the same reason.
-    # Replay suppression for COORDINATES still uses captured_at (correct:
-    # you want the newest GPS fix); battery freshness is independent of
-    # where the GPS fix was captured.
-    #
-    # Additional guard: reject -1 (SDK "unavailable" sentinel) and values
-    # out of range.  Clamp upper bound to 1.0.
-    _batt_incoming_ts = server_now
+    # Guard: also reject -1 (SDK "unavailable" sentinel) and values out
+    # of range.  Clamp upper bound to 1.0 so a misbehaving client can't
+    # write > 100 %.
+    _batt_incoming_ts = incoming_captured_at or server_now
     _batt_stored_ts   = prev_doc.get("battery_updated_at") if prev_doc else None
     # Motor returns naive UTC datetimes; normalize before comparing against the
     # always-aware incoming timestamp (codebase standard: UTC-aware throughout).
