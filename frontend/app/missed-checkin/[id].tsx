@@ -197,16 +197,19 @@ export default function MissedCheckinDetail() {
 
   return (
     <SafeAreaView style={styles.root} edges={['top', 'bottom']}>
-      <View style={styles.headerBar}>
+      {/* Full-width return button — must be unmistakably interactive,
+          not a breadcrumb or page title (same principle as alert/[id].tsx). */}
+      <View style={styles.returnRow}>
         <TouchableOpacity
           testID="checkin-back"
           onPress={() => router.replace('/(tabs)/dashboard')}
-          style={styles.backBtn}
+          style={styles.returnBtn}
+          activeOpacity={0.85}
           accessibilityRole="button"
-          accessibilityLabel="Back to dashboard"
+          accessibilityLabel="Return to dashboard"
         >
-          <Icon name="chevron-back" size={26} color={Colors.textPrimary} />
-          <Text style={styles.backText}>Dashboard</Text>
+          <Icon name="arrow-back" size={24} color="#FFFFFF" />
+          <Text style={styles.returnBtnText}>Return to Dashboard</Text>
         </TouchableOpacity>
       </View>
 
@@ -336,9 +339,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 32,
   },
-  headerBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingTop: 8 },
-  backBtn: { flexDirection: 'row', alignItems: 'center', padding: 8 },
-  backText: { fontSize: 17, color: Colors.textPrimary, marginLeft: 2 },
+  returnRow: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 20 },
+  returnBtn: {
+    height: 52, backgroundColor: Colors.primary, borderRadius: 12,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 16, gap: 10,
+  },
+  returnBtnText: { color: '#FFFFFF', fontSize: 18, fontWeight: '800' },
   body: { paddingHorizontal: 20, paddingBottom: 40, paddingTop: 8 },
 
   banner: {
