@@ -2,7 +2,7 @@ import { Stack, useRouter, useSegments, usePathname } from 'expo-router';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from '../src/AuthContext';
-import { useEffect, useState, useRef } from 'react';import { View, ActivityIndicator, AppState, Platform, Linking } from 'react-native';
+import { useEffect, useState, useRef } from 'react';import { View, ActivityIndicator, AppState, Platform, Linking, Alert } from 'react-native';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
 import { Colors } from '../src/theme';
@@ -12,6 +12,7 @@ import { hasPinForUser, isUnlockedNow, markUnlocked } from '../src/pinAuth';
 import { isSessionValid } from '../src/pinSession';
 import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
 import { startBackgroundLocation, stopBackgroundLocation } from '../src/backgroundLocation';
+import { configureBatteryTask, BATTERY_OPT_PROMPTED_KEY } from '../src/batteryTask';
 import { refreshLocationIfStale, setMyMemberId, setMyUserId } from '../src/locationRefresh';
 import * as locationEngine from '../src/locationEngine';
 import * as leonidas from '../src/leonidas';
@@ -27,6 +28,7 @@ import { logResumeDecision, isAlertDismissed } from '../src/resumeDiagnostics';
 import { setActiveEmergency } from '../src/activeEmergency';
 import { setPendingInvite, clearPendingInvite, getPendingInvite } from '../src/pendingInvite';
 import { isPermissionsHandled } from '../src/permissionsStore';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 function RootNav() {
   const { user, loading } = useAuth();
@@ -1089,6 +1091,40 @@ function RootNav() {
         // with the location engine; tears down on sign-out via the
         // cleanup block below.  No-op if already active.
         try { leonidas.start(); } catch (_e) {}
+        // Battery subsystem — independent 4-hour refresh via WorkManager
+        // (Android) / BGTaskScheduler (iOS).  Runs even when the device
+        // hasn't moved and the Transistor SDK is idle.
+        configureBatteryTask().catch(() => {});
+        // Part 7 — One-time battery optimization exemption prompt (Android).
+        // OEM devices (Samsung, Xiaomi, OnePlus, Huawei) aggressively kill
+        // background tasks.  Exempting Kinnship from battery optimization lets
+        // WorkManager fire reliably even in deep Doze.  Show once, non-blocking,
+        // graceful if declined.
+        if (Platform.OS === 'android') {
+          (async () => {
+            try {
+              const already = await AsyncStorage.getItem(BATTERY_OPT_PROMPTED_KEY);
+              if (!already) {
+                await AsyncStorage.setItem(BATTERY_OPT_PROMPTED_KEY, '1');
+                // Brief delay so the prompt doesn't compete with startup UI.
+                await new Promise<void>((r) => setTimeout(r, 3000));
+                Alert.alert(
+                  'Improve background monitoring',
+                  'For reliable battery and location monitoring when the phone is idle, please disable battery optimization for Kinnship.\n\nTap "Open Settings," find Kinnship under Battery, and select "Unrestricted" or "Don\'t optimize."',
+                  [
+                    { text: 'Not now', style: 'cancel' },
+                    {
+                      text: 'Open Settings',
+                      onPress: () => Linking.openSettings(),
+                    },
+                  ],
+                );
+              }
+            } catch (_e) {
+              // Non-fatal — prompt is an enhancement, not required.
+            }
+          })();
+        }
         engineBootedForUserIdRef.current = user.id;
         // Subscribe AFTER successful start so any rolling token
         // refresh during the live session flows through.

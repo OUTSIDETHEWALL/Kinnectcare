@@ -35,6 +35,11 @@ import { Colors } from '../src/theme';
 import { readRouteLog, clearRouteLog, RouteDiagEntry } from '../src/routeDiagnostics';
 import { readLocationRefreshLog, clearLocationRefreshLog, LocationRefreshEntry } from '../src/locationRefresh';
 import { readBgTaskLog, clearBgTaskLog, BgTaskLogEntry } from '../src/backgroundLocation';
+import {
+  readBatteryTaskLog,
+  clearBatteryTaskLog,
+  BatteryTaskLogEntry,
+} from '../src/batteryTask';
 import { readScreenRenderLog, clearScreenRenderLog, ScreenRenderEntry } from '../src/screenRenderLog';
 import {
   getDashboardLoadLog,
@@ -57,6 +62,7 @@ import {
   EngineLogEvent,
   LocationEngineState,
   getPipelineTimestamps,
+  getLastHttpSuccessTs,
   isListenersAttached,
   PipelineTimestamps,
   triggerDeviceSnapshotNow,
@@ -77,6 +83,7 @@ import {
   formatAgeMs,
   computeHealthItems,
   computeOverallHealth,
+  heroTheme,
   OverallHealthResult,
   OverallHealthLevel,
 } from '../src/healthCheck';
@@ -509,6 +516,8 @@ export default function DiagnosticsScreen() {
   const [gpsHistoryErr, setGpsHistoryErr] = useState<string | null>(null);
   // TEMP DIAG — battery pipeline investigation.
   const [deviceBatteryLevel, setDeviceBatteryLevel] = useState<number | null>(null);
+  // Battery subsystem — periodic WorkManager/BGTaskScheduler task log.
+  const [batteryTaskLog, setBatteryTaskLog] = useState<BatteryTaskLogEntry[]>([]);
 
   // Task #21 — Pipeline timestamps (per-stage AsyncStorage timestamps).
   const [pipelineTs, setPipelineTs] = useState<PipelineTimestamps | null>(null);
@@ -601,6 +610,24 @@ export default function DiagnosticsScreen() {
       pipelineTs?.http_success ?? null,
     );
   }, [engineLog, nowTick, user?.id, pipelineTs]);
+
+  // Task 68 — Upload ratio summary.
+  // Counts headless + foreground HTTP upload successes vs failures from
+  // the ring buffer so Charles can confirm the upload pipeline is healthy
+  // at a glance without scanning individual log entries.
+  //
+  // Both paths emit sdk_onHttp (success boolean) and a named event
+  // (headless_http_ok / headless_http_error or http_upload_success /
+  // http_upload_failure).  We count only sdk_onHttp to avoid double-
+  // counting (each upload emits exactly one sdk_onHttp regardless of path).
+  const uploadRatio = useMemo(() => {
+    const httpEvents = engineLog.filter((e) => e.event === 'sdk_onHttp');
+    const ok = httpEvents.filter((e) => e.detail?.success === true).length;
+    const fail = httpEvents.filter((e) => e.detail?.success === false).length;
+    const total = httpEvents.length;
+    const lastFailEvt = [...httpEvents].reverse().find((e) => e.detail?.success === false) ?? null;
+    return { total, ok, fail, lastFailStatus: lastFailEvt?.detail?.status ?? null };
+  }, [engineLog]);
 
   // Build 64 — Motion Timeline derived data.
   // Computed from engineLog so they stay in sync with the reload() cycle.
@@ -710,12 +737,17 @@ export default function DiagnosticsScreen() {
       setGpsHistoryErr(msg);
     }
 
-    // TEMP DIAG — sample device battery for the battery pipeline section.
+    // Battery subsystem — live device level + periodic task log.
     try {
       const level = await Battery.getBatteryLevelAsync();
       setDeviceBatteryLevel(typeof level === 'number' ? level : null);
     } catch (_e) {
       setDeviceBatteryLevel(null);
+    }
+    try {
+      setBatteryTaskLog(await readBatteryTaskLog());
+    } catch (_e) {
+      setBatteryTaskLog([]);
     }
 
     // Task #21 — pipeline timestamps.
@@ -774,6 +806,37 @@ export default function DiagnosticsScreen() {
   // AsyncStorage reads, no network calls, just a Date.now() assignment.
   useEffect(() => {
     const t = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // 30-second pipelineTs refresh — fresh-install recovery path.
+  //
+  // reload() is only called at mount-time, so if the first upload fires after
+  // that initial read, kc_pts_http_ok is written to AsyncStorage but pipelineTs
+  // state never receives the new value.  The hero card would stay 'starting'
+  // indefinitely.
+  //
+  // This effect polls getLastHttpSuccessTs() every 30 seconds — a single
+  // AsyncStorage key read, minimal overhead — and applies a functional update
+  // to pipelineTs state when the value changes.  The overallHealth useMemo
+  // then re-runs on the next nowTick, flipping the hero card from 'starting'
+  // to 'ok' within at most 30 seconds of the first upload, well within the
+  // 5-minute window the task requires.
+  //
+  // The update is a no-op when:
+  //   • pipelineTs is null (reload hasn't completed yet — avoid creating a
+  //     partial object with only http_success set)
+  //   • the value hasn't changed (avoids unnecessary re-renders)
+  useEffect(() => {
+    const t = setInterval(async () => {
+      try {
+        const httpSuccessMs = await getLastHttpSuccessTs();
+        setPipelineTs((prev) => {
+          if (!prev || prev.http_success === httpSuccessMs) return prev;
+          return { ...prev, http_success: httpSuccessMs };
+        });
+      } catch (_e) { /* swallow — hero card remains at last known state */ }
+    }, 30_000);
     return () => clearInterval(t);
   }, []);
 
@@ -965,6 +1028,7 @@ export default function DiagnosticsScreen() {
               clearCardRenderLog(),
               leonidas.clearRecoveryLog(),
               clearNotificationLog(),
+              clearBatteryTaskLog(),
             ]);
             await reload();
             try { await refreshNotifLog(); } catch (_e) {}
@@ -1085,14 +1149,6 @@ export default function DiagnosticsScreen() {
           ===================================================== */}
       {(() => {
         const { level, headline, subline } = overallHealth;
-        const heroTheme: Record<OverallHealthLevel, {
-          bg: string; border: string; headline: string; sub: string; icon: string;
-        }> = {
-          ok:       { bg: '#ECFDF5', border: '#6EE7B7', headline: '#065F46', sub: '#047857', icon: '🛡️' },
-          warn:     { bg: '#FFFBEB', border: '#FDE68A', headline: '#92400E', sub: '#B45309', icon: '⚠️' },
-          error:    { bg: '#FEF2F2', border: '#FECACA', headline: '#991B1B', sub: '#DC2626', icon: '❌' },
-          starting: { bg: '#F9FAFB', border: '#E5E7EB', headline: '#374151', sub: '#6B7280', icon: '⏳' },
-        };
         const t = heroTheme[level];
         return (
           <View style={[styles.heroCard, { backgroundColor: t.bg, borderColor: t.border }]}>
@@ -2146,6 +2202,41 @@ export default function DiagnosticsScreen() {
             </Text>
           </View>
 
+          {/* Task 68 — Upload ratio summary card.
+              Shows ok vs fail counts from the ring buffer so Charles can
+              confirm at a glance whether uploads are landing or bouncing
+              without reading individual log entries.  Both the foreground
+              (http_upload_success/failure) and headless (headless_http_ok/
+              headless_http_error) paths feed into sdk_onHttp, which is what
+              we count here to avoid double-counting. */}
+          <Text style={[styles.subSectionLabel, { marginTop: 12 }]}>Upload ratio (this buffer)</Text>
+          <View style={styles.card} testID="diagnostics-upload-ratio">
+            {uploadRatio.total === 0 ? (
+              <Text style={styles.entryLine}>
+                <Text style={styles.entry}>No uploads recorded yet in this buffer.</Text>
+              </Text>
+            ) : (
+              <>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>✅ ok: </Text>
+                  <Text style={[styles.bold, uploadRatio.ok > 0 ? { color: '#22c55e' } : {}]}>
+                    {uploadRatio.ok}
+                  </Text>
+                  <Text style={styles.entry}>  /  total: {uploadRatio.total}</Text>
+                </Text>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>❌ failed: </Text>
+                  <Text style={[styles.bold, uploadRatio.fail > 0 ? { color: '#ef4444' } : {}]}>
+                    {uploadRatio.fail}
+                  </Text>
+                  {uploadRatio.lastFailStatus !== null && (
+                    <Text style={styles.entry}>  (last status: {uploadRatio.lastFailStatus})</Text>
+                  )}
+                </Text>
+              </>
+            )}
+          </View>
+
           <Text style={[styles.subSectionLabel, { marginTop: 12 }]}>Lifecycle log (last 30)</Text>
           {engineLog.length === 0 ? (
             <View style={styles.card}>
@@ -2694,77 +2785,117 @@ export default function DiagnosticsScreen() {
           </View>
         </View>
 
-        {/* TEMP DIAG — Battery Pipeline (Joyce investigation). Remove after verification. */}
+        {/* Battery System — permanent section (replaces temp Battery Pipeline diag). */}
         <CollapsibleSection
-          id="battery-pipeline"
-          title="Battery Pipeline (temp diag)"
+          id="battery-system"
+          title="Battery System"
+          count={batteryTaskLog.length || null}
           hint={
-            'Compares the four battery readings at each layer: device OS → Transistor SDK → backend write → stored member doc. ' +
-            'Used to locate where the Joyce 74 % vs 79 % discrepancy originates. Remove after investigation is closed.'
+            'Two independent paths update battery: (A) Transistor SDK headless heartbeat — fires when the ' +
+            'location engine is active; (B) WorkManager periodic task — fires every ~4 h regardless of movement. ' +
+            'Both PATCH the same /battery endpoint; the backend write-guard keeps the most recent reading.'
           }
-          expanded={!!expanded['battery-pipeline']}
+          expanded={!!expanded['battery-system']}
           onToggle={toggleSection}
-          defaultExpanded
         >
+          {/* ── Live device state ─────────────────────────────────── */}
           <View style={styles.card}>
-            {loading ? (
-              <Text style={styles.muted}>Loading…</Text>
-            ) : (
-              <>
-                {/* Layer 1 — OS / expo-battery */}
+            <Text style={styles.subSectionLabel}>Live device state</Text>
+            <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>Device battery (expo-battery): </Text>
+              {deviceBatteryLevel != null
+                ? `${Math.round(deviceBatteryLevel * 100)} %`
+                : '— (unavailable on this device/platform)'}
+            </Text>
+            {gpsHistory.length > 0 && (() => {
+              const latest = gpsHistory[0];
+              const rb = latest.raw_battery;
+              const sdkPct = rb?.level != null ? Math.round(Number(rb.level) * 100) : null;
+              return (
                 <Text style={styles.entryLine}>
-                  <Text style={styles.entryK}>① Device (OS / expo-battery): </Text>
-                  {deviceBatteryLevel != null
-                    ? `${Math.round(deviceBatteryLevel * 100)} %`
-                    : '— (unavailable on this device/platform)'}
+                  <Text style={styles.entryK}>Last SDK upload battery: </Text>
+                  {rb != null
+                    ? `${sdkPct != null ? sdkPct + ' %' : '—'}  charging=${rb.is_charging != null ? String(rb.is_charging) : '—'}`
+                    : '— (SDK did not send battery in last upload)'}
                 </Text>
+              );
+            })()}
+          </View>
 
-                {/* Layers 2–4 from the most recent location_history entry */}
-                {gpsHistory.length === 0 ? (
-                  <Text style={[styles.muted, { marginTop: 6 }]}>
-                    No location_history entries yet — SDK layer data will appear after the next background upload.
+          {/* ── Path A: Headless SDK battery events ──────────────── */}
+          <View style={[styles.card, { marginTop: 8 }]}>
+            <Text style={styles.subSectionLabel}>Path A — Transistor headless</Text>
+            {(() => {
+              const rev = [...engineLog].reverse();
+              const lastOk = rev.find((e) => e.event === 'headless_battery_patch_ok');
+              const lastSkip = rev.find((e) => e.event === 'headless_battery_patch_skipped');
+              const lastErr = rev.find((e) => e.event === 'headless_battery_patch_error');
+              const fmt = (ts: number) => {
+                const ageMs = Date.now() - ts;
+                const min = Math.round(ageMs / 60_000);
+                return min < 60 ? `${min} min ago` : `${Math.round(ageMs / 3_600_000)} h ago`;
+              };
+              return (
+                <>
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>Last patch_ok: </Text>
+                    {lastOk
+                      ? `${fmt(lastOk.at)}  level=${lastOk.detail?.battLevel != null ? Math.round(Number(lastOk.detail.battLevel) * 100) + ' %' : '?'}  charging=${lastOk.detail?.battCharging}`
+                      : '— not seen in ring buffer'}
                   </Text>
-                ) : (() => {
-                  const latest = gpsHistory[0];
-                  const rb = latest.raw_battery;
-                  const sdkPct = rb?.level != null ? Math.round(Number(rb.level) * 100) : null;
-                  const storedPct = latest.battery_level != null ? Math.round(Number(latest.battery_level) * 100) : null;
-                  const acceptedAt = latest.accepted_at ? new Date(latest.accepted_at) : null;
-                  return (
-                    <>
-                      <Text style={[styles.entryLine, { marginTop: 4 }]}>
-                        <Text style={styles.entryK}>② Raw SDK (battery dict from PUT body): </Text>
-                        {rb != null
-                          ? `level=${sdkPct != null ? sdkPct + ' %' : '—'}  is_charging=${rb.is_charging != null ? String(rb.is_charging) : '—'}`
-                          : '— (null — SDK did not send battery in this upload)'}
-                      </Text>
-                      <Text style={styles.entryLine}>
-                        <Text style={styles.entryK}>③ Stored in location_history: </Text>
-                        {storedPct != null ? `${storedPct} %` : '— (null)'}
-                        {latest.is_charging != null ? `  charging=${String(latest.is_charging)}` : ''}
-                      </Text>
-                      <Text style={styles.entryLine}>
-                        <Text style={styles.entryK}>④ Upload accepted_at: </Text>
-                        {acceptedAt ? acceptedAt.toLocaleString() : '—'}
-                      </Text>
-                      {sdkPct != null && deviceBatteryLevel != null && (
-                        <Text style={[styles.entryLine, { marginTop: 6 }]}>
-                          <Text style={styles.entryK}>Delta device vs SDK: </Text>
-                          <Text style={Math.abs(sdkPct - Math.round(deviceBatteryLevel * 100)) > 5 ? styles.divergent : undefined}>
-                            {sdkPct - Math.round(deviceBatteryLevel * 100) > 0 ? '+' : ''}
-                            {sdkPct - Math.round(deviceBatteryLevel * 100)} pp
-                          </Text>
-                        </Text>
-                      )}
-                      <Text style={[styles.muted, { marginTop: 8, fontSize: 10 }]}>
-                        Showing most recent upload. Reload to refresh. Full history in GPS Quality History section.
-                      </Text>
-                    </>
-                  );
-                })()}
-              </>
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>Last skipped: </Text>
+                    {lastSkip
+                      ? `${fmt(lastSkip.at)}  reason=${lastSkip.detail?.reason ?? '?'}`
+                      : '—'}
+                  </Text>
+                  <Text style={styles.entryLine}>
+                    <Text style={styles.entryK}>Last error: </Text>
+                    {lastErr
+                      ? `${fmt(lastErr.at)}  ${String(lastErr.detail?.error ?? '').slice(0, 80)}`
+                      : '—'}
+                  </Text>
+                </>
+              );
+            })()}
+          </View>
+
+          {/* ── Path B: WorkManager periodic task log ────────────── */}
+          <View style={[styles.card, { marginTop: 8 }]}>
+            <Text style={styles.subSectionLabel}>
+              {'Path B — WorkManager (~4 h)  '}
+              <Text style={styles.muted}>{`${batteryTaskLog.length} entries`}</Text>
+            </Text>
+            {batteryTaskLog.length === 0 ? (
+              <Text style={styles.muted}>
+                No background task executions recorded yet. The first fire will appear here after ~4 hours (or sooner if the OS scheduler runs a maintenance window).
+              </Text>
+            ) : (
+              [...batteryTaskLog].reverse().slice(0, 10).map((entry, i) => {
+                const ageMs = Date.now() - entry.at;
+                const min = Math.round(ageMs / 60_000);
+                const ageStr = min < 60 ? `${min} min ago` : `${Math.round(ageMs / 3_600_000)} h ago`;
+                const isOk = entry.event === 'background_battery_ok';
+                const isErr = entry.event === 'background_battery_error' || entry.event === 'background_battery_timeout';
+                const dotColor = isOk ? Colors.success : isErr ? Colors.error : Colors.textTertiary;
+                const detail = entry.detail
+                  ? Object.entries(entry.detail)
+                      .map(([k, v]) => `${k}=${String(v)}`)
+                      .join('  ')
+                  : '';
+                return (
+                  <View key={i} style={{ flexDirection: 'row', marginTop: 3, flexWrap: 'wrap' }}>
+                    <Text style={{ color: dotColor, marginRight: 4 }}>●</Text>
+                    <Text style={[styles.entryLine, { flex: 1, marginTop: 0 }]}>
+                      <Text style={styles.entryK}>{ageStr}  </Text>
+                      {entry.event.replace('background_battery_', '')}{detail ? '  ' + detail : ''}
+                    </Text>
+                  </View>
+                );
+              })
             )}
           </View>
+
           <TouchableOpacity
             style={[styles.secondaryBtn, { marginTop: 8 }]}
             onPress={reload}
