@@ -16,6 +16,7 @@
  * evidence something is wrong.
  */
 import { EngineLogEvent } from './locationEngine';
+import { Colors } from './theme';
 
 export type HealthStatus = 'ok' | 'warn' | 'error' | 'unknown';
 export type HealthItem = { icon: string; label: string; status: HealthStatus };
@@ -35,6 +36,21 @@ export function healthIcon(s: HealthStatus): string {
 // loved one right now?" before the user scrolls into any detail panel.
 
 export type OverallHealthLevel = 'ok' | 'warn' | 'error' | 'starting';
+
+/**
+ * Colour + icon tokens for the Diagnostics hero card, keyed by OverallHealthLevel.
+ * Each value has: bg, border, icon, headline (text colour), sub (text colour).
+ * Exported here because OverallHealthLevel lives here; diagnostics.tsx consumes it.
+ */
+export const heroTheme: Record<
+  OverallHealthLevel,
+  { bg: string; border: string; icon: string; headline: string; sub: string }
+> = {
+  ok:       { bg: Colors.successBg, border: Colors.success,  icon: '✅', headline: Colors.textPrimary,   sub: Colors.textSecondary },
+  warn:     { bg: Colors.warningBg, border: Colors.warning,  icon: '⚠️', headline: Colors.textPrimary,   sub: Colors.textSecondary },
+  error:    { bg: Colors.errorBg,   border: Colors.error,    icon: '❌', headline: Colors.textPrimary,   sub: Colors.textSecondary },
+  starting: { bg: Colors.surface,   border: Colors.border,   icon: '⏳', headline: Colors.textPrimary,   sub: Colors.textTertiary  },
+};
 
 export type OverallHealthResult = {
   level: OverallHealthLevel;
