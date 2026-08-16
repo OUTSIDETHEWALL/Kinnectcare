@@ -294,14 +294,22 @@ async function ensureNotificationCategories() {
         },
       },
     ]);
-    // Build XX — "Are You OK?" action buttons.
-    // opensAppToForeground: true so Joyce's phone opens the app and
-    // the response screen can capture GPS before calling /respond.
+    // "Are You OK?" action buttons.
+    //
+    // IM_OK — silent (opensAppToForeground: false).  Calls /respond
+    // directly in the notification response handler, dismisses the
+    // notification, and notifies Charles — no unlock, no screen
+    // transition, no spinner.  GPS is skipped because expo-location
+    // getCurrentPositionAsync is not safe in a background handler;
+    // the endpoint accepts lat/lon as optional and gracefully omits
+    // the location line from the caregiver confirmation.
+    //
+    // NEED_HELP — opens the app so Joyce reaches the SOS flow.
     await Notifications.setNotificationCategoryAsync('ARE_YOU_OK', [
       {
         identifier: 'IM_OK',
         buttonTitle: "✅  I'M OK",
-        options: { opensAppToForeground: true },
+        options: { opensAppToForeground: false },
       },
       {
         identifier: 'NEED_HELP',
@@ -1017,19 +1025,35 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
       const actionId = r.actionIdentifier;
       const reqId = r.notification.request.identifier;
 
-      // Build XX — "Are You OK?" action button taps.
-      // Both actions open the app (opensAppToForeground: true in the category),
-      // so we route through the deep-link queue like a normal notification tap,
-      // passing _action so the response screen knows to auto-submit.
+      // "Are You OK?" action button taps.
+      //
+      // IM_OK — silent path (opensAppToForeground: false).  Joyce never
+      // sees a screen — we call /respond directly here, dismiss the
+      // notification, and let Charles's device receive the confirmation
+      // push.  GPS is intentionally skipped: expo-location is unsafe in
+      // a background handler; the endpoint accepts lat/lon as optional.
       if (actionId === 'IM_OK') {
         markNotificationConsumed(reqId);
-        enqueueDeepLink({
-          ...data,
-          type: 'are_you_ok_request',
-          _action: 'im_ok',
-        });
+        const checkinReqId: string | undefined = data.request_id;
+        const checkinMemberId: string | undefined = data.member_id;
+        if (checkinReqId && checkinMemberId) {
+          try {
+            await api.post(`/checkin-requests/${checkinReqId}/respond`, {
+              member_id: checkinMemberId,
+            });
+          } catch (_e) {
+            // Silent — if the network call fails the notification is still
+            // dismissed; Joyce can open the app and retry from the response
+            // screen if Charles doesn't see her confirmation.
+          }
+          try {
+            await Notifications.dismissNotificationAsync(reqId);
+          } catch (_e) {}
+        }
         return;
       }
+      // NEED_HELP — opens the app (opensAppToForeground: true) so Joyce
+      // can reach the SOS flow which requires foreground GPS + UI consent.
       if (actionId === 'NEED_HELP') {
         markNotificationConsumed(reqId);
         enqueueDeepLink({
