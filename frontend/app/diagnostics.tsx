@@ -433,28 +433,41 @@ const healthRowStyles = {
   label: { fontSize: 14, color: '#111827', flex: 1 },
 };
 
-// Battery optimization row — Android only, shown when isIgnoringBatteryOptimizations() is false.
-// Uses a top border to visually separate from the last HealthRow (which sets borderBottomWidth:0).
+// Background Reliability section — Android only.
+// Card-based layout with two states:
+//   enabled  (battOptIgnoring === false): amber ⚠ + description + "Open Battery Settings" button
+//   disabled (battOptIgnoring === true):  green ✅ + confirmation text, no button
 const battOptStyles = {
-  row: {
+  card: {
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  cardRow: {
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
-    paddingVertical: 11,
-    paddingHorizontal: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#F3F4F6',
+    marginBottom: 2,
   },
-  icon: { fontSize: 17, marginRight: 10, width: 26, textAlign: 'center' as const },
-  label: { fontSize: 14, color: '#111827', flex: 1 },
+  warningIcon: { fontSize: 17, marginRight: 8 },
+  warningTitle: { fontSize: 15, fontWeight: '700' as const, color: Colors.warning, flex: 1 },
+  okIcon: { fontSize: 17, marginRight: 8 },
+  okTitle: { fontSize: 15, fontWeight: '700' as const, color: Colors.success, flex: 1 },
+  description: {
+    fontSize: 13.5,
+    color: Colors.textSecondary,
+    lineHeight: 19,
+    marginTop: 8,
+    marginBottom: 14,
+  },
   btn: {
+    alignSelf: 'flex-start' as const,
     borderWidth: 1,
     borderColor: Colors.warning,
     borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
     backgroundColor: Colors.warningBg,
   },
-  btnText: { fontSize: 12, color: Colors.warning, fontWeight: '700' as const },
+  btnText: { fontSize: 14, color: Colors.warning, fontWeight: '700' as const },
 };
 
 // ===========================================================
@@ -705,6 +718,7 @@ export default function DiagnosticsScreen() {
     pipeline: true,  // Build XX — Refresh Pipeline investigation, default open
     'pipeline-ts': true, // Task #21 — Pipeline Timestamps, default open
     'device-comparison': true, // Task #30 — open by default so stale events are visible immediately
+    'background-reliability': false, // Closed by default — tester opens when investigating
   });
   const expansionLoadedRef = useRef(false);
 
@@ -1183,25 +1197,31 @@ export default function DiagnosticsScreen() {
   // All steps are logged so the Diagnostics ring buffer captures the full trace.
   const onOpenBatterySettings = useCallback(async () => {
     Alert.alert(
-      'Battery Optimization',
-      'Android\'s battery optimization can limit how often Kinnship runs in the ' +
-      'background. Tapping "Open Settings" lets you set Kinnship to "Unrestricted" — ' +
-      'this allows more reliable location uploads after long idle periods.\n\n' +
-      'The SDK recommends this only as a last resort. Most devices work fine without ' +
-      'this change.',
+      'Improve Background Reliability',
+      'Some Android phones reduce background activity to save battery.\n\n' +
+      'Allowing Kinnship to run without battery optimization may improve:\n\n' +
+      '• faster location updates\n' +
+      '• more reliable battery monitoring\n' +
+      '• better emergency tracking\n\n' +
+      'Your phone may use slightly more battery.',
       [
-        { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Open Settings',
+          text: 'Cancel',
+          style: 'cancel',
+          onPress: () => { void logEvent('battery_opt_user_cancelled'); },
+        },
+        {
+          text: 'Continue',
           onPress: async () => {
             try {
               const request = await requestShowIgnoreBatteryOptimizations();
               if (!request) {
-                void logEvent('battery_opt_prompt_unavailable');
+                void logEvent('battery_opt_settings_unavailable');
                 return;
               }
               void logEvent('battery_opt_prompt_shown', {
                 seen: request.seen,
+                lastSeenAt: request.lastSeenAt ? new Date(request.lastSeenAt).toISOString() : null,
                 manufacturer: request.manufacturer,
                 model: request.model,
               });
@@ -1213,21 +1233,27 @@ export default function DiagnosticsScreen() {
               // Samsung devices have a vendor-specific power-manager screen in
               // addition to the standard Android battery settings.  Offer it only
               // if requestShowPowerManager() confirms this device has one (it returns
-              // null and logs 'unavailable' on stock-Android / Pixel devices).
+              // null on stock-Android / Pixel devices — expected, not an error).
               const isSamsung = request.manufacturer?.toLowerCase().includes('samsung');
               if (isSamsung) {
                 const pmReq = await requestShowPowerManager();
                 if (pmReq) {
                   void logEvent('battery_opt_power_manager_available', {
                     seen: pmReq.seen,
+                    lastSeenAt: pmReq.lastSeenAt ? new Date(pmReq.lastSeenAt).toISOString() : null,
                     manufacturer: pmReq.manufacturer,
+                    model: pmReq.model,
                   });
                   Alert.alert(
                     'Samsung Battery Settings',
                     'Samsung devices have an additional power-manager setting. ' +
                     "Tap \"Open\" to check Kinnship's setting there too.",
                     [
-                      { text: 'Skip', style: 'cancel' },
+                      {
+                        text: 'Skip',
+                        style: 'cancel',
+                        onPress: () => { void logEvent('battery_opt_power_manager_skipped'); },
+                      },
                       {
                         text: 'Open',
                         onPress: async () => {
@@ -1327,28 +1353,59 @@ export default function DiagnosticsScreen() {
           {healthItems.map((item, i) => (
             <HealthRow key={item.label} item={item} isLast={i === healthItems.length - 1} />
           ))}
-          {/* Battery optimization row — Android only.
-              Rendered only when isIgnoringBatteryOptimizations() returned false,
-              meaning the OS is restricting background wakeups for this app.
-              When ignoring === true (unrestricted) or null (iOS / check failed),
-              this renders nothing — no noise in the happy path. */}
-          {Platform.OS === 'android' && battOptIgnoring === false && (
-            <View style={battOptStyles.row} testID="diagnostics-battery-opt-row">
-              <Text style={battOptStyles.icon}>⚠️</Text>
-              <Text style={battOptStyles.label}>
-                Battery optimization: Optimized by Android
-              </Text>
-              <TouchableOpacity
-                style={battOptStyles.btn}
-                onPress={onOpenBatterySettings}
-                activeOpacity={0.8}
-                testID="diagnostics-battery-opt-btn"
-              >
-                <Text style={battOptStyles.btnText}>Open Battery Settings</Text>
-              </TouchableOpacity>
-            </View>
-          )}
         </CollapsibleSection>
+
+        {/* =====================================================
+            Background Reliability — Android only.
+            Uses the documented Transistorsoft deviceSettings API.
+            Two states:
+              enabled  (battOptIgnoring === false): ⚠ + description + button
+              disabled (battOptIgnoring === true):  ✅ + confirmation, no button
+            Hidden entirely on iOS and before the first check runs.
+            ===================================================== */}
+        {Platform.OS === 'android' && battOptIgnoring !== null && (
+          <CollapsibleSection
+            id="background-reliability"
+            title="Background Reliability"
+            expanded={!!expanded['background-reliability']}
+            onToggle={toggleSection}
+            hint="Android battery optimization controls how often Kinnship can run in the background."
+            testID="diagnostics-background-reliability"
+          >
+            {battOptIgnoring === false ? (
+              // Battery optimization is ACTIVE — show actionable warning.
+              <View style={battOptStyles.card} testID="diagnostics-battery-opt-enabled">
+                <View style={battOptStyles.cardRow}>
+                  <Text style={battOptStyles.warningIcon}>⚠</Text>
+                  <Text style={battOptStyles.warningTitle}>
+                    Android Battery Optimization Enabled
+                  </Text>
+                </View>
+                <Text style={battOptStyles.description}>
+                  This phone may delay background location updates after long periods of inactivity.
+                </Text>
+                <TouchableOpacity
+                  style={battOptStyles.btn}
+                  onPress={onOpenBatterySettings}
+                  activeOpacity={0.8}
+                  testID="diagnostics-battery-opt-btn"
+                >
+                  <Text style={battOptStyles.btnText}>Open Battery Settings</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              // Battery optimization is DISABLED — unrestricted, no action needed.
+              <View style={battOptStyles.card} testID="diagnostics-battery-opt-disabled">
+                <View style={battOptStyles.cardRow}>
+                  <Text style={battOptStyles.okIcon}>✅</Text>
+                  <Text style={battOptStyles.okTitle}>
+                    Android Battery Optimization Disabled
+                  </Text>
+                </View>
+              </View>
+            )}
+          </CollapsibleSection>
+        )}
 
         {/* =====================================================
             Build 46 — Clear ALL Diagnostics.
