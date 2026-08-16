@@ -1708,6 +1708,108 @@ export async function getEngineDiagnostics(): Promise<{
 }
 
 // ============================================================
+//  Battery Optimization helpers — Android only.
+//
+//  Wrappers around BackgroundGeolocation.deviceSettings so
+//  diagnostics.tsx does not need to import the SDK directly.
+//
+//  SDK contract (from installed DeviceSettings.d.ts):
+//    isIgnoringBatteryOptimizations() → Promise<boolean>
+//    showIgnoreBatteryOptimizations() → Promise<DeviceSettingsRequest>
+//    showPowerManager()               → Promise<DeviceSettingsRequest>
+//    show(request)                    → Promise<boolean>
+//
+//  showIgnoreBatteryOptimizations() and showPowerManager() do NOT
+//  open Settings automatically — they return a DeviceSettingsRequest
+//  with metadata (manufacturer, model, seen, lastSeenAt).  Call
+//  deviceSettings.show(request) after obtaining user consent to open
+//  the actual screen.
+//
+//  showPowerManager() throws on stock-Android / Pixel devices that
+//  have no OEM power-manager screen.  This is documented behaviour;
+//  always wrap in try/catch and treat the throw as "not available".
+//
+//  The SDK docs note: "In most cases the plugin will perform normally
+//  with battery optimizations. Direct users to ignore optimizations
+//  only as a last resort for background issues."
+// ============================================================
+
+export type DeviceSettingsRequest = {
+  manufacturer: string;
+  model: string;
+  version: string;
+  seen: boolean;
+  lastSeenAt: Date;
+  action: string;
+};
+
+/**
+ * Returns true if Android is currently ignoring battery optimizations
+ * for this app (i.e. the app is in the "Unrestricted" battery bucket).
+ * Returns null on iOS / web or if the SDK is unavailable.
+ */
+export async function checkBatteryOptimization(): Promise<boolean | null> {
+  if (Platform.OS !== 'android') return null;
+  const lib = bgGeo();
+  if (!lib) return null;
+  try {
+    return await lib.deviceSettings.isIgnoringBatteryOptimizations();
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * Returns a DeviceSettingsRequest for the Android "Ignore Battery
+ * Optimizations" settings screen.  Does NOT open the screen — call
+ * showDeviceSettingsScreen(request) after user consent.
+ * Returns null if the SDK or screen is unavailable.
+ */
+export async function requestShowIgnoreBatteryOptimizations(): Promise<DeviceSettingsRequest | null> {
+  if (Platform.OS !== 'android') return null;
+  const lib = bgGeo();
+  if (!lib) return null;
+  try {
+    return (await lib.deviceSettings.showIgnoreBatteryOptimizations()) as DeviceSettingsRequest;
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * Returns a DeviceSettingsRequest for the OEM vendor power manager
+ * (Samsung "Device Care", Huawei "App Launch", etc.).
+ * Returns null on stock Android / Pixel devices — the SDK throws when
+ * no OEM screen exists, which is expected and not an error.
+ */
+export async function requestShowPowerManager(): Promise<DeviceSettingsRequest | null> {
+  if (Platform.OS !== 'android') return null;
+  const lib = bgGeo();
+  if (!lib) return null;
+  try {
+    return (await lib.deviceSettings.showPowerManager()) as DeviceSettingsRequest;
+  } catch (_e) {
+    // Expected on non-OEM / stock-Android devices — not an error.
+    return null;
+  }
+}
+
+/**
+ * Opens the settings screen described by a DeviceSettingsRequest.
+ * Only call this after the user has confirmed an explanation dialog.
+ */
+export async function showDeviceSettingsScreen(request: DeviceSettingsRequest): Promise<boolean> {
+  if (Platform.OS !== 'android') return false;
+  const lib = bgGeo();
+  if (!lib) return false;
+  try {
+    return await lib.deviceSettings.show(request);
+  } catch (_e) {
+    return false;
+  }
+}
+
+// ============================================================
 //  Module bootstrap (v1.2.2 / build 42)
 // ============================================================
 //

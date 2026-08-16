@@ -66,6 +66,12 @@ import {
   isListenersAttached,
   PipelineTimestamps,
   triggerDeviceSnapshotNow,
+  checkBatteryOptimization,
+  requestShowIgnoreBatteryOptimizations,
+  requestShowPowerManager,
+  showDeviceSettingsScreen,
+  DeviceSettingsRequest,
+  logEvent,
 } from '../src/locationEngine';
 import * as memberStore from '../src/store/memberStore';
 import * as leonidas from '../src/leonidas';
@@ -427,6 +433,30 @@ const healthRowStyles = {
   label: { fontSize: 14, color: '#111827', flex: 1 },
 };
 
+// Battery optimization row — Android only, shown when isIgnoringBatteryOptimizations() is false.
+// Uses a top border to visually separate from the last HealthRow (which sets borderBottomWidth:0).
+const battOptStyles = {
+  row: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    paddingVertical: 11,
+    paddingHorizontal: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
+  },
+  icon: { fontSize: 17, marginRight: 10, width: 26, textAlign: 'center' as const },
+  label: { fontSize: 14, color: '#111827', flex: 1 },
+  btn: {
+    borderWidth: 1,
+    borderColor: Colors.warning,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    backgroundColor: Colors.warningBg,
+  },
+  btnText: { fontSize: 12, color: Colors.warning, fontWeight: '700' as const },
+};
+
 // ===========================================================
 //  CollapsibleSection — Build 46 wrapper.
 //
@@ -534,6 +564,11 @@ export default function DiagnosticsScreen() {
   // Task #53 — "Push snapshot now" test button state.
   const [snapshotPushing, setSnapshotPushing] = useState<boolean>(false);
   const [snapshotPushResult, setSnapshotPushResult] = useState<string | null>(null);
+  // Battery optimization — Android only.
+  // null  = check not yet run, unavailable, or iOS.
+  // true  = OS is ignoring battery optimizations (unrestricted — no row shown).
+  // false = OS is applying battery optimizations — show the actionable row.
+  const [battOptIgnoring, setBattOptIgnoring] = useState<boolean | null>(null);
   // Task #92 — auto-clear timer so a stale result never misleads the next tap.
   const snapshotPushResultTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -768,6 +803,21 @@ export default function DiagnosticsScreen() {
       setBatteryTaskLog(await readBatteryTaskLog());
     } catch (_e) {
       setBatteryTaskLog([]);
+    }
+
+    // Battery optimization status — Android only.
+    // Re-checked on every reload so the row updates if the user changed
+    // settings externally and returned to this screen.
+    if (Platform.OS === 'android') {
+      try {
+        const ignoring = await checkBatteryOptimization();
+        setBattOptIgnoring(ignoring);
+        if (ignoring !== null) {
+          void logEvent('battery_opt_status_check', { ignoring });
+        }
+      } catch (_e) {
+        setBattOptIgnoring(null);
+      }
     }
 
     // Task #21 — pipeline timestamps.
@@ -1122,6 +1172,84 @@ export default function DiagnosticsScreen() {
   // Transistor background-task ring buffer to clipboard so bug reports
   // can paste a focused execution trace of what the headless engine
   // actually did (rather than a big multi-log dump).
+  // Battery optimization — Android only.
+  // Implements the documented SDK flow:
+  //   1. Show an explanation Alert (user must opt in).
+  //   2. Call requestShowIgnoreBatteryOptimizations() to get a DeviceSettingsRequest.
+  //   3. Call showDeviceSettingsScreen(request) to open the Android settings screen.
+  //   4. On Samsung: also offer showPowerManager() if the device has that screen.
+  //
+  // The SDK docs note showPowerManager() throws on non-OEM devices — catch it silently.
+  // All steps are logged so the Diagnostics ring buffer captures the full trace.
+  const onOpenBatterySettings = useCallback(async () => {
+    Alert.alert(
+      'Battery Optimization',
+      'Android\'s battery optimization can limit how often Kinnship runs in the ' +
+      'background. Tapping "Open Settings" lets you set Kinnship to "Unrestricted" — ' +
+      'this allows more reliable location uploads after long idle periods.\n\n' +
+      'The SDK recommends this only as a last resort. Most devices work fine without ' +
+      'this change.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Open Settings',
+          onPress: async () => {
+            try {
+              const request = await requestShowIgnoreBatteryOptimizations();
+              if (!request) {
+                void logEvent('battery_opt_prompt_unavailable');
+                return;
+              }
+              void logEvent('battery_opt_prompt_shown', {
+                seen: request.seen,
+                manufacturer: request.manufacturer,
+                model: request.model,
+              });
+              await showDeviceSettingsScreen(request);
+              void logEvent('battery_opt_settings_opened', {
+                manufacturer: request.manufacturer,
+                model: request.model,
+              });
+              // Samsung devices have a vendor-specific power-manager screen in
+              // addition to the standard Android battery settings.  Offer it only
+              // if requestShowPowerManager() confirms this device has one (it returns
+              // null and logs 'unavailable' on stock-Android / Pixel devices).
+              const isSamsung = request.manufacturer?.toLowerCase().includes('samsung');
+              if (isSamsung) {
+                const pmReq = await requestShowPowerManager();
+                if (pmReq) {
+                  void logEvent('battery_opt_power_manager_available', {
+                    seen: pmReq.seen,
+                    manufacturer: pmReq.manufacturer,
+                  });
+                  Alert.alert(
+                    'Samsung Battery Settings',
+                    'Samsung devices have an additional power-manager setting. ' +
+                    "Tap \"Open\" to check Kinnship's setting there too.",
+                    [
+                      { text: 'Skip', style: 'cancel' },
+                      {
+                        text: 'Open',
+                        onPress: async () => {
+                          await showDeviceSettingsScreen(pmReq);
+                          void logEvent('battery_opt_power_manager_opened');
+                        },
+                      },
+                    ],
+                  );
+                } else {
+                  void logEvent('battery_opt_power_manager_unavailable');
+                }
+              }
+            } catch (e: any) {
+              void logEvent('battery_opt_error', { error: String(e?.message || e) });
+            }
+          },
+        },
+      ],
+    );
+  }, []);
+
   const onCopyBgTaskLog = useCallback(async () => {
     try {
       const raw = await readBgTaskLog();
@@ -1199,6 +1327,27 @@ export default function DiagnosticsScreen() {
           {healthItems.map((item, i) => (
             <HealthRow key={item.label} item={item} isLast={i === healthItems.length - 1} />
           ))}
+          {/* Battery optimization row — Android only.
+              Rendered only when isIgnoringBatteryOptimizations() returned false,
+              meaning the OS is restricting background wakeups for this app.
+              When ignoring === true (unrestricted) or null (iOS / check failed),
+              this renders nothing — no noise in the happy path. */}
+          {Platform.OS === 'android' && battOptIgnoring === false && (
+            <View style={battOptStyles.row} testID="diagnostics-battery-opt-row">
+              <Text style={battOptStyles.icon}>⚠️</Text>
+              <Text style={battOptStyles.label}>
+                Battery optimization: Optimized by Android
+              </Text>
+              <TouchableOpacity
+                style={battOptStyles.btn}
+                onPress={onOpenBatterySettings}
+                activeOpacity={0.8}
+                testID="diagnostics-battery-opt-btn"
+              >
+                <Text style={battOptStyles.btnText}>Open Battery Settings</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </CollapsibleSection>
 
         {/* =====================================================
