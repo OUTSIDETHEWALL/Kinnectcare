@@ -87,6 +87,7 @@ import {
   OverallHealthResult,
   OverallHealthLevel,
 } from '../src/healthCheck';
+import { startDeviceComparisonRefresh } from '../src/deviceComparisonRefresh';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
 const PUSH_REFRESH_KEY = 'kc_push_refresh_log';
@@ -449,6 +450,8 @@ type CollapsibleSectionProps = {
   onToggle: (id: string) => void;
   children: ReactNode;
   testID?: string;
+  /** Optional small status badge rendered in the header (e.g. auto-refresh indicator). */
+  autoRefreshLabel?: string;
 };
 
 function CollapsibleSection({
@@ -460,6 +463,7 @@ function CollapsibleSection({
   onToggle,
   children,
   testID,
+  autoRefreshLabel,
 }: CollapsibleSectionProps) {
   return (
     <View style={styles.section} testID={testID}>
@@ -477,6 +481,11 @@ function CollapsibleSection({
         </Text>
         {count !== null && count !== undefined ? (
           <Text style={styles.collapsibleCount}>{count}</Text>
+        ) : null}
+        {autoRefreshLabel ? (
+          <View style={styles.autoRefreshBadge}>
+            <Text style={styles.autoRefreshBadgeText}>{autoRefreshLabel}</Text>
+          </View>
         ) : null}
       </TouchableOpacity>
       {expanded ? (
@@ -525,6 +534,8 @@ export default function DiagnosticsScreen() {
   // Task #53 — "Push snapshot now" test button state.
   const [snapshotPushing, setSnapshotPushing] = useState<boolean>(false);
   const [snapshotPushResult, setSnapshotPushResult] = useState<string | null>(null);
+  // Task #92 — auto-clear timer so a stale result never misleads the next tap.
+  const snapshotPushResultTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Leonidas (Build 46) — snapshot + recovery log
   const [leoSnapshot, setLeoSnapshot] = useState<leonidas.LeonidasSnapshotForUI | null>(null);
@@ -678,6 +689,15 @@ export default function DiagnosticsScreen() {
     })();
   }, []);
 
+  // Task #92 — cancel the auto-clear timer if the screen unmounts while it's running.
+  useEffect(() => {
+    return () => {
+      if (snapshotPushResultTimerRef.current !== null) {
+        clearTimeout(snapshotPushResultTimerRef.current);
+      }
+    };
+  }, []);
+
   const toggleSection = useCallback((id: string) => {
     setExpanded((prev) => {
       const next = { ...prev, [id]: !prev[id] };
@@ -784,21 +804,6 @@ export default function DiagnosticsScreen() {
     return () => clearInterval(tick);
   }, [expanded.leonidas]);
 
-  // Task #52 — Device Comparison auto-refresh.
-  // Mirrors the Leonidas pattern above: runs only while the section is
-  // expanded, fires every 60 s (one full heartbeat cycle), and clears
-  // itself the moment the section collapses.  An initial fetch is NOT
-  // fired here — the manual "Fetch Device Comparison" button (or any
-  // prior fetch this session) already has the first payload.  The
-  // interval keeps it current without requiring repeated manual taps.
-  useEffect(() => {
-    if (!expanded['device-comparison']) return;
-    const tick = setInterval(() => {
-      fetchFamilySnapshot().catch(() => { /* swallow — fetchFamilySnapshot sets its own error state */ });
-    }, 60_000);
-    return () => clearInterval(tick);
-  }, [expanded['device-comparison'], fetchFamilySnapshot]);
-
   // 1-second tick for live age displays.  Runs unconditionally while the
   // Diagnostics screen is mounted so the summary card "X min ago" values
   // and the Leonidas "Next Patrol" countdown both stay accurate without a
@@ -872,6 +877,14 @@ export default function DiagnosticsScreen() {
       setFamilySnapshotLoading(false);
     }
   }, []);
+
+  // Device Comparison auto-refresh — must sit AFTER fetchFamilySnapshot is
+  // declared; placing it before caused a ReferenceError at component init
+  // (const is not hoisted) which blanked the entire Diagnostics screen.
+  useEffect(
+    () => startDeviceComparisonRefresh(!!expanded['device-comparison'], fetchFamilySnapshot),
+    [expanded['device-comparison'], fetchFamilySnapshot],
+  );
 
   const buildPayload = useCallback(() => {
     const appVersion =
@@ -1670,15 +1683,26 @@ export default function DiagnosticsScreen() {
             ]}
             onPress={async () => {
               if (snapshotPushing) return;
+              // Clear any pending auto-clear and any stale result immediately
+              // so the button never shows a previous outcome while the new push
+              // is in-flight (Task #92).
+              if (snapshotPushResultTimerRef.current !== null) {
+                clearTimeout(snapshotPushResultTimerRef.current);
+                snapshotPushResultTimerRef.current = null;
+              }
               setSnapshotPushing(true);
               setSnapshotPushResult(null);
               const result = await triggerDeviceSnapshotNow();
               setSnapshotPushing(false);
-              if (result.ok) {
-                setSnapshotPushResult('✓ Snapshot pushed — tap "Fetch Device Comparison" to verify');
-              } else {
-                setSnapshotPushResult(`✗ ${result.error}`);
-              }
+              const msg = result.ok
+                ? '✓ Snapshot pushed — tap "Fetch Device Comparison" to verify'
+                : `✗ ${result.error}`;
+              setSnapshotPushResult(msg);
+              // Auto-clear after 8 s so the result never misleads the next tap.
+              snapshotPushResultTimerRef.current = setTimeout(() => {
+                setSnapshotPushResult(null);
+                snapshotPushResultTimerRef.current = null;
+              }, 8000);
             }}
             disabled={snapshotPushing}
             activeOpacity={0.85}
@@ -1727,6 +1751,7 @@ export default function DiagnosticsScreen() {
           onToggle={toggleSection}
           hint="Compare all family members' upload freshness and pipeline state at the same instant. Fetch from server to refresh."
           testID="diagnostics-device-comparison"
+          autoRefreshLabel={!!expanded['device-comparison'] ? '⟳ 60s' : undefined}
         >
           <TouchableOpacity
             style={[styles.secondaryBtn, { marginBottom: 8 }]}
@@ -3328,6 +3353,17 @@ const styles = StyleSheet.create({
     fontSize: 12, fontWeight: '800', color: Colors.primary,
     backgroundColor: Colors.tertiary, paddingHorizontal: 8, paddingVertical: 2,
     borderRadius: 8, minWidth: 26, textAlign: 'center', overflow: 'hidden',
+  },
+  autoRefreshBadge: {
+    backgroundColor: '#D1FAE5',
+    borderRadius: 8,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  autoRefreshBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#065F46',
   },
   clearAllBtn: {
     marginBottom: 6, paddingVertical: 14, borderRadius: 12,
