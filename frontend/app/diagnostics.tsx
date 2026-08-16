@@ -468,6 +468,8 @@ const battOptStyles = {
     backgroundColor: Colors.warningBg,
   },
   btnText: { fontSize: 14, color: Colors.warning, fontWeight: '700' as const },
+  // Info table — key/value rows shown below the state card.
+  infoTable: { paddingHorizontal: 16, paddingBottom: 14 },
 };
 
 // ===========================================================
@@ -579,9 +581,17 @@ export default function DiagnosticsScreen() {
   const [snapshotPushResult, setSnapshotPushResult] = useState<string | null>(null);
   // Battery optimization — Android only.
   // null  = check not yet run, unavailable, or iOS.
-  // true  = OS is ignoring battery optimizations (unrestricted — no row shown).
-  // false = OS is applying battery optimizations — show the actionable row.
+  // true  = OS is ignoring battery optimizations (unrestricted).
+  // false = OS is applying battery optimizations — show actionable state.
   const [battOptIgnoring, setBattOptIgnoring] = useState<boolean | null>(null);
+  // Device info gathered alongside the battery check — used for the static
+  // info card so a screenshot tells us the full device state immediately.
+  const [battOptInfo, setBattOptInfo] = useState<{
+    manufacturer: string | null;
+    model: string | null;
+    powerManagerAvailable: boolean | null;
+    checkedAt: number | null;
+  }>({ manufacturer: null, model: null, powerManagerAvailable: null, checkedAt: null });
   // Task #92 — auto-clear timer so a stale result never misleads the next tap.
   const snapshotPushResultTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -819,15 +829,31 @@ export default function DiagnosticsScreen() {
       setBatteryTaskLog([]);
     }
 
-    // Battery optimization status — Android only.
-    // Re-checked on every reload so the row updates if the user changed
-    // settings externally and returned to this screen.
+    // Battery optimization status + device info — Android only.
+    // All three calls are read-only metadata fetches — no Settings screen is opened.
+    // Running them in parallel on every reload keeps the info card current without
+    // requiring the user to tap any button first.
     if (Platform.OS === 'android') {
       try {
-        const ignoring = await checkBatteryOptimization();
+        const [ignoring, bOptReq, pmReq] = await Promise.all([
+          checkBatteryOptimization(),
+          requestShowIgnoreBatteryOptimizations(),
+          requestShowPowerManager(),
+        ]);
         setBattOptIgnoring(ignoring);
+        setBattOptInfo({
+          manufacturer: bOptReq?.manufacturer ?? null,
+          model: bOptReq?.model ?? null,
+          powerManagerAvailable: pmReq !== null,
+          checkedAt: Date.now(),
+        });
         if (ignoring !== null) {
-          void logEvent('battery_opt_status_check', { ignoring });
+          void logEvent('battery_opt_status_check', {
+            ignoring,
+            manufacturer: bOptReq?.manufacturer ?? null,
+            model: bOptReq?.model ?? null,
+            powerManagerAvailable: pmReq !== null,
+          });
         }
       } catch (_e) {
         setBattOptIgnoring(null);
@@ -1230,6 +1256,15 @@ export default function DiagnosticsScreen() {
                 manufacturer: request.manufacturer,
                 model: request.model,
               });
+              // show(request) resolves when the user returns from Android Settings.
+              // Re-run isIgnoringBatteryOptimizations() immediately so the card
+              // updates to ✅ without requiring a manual reload.
+              try {
+                const updatedIgnoring = await checkBatteryOptimization();
+                setBattOptIgnoring(updatedIgnoring);
+                setBattOptInfo(prev => ({ ...prev, checkedAt: Date.now() }));
+                void logEvent('battery_opt_recheck_after_settings', { ignoring: updatedIgnoring });
+              } catch (_e) { /* swallow — UI stays at last known state */ }
               // Samsung devices have a vendor-specific power-manager screen in
               // addition to the standard Android battery settings.  Offer it only
               // if requestShowPowerManager() confirms this device has one (it returns
@@ -1402,6 +1437,42 @@ export default function DiagnosticsScreen() {
                     Android Battery Optimization Disabled
                   </Text>
                 </View>
+              </View>
+            )}
+            {/* Static device info card — visible as soon as the check has run.
+                A tester screenshot shows the full device state without digging
+                through the engine ring buffer. */}
+            {battOptInfo.checkedAt !== null && (
+              <View style={battOptStyles.infoTable}>
+                <SummaryRow
+                  label="Battery optimization"
+                  value={battOptIgnoring === false ? 'Enabled' : 'Disabled'}
+                  valueColor={battOptIgnoring === false ? Colors.warning : Colors.success}
+                />
+                {battOptInfo.model ? (
+                  <SummaryRow label="Device" value={battOptInfo.model} />
+                ) : null}
+                {battOptInfo.manufacturer ? (
+                  <SummaryRow label="Manufacturer" value={battOptInfo.manufacturer} />
+                ) : null}
+                {battOptInfo.powerManagerAvailable !== null && (
+                  <SummaryRow
+                    label="Power Manager"
+                    value={battOptInfo.powerManagerAvailable ? 'Available' : 'Not available'}
+                    valueColor={battOptInfo.powerManagerAvailable ? Colors.success : Colors.textSecondary}
+                  />
+                )}
+                <SummaryRow
+                  label="Ignoring battery optimizations"
+                  value={battOptIgnoring === true ? 'YES' : battOptIgnoring === false ? 'NO' : '—'}
+                  valueColor={battOptIgnoring === true ? Colors.success : battOptIgnoring === false ? Colors.warning : undefined}
+                  isLast={!battOptInfo.checkedAt}
+                />
+                <SummaryRow
+                  label="Last checked"
+                  value={fmt(battOptInfo.checkedAt)}
+                  isLast
+                />
               </View>
             )}
           </CollapsibleSection>
