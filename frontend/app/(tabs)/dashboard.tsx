@@ -1202,38 +1202,43 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
               ) : null}
             </>
           )}
-          {/* Battery status — overview only on the family card; percentage
-              lives on the member detail screen (overview-first principle).
-              Hidden when battery_updated_at is absent or older than 4 hours.
-              4-hour threshold (was 15 min): stationary devices update battery
-              via native SDK location uploads every ~60 s; 4 hours provides a
-              meaningful upper bound while tolerating extended offline gaps
-              without permanently hiding state caregivers rely on. */}
+          {/* Battery status — always shows last known reading so caregivers
+              never lose visibility into Mom's battery state just because
+              the phone was stationary overnight.  The row is hidden only
+              when battery_level has never been recorded (null) — an
+              intentional "no data" state.  Age is always shown so
+              caregivers can judge how fresh the reading is. */}
           {(() => {
             const bLevel = (member as any).battery_level as number | null | undefined;
-            if (bLevel == null) return null;
+            if (bLevel == null) return null; // No battery data ever recorded — hide row
             const updatedAt = (member as any).battery_updated_at as string | null | undefined;
-            const ageMs = updatedAt ? Date.now() - new Date(updatedAt).getTime() : null;
-            if (ageMs === null || ageMs > 4 * 60 * 60 * 1000) return null;
             const isCharging = (member as any).is_charging as boolean | null | undefined;
+            const pct = Math.round(bLevel * 100);
+
+            // Status indicator + percentage on first line
+            let statusText: string;
+            let statusStyle: object;
             if (isCharging) {
-              return (
-                <Text style={[styles.batteryLine, styles.batteryLineCharging]}>
-                  🔌 Charging
-                </Text>
-              );
+              statusText = `🔌 Charging · ${pct}%`;
+              statusStyle = styles.batteryLineCharging;
+            } else if (bLevel <= 0.20) {
+              statusText = `🔴 ${pct}% · Low`;
+              statusStyle = styles.batteryLineLow;
+            } else {
+              statusText = `🟢 ${pct}%`;
+              statusStyle = styles.batteryLineOk;
             }
-            if (bLevel <= 0.20) {
-              return (
-                <Text style={[styles.batteryLine, styles.batteryLineLow]}>
-                  🔴 Battery Low
-                </Text>
-              );
-            }
+
+            // Age label on second line — "Updated 9 hours ago" or "Last update unknown"
+            const ageLabel = updatedAt
+              ? `Updated ${formatLastSeenAge(updatedAt)}`
+              : 'Last update unknown';
+
             return (
-              <Text style={[styles.batteryLine, styles.batteryLineOk]}>
-                🟢 Battery OK
-              </Text>
+              <>
+                <Text style={[styles.batteryLine, statusStyle]}>{statusText}</Text>
+                <Text style={[styles.batteryLine, styles.batteryLineAge]}>{ageLabel}</Text>
+              </>
             );
           })()}
           {/* Build #59 — hide the medication chip row entirely when
@@ -1406,10 +1411,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, gap: 4,
   },
   _refreshAllText_unused: { color: Colors.primary, fontWeight: '700', fontSize: 13 },
-  batteryLine: { fontSize: 12, fontWeight: '600', marginTop: 4 },
+  batteryLine:         { fontSize: 12, fontWeight: '600', marginTop: 4 },
   batteryLineCharging: { color: Colors.success },
   batteryLineLow:      { color: Colors.error },
   batteryLineOk:       { color: Colors.textTertiary },
+  batteryLineAge:      { fontSize: 11, fontWeight: '400', color: Colors.textTertiary, marginTop: 1 },
   medRow: { flexDirection: 'row', gap: 6, marginTop: 8, flexWrap: 'wrap' },
   medChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: Colors.tertiary, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 },
   medChipEmoji: { fontSize: 12 },

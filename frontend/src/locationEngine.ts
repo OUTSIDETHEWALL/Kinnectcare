@@ -263,10 +263,16 @@ function registerHeadlessTaskOnce(): void {
           // periods (the original 19-hour disappearance bug).
           try {
             const battLevel: number | undefined = pos?.battery?.level;
-            const battCharging: boolean | undefined = pos?.battery?.is_charging;
+            // Part 1 fix — SDK may return is_charging as 0/1 (integer) on some
+            // Android devices rather than true/false (boolean).  The previous
+            // `typeof battCharging === 'boolean'` guard silently skipped the
+            // PATCH in those cases.  Coerce to boolean here; null means absent.
+            const battChargingRaw = pos?.battery?.is_charging;
+            const battCharging: boolean | null =
+              battChargingRaw != null ? Boolean(battChargingRaw) : null;
             if (
               typeof battLevel === 'number' && battLevel >= 0 &&
-              typeof battCharging === 'boolean'
+              battCharging !== null
             ) {
               const sdkState = await lib.getState();
               const locationUrl: string = sdkState?.url ?? '';
@@ -396,6 +402,24 @@ function registerHeadlessTaskOnce(): void {
         } catch (_e) { /* best-effort */ }
 
         await logEvent('sdk_onHttp', { success, status, path: '', bodyHead });
+
+        // Explicit named ok/error events alongside sdk_onHttp so the
+        // Diagnostics upload-ratio card can count headless successes and
+        // failures without decoding the success boolean inside sdk_onHttp.
+        // Mirrors the foreground handler's http_upload_success / http_upload_failure.
+        if (success) {
+          await logEvent('headless_http_ok', { status });
+        } else {
+          await logEvent('headless_http_error', { status, bodyHead });
+        }
+
+        // Record every HTTP attempt (success or failure) so Charles can
+        // distinguish "upload never tried" from "upload tried and failed"
+        // in Diagnostics when the device is backgrounded.  Without this,
+        // repeated upload failures leave http_attempt null for background-
+        // only users, which is indistinguishable from "SDK never reached
+        // the HTTP stage at all."  Mirrors the foreground onHttp handler.
+        recordPipelineTs('http_attempt');
 
         // Persist the last-successful-upload timestamp in its own
         // dedicated AsyncStorage key so it survives ring-buffer eviction.
