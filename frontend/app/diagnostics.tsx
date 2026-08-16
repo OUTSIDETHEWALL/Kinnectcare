@@ -831,21 +831,32 @@ export default function DiagnosticsScreen() {
 
     // Battery optimization status + device info — Android only.
     // All three calls are read-only metadata fetches — no Settings screen is opened.
-    // Running them in parallel on every reload keeps the info card current without
-    // requiring the user to tap any button first.
+    // Every failure path is now logged explicitly so the engine ring buffer shows
+    // exactly which SDK call failed and why, instead of silently returning null.
     if (Platform.OS === 'android') {
+      void logEvent('battery_opt_reload_start');
       try {
         const [ignoring, bOptReq, pmReq] = await Promise.all([
           checkBatteryOptimization(),
           requestShowIgnoreBatteryOptimizations(),
           requestShowPowerManager(),
         ]);
+        // Log all resolved values before setting state — each wrapper already logs
+        // its own failure reason (SDK_NOT_READY / METHOD_THROW), so this entry
+        // shows the final picture: which calls succeeded and which returned null.
+        void logEvent('battery_opt_reload_result', {
+          ignoring,
+          hasOptRequest: bOptReq !== null,
+          manufacturer: bOptReq?.manufacturer ?? null,
+          model: bOptReq?.model ?? null,
+          hasPowerManager: pmReq !== null,
+        });
         setBattOptIgnoring(ignoring);
         setBattOptInfo({
           manufacturer: bOptReq?.manufacturer ?? null,
           model: bOptReq?.model ?? null,
           powerManagerAvailable: pmReq !== null,
-          checkedAt: Date.now(),
+          checkedAt: ignoring !== null ? Date.now() : null,
         });
         if (ignoring !== null) {
           void logEvent('battery_opt_status_check', {
@@ -855,7 +866,13 @@ export default function DiagnosticsScreen() {
             powerManagerAvailable: pmReq !== null,
           });
         }
-      } catch (_e) {
+      } catch (e: any) {
+        // The individual wrappers each catch their own errors, so this outer catch
+        // should only fire if something unexpected throws inside the try block itself.
+        void logEvent('battery_opt_reload_failed', {
+          reason: 'PROMISE_ALL_THROW',
+          error: String((e as any)?.message || e),
+        });
         setBattOptIgnoring(null);
       }
     }

@@ -1751,10 +1751,21 @@ export type DeviceSettingsRequest = {
 export async function checkBatteryOptimization(): Promise<boolean | null> {
   if (Platform.OS !== 'android') return null;
   const lib = bgGeo();
-  if (!lib) return null;
+  if (!lib) {
+    void logEvent('battery_opt_check_failed', {
+      fn: 'checkBatteryOptimization',
+      reason: 'SDK_NOT_READY',
+    });
+    return null;
+  }
   try {
     return await lib.deviceSettings.isIgnoringBatteryOptimizations();
-  } catch (_e) {
+  } catch (e: any) {
+    void logEvent('battery_opt_check_failed', {
+      fn: 'checkBatteryOptimization',
+      reason: 'METHOD_THROW',
+      error: String(e?.message || e),
+    });
     return null;
   }
 }
@@ -1768,10 +1779,21 @@ export async function checkBatteryOptimization(): Promise<boolean | null> {
 export async function requestShowIgnoreBatteryOptimizations(): Promise<DeviceSettingsRequest | null> {
   if (Platform.OS !== 'android') return null;
   const lib = bgGeo();
-  if (!lib) return null;
+  if (!lib) {
+    void logEvent('battery_opt_check_failed', {
+      fn: 'requestShowIgnoreBatteryOptimizations',
+      reason: 'SDK_NOT_READY',
+    });
+    return null;
+  }
   try {
     return (await lib.deviceSettings.showIgnoreBatteryOptimizations()) as DeviceSettingsRequest;
-  } catch (_e) {
+  } catch (e: any) {
+    void logEvent('battery_opt_check_failed', {
+      fn: 'requestShowIgnoreBatteryOptimizations',
+      reason: 'METHOD_THROW',
+      error: String(e?.message || e),
+    });
     return null;
   }
 }
@@ -1785,11 +1807,24 @@ export async function requestShowIgnoreBatteryOptimizations(): Promise<DeviceSet
 export async function requestShowPowerManager(): Promise<DeviceSettingsRequest | null> {
   if (Platform.OS !== 'android') return null;
   const lib = bgGeo();
-  if (!lib) return null;
+  if (!lib) {
+    void logEvent('battery_opt_check_failed', {
+      fn: 'requestShowPowerManager',
+      reason: 'SDK_NOT_READY',
+    });
+    return null;
+  }
   try {
     return (await lib.deviceSettings.showPowerManager()) as DeviceSettingsRequest;
-  } catch (_e) {
-    // Expected on non-OEM / stock-Android devices — not an error.
+  } catch (e: any) {
+    // Throwing here is expected on stock-Android / Pixel devices that have no
+    // OEM power-manager screen.  Log it so we can distinguish "not available on
+    // this device" (normal) from an unexpected SDK error (worth investigating).
+    void logEvent('battery_opt_power_manager_not_available', {
+      fn: 'requestShowPowerManager',
+      reason: 'METHOD_THROW',
+      error: String(e?.message || e),
+    });
     return null;
   }
 }
