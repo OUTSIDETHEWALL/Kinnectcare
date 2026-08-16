@@ -2798,8 +2798,68 @@ export default function DiagnosticsScreen() {
           expanded={!!expanded['battery-system']}
           onToggle={toggleSection}
         >
+          {/* ── Last update summary (Charles's "Source" field) ───── */}
+          {(() => {
+            // Find most recent successful update from EITHER path so we
+            // can show a single "last refresh" summary with the source label.
+            const pathAOk = [...engineLog].reverse()
+              .find((e) => e.event === 'headless_battery_patch_ok');
+            const pathBOk = [...batteryTaskLog].reverse()
+              .find((e) => e.event === 'background_battery_ok');
+
+            const winner =
+              pathAOk && pathBOk
+                ? (pathAOk.at >= pathBOk.at ? { src: 'Transistor heartbeat', e: pathAOk, isB: false } : { src: 'WorkManager', e: pathBOk, isB: true })
+                : pathAOk ? { src: 'Transistor heartbeat', e: pathAOk, isB: false }
+                : pathBOk ? { src: 'WorkManager', e: pathBOk, isB: true }
+                : null;
+
+            if (!winner) {
+              return (
+                <View style={styles.card}>
+                  <Text style={styles.subSectionLabel}>Last battery update</Text>
+                  <Text style={styles.muted}>No battery update recorded yet in this session.</Text>
+                </View>
+              );
+            }
+
+            const ageMs = Date.now() - winner.e.at;
+            const min = Math.round(ageMs / 60_000);
+            const ageStr = min < 60 ? `${min} min ago` : `${Math.round(ageMs / 3_600_000)} h ago`;
+            const ts = new Date(winner.e.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+            const level = winner.isB
+              ? winner.e.detail?.levelPct
+              : (winner.e.detail?.battLevel != null ? Math.round(Number(winner.e.detail.battLevel) * 100) : null);
+            const charging = winner.isB
+              ? winner.e.detail?.isCharging
+              : winner.e.detail?.battCharging;
+
+            return (
+              <View style={styles.card}>
+                <Text style={styles.subSectionLabel}>Last battery update</Text>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>Last background refresh  </Text>
+                  {`${ts}  (${ageStr})`}
+                </Text>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>Source  </Text>
+                  {winner.src}
+                </Text>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>Battery sent  </Text>
+                  {level != null ? `${level} %` : '—'}
+                </Text>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>Charging  </Text>
+                  {charging != null ? (charging ? 'Yes' : 'No') : '—'}
+                </Text>
+              </View>
+            );
+          })()}
+
           {/* ── Live device state ─────────────────────────────────── */}
-          <View style={styles.card}>
+          <View style={[styles.card, { marginTop: 8 }]}>
             <Text style={styles.subSectionLabel}>Live device state</Text>
             <Text style={styles.entryLine}>
               <Text style={styles.entryK}>Device battery (expo-battery): </Text>

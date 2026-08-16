@@ -1095,36 +1095,9 @@ function RootNav() {
         // (Android) / BGTaskScheduler (iOS).  Runs even when the device
         // hasn't moved and the Transistor SDK is idle.
         configureBatteryTask().catch(() => {});
-        // Part 7 — One-time battery optimization exemption prompt (Android).
-        // OEM devices (Samsung, Xiaomi, OnePlus, Huawei) aggressively kill
-        // background tasks.  Exempting Kinnship from battery optimization lets
-        // WorkManager fire reliably even in deep Doze.  Show once, non-blocking,
-        // graceful if declined.
-        if (Platform.OS === 'android') {
-          (async () => {
-            try {
-              const already = await AsyncStorage.getItem(BATTERY_OPT_PROMPTED_KEY);
-              if (!already) {
-                await AsyncStorage.setItem(BATTERY_OPT_PROMPTED_KEY, '1');
-                // Brief delay so the prompt doesn't compete with startup UI.
-                await new Promise<void>((r) => setTimeout(r, 3000));
-                Alert.alert(
-                  'Improve background monitoring',
-                  'For reliable battery and location monitoring when the phone is idle, please disable battery optimization for Kinnship.\n\nTap "Open Settings," find Kinnship under Battery, and select "Unrestricted" or "Don\'t optimize."',
-                  [
-                    { text: 'Not now', style: 'cancel' },
-                    {
-                      text: 'Open Settings',
-                      onPress: () => Linking.openSettings(),
-                    },
-                  ],
-                );
-              }
-            } catch (_e) {
-              // Non-fatal — prompt is an enhancement, not required.
-            }
-          })();
-        }
+        // Part 7 — Battery optimization prompt moved to post-onboarding.
+        // See useEffect below; fired there so the user has context from
+        // onboarding before being asked about a system setting.
         engineBootedForUserIdRef.current = user.id;
         // Subscribe AFTER successful start so any rolling token
         // refresh during the live session flows through.
@@ -1323,6 +1296,34 @@ function RootNav() {
     // honoured once routing has settled.
     setAppReadyForDeepLink(true);
   }, [user, loading, segments, onboardingChecked, needsOnboarding, pinChecked, needsPinUnlock, needsPinSetup, disclaimerChecked, needsDisclaimer, permissionsChecked, needsPermissions]);
+
+  // Part 7 — Battery optimization exemption prompt (Android only, post-onboarding).
+  // Fired here — after the user has seen the full onboarding/permissions flow —
+  // rather than 3 s after login, so they have context about why Kinnship needs
+  // background access before being asked to open a system setting.
+  // Conditions: authenticated + all onboarding / permissions gates cleared.
+  useEffect(() => {
+    if (!user || needsOnboarding || needsPermissions || Platform.OS !== 'android') return;
+    (async () => {
+      try {
+        const already = await AsyncStorage.getItem(BATTERY_OPT_PROMPTED_KEY);
+        if (already) return;
+        await AsyncStorage.setItem(BATTERY_OPT_PROMPTED_KEY, '1');
+        // Brief delay so the dashboard finishes painting before the Alert appears.
+        await new Promise<void>((r) => setTimeout(r, 2000));
+        Alert.alert(
+          'Keep monitoring reliable',
+          'To provide reliable location and battery monitoring, Android may need to allow Kinnship to run without battery optimization.\n\nTap "Open Settings," find Kinnship under Battery, and select "Unrestricted" or "Don\'t optimize."',
+          [
+            { text: 'Not now', style: 'cancel' },
+            { text: 'Open Settings', onPress: () => Linking.openSettings() },
+          ],
+        );
+      } catch (_e) {
+        // Non-fatal — prompt is an enhancement, not required.
+      }
+    })();
+  }, [user?.id, needsOnboarding, needsPermissions]);
 
   if (loading || !onboardingChecked || !disclaimerChecked || !permissionsChecked || (user && !pinChecked)) {
     return (
