@@ -1,44 +1,58 @@
 ---
-name: Battery sync — Transistor SDK architecture
-description: Root cause and fix for battery level not updating in background; covers which upload path is real and how to extend it.
+name: Battery–Transistor SDK architecture
+description: How battery data reaches the backend, all three upload paths, and why the write-guard uses server_now not GPS capture time.
 ---
 
-## Rule
+## Three battery upload paths
 
-Battery metadata (and any other per-fix telemetry) must be added to the Transistor SDK `locationTemplate` in `locationEngine.ts`, not to the `expo-task-manager` task in `backgroundLocation.ts`.
+### Path A — JS-alive heartbeat (every 60 s, stationary)
+`pushBatteryUpdate('heartbeat')` → reads expo-battery → PATCH /members/{id}/battery.
+Requires the main JS runtime to be alive. Dies when Android kills the runtime.
 
-## Why
+### Path B — JS-alive state/level listeners
+`pushBatteryUpdate('charging-state'|'level-change')` → PATCH /battery.
+expo-battery `BatteryState.CHARGING` and ~1% level change events. JS-alive only.
 
-There are two background upload systems in the app:
+### Path C — Headless heartbeat (CRITICAL — runs when JS runtime is dead)
+`HeadlessTask` → `lib.getCurrentPosition({persist:true})` succeeds → reads
+`pos.battery.level` and `pos.battery.is_charging` from the SDK's native position
+result → PATCH /battery using JWT from `lib.getState().authorization.accessToken`.
+6-second `Promise.race` timeout. Logs `headless_battery_patch_ok` / `_error` / `_skipped`
+to the ring buffer. New PTS key: `headless_battery` / `kc_pts_hl_bat`.
 
-1. **Transistor SDK native transport** (`locationEngine.ts`) — the real upload path. `autoSync: true` + `url` + `method: 'PUT'` causes the SDK to PUT each fix to the backend natively, without invoking any JS callback. This generates all background heartbeats visible in `location_ingest_log`.
+The SDK's native location upload ALSO includes `battery` nested object, extracted by
+`LocationUpdate._normalize_payload()` in `server.py`. This is a secondary path for battery
+data that arrives via PUT /location — not sufficient on its own (see write-guard note below).
 
-2. **TaskManager JS task** (`backgroundLocation.ts`) — defined via `expo-task-manager` + `expo-location`'s `startLocationUpdatesAsync`. Zero entries in the Background Task Log confirmed this task never fires during normal background operation; the Transistor SDK handles uploads before the JS task gets a chance to run.
+## Battery write-guard — server.py PUT /location
 
-Battery sampling was added to System 2 (PR #62). System 1 never called it. MongoDB showed 0/656 background heartbeats containing `battery_level` despite the sampling code existing.
+`_batt_incoming_ts = incoming_captured_at or server_now` — **unchanged from original**.
 
-## Fix
+A speculative change to `server_now` was proposed (theory: GPS clock lag causes write-guard
+false rejections) but reverted at Charles's request — no concrete log evidence of actual
+rejections in production. If Railway logs ever show `battery_updated_at` NOT advancing on
+PUT /location payloads that carry valid battery data, that is the evidence needed to revisit
+using `server_now` here. Until then, leave the guard logic alone.
 
-The SDK natively measures `battery.level` (0.0–1.0) and `battery.is_charging` (boolean) at fix-record time — available as `locationTemplate` variables. Adding them to the template string is the SDK's intended extension point:
+## Dashboard staleness threshold
 
-```typescript
-locationTemplate:
-  '...,"battery_level":<%= battery.level %>,"is_charging":<%= battery.is_charging %>}'
-```
+`frontend/app/(tabs)/dashboard.tsx` battery row: `ageMs > 4 * 60 * 60 * 1000` (4 hours).
+Was 15 minutes — too aggressive for a caregiving app where stationary periods last hours.
+The `_hasBatteryIssue` Needs Attention check retains its own 15-minute window (intentional —
+that check fires only on freshly confirmed low battery).
 
-No JS battery API call needed. No background runtime restriction possible.
+## What NOT to do
 
-## Backend guard
+Do not add `locationTemplate` to the SDK config. It was removed because any undefined
+template variable produces invalid JSON and silently drops the entire upload. PR #65
+triggered this and stopped all background uploads. See `location-template-architecture.md`.
 
-`battery.level` can theoretically be `-1` (SDK sentinel for "unavailable", documented for `speed`/`heading`/etc.). Server-side guard:
+## Root cause of the 19-hour battery disappearance bug
 
-```python
-if data.battery_level is not None and data.battery_level >= 0:
-    update["battery_level"] = min(1.0, data.battery_level)
-```
+1. Android killed the JS runtime → Paths A and B stopped
+2. Headless task fired every 60 s but sent no battery PATCH (Path C didn't exist yet)
+3. The native SDK location upload's battery data was being silently rejected by the
+   write-guard (GPS clock lag vs wall-clock PATCH timestamp)
+4. `battery_updated_at` stopped advancing → dashboard hid battery after 15-minute threshold
 
-The `>= 0` check makes `-1` a silent no-op instead of clamping it to `0.0` (false dead-battery reading).
-
-## How to apply
-
-Any future per-fix metadata that should travel with every background upload belongs in `locationTemplate`, not in a JS background callback. The foreground path (`locationRefresh.ts`) is a separate code path and correctly handles its own battery sampling — leave it unchanged.
+All three layers were fixed simultaneously in PR #92.

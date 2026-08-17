@@ -52,11 +52,14 @@ export default function Alerts() {
   const [loadError, setLoadError] = useState(false);
 
   const load = async () => {
-    setLoadError(false);
     try {
       const r = await api.get('/alerts');
       const fresh = r.data as Alert[];
       setAlerts(fresh);
+      // Clear any previous error only once the fetch succeeds — keeps the error
+      // card visible during a retry rather than flashing "All clear!" while the
+      // request is in flight.
+      setLoadError(false);
       // Persist the fresh list so it survives a force-kill restart.
       if (user?.id) {
         try {

@@ -9,3 +9,4 @@
 - [Battery sync — Transistor SDK architecture](battery-transistor-architecture.md) — battery/telemetry belongs in locationTemplate, not the TaskManager JS task; backend needs >= 0 guard against -1 sentinel.
 - [locationTemplate architecture decision](location-template-architecture.md) — agreed post-beta plan: remove locationTemplate, consume SDK native payload; battery comes free; no template variables needed.
 - [PR verification rule](pr-verification-rule.md) — always curl-verify the PR URL returns 200 before reporting it; createPullRequest() success text is not enough.
+- [Battery subsystem architecture](battery-subsystem-architecture.md) — two-path (headless + WorkManager); type guard fix; never use typeof===boolean for SDK values; react-native-background-fetch chosen over expo-background-task (already native-linked).

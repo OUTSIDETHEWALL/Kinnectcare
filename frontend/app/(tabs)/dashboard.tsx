@@ -1110,7 +1110,6 @@ function PendingInviteCard({
 }
 
 
-
 function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
   member: Member; sum?: MemberSummary; isSenior?: boolean;
   onPress: () => void; onCheckIn?: () => void;

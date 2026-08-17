@@ -204,7 +204,7 @@ export function computeOverallHealth(
 }
 
 export function formatAgeMs(ms: number | null): string {
-  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—';
+  if (ms === null || ms === undefined || !Number.isFinite(ms) || ms < 0) return '—';
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s ago`;
   const m = Math.round(s / 60);
@@ -358,6 +358,21 @@ export function computeHealthItems(
     },
   ];
 }
+
+// ─── Hero card visual theme ────────────────────────────────────────────────
+// Exported so both the Diagnostics screen (diagnostics.tsx) and its tests can
+// share a single source of truth.  Any palette change here propagates to both
+// the rendered card and the regression guards in diagnosticsHeroCard.test.ts.
+
+export const heroTheme: Record<
+  OverallHealthLevel,
+  { bg: string; border: string; headline: string; sub: string; icon: string }
+> = {
+  ok:       { bg: '#ECFDF5', border: '#6EE7B7', headline: '#065F46', sub: '#047857', icon: '🛡️' },
+  warn:     { bg: '#FFFBEB', border: '#FDE68A', headline: '#92400E', sub: '#B45309', icon: '⚠️' },
+  error:    { bg: '#FEF2F2', border: '#FECACA', headline: '#991B1B', sub: '#DC2626', icon: '❌' },
+  starting: { bg: '#F9FAFB', border: '#E5E7EB', headline: '#374151', sub: '#6B7280', icon: '⏳' },
+};
 
 /**
  * Returns the worst status across all items, in order: error > warn > unknown > ok.

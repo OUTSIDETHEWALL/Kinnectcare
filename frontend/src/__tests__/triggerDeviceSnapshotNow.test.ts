@@ -141,6 +141,32 @@ describe('triggerDeviceSnapshotNow', () => {
       ([url]: [string]) => url === `/members/${FAKE_CFG.memberId}/device-snapshot`,
     );
     expect(snapshotCall).toBeDefined();
+
+    // Confirm the payload shape — all required fields must be present so the
+    // backend can store the device-snapshot without a missing-key error.
+    const body = snapshotCall![1] as Record<string, unknown>;
+    // Timestamp — must be an ISO-8601 string
+    expect(typeof body.at).toBe('string');
+    expect((body.at as string)).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // Pipeline-age fields — must exist (null or number)
+    const ageFields = [
+      'activity_age_ms', 'motion_age_ms', 'location_age_ms',
+      'hb_js_age_ms', 'hl_inv_age_ms', 'hl_hb_age_ms',
+      'http_att_age_ms', 'http_ok_age_ms',
+    ];
+    for (const field of ageFields) {
+      expect(body).toHaveProperty(field);
+      expect(
+        body[field] === null || typeof body[field] === 'number',
+      ).toBe(true);
+    }
+    // SDK-state fields
+    expect(body).toHaveProperty('sdk_enabled');
+    expect(body).toHaveProperty('sdk_is_moving');
+    expect(body).toHaveProperty('sdk_tracking_mode');
+    // App-state
+    expect(body).toHaveProperty('app_state');
+    expect(body).toHaveProperty('listeners_attached');
   });
 
   // ── Case 3: PUT fails ───────────────────────────────────────────────────────

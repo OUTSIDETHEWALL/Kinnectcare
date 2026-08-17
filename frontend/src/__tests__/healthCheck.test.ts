@@ -1003,6 +1003,170 @@ describe('network-error burst recovery — upload row with lastHttpSuccessMs', (
   });
 });
 
+// ─── computeOverallHealth — subline copy contains the formatted age ───────────
+//
+// Task #62: The subline strings caregivers actually read are assembled inside
+// computeOverallHealth — e.g. "Last location confirmed: 2m ago".  No prior
+// test asserted the full subline text, so a merge conflict that dropped
+// "Last location confirmed:" would pass all existing tests but silently corrupt
+// the copy caregivers see.
+//
+// These tests pin the subline wording for every branch:
+//   • ok          — upload < 5 min    → "Last location confirmed: Xm ago"
+//   • warn        — upload 5–15 min   → "Last location confirmed: Xm ago — usually self-correcting"
+//   • error       — upload > 15 min   → "Last location confirmed: Xm ago — check background permissions"
+//   • heartbeat   — heartbeat, no upload → "Last heartbeat: Xs ago — upload confirmation expected..."
+
+describe('computeOverallHealth — subline contains the formatted age', () => {
+  beforeEach(() => { seq = 0; });
+
+  const NOW = 10_000_000;
+
+  // ── ok branch: upload < 5 min ─────────────────────────────────────────────
+  //
+  // Upload 2 min ago → level 'ok'.
+  // Subline must mention "Last location confirmed:" and include the age string.
+
+  it('ok subline reads "Last location confirmed: 2m ago"', () => {
+    const log = [
+      makeEvent('sdk_onHttp', NOW - 2 * 60_000, { success: true }), // 2 min ago
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('ok');
+    expect(result.subline).toMatch(/Last location confirmed:/);
+    expect(result.subline).toMatch(/2m ago/);
+  });
+
+  it('ok subline contains the exact age formatted by formatAgeMs', () => {
+    // 90 s = 1.5 min → formatAgeMs rounds to 2m ago
+    const uploadAgeMs = 90_000;
+    const log = [
+      makeEvent('sdk_onHttp', NOW - uploadAgeMs, { success: true }),
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('ok');
+    expect(result.subline).toContain(formatAgeMs(uploadAgeMs));
+  });
+
+  // ── warn branch: upload 5–15 min ─────────────────────────────────────────
+  //
+  // Upload 10 min ago → level 'warn'.
+  // Subline must still lead with "Last location confirmed:" (not a generic
+  // "upload delayed" string) and must include the qualifying rider.
+
+  it('warn subline reads "Last location confirmed: 10m ago — usually self-correcting"', () => {
+    const log = [
+      makeEvent('sdk_onHttp', NOW - 10 * 60_000, { success: true }), // 10 min ago
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('warn');
+    expect(result.subline).toMatch(/Last location confirmed:/);
+    expect(result.subline).toMatch(/10m ago/);
+    expect(result.subline).toMatch(/self-correcting/i);
+  });
+
+  it('warn subline contains the exact age formatted by formatAgeMs', () => {
+    const uploadAgeMs = 7 * 60_000; // 7 min
+    const log = [
+      makeEvent('sdk_onHttp', NOW - uploadAgeMs, { success: true }),
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('warn');
+    expect(result.subline).toContain(formatAgeMs(uploadAgeMs));
+  });
+
+  // ── error branch: upload > 15 min ────────────────────────────────────────
+  //
+  // Upload 20 min ago → level 'error'.
+  // Subline must still report the age (not just "check permissions") so
+  // caregivers know how long ago the last location was confirmed.
+
+  it('error subline reads "Last location confirmed: 20m ago — check background permissions"', () => {
+    const log = [
+      makeEvent('sdk_onHttp', NOW - 20 * 60_000, { success: true }), // 20 min ago
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('error');
+    expect(result.subline).toMatch(/Last location confirmed:/);
+    expect(result.subline).toMatch(/20m ago/);
+    expect(result.subline).toMatch(/background permissions/i);
+  });
+
+  it('error subline contains the exact age formatted by formatAgeMs', () => {
+    const uploadAgeMs = 25 * 60_000; // 25 min → formatAgeMs: "25m ago"
+    const log = [
+      makeEvent('sdk_onHttp', NOW - uploadAgeMs, { success: true }),
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('error');
+    expect(result.subline).toContain(formatAgeMs(uploadAgeMs));
+  });
+
+  // ── heartbeat-only warn: no upload, heartbeat present ────────────────────
+  //
+  // When no upload evidence exists but a heartbeat is present the level is
+  // 'warn'.  The subline must reference the heartbeat age — not the upload
+  // age — and must include the "expected within the next minute" rider so
+  // caregivers understand this is transient, not an error.
+
+  it('heartbeat-only warn subline reads "Last heartbeat: 45s ago — upload confirmation expected…"', () => {
+    const log = [
+      makeEvent('sdk_onHeartbeat', NOW - 45_000), // 45 s ago
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('warn');
+    expect(result.uploadAgeMs).toBeNull();
+    expect(result.subline).toMatch(/Last heartbeat:/);
+    expect(result.subline).toMatch(/45s ago/);
+    expect(result.subline).toMatch(/upload confirmation expected/i);
+  });
+
+  it('heartbeat-only warn subline contains the exact heartbeat age from formatAgeMs', () => {
+    const hbAgeMs = 2 * 60_000; // 2 min
+    const log = [
+      makeEvent('headless_task_invoked', NOW - hbAgeMs),
+    ];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('warn');
+    expect(result.uploadAgeMs).toBeNull();
+    expect(result.subline).toContain(formatAgeMs(hbAgeMs));
+  });
+
+  // ── cross-check: subline never contains raw numbers without units ─────────
+  //
+  // A formatting regression (e.g. formatAgeMs returning "120000" instead of
+  // "2m ago") would produce sublines like "Last location confirmed: 120000".
+  // Guard against that by asserting the subline always contains "ago".
+
+  it('ok subline always contains the word "ago" (not a raw millisecond count)', () => {
+    const log = [makeEvent('sdk_onHttp', NOW - 90_000, { success: true })];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('ok');
+    expect(result.subline).toContain('ago');
+  });
+
+  it('warn subline always contains the word "ago" (not a raw millisecond count)', () => {
+    const log = [makeEvent('sdk_onHttp', NOW - 8 * 60_000, { success: true })];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('warn');
+    expect(result.subline).toContain('ago');
+  });
+
+  it('error subline always contains the word "ago" (not a raw millisecond count)', () => {
+    const log = [makeEvent('sdk_onHttp', NOW - 20 * 60_000, { success: true })];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('error');
+    expect(result.subline).toContain('ago');
+  });
+
+  it('heartbeat-only warn subline always contains the word "ago"', () => {
+    const log = [makeEvent('sdk_onHeartbeat', NOW - 30_000)];
+    const result = computeOverallHealth(log, NOW);
+    expect(result.level).toBe('warn');
+    expect(result.subline).toContain('ago');
+  });
+});
+
 // ─── formatAgeMs — human-readable age strings shown in health sublines ────────
 //
 // formatAgeMs produces every timestamp shown in the Diagnostics and Me tab
@@ -1082,22 +1246,22 @@ describe('formatAgeMs — timestamp formatting', () => {
     expect(formatAgeMs(7_200_000)).toBe('2h ago');
   });
 
-  // ── Negative values — must not crash; documents expected output ───────────
+  // ── Negative values — clock skew guard → em-dash ─────────────────────────
   //
   // Negative ms means the recorded timestamp is in the future relative to
-  // `now`, which can happen if the device clock is skewed.  formatAgeMs does
-  // not guard against this, so it propagates through as a negative-prefixed
-  // string.  The tests below document the actual behavior so a silent change
-  // is caught.
+  // `now`, which can happen if the device clock is skewed.  formatAgeMs must
+  // return '—' for any negative input (consistent with the NaN / Infinity
+  // guard) so caregivers never see "-2m ago" or "-1s ago" in health sublines.
 
   it('does not throw for negative values', () => {
     expect(() => formatAgeMs(-1_000)).not.toThrow();
   });
 
-  it('returns a string (not "—") for small negative values', () => {
-    // -1 000 ms: s = Math.round(-1) = -1 < 60 → "-1s ago"
-    const result = formatAgeMs(-1_000);
-    expect(typeof result).toBe('string');
-    expect(result).not.toBe('—');
+  it('returns "—" for small negative values (-1 000 ms)', () => {
+    expect(formatAgeMs(-1_000)).toBe('—');
+  });
+
+  it('returns "—" for large negative values (-90 000 ms)', () => {
+    expect(formatAgeMs(-90_000)).toBe('—');
   });
 });

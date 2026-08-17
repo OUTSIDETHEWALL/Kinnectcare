@@ -94,6 +94,12 @@ import {
   OverallHealthLevel,
 } from '../src/healthCheck';
 import { startDeviceComparisonRefresh } from '../src/deviceComparisonRefresh';
+import {
+  ageCellColor,
+  computeSnapshotElapsedMs,
+  effectiveSnapshotAgeMs as computeEffectiveSnapshotAgeMs,
+  httpOkCellColor,
+} from '../src/deviceComparisonUtils';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
 const PUSH_REFRESH_KEY = 'kc_push_refresh_log';
@@ -2074,7 +2080,7 @@ export default function DiagnosticsScreen() {
               if (ageMs === null || ageMs === undefined) {
                 return <Text style={{ color: '#6B7280', fontSize: 12 }}>—</Text>;
               }
-              const color = ageMs < warn ? '#10B981' : ageMs < crit ? '#F59E0B' : '#EF4444';
+              const color = ageCellColor(ageMs, warn, crit);
               const s = Math.round(ageMs / 1000);
               const label = s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
               return <Text style={{ color, fontWeight: '700', fontSize: 12 }}>{label} ago</Text>;
@@ -2133,10 +2139,7 @@ export default function DiagnosticsScreen() {
              */
             const getSnapshotElapsedMs = (m: any): number | null => {
               const ds = m.device_snapshot;
-              if (!ds?.at && !ds?.stored_at) return null;
-              try {
-                return nowTick - new Date(ds.at || ds.stored_at).getTime();
-              } catch { return null; }
+              return computeSnapshotElapsedMs(ds?.at, ds?.stored_at, nowTick);
             };
 
             /**
@@ -2144,10 +2147,8 @@ export default function DiagnosticsScreen() {
              * Returns null if either component is missing.
              */
             const effectiveSnapshotAgeMs = (m: any, stageAgeMs: number | null | undefined): number | null => {
-              if (stageAgeMs === null || stageAgeMs === undefined) return null;
-              const elapsed = getSnapshotElapsedMs(m);
-              if (elapsed === null) return null;
-              return elapsed + stageAgeMs;
+              const ds = m.device_snapshot;
+              return computeEffectiveSnapshotAgeMs(ds?.at, ds?.stored_at, nowTick, stageAgeMs);
             };
 
             // Comparison rows: label + accessor function.
@@ -2210,7 +2211,18 @@ export default function DiagnosticsScreen() {
               },
               {
                 label: 'HTTP success (device)',
-                render: (m) => ageCell(effectiveSnapshotAgeMs(m, m.device_snapshot?.http_ok_age_ms), 5 * 60_000, 15 * 60_000),
+                // httpOkCellColor is the exported presentation model for this row
+                // (deviceComparisonUtils.ts).  Calling it with `nowTick` is the
+                // explicit linkage that turns the cell amber as the live clock
+                // advances — without requiring a new server fetch.  Tests verify
+                // this by calling httpOkCellColor(member, nowMs) with advancing nowMs.
+                render: (m) => {
+                  const ageMs = effectiveSnapshotAgeMs(m, m.device_snapshot?.http_ok_age_ms);
+                  if (ageMs === null) return <Text style={{ color: '#6B7280', fontSize: 12 }}>—</Text>;
+                  const s = Math.round(ageMs / 1000);
+                  const label = s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+                  return <Text style={{ color: httpOkCellColor(m, nowTick), fontWeight: '700', fontSize: 12 }}>{label} ago</Text>;
+                },
               },
               {
                 label: 'Listeners attached (device)',
