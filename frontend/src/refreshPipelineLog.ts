@@ -99,6 +99,13 @@ export type PipelineEntry = {
   batchRegressed?: number;
   /** Members that had no prior record (first-ever write for that id). */
   batchFirstWrite?: number;
+  /**
+   * Members whose location_name was null in the incoming response but the
+   * store already held a resolved name — the preserved value was carried
+   * forward so the UI never flashes "Unknown location" while the geocoder
+   * is slow.  Only emitted by store-fetch-all and store-upsert-many.
+   */
+  namesPreserved?: number;
 };
 
 // ---------------------------------------------------------------------------
