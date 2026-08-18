@@ -383,10 +383,22 @@ export function fetchAll(): Promise<MemberRecord[]> {
       // from the backend (a removed member) drops out here.
       const next: Record<string, MemberRecord> = {};
       const touched: string[] = [];
+      let namesPreserved = 0;
       for (const m of arr) {
         if (!m || !m.id) continue;
         fetchSeq[m.id] = nextSeq++;
-        next[m.id] = m;
+        // Preserve a previously-resolved location_name if the incoming record
+        // has none (e.g. the backend geocoder timed out on this GET /members
+        // call).  Mirrors the same guard in upsertMany() so all three write
+        // paths are consistent.
+        const existingName = (state.members[m.id] as any)?.location_name ?? null;
+        const incomingName = (m as any)?.location_name ?? null;
+        if (!incomingName && existingName) {
+          next[m.id] = { ...m, location_name: existingName } as MemberRecord;
+          namesPreserved++;
+        } else {
+          next[m.id] = m;
+        }
         touched.push(m.id);
       }
       // Also include any local ids that weren't in this response so
@@ -416,6 +428,7 @@ export function fetchAll(): Promise<MemberRecord[]> {
           batchUnchanged,
           batchRegressed,
           batchFirstWrite,
+          namesPreserved,
         });
       } catch (_e) {}
       return arr;
