@@ -27,6 +27,7 @@ Speculative fixes are not acceptable. "This should work" is not acceptable. If c
 - PR description must follow the engineering process format above: bug, fix, why, confidence level, verification steps
 - **No force-pushes to any branch without Charles's explicit approval**
 - Charles reviews and approves every merge
+- **Git push:** always use `GITHUB_PAT` secret with the `x-access-token` URL scheme. Never rely on the Replit built-in git credential helper — it times out consistently in this environment. Reset the remote URL to the plain HTTPS form immediately after each push so the token is never left in the config.
 
 ## Release commands
 
