@@ -59,7 +59,12 @@ _LOW_BATTERY    = 0.10   # well below the 0.15 trigger threshold
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _make_prev_doc(*, was_alerted: bool = False, name: str = "Joyce") -> dict:
-    return {"low_battery_alerted": was_alerted, "name": name}
+    # When critical fired (was_alerted=True), warn was also set — mirror real state.
+    return {
+        "low_battery_alerted":      was_alerted,
+        "low_battery_warn_alerted": was_alerted,
+        "name":                     name,
+    }
 
 
 def _make_coro():
@@ -102,9 +107,11 @@ def _make_db_mock(*, second_insert_raises: bool = True):
         # First insert succeeds (return value unused by check_low_battery)
         return MagicMock()
 
-    m.alerts.insert_one = AsyncMock(side_effect=_insert_side_effect)
-    m.alerts.update_one = AsyncMock()
-    m.members.update_one = AsyncMock()
+    m.alerts.insert_one       = AsyncMock(side_effect=_insert_side_effect)
+    m.alerts.update_one       = AsyncMock()
+    m.alerts.update_many      = AsyncMock()
+    m.alerts.find_one_and_update = AsyncMock(return_value={"_id": "alert-id-001"})
+    m.members.update_one      = AsyncMock()
     return m
 
 
@@ -152,11 +159,11 @@ class TestConcurrentDedup:
              patch.object(server, "push_to_family_group", push_mock):
             results = _run_concurrent(_make_coro(), _make_coro())
 
+        expected = {"low_battery_alerted": True, "low_battery_warn_alerted": True}
         for i, result in enumerate(results):
-            assert result == {"low_battery_alerted": True}, (
+            assert result == expected, (
                 f"Path {i} returned {result!r} instead of "
-                "{'low_battery_alerted': True} — the member document would not "
-                "be updated correctly."
+                f"{expected!r} — the member document would not be updated correctly."
             )
 
     def test_exactly_one_alert_in_db(self):
@@ -295,7 +302,7 @@ class TestSingleUploadPath:
              patch.object(server, "push_to_family_group", push_mock):
             result = asyncio.get_event_loop().run_until_complete(_make_coro())
 
-        assert result == {"low_battery_alerted": True}
+        assert result == {"low_battery_alerted": True, "low_battery_warn_alerted": True}
         assert mock_db.alerts.insert_one.call_count == 1
         assert push_mock.call_count == 1
 
