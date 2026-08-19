@@ -1132,6 +1132,20 @@ describe('computeOverallHealth — subline contains the formatted age', () => {
     expect(result.subline).toContain(formatAgeMs(hbAgeMs));
   });
 
+  it('future heartbeat timestamps never produce a negative age in the hero subline', () => {
+    const futureHeartbeatAt = NOW + 60_000; // device clock is 1 min ahead
+    const log = [
+      makeEvent('sdk_onHeartbeat', futureHeartbeatAt),
+    ];
+    const result = computeOverallHealth(log, NOW);
+
+    expect(result.level).toBe('warn');
+    expect(result.uploadAgeMs).toBeNull();
+    // formatAgeMs safely renders an invalid negative age as an em dash.
+    expect(result.subline).toContain('Last heartbeat: —');
+    expect(result.subline).not.toMatch(/-\d+[smh] ago/);
+  });
+
   // ── cross-check: subline never contains raw numbers without units ─────────
   //
   // A formatting regression (e.g. formatAgeMs returning "120000" instead of
