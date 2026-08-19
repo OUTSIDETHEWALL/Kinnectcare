@@ -29,8 +29,9 @@ export const PRIVACY_POLICY: LegalSection[] = [
       `Family member profiles: names, ages, roles, optional phone numbers, and an optional daily ` +
       `check-in time you configure. Health & routine data: medication titles, dosages, scheduled ` +
       `times, completion history, daily routine items, and check-in records. Location data: when ` +
-      `you use SOS or share a check-in, we record the device’s GPS coordinates at that moment ` +
-      `(latitude, longitude, and timestamp). We do not continuously track location in the background. ` +
+      `you grant location permission, we collect the device’s precise GPS coordinates, location accuracy, ` +
+      `and timestamps to provide current location in the family map and location in SOS alerts. ` +
+      `This can occur while the app is open, closed, or not in use. ` +
       `Device & push data: Expo push notification tokens, time zone, and limited diagnostic logs. ` +
       `We do not knowingly collect personal information from children under the age of 13.`,
   },
@@ -38,19 +39,20 @@ export const PRIVACY_POLICY: LegalSection[] = [
     heading: '3. How We Use Your Information',
     body:
       `We use the information you provide to (a) deliver core ${APP_NAME} features such as ` +
-      `reminders, check-ins, the family dashboard, and SOS alerts; (b) compute medication compliance ` +
-      `statistics for your own household; (c) send push notifications you have opted into; ` +
-      `(d) maintain account security; and (e) improve the service and resolve issues. We do not ` +
+      `reminders, check-ins, the family dashboard, family location sharing, and SOS alerts; ` +
+      `(b) compute medication compliance statistics for your own household; (c) send push notifications ` +
+      `you have opted into; (d) maintain account security; and (e) improve the service and resolve issues. We do not ` +
       `sell personal data, and we do not use your health or location data for advertising.`,
   },
   {
     heading: '4. How We Share Information',
     body:
-      `We only share information as needed to operate ${APP_NAME}: (a) with service providers ` +
-      `that host our infrastructure or deliver push notifications (e.g., Expo); (b) when required ` +
-      `by law, legal process, or to protect the safety of a user or the public; and (c) in connection ` +
-      `with a business transfer (merger, acquisition, or sale of assets), in which case affected ` +
-      `users will be notified. We never sell your data to advertisers or data brokers.`,
+      `We only share information as needed to operate ${APP_NAME}: (a) precise location and related ` +
+      `safety information are visible to the members of the Kinnship family group that you join; ` +
+      `(b) service providers that host our infrastructure, provide map or location services, or deliver ` +
+      `push notifications process data on our behalf; (c) when required by law, legal process, or to protect ` +
+      `the safety of a user or the public; and (d) in connection with a business transfer (merger, acquisition, ` +
+      `or sale of assets), in which case affected users will be notified. We never sell your data to advertisers or data brokers.`,
   },
   {
     heading: '5. SOS & Emergency Data',

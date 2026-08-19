@@ -65,6 +65,7 @@ import { Platform, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
+import { ensureBackgroundLocationDisclosure } from './backgroundLocationDisclosure';
 
 // Lazy require so this module is safe to import on web (where the
 // native module is absent).
@@ -1480,6 +1481,9 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
   //   AUTHORIZATION_STATUS_DENIED (1) — denied
   //   AUTHORIZATION_STATUS_NOT_DETERMINED (0) — never asked
   try {
+    // The native SDK owns this Android request path, so it needs the same
+    // Play-compliant prominent disclosure as the legacy expo-location path.
+    await ensureBackgroundLocationDisclosure();
     const status = await lib.requestPermission();
     await logEvent('requestPermission_ok', {
       status,
