@@ -28,6 +28,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { api } from './api';
 import * as memberStore from './store/memberStore';
+import { ensureBackgroundLocationDisclosure } from './backgroundLocationDisclosure';
 
 export const BG_LOCATION_TASK = 'kinnship/background-location-v1';
 export const SOS_ACTIVE_KEY = '@kinnship/sos_active_v1';
@@ -434,6 +435,10 @@ export async function startBackgroundLocation(memberId: string): Promise<boolean
   }
   const bg = await Location.getBackgroundPermissionsAsync();
   if (bg.status !== 'granted') {
+    // Google Play prominent disclosure: this must appear immediately before
+    // Android's background-location prompt, including when this function is
+    // reached from the root bootstrap or an SOS cadence restart.
+    await ensureBackgroundLocationDisclosure();
     const req = await Location.requestBackgroundPermissionsAsync();
     if (req.status !== 'granted') return false;
   }
