@@ -1,17 +1,8 @@
 /**
- * pin-setup.tsx — first-time PIN setup screen.
+ * pin-setup.tsx — optional App Lock PIN setup screen.
  *
- * Flow:
- *   1. User signs in with email/password (or just signed up). The login
- *      screen routes here if no PIN is set yet for this user.
- *   2. Step 1: enter a new 4-digit PIN.
- *   3. Step 2: re-enter to confirm. If the two PINs don't match, we
- *      bounce them back to step 1 with a friendly error.
- *   4. On match: store via pinAuth.setPin, mark unlocked, route to
- *      dashboard.
- *
- * The user can also tap "Not now" — that skips PIN setup; they'll keep
- * logging in with email/password until they decide to set one later.
+ * This route is only entered voluntarily from Me → Security. Completing it
+ * saves a fallback PIN and, when requested, enables optional App Lock.
  */
 import { useRef, useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView } from 'react-native';
@@ -21,16 +12,15 @@ import { Colors } from '../../src/theme';
 import { useAuth } from '../../src/AuthContext';
 import PinPad, { PinPadHandle } from '../../src/PinPad';
 import { setPin, markUnlocked, PIN_LENGTH } from '../../src/pinAuth';
-import { markPinSetupDismissed } from '../../src/pinSetupPrompt';
+import { enableAppLock } from '../../src/appLock';
 import { performFullAppReset } from '../../src/appReset';
 
 export default function PinSetup() {
   const router = useRouter();
   const { user, loading, logout } = useAuth();
-  const params = useLocalSearchParams<{ required?: string }>();
-  // When `required=1` we hide the "Not now" button — used after a forced
-  // PIN reset where the user MUST set a new one before continuing.
-  const isRequired = params?.required === '1';
+  const params = useLocalSearchParams<{ enableAppLock?: string; change?: string }>();
+  const enablesAppLock = params?.enableAppLock === '1';
+  const isChanging = params?.change === '1';
 
   // ============================================================
   // HARD GUARD: unauthenticated users must NEVER see this screen.
@@ -83,38 +73,15 @@ export default function PinSetup() {
     }
     try {
       await setPin(user.id, pin);
+      if (enablesAppLock) await enableAppLock(user.id);
       markUnlocked(user.id);
-      reset('enter', 'PIN saved!', 'success');
+      reset('enter', enablesAppLock ? 'App Lock is on!' : 'PIN updated!', 'success');
       setTimeout(() => router.replace('/(tabs)/dashboard'), 400);
     } catch (e: any) {
       Alert.alert('Could not save PIN', e?.message || 'Please try again.');
       setFirstPin('');
       reset('enter', 'Try again.', 'error');
     }
-  };
-
-  const onSkip = () => {
-    if (isRequired) return;
-    Alert.alert(
-      'Skip PIN setup?',
-      "You can always add a PIN later from Settings → Account. You'll keep signing in with your email and password until then.",
-      [
-        {
-          text: 'Keep email login',
-          style: 'default',
-          onPress: async () => {
-            // Persist the dismissal so RootNav doesn't keep
-            // re-routing the user back here on every app open /
-            // re-sign-in.
-            if (user?.id) {
-              try { await markPinSetupDismissed(user.id); } catch (_e) {}
-            }
-            router.replace('/(tabs)/dashboard');
-          },
-        },
-        { text: 'Set up PIN', style: 'cancel' },
-      ],
-    );
   };
 
   // ============================================================
@@ -154,7 +121,7 @@ export default function PinSetup() {
   // pattern as otp-verify.tsx — one clear instruction line, never
   // two stacked on top of each other.
   const stepTitle = step === 'enter'
-    ? (isRequired ? 'Set up a new PIN' : 'Choose a 4-digit PIN')
+    ? (isChanging ? 'Choose a new PIN' : 'Choose a 4-digit PIN')
     : 'Confirm your PIN';
 
   return (
@@ -168,7 +135,7 @@ export default function PinSetup() {
           <Text style={styles.title}>{stepTitle}</Text>
           <Text style={styles.subtitle}>
             {step === 'enter'
-              ? "We'll use this for daily sign-in — no email code needed."
+              ? 'This is your fallback when Face ID or fingerprint is unavailable.'
               : 'Type the same 4 digits again to confirm.'}
           </Text>
         </View>
@@ -183,12 +150,6 @@ export default function PinSetup() {
             hintTone={hintTone}
           />
         </View>
-
-        {!isRequired && (
-          <TouchableOpacity testID="pin-setup-skip" onPress={onSkip} style={styles.skip}>
-            <Text style={styles.skipText}>Not now</Text>
-          </TouchableOpacity>
-        )}
 
         <TouchableOpacity
           testID="pin-setup-reset-app"

@@ -36,8 +36,6 @@ import * as memberStore from '../../src/store/memberStore';
 import { logPipelineEvent } from '../../src/refreshPipelineLog';
 import { useActiveEmergency } from '../../src/activeEmergency';
 // TrackingStatusPill removed — Build XX family screen simplification.
-import { hasPinForUser } from '../../src/pinAuth';
-import { wasPinSetupDismissed, markPinSetupDismissed } from '../../src/pinSetupPrompt';
 import Svg, { Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 
@@ -148,18 +146,6 @@ export default function Dashboard() {
     })();
   }, [user?.id]);
 
-  // PIN setup card — shown once on the dashboard after first login if no
-  // PIN is set yet and the user hasn't tapped "Not now" before.
-  const [showPinCard, setShowPinCard] = useState(false);
-  useEffect(() => {
-    if (!user?.id) return;
-    (async () => {
-      const hasPin = await hasPinForUser(user.id);
-      if (hasPin) return;
-      const dismissed = await wasPinSetupDismissed(user.id);
-      if (!dismissed) setShowPinCard(true);
-    })();
-  }, [user?.id]);
   // SOS hold-to-activate. 2.5 s hold → 3-2-1 countdown overlay → fires.
   // Cancel button on the overlay aborts before any alert is sent.
   const [sosHolding, setSosHolding] = useState(false);
@@ -899,43 +885,6 @@ export default function Dashboard() {
                 }}
               />
             ))}
-          </View>
-        )}
-
-        {/* PIN setup card — dismissible, shown after first login when no
-            PIN is configured.  Moved off the critical onboarding path so
-            the user reaches the dashboard before being asked to set one. */}
-        {showPinCard && (
-          <View style={styles.pinCard} testID="dashboard-pin-setup-card">
-            <View style={styles.pinCardRow}>
-              <Text style={styles.pinCardEmoji}>🔐</Text>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.pinCardTitle}>Add a 4-digit PIN</Text>
-                <Text style={styles.pinCardBody}>
-                  Protect your account with a 4-digit PIN for faster sign-in.
-                </Text>
-              </View>
-              <TouchableOpacity
-                testID="dashboard-pin-dismiss"
-                onPress={async () => {
-                  setShowPinCard(false);
-                  if (user?.id) {
-                    try { await markPinSetupDismissed(user.id); } catch (_e) {}
-                  }
-                }}
-                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-              >
-                <Icon name="close" size={20} color={Colors.textTertiary} />
-              </TouchableOpacity>
-            </View>
-            <TouchableOpacity
-              testID="dashboard-pin-setup-btn"
-              style={styles.pinCardBtn}
-              onPress={() => router.push('/(auth)/pin-setup' as any)}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.pinCardBtnText}>Set up PIN</Text>
-            </TouchableOpacity>
           </View>
         )}
 

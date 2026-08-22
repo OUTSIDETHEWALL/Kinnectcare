@@ -8,9 +8,13 @@ import * as Updates from 'expo-updates';
 import { Colors } from '../src/theme';
 import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink, refreshPushTokenIfStale, dismissStaleAreYouOkNotifs } from '../src/push';
 import { isOnboardingDone, markOnboardingDone } from '../src/onboardingStore';
-import { hasPinForUser, isUnlockedNow, markUnlocked } from '../src/pinAuth';
-import { isSessionValid } from '../src/pinSession';
-import { wasPinSetupDismissed } from '../src/pinSetupPrompt';
+import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
+import {
+  isAppLockEnabled,
+  markAppLockMigrationNoticeShown,
+  needsAppLockUnlock as shouldRequireAppLockUnlock,
+  shouldShowAppLockMigrationNotice,
+} from '../src/appLock';
 import { startBackgroundLocation, stopBackgroundLocation } from '../src/backgroundLocation';
 import { configureBatteryTask, BATTERY_OPT_PROMPTED_KEY } from '../src/batteryTask';
 import { refreshLocationIfStale, setMyMemberId, setMyUserId } from '../src/locationRefresh';
@@ -37,20 +41,10 @@ function RootNav() {
   const pathname = usePathname();
   const [onboardingChecked, setOnboardingChecked] = useState(false);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
-  // PIN gate state: whether THIS user has a PIN set on this device, and
-  // whether they've already unlocked-it-this-session. We re-check the
-  // "has PIN" flag whenever the authenticated user changes (sign-in,
-  // sign-out, account switch on the same device).
-  const [pinChecked, setPinChecked] = useState(false);
-  const [needsPinUnlock, setNeedsPinUnlock] = useState(false);
-  // Set after first successful login when no PIN is configured AND the
-  // user hasn't tapped "Not now" before. This is the source of truth
-  // for the post-login "Set up a 4-digit PIN?" prompt — putting it
-  // here in RootNav eliminates the race we had when login.tsx tried
-  // to navigate to /(auth)/pin-setup itself (RootNav would overwrite
-  // with /(tabs)/dashboard since both runs were redirecting at the
-  // same time).
-  const [needsPinSetup, setNeedsPinSetup] = useState(false);
+  // App Lock is optional and off by default. A saved legacy PIN alone must
+  // never hold up session restoration, deep links, or monitoring startup.
+  const [appLockChecked, setAppLockChecked] = useState(false);
+  const [needsAppLockUnlock, setNeedsAppLockUnlock] = useState(false);
   // Health disclaimer gate — first-launch only.  Acknowledgment stored in
   // AsyncStorage under DISCLAIMER_ACK_KEY.  Required for Google Play
   // medical-disclaimer compliance (v1.1.7).
@@ -270,96 +264,60 @@ function RootNav() {
 
   // ==========================================================================
 
-  // Re-evaluate the PIN gate whenever the auth user changes. If the
-  // user has a PIN saved AND they haven't unlocked-this-session yet,
-  // we redirect to the PIN-login screen below. If they have NO PIN
-  // saved AND they haven't dismissed the setup prompt yet, we route
-  // them to /(auth)/pin-setup.
+  // Re-evaluate the optional App Lock whenever the authenticated account
+  // changes. A legacy PIN does not activate the gate by itself: only the
+  // explicit App Lock preference does. This keeps the session and all native
+  // safety work independent from the foreground privacy choice.
   useEffect(() => {
-    // CRITICAL RACE FIX (v1.2-hotfix): reset pinChecked to false at
-    // the START of every re-run.  Previously the effect only set
-    // pinChecked=TRUE at the end — when the cached-user restore on
-    // cold-start changed user.id from null → set, this effect kicked
-    // off a fresh async hasPinForUser() check, but during that ~30ms
-    // await the routing effect would fire with the STALE
-    // pinChecked=true (from the prior user=null run, where we'd set
-    // needsPinUnlock=false).  RootNav saw a logged-in user with
-    // "PIN already checked, no unlock needed" and routed straight to
-    // the dashboard (OR back to welcome, depending on segment
-    // alignment) — skipping the PIN entirely.  Symptom: "notification
-    // tap routes to OTP/welcome instead of PIN after device reboot".
-    //
-    // By resetting pinChecked=false at the top, the routing effect's
-    // `if (loading || !pinChecked) return;` guard keeps the spinner
-    // visible until we've recomputed needsPinUnlock against the new
-    // user.  The spinner is invisible-to-fast for most users (<50ms)
-    // and is the correct UX in the genuine "we don't know yet" state.
     let cancelled = false;
-    setPinChecked(false);
+    setAppLockChecked(false);
     (async () => {
       if (!user?.id) {
         if (cancelled) return;
-        setNeedsPinUnlock(false);
-        setNeedsPinSetup(false);
-        setPinChecked(true);
+        setNeedsAppLockUnlock(false);
+        setAppLockChecked(true);
         return;
       }
-      const hasPin = await hasPinForUser(user.id);
+      const [enabled, hasPin] = await Promise.all([
+        isAppLockEnabled(user.id),
+        hasPinForUser(user.id),
+      ]);
       if (cancelled) return;
-      if (hasPin) {
-        // Existing PIN — gate behind unlock unless we've already
-        // unlocked-this-session (e.g. after a fresh email login,
-        // login.tsx calls markUnlocked).
-        //
-        // Build #55 — also honour the persistent 24 h PIN session
-        // (see src/pinSession.ts).  Rationale: without persistence,
-        // Android low-memory reclaim silently kills the JS process
-        // → in-memory `unlockedSessions` set clears → user is
-        // re-prompted for the PIN even though they unlocked 5
-        // minutes ago.  With this check, we re-mark the session as
-        // unlocked from the persisted timestamp so RootNav flows
-        // straight to the dashboard.  Foregrounding alone does NOT
-        // refresh the stamp — only a fresh unlock does.
-        if (isUnlockedNow(user.id)) {
-          setNeedsPinUnlock(false);
-        } else if (await isSessionValid(user.id)) {
-          if (cancelled) return;
-          markUnlocked(user.id);
-          setNeedsPinUnlock(false);
-        } else {
-          setNeedsPinUnlock(true);
-        }
-        setNeedsPinSetup(false);
-      } else {
-        // No PIN yet — prompt unless the user previously tapped
-        // "Not now". The flag is per-user so signing in with a
-        // different account re-prompts that account.
-        setNeedsPinUnlock(false);
-        const dismissed = await wasPinSetupDismissed(user.id);
-        if (cancelled) return;
-        setNeedsPinSetup(!dismissed);
-      }
-      setPinChecked(true);
+      // A missing PIN under App Lock is a corrupted/incomplete local setup.
+      // Fail open to the authenticated session rather than trapping someone
+      // behind a screen they cannot unlock; Settings can recreate the PIN.
+      setNeedsAppLockUnlock(shouldRequireAppLockUnlock(enabled, hasPin, isUnlockedNow(user.id)));
+      setAppLockChecked(true);
     })();
     return () => {
       cancelled = true;
     };
   }, [user?.id]);
 
-  // ----- PIN re-prompt cadence: COLD START ONLY -----
-  //
-  // v6.10 re-locked the PIN on every background/foreground transition
-  // (banking-app pattern). v6.11 switches to the "every cold start
-  // only" pattern per user feedback — elderly users found the
-  // every-resume re-prompt annoying when they briefly switched to a
-  // calendar / SMS / phone call and came back. The PIN unlock now
-  // sticks until the JS process actually dies (which happens on a
-  // true app kill or an OS process-reclaim under memory pressure).
-  //
-  // If the user wants tighter re-lock cadence later they can opt in
-  // via Settings — for now we ship the friendlier default.
-  //
-  // NOTE: previous AppState listener has been intentionally removed.
+  // Existing PIN users get this explanation once, after normal onboarding
+  // gates have cleared. It does not change their PIN, session, or monitoring.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (
+        !user?.id ||
+        !appLockChecked ||
+        needsAppLockUnlock ||
+        needsOnboarding ||
+        needsPermissions ||
+        needsDisclaimer
+      ) return;
+      const hasLegacyPin = await hasPinForUser(user.id);
+      if (cancelled || !(await shouldShowAppLockMigrationNotice(user.id, hasLegacyPin))) return;
+      await markAppLockMigrationNoticeShown(user.id);
+      if (cancelled) return;
+      Alert.alert(
+        'App Lock is now optional',
+        "Kinnship now uses your phone's built-in security by default. Your PIN is still saved if you want extra protection — turn on App Lock anytime in Me → Security.",
+      );
+    })();
+    return () => { cancelled = true; };
+  }, [user?.id, appLockChecked, needsAppLockUnlock, needsOnboarding, needsPermissions, needsDisclaimer]);
 
   useNotificationListeners((data) => {
     // Deep-link by notification type. Uses router.replace (not push)
@@ -382,8 +340,8 @@ function RootNav() {
         void diag.logRouteDecision({
           type: typeof t === 'string' ? t : 'unknown',
           loggedIn: !!user?.id,
-          hasPin: pinChecked ? !needsPinUnlock || !needsPinSetup : null,
-          pinUnlocked: !needsPinUnlock,
+          hasPin: appLockChecked ? !needsAppLockUnlock : null,
+          pinUnlocked: !needsAppLockUnlock,
           fromSegment: (segments && (segments as string[]).join('/')) || 'unknown',
           toRoute,
           reason: 'tap',
@@ -1133,7 +1091,7 @@ function RootNav() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (loading || !onboardingChecked || !pinChecked || !disclaimerChecked) return;
+    if (loading || !onboardingChecked || !appLockChecked || !disclaimerChecked) return;
     const inAuthGroup = segments[0] === '(auth)';
     const isWelcome = !segments[0] || segments[0] === ('index' as any);
     const isOnboarding = segments[0] === 'onboarding';
@@ -1215,51 +1173,22 @@ function RootNav() {
       router.replace('/');
       return;
     }
-    // PIN GATE — authenticated user with a saved PIN must enter it
-    // before anything else. Same async-recheck pattern as the PIN
-    // setup branch below: the cached `needsPinUnlock` state only
-    // refreshes when user.id changes, but pin-login mutates the
-    // in-memory unlocked-session flag (via markUnlocked) WITHOUT
-    // changing user.id. Without this re-verify, a successful PIN
-    // entry → router.replace('/dashboard') → segments change →
-    // cached needsPinUnlock still true → bounced back to pin-login
-    // → infinite loop. Identical class of bug to the setup-loop
-    // the user reported; fixing both up front.
-    if (user && needsPinUnlock && !onPinScreen) {
+    // OPTIONAL APP LOCK — the launch gate exists only for people who
+    // deliberately enabled it in Me → Security. Re-check the preference and
+    // saved PIN after a successful unlock so the route cannot loop.
+    if (user && needsAppLockUnlock && !onPinScreen) {
       (async () => {
-        const hasPin = await hasPinForUser(user.id);
-        if (hasPin && !isUnlockedNow(user.id)) {
+        const [enabled, hasPin] = await Promise.all([
+          isAppLockEnabled(user.id),
+          hasPinForUser(user.id),
+        ]);
+        if (enabled && hasPin && !isUnlockedNow(user.id)) {
           router.replace('/(auth)/pin-login');
         } else {
-          // Unlocked-this-session (or PIN cleared) — drop the stale
-          // gate flag so subsequent renders fall through.
-          setNeedsPinUnlock(false);
+          setNeedsAppLockUnlock(false);
         }
       })();
       return;
-    }
-    // PIN SETUP — authenticated user with NO PIN yet (and who hasn't
-    // dismissed the prompt) must be routed to the setup screen.
-    //
-    // We RE-VERIFY the verdict inside the effect (rather than blindly
-    // trusting the cached `needsPinSetup` state) because the cached
-    // value is only refreshed when user.id changes — and pin-setup
-    // mutates SecureStore (saves a PIN) without changing user.id.
-    // Without this re-verify the screen got stuck in an infinite
-    // loop: save PIN → route to /dashboard → segments change →
-    // cached needsPinSetup still true → bounced back to pin-setup
-    // → fresh mount with empty firstPin → user re-enters → save →
-    // loop. Same async-recheck pattern that needsOnboarding uses
-    // above for the analogous AsyncStorage-mutates-without-user.id-
-    // change case.
-    // PIN SETUP — moved off the critical onboarding path.  Rather than
-    // intercepting the user here, the dashboard surfaces a dismissible
-    // card offering PIN setup.  This clears the routing gate immediately
-    // so the user reaches the dashboard on first launch.  The card checks
-    // hasPinForUser + wasPinSetupDismissed independently.
-    if (user && needsPinSetup) {
-      setNeedsPinSetup(false);
-      // Fall through to the next gate — do not return.
     }
 
     // PERMISSIONS GATE — shown once per install after first authentication.
@@ -1268,7 +1197,7 @@ function RootNav() {
     // screen is picked up as soon as segments change after its
     // router.replace('/(tabs)/dashboard').
     const onPermissionsScreen = inAuthGroup && authSubroute === 'permissions';
-    if (user && needsPermissions && !needsPinUnlock && !onPermissionsScreen) {
+    if (user && needsPermissions && !needsAppLockUnlock && !onPermissionsScreen) {
       (async () => {
         const handled = await isPermissionsHandled();
         if (!handled) {
@@ -1280,11 +1209,9 @@ function RootNav() {
       return;
     }
 
-    if (user && !needsPinUnlock && !onPinScreen && !onPermissionsScreen && (inAuthGroup || isWelcome || isOnboarding)) {
-      // Only auto-bounce out of (auth) once both PIN gates have
-      // cleared. The !onPinScreen guard prevents this branch from
-      // racing with the two redirects above and dragging the user
-      // back to the dashboard mid-setup.
+    if (user && !needsAppLockUnlock && !onPinScreen && !onPermissionsScreen && (inAuthGroup || isWelcome || isOnboarding)) {
+      // Do not race a voluntary PIN setup/change screen. Otherwise an
+      // authenticated session opens the app immediately by default.
       router.replace('/(tabs)/dashboard');
       return;
     }
@@ -1295,7 +1222,7 @@ function RootNav() {
     // where no further redirect is needed, so taps from any state are
     // honoured once routing has settled.
     setAppReadyForDeepLink(true);
-  }, [user, loading, segments, onboardingChecked, needsOnboarding, pinChecked, needsPinUnlock, needsPinSetup, disclaimerChecked, needsDisclaimer, permissionsChecked, needsPermissions]);
+  }, [user, loading, segments, onboardingChecked, needsOnboarding, appLockChecked, needsAppLockUnlock, disclaimerChecked, needsDisclaimer, permissionsChecked, needsPermissions]);
 
   // Part 7 — Battery optimization exemption prompt (Android only, post-onboarding).
   // Fired here — after the user has seen the full onboarding/permissions flow —
@@ -1325,7 +1252,7 @@ function RootNav() {
     })();
   }, [user?.id, needsOnboarding, needsPermissions]);
 
-  if (loading || !onboardingChecked || !disclaimerChecked || !permissionsChecked || (user && !pinChecked)) {
+  if (loading || !onboardingChecked || !disclaimerChecked || !permissionsChecked || (user && !appLockChecked)) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: Colors.background }}>
         <ActivityIndicator size="large" color={Colors.primary} />

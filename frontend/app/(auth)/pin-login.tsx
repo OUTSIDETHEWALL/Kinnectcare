@@ -1,10 +1,10 @@
 /**
- * pin-login.tsx — the daily-driver login screen.
+ * pin-login.tsx — the optional App Lock unlock screen.
  *
  * Shown when:
- *   - The user has a saved token (authenticated already) AND
- *   - They have set up a PIN AND
- *   - They have NOT yet unlocked in this session.
+ *   - The user has a saved token (authenticated already)
+ *   - They have enabled App Lock and saved a PIN
+ *   - They have not yet unlocked in this process.
  *
  * Behaviour:
  *   - Big 4-digit PIN pad (88pt touch targets, designed for seniors).
@@ -35,6 +35,7 @@ import {
   disableBiometricForUser,
 } from '../../src/biometrics';
 import { refreshUnlockTimestamp } from '../../src/pinSession';
+import { isAppLockEnabled } from '../../src/appLock';
 
 function formatLockMs(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -75,14 +76,23 @@ export default function PinLogin() {
     }
   }, [loading, user?.id]);
 
-  // Load initial state (in case user is mid-lockout).
+  // This route must never become a second mandatory-auth path. If App Lock
+  // has been turned off since navigation was queued, go straight back into
+  // the authenticated app.
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       if (!user?.id) return;
+      if (!(await isAppLockEnabled(user.id))) {
+        if (!cancelled) router.replace('/(tabs)/dashboard');
+        return;
+      }
       const st = await getAttemptState(user.id);
+      if (cancelled) return;
       if (!st.hasPin) {
-        // No PIN saved on this device — fall through to email login.
-        router.replace('/(auth)/login');
+        // An incomplete local setup must not trap an already-authenticated
+        // user. Settings can recreate the fallback PIN later.
+        router.replace('/(tabs)/dashboard');
         return;
       }
       setRemaining(MAX_PIN_ATTEMPTS - st.attempts);
@@ -90,6 +100,7 @@ export default function PinLogin() {
         setLockUntilMs(st.lockUntilMs);
       }
     })();
+    return () => { cancelled = true; };
   }, [user?.id]);
 
   // Live countdown during lockout — updates the hint every second.
@@ -220,11 +231,8 @@ export default function PinLogin() {
   };
 
   const goToEmailLogin = async () => {
-    // Master-key fallback: send a 6-digit code to the user's email
-    // so they can sign in even if they forgot their PIN. We log out
-    // the existing token first so AuthContext starts from a clean
-    // slate after verification. After they verify, RootNav will
-    // route them through pin-setup so they can pick a new PIN.
+    // Email-code sign-in remains the recovery route if someone has forgotten
+    // their optional App Lock PIN.
     const email = user?.email;
     if (!email) {
       await logout();

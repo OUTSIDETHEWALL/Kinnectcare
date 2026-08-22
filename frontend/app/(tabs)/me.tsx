@@ -9,7 +9,7 @@
  *   • Account        — editable Name / Time zone, read-only Email + Role
  *   • Plan           — Stripe status + Manage Subscription
  *   • Notifications  — Push registration status + Retry, Quiet Hours
- *   • Security       — Change / Remove PIN, Biometrics toggle
+ *   • Security       — Optional App Lock, PIN fallback, biometrics
  *   • Privacy        — Location Sharing toggle (kills background uploads)
  *   • Legal          — Privacy, Terms
  *   • Advanced       — Diagnostics
@@ -36,8 +36,8 @@ import { APP_NAME, COMPANY_NAME } from '../../src/legal';
 import {
   getPushStatus, subscribePushStatus, PushStatus, registerForPushNotifications,
 } from '../../src/push';
-import { hasPinForUser, clearPin } from '../../src/pinAuth';
-import { clearPinSetupDismissed } from '../../src/pinSetupPrompt';
+import { hasPinForUser } from '../../src/pinAuth';
+import { enableAppLock, disableAppLock, isAppLockEnabled } from '../../src/appLock';
 import {
   getBiometricCapability, isBiometricEnabledForUser, enableBiometricForUser,
   disableBiometricForUser, promptBiometric, labelForBiometricType,
@@ -244,7 +244,9 @@ export default function MeScreen() {
   const [pushStatus, setPushStatus] = useState<PushStatus>(getPushStatus());
   const [pushRetrying, setPushRetrying] = useState(false);
 
-  // PIN + biometric state
+  // Optional App Lock + PIN/biometric state
+  const [appLockOn, setAppLockOn] = useState<boolean>(false);
+  const [appLockBusy, setAppLockBusy] = useState(false);
   const [pinOn, setPinOn] = useState<boolean>(false);
   const [bioSupported, setBioSupported] = useState(false);
   const [bioLabel, setBioLabel] = useState('Biometrics');
@@ -406,14 +408,15 @@ export default function MeScreen() {
 
   useEffect(() => subscribePushStatus(setPushStatus), []);
 
-  // Refresh PIN / biometric / preference state whenever the tab
-  // regains focus (user may have just returned from pin-setup).
+  // Refresh App Lock / biometric / preference state whenever the tab
+  // regains focus (user may have just returned from PIN setup).
   useFocusEffect(
     React.useCallback(() => {
       let cancelled = false;
       (async () => {
         if (!user?.id) return;
-        const [pin, cap, bioEnabled, sharing, prefs] = await Promise.all([
+        const [appLock, pin, cap, bioEnabled, sharing, prefs] = await Promise.all([
+          isAppLockEnabled(user.id),
           hasPinForUser(user.id),
           getBiometricCapability(),
           isBiometricEnabledForUser(user.id),
@@ -421,6 +424,7 @@ export default function MeScreen() {
           getPreferences(),
         ]);
         if (cancelled) return;
+        setAppLockOn(appLock);
         setPinOn(pin);
         setBioSupported(cap.supported && cap.enrolled);
         setBioLabel(cap.typeLabel);
@@ -624,12 +628,24 @@ export default function MeScreen() {
       await enableBiometricForUser(user.id);
       setBioOn(true);
     } else {
-      await disableBiometricForUser(user.id);
-      setBioOn(false);
+      Alert.alert(
+        'Use PIN instead?',
+        'App Lock will continue to protect Kinnship with your 4-digit PIN.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Use PIN',
+            onPress: async () => {
+              await disableBiometricForUser(user.id);
+              setBioOn(false);
+            },
+          },
+        ],
+      );
     }
   };
 
-  const onToggleLocationSharing = async (next: boolean) => {
+  const applyLocationSharing = async (next: boolean) => {
     if (!user?.id || locBusy) return;
     setLocBusy(true);
     try {
@@ -660,12 +676,6 @@ export default function MeScreen() {
       // transition feels atomic.  Fire-and-forget; failure is
       // non-fatal because the next scheduled poll will pick it up.
       try { void refetchMembers(); } catch (_e) {}
-      if (!next) {
-        Alert.alert(
-          'Location sharing off',
-          'Your family will see “Location sharing off.” Turn it back on anytime.',
-        );
-      }
     } catch (e: any) {
       Alert.alert('Could not update', e?.response?.data?.detail || e?.message || 'Please try again.');
       // Revert the toggle if the server rejected it.
@@ -676,32 +686,107 @@ export default function MeScreen() {
     }
   };
 
-  const onRemovePin = () => {
-    if (!user?.id) return;
+  const onToggleLocationSharing = (next: boolean) => {
+    if (next) {
+      void applyLocationSharing(true);
+      return;
+    }
     Alert.alert(
-      'Remove PIN?',
-      "You'll sign in with an emailed 6-digit code each time you open the app. Biometric unlock will also be disabled.",
+      'Turn off location sharing?',
+      'Your family will see “Location sharing off” and no new location data will leave this device. You can turn it back on anytime.',
       [
         { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Remove',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await clearPin(user.id);
-              await clearPinSetupDismissed(user.id);
-              // Biometrics require an underlying PIN — remove them too.
-              await disableBiometricForUser(user.id);
-              setPinOn(false);
-              setBioOn(false);
-              Alert.alert('PIN removed', 'You can set a new PIN anytime from Me → Security.');
-            } catch (e: any) {
-              Alert.alert('Error', e?.message || 'Could not remove PIN.');
-            }
-          },
-        },
+        { text: 'Turn off', style: 'destructive', onPress: () => void applyLocationSharing(false) },
       ],
     );
+  };
+
+  const finishAppLockEnable = async (useBiometrics: boolean) => {
+    if (!user?.id) return;
+    setAppLockBusy(true);
+    try {
+      await enableAppLock(user.id);
+      if (useBiometrics) await enableBiometricForUser(user.id);
+      else await disableBiometricForUser(user.id);
+      setAppLockOn(true);
+      setBioOn(useBiometrics);
+      Alert.alert(
+        'App Lock is on',
+        useBiometrics
+          ? 'Kinnship will use your biometrics first, with your PIN available as a fallback.'
+          : 'Kinnship will ask for your 4-digit PIN when App Lock is needed.',
+      );
+    } catch (e: any) {
+      Alert.alert('Could not turn on App Lock', e?.message || 'Please try again.');
+    } finally {
+      setAppLockBusy(false);
+    }
+  };
+
+  const onToggleAppLock = (next: boolean) => {
+    if (!user?.id || appLockBusy) return;
+    if (!next) {
+      Alert.alert(
+        'Turn off App Lock?',
+        "Kinnship will stay signed in and use your phone's built-in security. Your PIN is kept in case you turn App Lock back on.",
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Turn off',
+            style: 'destructive',
+            onPress: async () => {
+              setAppLockBusy(true);
+              try {
+                await disableAppLock(user.id);
+                setAppLockOn(false);
+              } catch (e: any) {
+                Alert.alert('Could not turn off App Lock', e?.message || 'Please try again.');
+              } finally {
+                setAppLockBusy(false);
+              }
+            },
+          },
+        ],
+      );
+      return;
+    }
+
+    if (!pinOn) {
+      Alert.alert(
+        'Set up App Lock',
+        'Choose a 4-digit PIN to use when your phone cannot use Face ID or fingerprint.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Set up PIN', onPress: () => router.push('/(auth)/pin-setup?enableAppLock=1' as any) },
+        ],
+      );
+      return;
+    }
+
+    if (bioSupported) {
+      Alert.alert(
+        'Turn on App Lock?',
+        `${bioLabel} is available and will be the fastest way to unlock Kinnship. Your PIN always remains available.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Use PIN', onPress: () => { void finishAppLockEnable(false); } },
+          {
+            text: `Use ${bioLabel}`,
+            onPress: async () => {
+              const result = await promptBiometric(`Confirm ${bioLabel} for Kinnship`);
+              if (result.ok) {
+                await finishAppLockEnable(true);
+              } else if (result.reason !== 'cancel') {
+                Alert.alert('Could not verify', result.message || `Try again or choose Use PIN.`);
+              }
+            },
+          },
+        ],
+      );
+      return;
+    }
+
+    void finishAppLockEnable(false);
   };
 
   const confirmLogout = () => {
@@ -963,40 +1048,29 @@ export default function MeScreen() {
         {/* Security */}
         <SectionLabel>Security</SectionLabel>
         <View style={styles.card}>
-          {pinOn ? (
-            <>
-              <NavRow
-                testID="me-change-pin"
-                icon="🔒"
-                label="Change PIN"
-                secondary="4-digit unlock for the app"
-                onPress={async () => {
-                  if (user?.id) { try { await clearPinSetupDismissed(user.id); } catch (_e) {} }
-                  router.push('/(auth)/pin-setup' as any);
-                }}
-              />
-              <NavRow
-                testID="me-remove-pin"
-                icon="🔓"
-                label="Remove PIN"
-                secondary="Sign in with an emailed code each time"
-                onPress={onRemovePin}
-                danger
-              />
-            </>
-          ) : (
+          <ToggleRow
+            testID="me-app-lock"
+            icon="🔐"
+            label="App Lock"
+            secondary={
+              appLockOn
+                ? 'Kinnship asks for biometrics or your PIN when you open it.'
+                : "Off — Kinnship uses your phone's built-in security."
+            }
+            value={appLockOn}
+            onValueChange={onToggleAppLock}
+            disabled={appLockBusy}
+          />
+          {appLockOn ? (
             <NavRow
-              testID="me-setup-pin"
+              testID="me-change-pin"
               icon="🔒"
-              label="Set up 4-digit PIN"
-              secondary="Fast unlock — no email code every time"
-              onPress={async () => {
-                if (user?.id) { try { await clearPinSetupDismissed(user.id); } catch (_e) {} }
-                router.push('/(auth)/pin-setup' as any);
-              }}
+              label="Change App Lock PIN"
+              secondary="Your PIN is the fallback when biometrics are unavailable."
+              onPress={() => router.push('/(auth)/pin-setup?change=1' as any)}
             />
-          )}
-          {pinOn && bioSupported ? (
+          ) : null}
+          {appLockOn && bioSupported ? (
             <ToggleRow
               testID="me-biometrics"
               icon={
@@ -1008,8 +1082,8 @@ export default function MeScreen() {
                   : bioTypes.includes('face') ? '🙂'
                   : '🔐'
               }
-              label="Biometric unlock"
-              secondary="A convenience option — your PIN still works."
+              label="Use biometrics"
+              secondary="Preferred for App Lock. Your PIN still works."
               value={bioOn}
               onValueChange={onToggleBiometrics}
             />
