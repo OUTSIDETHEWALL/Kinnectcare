@@ -50,6 +50,10 @@ import type { EngineLogEvent } from '../locationEngine';
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 let seq = 0;
+function unloadedPipelineTimestamps(): PipelineTimestamps | null {
+  return null;
+}
+
 function makeEvent(
   event: string,
   atMs: number,
@@ -149,7 +153,7 @@ describe('Diagnostics hero card — failure-burst then pipelineTs recovery', () 
   it('hero card is NOT green when pipelineTs itself is null (optional chaining + null-coalescing)', () => {
     const engineLog = failureBuffer(50, NOW);
 
-    const pipelineTs: PipelineTimestamps | null = null; // never loaded from storage
+    const pipelineTs = unloadedPipelineTimestamps(); // never loaded from storage
 
     const result = computeOverallHealth(
       engineLog,
@@ -172,7 +176,7 @@ describe('Diagnostics hero card — failure-burst then pipelineTs recovery', () 
     // Before recovery: ring buffer full of failures, no pipelineTs yet
     const engineLog = failureBuffer(50, NOW);
 
-    const pipelineBefore: PipelineTimestamps | null = null;
+    const pipelineBefore = unloadedPipelineTimestamps();
     const beforeResult = computeOverallHealth(
       engineLog,
       NOW,

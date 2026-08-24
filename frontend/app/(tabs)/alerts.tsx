@@ -219,7 +219,7 @@ export default function Alerts() {
         {loadError && alerts.length > 0 && (
           <View style={styles.offlineBanner}>
             <Icon name="cloud-offline-outline" size={18} color={Colors.error} />
-            <Text style={styles.offlineBannerText}>Showing cached alerts · couldn't refresh</Text>
+            <Text style={styles.offlineBannerText}>Showing cached alerts · couldn&apos;t refresh</Text>
             <TouchableOpacity
               testID="alerts-retry"
               onPress={load}
@@ -234,7 +234,7 @@ export default function Alerts() {
         {loadError && alerts.length === 0 && (
           <View style={styles.errorCard}>
             <Icon name="cloud-offline-outline" size={40} color={Colors.error} />
-            <Text style={styles.errorTitle}>Couldn't load alerts.</Text>
+            <Text style={styles.errorTitle}>Couldn&apos;t load alerts.</Text>
             <Text style={styles.errorMsg}>Please check your connection.</Text>
             <TouchableOpacity
               testID="alerts-retry"

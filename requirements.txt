@@ -10,7 +10,7 @@
 # wheel cache so bcrypt==4.0.1 below is actually re-resolved.
 fastapi==0.110.1
 uvicorn[standard]==0.25.0
-python-multipart==0.0.28
+python-multipart==0.0.30
 
 # --- Database ---
 motor==3.3.1

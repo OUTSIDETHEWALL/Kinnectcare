@@ -135,9 +135,9 @@ export default function Permissions() {
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.center}>
           <Text style={styles.emoji}>📍</Text>
-          <Text style={styles.title}>Let your family know you've arrived safely.</Text>
+          <Text style={styles.title}>Let your family know you&apos;ve arrived safely.</Text>
           <Text style={styles.body}>
-            Your family can see you're safe — and reach you instantly
+            Your family can see you&apos;re safe — and reach you instantly
             if you ever need help.
           </Text>
           <ActivityIndicator
@@ -158,10 +158,10 @@ export default function Permissions() {
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.center}>
           <Text style={styles.emoji}>📍</Text>
-          <Text style={styles.title}>Your family won't be able to see you're safe.</Text>
+          <Text style={styles.title}>Your family won&apos;t be able to see you&apos;re safe.</Text>
           <Text style={styles.body}>
-            Without location, your family can't tell when you've arrived
-            somewhere — and SOS alerts won't be able to pinpoint your
+            Without location, your family can&apos;t tell when you&apos;ve arrived
+            somewhere — and SOS alerts won&apos;t be able to pinpoint your
             location in an emergency.
           </Text>
           <TouchableOpacity
@@ -190,7 +190,7 @@ export default function Permissions() {
           <Text style={styles.emoji}>🔔</Text>
           <Text style={styles.title}>Be notified if someone you care about needs help.</Text>
           <Text style={styles.body}>
-            You'll know the moment someone in your family needs you —
+            You&apos;ll know the moment someone in your family needs you —
             SOS alerts, missed check-ins, and more.
           </Text>
           <ActivityIndicator
@@ -211,7 +211,7 @@ export default function Permissions() {
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.center}>
           <Text style={styles.emoji}>🔔</Text>
-          <Text style={styles.title}>You won't be notified if someone needs help.</Text>
+          <Text style={styles.title}>You won&apos;t be notified if someone needs help.</Text>
           <Text style={styles.body}>
             Without notifications, SOS alerts and missed check-ins
             will be silent. You can turn them on in Settings at any time.

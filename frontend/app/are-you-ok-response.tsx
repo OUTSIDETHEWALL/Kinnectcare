@@ -101,7 +101,7 @@ export default function AreYouOkResponse() {
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.content}>
           <ActivityIndicator size="large" color={Colors.primary} />
-          <Text style={styles.checkingTitle}>Confirming you're OK…</Text>
+          <Text style={styles.checkingTitle}>Confirming you&apos;re OK…</Text>
           <Text style={styles.checkingSubtitle}>
             Capturing your location and notifying your family.
           </Text>
@@ -117,9 +117,9 @@ export default function AreYouOkResponse() {
           <Animated.View style={[styles.checkCircle, { transform: [{ scale }] }]}>
             <Text style={styles.bigEmoji}>✅</Text>
           </Animated.View>
-          <Text style={styles.title}>You're confirmed OK!</Text>
+          <Text style={styles.title}>You&apos;re confirmed OK!</Text>
           <Text style={styles.subtitle}>
-            Your family has been notified that you're safe.
+            Your family has been notified that you&apos;re safe.
           </Text>
         </View>
         <View style={styles.bottom}>
@@ -141,7 +141,7 @@ export default function AreYouOkResponse() {
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.content}>
           <Text style={styles.errorEmoji}>⚠️</Text>
-          <Text style={styles.errorTitle}>Couldn't send confirmation</Text>
+          <Text style={styles.errorTitle}>Couldn&apos;t send confirmation</Text>
           <Text style={styles.errorMsg}>{errorMsg}</Text>
         </View>
         <View style={styles.bottom}>
@@ -172,7 +172,7 @@ export default function AreYouOkResponse() {
         <Text style={styles.promptEmoji}>❓</Text>
         <Text style={styles.title}>Are you okay?</Text>
         <Text style={styles.subtitle}>
-          Your family is checking on you. Let them know how you're doing.
+          Your family is checking on you. Let them know how you&apos;re doing.
         </Text>
       </View>
       <View style={styles.bottom}>
@@ -182,7 +182,7 @@ export default function AreYouOkResponse() {
           activeOpacity={0.85}
           style={styles.cta}
         >
-          <Text style={styles.ctaText}>✅  I'm OK</Text>
+          <Text style={styles.ctaText}>✅  I&apos;m OK</Text>
         </TouchableOpacity>
         <TouchableOpacity
           testID="are-you-ok-need-help"

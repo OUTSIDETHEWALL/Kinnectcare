@@ -48,7 +48,7 @@ export function TimeSlotsEditor({ slots, onChange, testIDPrefix = 'slot' }: Prop
   return (
     <View>
       {slots.length === 0 && (
-        <Text style={styles.emptyHint}>No times yet. Tap "+ Add Time" below to add one.</Text>
+        <Text style={styles.emptyHint}>No times yet. Tap &quot;+ Add Time&quot; below to add one.</Text>
       )}
       {slots.map((s, i) => (
         <TimeRow

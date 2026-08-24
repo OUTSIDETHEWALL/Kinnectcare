@@ -125,7 +125,7 @@ export default function CheckInConfirm() {
         <Animated.View style={[styles.checkCircle, { transform: [{ scale }] }]}>
           <Icon name="checkmark" size={80} color={Colors.surface} />
         </Animated.View>
-        <Text testID="checkin-title" style={styles.title}>You're checked in!</Text>
+      <Text testID="checkin-title" style={styles.title}>You&apos;re checked in!</Text>
         <Text style={styles.subtitle}>
           {name ? `${name} is safely checked in.` : 'Your family has been notified.'}
         </Text>

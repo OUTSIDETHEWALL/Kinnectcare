@@ -36,6 +36,7 @@ import * as memberStore from '../../src/store/memberStore';
 import { logPipelineEvent } from '../../src/refreshPipelineLog';
 import { useActiveEmergency } from '../../src/activeEmergency';
 import { getBatteryDisplay } from '../../src/batteryStatus';
+import { confirmPendingInviteCancellation } from '../../src/pendingInviteCancellation';
 // TrackingStatusPill removed — Build XX family screen simplification.
 import Svg, { Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
@@ -686,14 +687,18 @@ export default function Dashboard() {
   type NeedsAttentionSeverity = 'ok' | 'medium' | 'critical';
   let needsAttentionCount = 0;
   let needsAttentionSeverity: NeedsAttentionSeverity = 'ok';
-  const _bumpSeverity = (s: NeedsAttentionSeverity) => {
-    if (s === 'critical') needsAttentionSeverity = 'critical';
-    else if (s === 'medium' && needsAttentionSeverity !== 'critical') needsAttentionSeverity = 'medium';
+  const _bumpSeverity = (
+    current: NeedsAttentionSeverity,
+    next: NeedsAttentionSeverity,
+  ): NeedsAttentionSeverity => {
+    if (next === 'critical') return 'critical';
+    if (next === 'medium' && current !== 'critical') return 'medium';
+    return current;
   };
   // SOS in progress → critical
   if (activeEmergency) {
     needsAttentionCount += 1;
-    _bumpSeverity('critical');
+    needsAttentionSeverity = _bumpSeverity(needsAttentionSeverity, 'critical');
   }
   for (const _m of members) {
     // Battery low — any role.
@@ -716,7 +721,7 @@ export default function Dashboard() {
     );
     if (_hasBatteryIssue) {
       needsAttentionCount += 1;
-      _bumpSeverity('medium');
+      needsAttentionSeverity = _bumpSeverity(needsAttentionSeverity, 'medium');
     }
     if (_m.role !== 'senior') continue;
     const _s = sumOf(_m.id);
@@ -732,12 +737,12 @@ export default function Dashboard() {
     );
     if (_effectiveMissed > 0) {
       needsAttentionCount += _effectiveMissed;
-      _bumpSeverity('medium');
+      needsAttentionSeverity = _bumpSeverity(needsAttentionSeverity, 'medium');
     }
     // Missed daily check-in — only when a schedule is actually configured
     if ((_m.daily_checkin_time || _m.checkin_interval_hours) && !_s.checked_in_today) {
       needsAttentionCount += 1;
-      _bumpSeverity('medium');
+      needsAttentionSeverity = _bumpSeverity(needsAttentionSeverity, 'medium');
     }
   }
   const needsAttentionColor =
@@ -772,7 +777,7 @@ export default function Dashboard() {
             explores their family dashboard. */}
         {showWelcomeBanner && (
           <View style={styles.welcomeBanner} testID="dashboard-welcome-banner">
-            <Text style={styles.welcomeBannerText}>✅ You're all set. Welcome to Kinnship!</Text>
+            <Text style={styles.welcomeBannerText}>✅ You&apos;re all set. Welcome to Kinnship!</Text>
           </View>
         )}
 
@@ -846,7 +851,7 @@ export default function Dashboard() {
         {loadError && members.length === 0 && (
           <View style={styles.loadErrorCard} testID="dashboard-load-error">
             <Icon name="cloud-offline-outline" size={40} color={Colors.error} />
-            <Text style={styles.loadErrorTitle}>Couldn't load your family.</Text>
+            <Text style={styles.loadErrorTitle}>Couldn&apos;t load your family.</Text>
             <Text style={styles.loadErrorMsg}>Please check your connection and try again.</Text>
             <TouchableOpacity
               testID="dashboard-retry"
@@ -861,7 +866,7 @@ export default function Dashboard() {
         {!loadError && members.length === 0 && (
           <View style={styles.empty}>
             <Text style={{ fontSize: 36 }}>👨‍👩‍👧</Text>
-            <Text style={styles.emptyText}>No family members yet. Tap "Add" to get started.</Text>
+            <Text style={styles.emptyText}>No family members yet. Tap &quot;Add&quot; to get started.</Text>
           </View>
         )}
 
@@ -1040,16 +1045,7 @@ function PendingInviteCard({
       </View>
       <TouchableOpacity
         testID={`pending-invite-cancel-${invite.id}`}
-        onPress={() => {
-          RNAlert.alert(
-            'Cancel invitation?',
-            `${invite.invitee_name} won't be able to accept this invitation anymore. You can send a new one later.`,
-            [
-              { text: 'Keep', style: 'cancel' },
-              { text: 'Cancel invite', style: 'destructive', onPress: () => { onCancel(); } },
-            ],
-          );
-        }}
+        onPress={() => confirmPendingInviteCancellation(invite, onCancel)}
         style={styles.pendingCancelBtn}
         activeOpacity={0.7}
       >

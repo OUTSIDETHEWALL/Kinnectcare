@@ -145,7 +145,7 @@ export default function InviteAcceptScreen() {
         <View style={styles.centerBox}>
           <Text style={styles.emojiHero}>💚</Text>
           <Text style={styles.title}>
-            You're already part of {familyName}
+            You&apos;re already part of {familyName}
           </Text>
           <TouchableOpacity
             testID="already-member-open-btn"

@@ -426,7 +426,7 @@ export default function FamilyGroupScreen() {
           <View style={styles.card}>
             <Text style={styles.sectionLabel}>INVITE BY EMAIL</Text>
             <Text style={styles.sectionHelp}>
-              Send a unique invite code by email. They'll join your family
+              Send a unique invite code by email. They&apos;ll join your family
               automatically when they sign up — so their SOS button, check-ins,
               and fall-detection alerts notify everyone here.
             </Text>
@@ -503,7 +503,7 @@ export default function FamilyGroupScreen() {
 
           <Text style={styles.footnote}>
             When ANY family member triggers SOS or fall detection, all linked accounts in this family
-            receive an instant push notification with the person's name, GPS coordinates, and
+            receive an instant push notification with the person&apos;s name, GPS coordinates, and
             timestamp — so you can respond together.
           </Text>
         </ScrollView>
@@ -607,7 +607,7 @@ export default function FamilyGroupScreen() {
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Invite a family member</Text>
             <Text style={styles.modalBody}>
-              We'll email them a unique invite code. They can use it on the
+              We&apos;ll email them a unique invite code. They can use it on the
               Kinnship sign-up screen and will auto-join your family.
             </Text>
             <TextInput

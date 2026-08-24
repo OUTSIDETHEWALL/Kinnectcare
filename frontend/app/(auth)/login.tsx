@@ -104,7 +104,7 @@ export default function Login() {
           </View>
           <Text style={styles.title}>Welcome back</Text>
           <Text style={styles.subtitle}>
-            We'll email you a 6-digit code — no password needed.
+            We&apos;ll email you a 6-digit code — no password needed.
           </Text>
 
           <View style={{ marginTop: 24 }}>
