@@ -1,0 +1,9 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "0P3k5rE_yspU_XR8FgefP"
+uri = "file://docs/beta-launch-checklist.md"
+type = "text"
+title = "Kinnship Android Beta Launch Checklist"
+description = "Release-verification checklist covering Railway, Expo OTA, Google Play, website, privacy, physical-device smoke testing, monitoring, and rollback."
