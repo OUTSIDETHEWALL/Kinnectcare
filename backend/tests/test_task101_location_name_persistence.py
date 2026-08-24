@@ -38,6 +38,14 @@ class _Cursor:
         return [copy.deepcopy(self._collection.document)]
 
 
+class _DocumentsCursor:
+    def __init__(self, collection):
+        self._collection = collection
+
+    async def to_list(self, _limit):
+        return [copy.deepcopy(document) for document in self._collection.documents]
+
+
 class _MembersCollection:
     def __init__(self, document):
         self.document = document
@@ -76,6 +84,25 @@ class _TrackingCollection:
 class _Database:
     def __init__(self, document):
         self.members = _MembersCollection(document)
+        self.geocode_cache = _TrackingCollection()
+
+
+class _CoLocatedMembersCollection:
+    def __init__(self, documents):
+        self.documents = documents
+        self.find = MagicMock(side_effect=lambda *_args, **_kwargs: _DocumentsCursor(self))
+        self.update_one = AsyncMock(side_effect=self._update_one)
+
+    async def _update_one(self, filter_doc, update_doc):
+        for document in self.documents:
+            if _MembersCollection._matches(document, filter_doc):
+                document.update(update_doc.get("$set", {}))
+                break
+
+
+class _CoLocatedDatabase:
+    def __init__(self, documents):
+        self.members = _CoLocatedMembersCollection(documents)
         self.geocode_cache = _TrackingCollection()
 
 
@@ -159,3 +186,53 @@ async def test_location_name_is_persisted_and_re_geocoded_after_upload():
             "fresh resolve on the following dashboard load"
         )
         assert database.members.document["location_name"] == "Bullhead City, AZ"
+
+
+@pytest.mark.asyncio
+async def test_deduplicated_location_name_is_persisted_for_each_member():
+    """A co-located member gets a write-back from the request-local dedup path."""
+    first_document = _member_document()
+    first_document["id"] = "task-102-first-member"
+    second_document = _member_document()
+    second_document["id"] = "task-102-second-member"
+    database = _CoLocatedDatabase([first_document, second_document])
+    resolve_location_name = AsyncMock(return_value=("Fort Mohave, AZ", True))
+    current_user = {
+        "id": "task-102-owner",
+        "family_group_id": "task-101-family",
+        "family_group_role": "owner",
+    }
+
+    with patch.object(server, "db", database), patch.object(
+        server.geocoding,
+        "resolve_location_name",
+        resolve_location_name,
+    ), patch.object(
+        server.geocoding,
+        "GEOCODE_BACKEND_ENABLED",
+        True,
+    ):
+        first = await server.list_members(current=current_user)
+        await asyncio.sleep(0)
+
+        assert [member.location_name for member in first] == [
+            "Fort Mohave, AZ",
+            "Fort Mohave, AZ",
+        ]
+        assert resolve_location_name.await_count == 1
+        assert [document["location_name"] for document in database.members.documents] == [
+            "Fort Mohave, AZ",
+            "Fort Mohave, AZ",
+        ]
+        assert database.members.update_one.await_count == 2
+
+        database.members.update_one.reset_mock()
+        second = await server.list_members(current=current_user)
+
+        assert [member.location_name for member in second] == [
+            "Fort Mohave, AZ",
+            "Fort Mohave, AZ",
+        ]
+        assert resolve_location_name.await_count == 1
+        database.members.update_one.assert_not_called()
+        database.geocode_cache.find_one.assert_not_called()

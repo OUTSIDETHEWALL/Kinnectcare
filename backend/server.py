@@ -2305,7 +2305,25 @@ async def list_members(current=Depends(get_current_user)):
             cache_key = geocoding._cache_key(lat, lon)
             if cache_key in _req_geo:
                 # Same rounded coordinate already resolved this request — free.
-                d["location_name"] = _req_geo[cache_key]
+                name = _req_geo[cache_key]
+                d["location_name"] = name
+                # Persist the deduplicated result for this member too.  The
+                # first member's resolve path writes its own document, but a
+                # co-located member only reaches this branch.  Keep the same
+                # conditional guard as the resolve path so a concurrent upload
+                # cannot write a label for stale coordinates.
+                _member_id = d.get("id")
+                asyncio.create_task(
+                    db.members.update_one(
+                        {
+                            "id": _member_id,
+                            "latitude": lat,
+                            "longitude": lon,
+                            "location_name": None,
+                        },
+                        {"$set": {"location_name": name}},
+                    )
+                )
             else:
                 try:
                     name, _ = await asyncio.wait_for(
