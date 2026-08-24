@@ -100,6 +100,7 @@ import {
   effectiveSnapshotAgeMs as computeEffectiveSnapshotAgeMs,
   httpOkCellColor,
 } from '../src/deviceComparisonUtils';
+import { computeUploadRatio } from '../src/uploadRatio';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
 const PUSH_REFRESH_KEY = 'kc_push_refresh_log';
@@ -695,14 +696,7 @@ export default function DiagnosticsScreen() {
   // (headless_http_ok / headless_http_error or http_upload_success /
   // http_upload_failure).  We count only sdk_onHttp to avoid double-
   // counting (each upload emits exactly one sdk_onHttp regardless of path).
-  const uploadRatio = useMemo(() => {
-    const httpEvents = engineLog.filter((e) => e.event === 'sdk_onHttp');
-    const ok = httpEvents.filter((e) => e.detail?.success === true).length;
-    const fail = httpEvents.filter((e) => e.detail?.success === false).length;
-    const total = httpEvents.length;
-    const lastFailEvt = [...httpEvents].reverse().find((e) => e.detail?.success === false) ?? null;
-    return { total, ok, fail, lastFailStatus: lastFailEvt?.detail?.status ?? null };
-  }, [engineLog]);
+  const uploadRatio = useMemo(() => computeUploadRatio(engineLog), [engineLog]);
 
   // Build 64 — Motion Timeline derived data.
   // Computed from engineLog so they stay in sync with the reload() cycle.
