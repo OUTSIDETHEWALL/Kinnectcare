@@ -227,7 +227,7 @@ export default function Signup() {
           </TouchableOpacity>
           <Text style={styles.title}>Create your account</Text>
           <Text style={styles.subtitle}>
-            No password to remember — we'll email you a 6-digit code instead.
+            No password to remember — we&apos;ll email you a 6-digit code instead.
           </Text>
 
           <Field
@@ -262,7 +262,7 @@ export default function Signup() {
           />
           {inviteCode.trim() ? (
             <Text style={styles.inviteHint}>
-              👨‍👩‍👧 You'll join an existing family and see their members & alerts immediately.
+              👨‍👩‍👧 You&apos;ll join an existing family and see their members & alerts immediately.
             </Text>
           ) : null}
 

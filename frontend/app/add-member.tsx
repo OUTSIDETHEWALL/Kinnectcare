@@ -311,7 +311,7 @@ export default function AddFamilyMember() {
                 : ''}
             </Text>
             <Text style={styles.modalBody}>
-              They're already set up and connected to your family in Kinnship.
+              They&apos;re already set up and connected to your family in Kinnship.
             </Text>
             <TouchableOpacity
               testID="already-member-open"

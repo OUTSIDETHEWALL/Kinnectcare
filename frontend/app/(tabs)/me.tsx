@@ -1480,7 +1480,7 @@ function EditModal(props: {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: Colors.background },
   body: { paddingHorizontal: 20, paddingBottom: 60, paddingTop: 8 },
-  title: { fontSize: 28, fontWeight: '800', color: Colors.text, marginTop: 4, marginBottom: 16 },
+  title: { fontSize: 28, fontWeight: '800', color: Colors.textPrimary, marginTop: 4, marginBottom: 16 },
   sectionLabel: {
     fontSize: 12, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase',
     color: Colors.textSecondary, marginTop: 20, marginBottom: 8, paddingHorizontal: 4,

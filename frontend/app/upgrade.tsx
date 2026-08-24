@@ -155,7 +155,7 @@ export default function UpgradeScreen() {
 
             {/* Features list */}
             <View style={styles.featuresCard}>
-              <Text style={styles.featuresLabel}>WHAT'S INCLUDED</Text>
+              <Text style={styles.featuresLabel}>WHAT&apos;S INCLUDED</Text>
               {FEATURES.map((f) => (
                 <Text key={f} style={styles.featureLine}>{f}</Text>
               ))}

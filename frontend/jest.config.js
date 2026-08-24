@@ -16,4 +16,7 @@ module.exports = {
   },
   testMatch: ['**/__tests__/**/*.test.[jt]s?(x)', '**/*.test.[jt]s?(x)'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
+  moduleNameMapper: {
+    '^expo-secure-store$': '<rootDir>/src/__mocks__/expoSecureStore.ts',
+  },
 };

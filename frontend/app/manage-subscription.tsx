@@ -164,9 +164,9 @@ export default function ManageSubscription() {
           <View testID="subscription-fetch-error" style={styles.errorCard}>
             <Icon name="cloud-offline-outline" size={20} color={Colors.error} />
             <View style={{ flex: 1, marginLeft: 10 }}>
-              <Text style={styles.errorTitle}>Couldn't load subscription</Text>
+              <Text style={styles.errorTitle}>Couldn&apos;t load subscription</Text>
               <Text style={styles.errorSub}>
-                Your plan info isn't shown below because we couldn't reach the billing
+                Your plan info isn&apos;t shown below because we couldn&apos;t reach the billing
                 service. {status ? 'Showing last-known status.' : ''} {String(fetchError).slice(0, 120)}
               </Text>
             </View>
@@ -217,7 +217,7 @@ export default function ManageSubscription() {
                 <Text style={styles.infoValue} testID="renewal-date">{renewalLabel}</Text>
                 {cancellingAtEnd && (
                   <Text style={styles.warnNote}>
-                    Your subscription will not auto-renew. You'll keep Family Plan
+                    Your subscription will not auto-renew. You&apos;ll keep Family Plan
                     features until this date, then move to the free tier.
                   </Text>
                 )}

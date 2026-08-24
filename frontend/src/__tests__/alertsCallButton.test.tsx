@@ -80,6 +80,9 @@ jest.mock('react-native-safe-area-context', () => {
 jest.mock('../Icon', () => ({ Icon: () => null }));
 jest.mock('../MemberMap', () => ({ __esModule: true, default: () => null }));
 jest.mock('../timeFormat', () => ({ formatRelativeLocal: () => '2m ago' }));
+jest.mock('../AuthContext', () => ({
+  useAuth: () => ({ user: { id: 'caregiver-001' } }),
+}));
 jest.mock('../theme', () => ({
   Colors: {
     background: '#FFFFFF',

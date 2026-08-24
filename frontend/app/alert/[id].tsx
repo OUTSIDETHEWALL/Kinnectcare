@@ -508,7 +508,7 @@ const styles = StyleSheet.create({
   bannerTitle: { color: Colors.surface, fontSize: 16, fontWeight: '800', letterSpacing: 0.5 },
   bannerSub: { color: Colors.surface, fontSize: 13, opacity: 0.92, marginTop: 2 },
 
-  memberName: { fontSize: 30, fontWeight: '800', color: Colors.text, lineHeight: 36 },
+  memberName: { fontSize: 30, fontWeight: '800', color: Colors.textPrimary, lineHeight: 36 },
   addressLine: { fontSize: 15, color: Colors.textSecondary, marginTop: 6, lineHeight: 21 },
 
   trackingPillWrap: { marginTop: 12 },
@@ -565,6 +565,6 @@ const styles = StyleSheet.create({
     fontSize: 13, color: Colors.textSecondary, lineHeight: 19, textAlign: 'center',
   },
 
-  notFoundTitle: { fontSize: 20, fontWeight: '700', color: Colors.text, marginTop: 12 },
+  notFoundTitle: { fontSize: 20, fontWeight: '700', color: Colors.textPrimary, marginTop: 12 },
   notFoundBody: { fontSize: 15, color: Colors.textSecondary, textAlign: 'center', marginTop: 8, lineHeight: 22 },
 });

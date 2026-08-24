@@ -184,7 +184,7 @@ export default function NotificationActionScreen() {
             onPress={() => router.replace('/(tabs)/dashboard')}
             activeOpacity={0.7}
           >
-            <Text style={styles.dismissText}>I'll do it later</Text>
+            <Text style={styles.dismissText}>I&apos;ll do it later</Text>
           </TouchableOpacity>
         )}
       </View>

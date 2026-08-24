@@ -110,7 +110,7 @@ export default function JoinFamilyByCode() {
             style={styles.backBtn}
             accessibilityRole="button"
           >
-            <Icon name="chevron-back" size={26} color={Colors.text} />
+            <Icon name="chevron-back" size={26} color={Colors.textPrimary} />
             <Text style={styles.backText}>Back</Text>
           </TouchableOpacity>
 
@@ -143,7 +143,7 @@ export default function JoinFamilyByCode() {
 
           {preview?.valid ? (
             <View style={styles.previewCard}>
-              <Text style={styles.previewLabel}>You'll be joining</Text>
+              <Text style={styles.previewLabel}>You&apos;ll be joining</Text>
               <Text style={styles.previewFamily}>{preview.family_name}</Text>
               {!!preview.inviter_name && (
                 <Text style={styles.previewBy}>
@@ -207,7 +207,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingRight: 12,
   },
-  backText: { fontSize: 17, color: Colors.text, marginLeft: 2 },
+  backText: { fontSize: 17, color: Colors.textPrimary, marginLeft: 2 },
   iconBubble: {
     width: 72,
     height: 72,
@@ -222,7 +222,7 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 28,
     fontWeight: '800',
-    color: Colors.text,
+    color: Colors.textPrimary,
     textAlign: 'center',
   },
   subtitle: {
@@ -244,7 +244,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingHorizontal: 18,
     backgroundColor: Colors.surface,
-    color: Colors.text,
+    color: Colors.textPrimary,
     fontSize: 20,
     letterSpacing: 2,
     borderWidth: 1,

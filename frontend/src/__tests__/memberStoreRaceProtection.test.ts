@@ -63,11 +63,11 @@ type PartialMember = {
 
 function member(overrides: PartialMember): any {
   return {
-    id: 'member-1',
     name: 'Joyce',
     last_seen: '2024-06-01T12:00:00.000Z',
     location_name: 'Bullhead City',
     ...overrides,
+    id: overrides.id ?? 'member-1',
   };
 }
 

@@ -48,11 +48,29 @@ _BG_TASKS: set = set()
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env', override=False)
 
+_INSECURE_JWT_FALLBACK = "kinnship-dev-secret-change-in-prod"
+_MIN_JWT_SECRET_LENGTH = 32
+
+
+def _load_jwt_secret() -> str:
+    """Require an explicit, sufficiently long signing secret at startup."""
+    secret = (os.environ.get("JWT_SECRET") or "").strip()
+    if (
+        not secret
+        or secret == _INSECURE_JWT_FALLBACK
+        or len(secret) < _MIN_JWT_SECRET_LENGTH
+    ):
+        raise RuntimeError(
+            "JWT_SECRET must be an explicit, non-development value of at least "
+            f"{_MIN_JWT_SECRET_LENGTH} characters before Kinnship can start."
+        )
+    return secret
+
+
+SECRET_KEY = _load_jwt_secret()
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
-
-SECRET_KEY = os.environ.get("JWT_SECRET", "kinnship-dev-secret-change-in-prod")
 ALGORITHM = "HS256"
 # JWT lifetime — 1 year. We target a senior + family-caregiver
 # audience for whom any unprompted "your session has expired, please

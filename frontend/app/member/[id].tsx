@@ -311,7 +311,7 @@ export default function MemberDetail() {
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 }}>
           <Icon name="cloud-offline-outline" size={48} color={Colors.error} />
           <Text style={{ fontSize: 18, fontWeight: '700', color: Colors.textPrimary, marginTop: 16, textAlign: 'center' }}>
-            Couldn't load member details.
+            Couldn&apos;t load member details.
           </Text>
           <Text style={{ fontSize: 14, color: Colors.textSecondary, marginTop: 8, textAlign: 'center' }}>
             Please check your connection and try again.

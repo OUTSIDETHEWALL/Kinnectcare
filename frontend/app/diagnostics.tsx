@@ -2288,7 +2288,7 @@ export default function DiagnosticsScreen() {
                       );
                     })}
                     <Text style={{ color: '#6B7280', fontSize: 10, marginTop: 6 }}>
-                      Ages are at snapshot time — add "Snapshot age" for current effective age
+                       Ages are at snapshot time — add &quot;Snapshot age&quot; for current effective age
                     </Text>
                   </View>
                 )}
@@ -2349,9 +2349,9 @@ export default function DiagnosticsScreen() {
           })() : (
             <View style={styles.card}>
               <Text style={styles.muted}>
-                Tap "Fetch Device Comparison" to load both devices' upload freshness and
+                 Tap &quot;Fetch Device Comparison&quot; to load both devices&apos; upload freshness and
                 pipeline state from the server. Green = &lt;5 min · Amber = 5-15 min · Red = &gt;15 min.{'\n\n'}
-                The "device_snapshot" rows only appear once each device has been stale for &gt;5 min
+                 The &quot;device_snapshot&quot; rows only appear once each device has been stale for &gt;5 min
                 and has pushed its pipeline timestamps to the backend.
               </Text>
             </View>
@@ -2823,7 +2823,7 @@ export default function DiagnosticsScreen() {
           <Text style={styles.sectionHint}>
             Every push observed by this device — for diagnosing intermittent silent-
             push sound leaks.  If a notification with `channelId: silent_v2` ever
-            shows `sound: "default"`, that's the leak source.
+            shows `sound: &quot;default&quot;`, that&apos;s the leak source.
           </Text>
           <View style={styles.card} testID="diagnostics-notif-log">
             {notifLog.length === 0 ? (
@@ -2876,7 +2876,7 @@ export default function DiagnosticsScreen() {
           <Text style={styles.sectionHint}>
             End-to-end latency for each refresh.  Columns: when requested, time to
             push send, time to GPS upload received.  Reveals whether a slow refresh
-            is the server, FCM, or the device's GPS warmup.
+            is the server, FCM, or the device&apos;s GPS warmup.
           </Text>
           <View style={styles.card} testID="diagnostics-refresh-traces">
             {refreshTraces.length === 0 ? (
@@ -3374,7 +3374,7 @@ export default function DiagnosticsScreen() {
             Every dashboard/member fetch (`*-fetch`), every MemberMap prop change
             (`map-props`), every WebView marker-painted confirmation (`map-rendered`).
             Compare the lat/lon across the three for the same member to isolate
-            (A) map didn't render fresh, (B) fetch returned stale, (C) state never updated.
+            (A) map didn&apos;t render fresh, (B) fetch returned stale, (C) state never updated.
           </Text>
           <View style={styles.card}>
             {loading ? (
@@ -3448,7 +3448,7 @@ export default function DiagnosticsScreen() {
               <Text style={styles.muted}>Loading…</Text>
             ) : bgLog.length === 0 ? (
               <Text style={styles.muted}>
-                No background task wakes recorded yet. Either the task hasn't fired since
+                No background task wakes recorded yet. Either the task hasn&apos;t fired since
                 this OTA installed, or the OS is suppressing wakeups. Walk &gt;100 m or
                 wait 5+ min to test.
               </Text>
