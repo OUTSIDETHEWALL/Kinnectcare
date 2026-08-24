@@ -176,6 +176,14 @@ const styles = StyleSheet.create({
   bottom: { paddingHorizontal: 24, paddingBottom: 24, gap: 12 },
   cta: { height: 60, backgroundColor: Colors.primary, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   ctaText: { color: Colors.surface, fontSize: 17, fontWeight: '700' },
-  ctaSecondary: { height: 50, alignItems: 'center', justifyContent: 'center' },
-  ctaSecondaryText: { color: Colors.textSecondary, fontSize: 15, fontWeight: '600' },
+  ctaSecondary: {
+    height: 52,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.surface,
+    borderWidth: 2,
+    borderColor: Colors.primary,
+  },
+  ctaSecondaryText: { color: Colors.primary, fontSize: 16, fontWeight: '800' },
 });
