@@ -116,6 +116,61 @@ const PTS_KEYS = {
 
 type PtsKey = keyof typeof PTS_KEYS;
 
+// These counters are intentionally separate from the pipeline timestamps.
+// Timestamps answer "when did this stage last fire?"; counters answer "how
+// many uploads have succeeded or failed over the lifetime of this install?"
+// They must not be part of the engine ring buffer because Clear engine log
+// is expected to leave this history intact.
+const HTTP_OK_COUNT_KEY = 'kc_pts_http_ok_count';
+const HTTP_FAIL_COUNT_KEY = 'kc_pts_http_fail';
+
+export type PersistentHttpUploadStats = {
+  attempted: number;
+  ok: number;
+  fail: number;
+};
+
+let httpCounterWriteQueue: Promise<void> = Promise.resolve();
+
+/**
+ * Increment one persistent HTTP upload counter.
+ *
+ * AsyncStorage has no atomic increment operation. Serializing writes within
+ * this JS runtime prevents two foreground callbacks from dropping a count.
+ * Headless invocations have their own runtime, but the SDK delivers those
+ * events one at a time in practice.
+ */
+function incrementHttpCounter(key: string): Promise<void> {
+  httpCounterWriteQueue = httpCounterWriteQueue
+    .then(async () => {
+      try {
+        const raw = await AsyncStorage.getItem(key);
+        const current = raw ? Number(raw) : 0;
+        const next = Number.isFinite(current) && current >= 0 ? current + 1 : 1;
+        await AsyncStorage.setItem(key, String(next));
+      } catch {
+        // Diagnostics must never interfere with location uploads.
+      }
+    })
+    .catch(() => {
+      // Keep the queue usable after an unexpected promise failure.
+    });
+  return httpCounterWriteQueue;
+}
+
+/** Read the durable upload counts. Safe to call from the Diagnostics screen. */
+export async function getPersistentHttpUploadStats(): Promise<PersistentHttpUploadStats> {
+  const [okRaw, failRaw] = await Promise.all([
+    AsyncStorage.getItem(HTTP_OK_COUNT_KEY).catch(() => null),
+    AsyncStorage.getItem(HTTP_FAIL_COUNT_KEY).catch(() => null),
+  ]);
+  const ok = Number(okRaw);
+  const fail = Number(failRaw);
+  const safeOk = Number.isFinite(ok) && ok >= 0 ? ok : 0;
+  const safeFail = Number.isFinite(fail) && fail >= 0 ? fail : 0;
+  return { attempted: safeOk + safeFail, ok: safeOk, fail: safeFail };
+}
+
 /** Write current epoch ms for one pipeline stage.  Fire-and-forget — never throws. */
 function recordPipelineTs(stage: PtsKey): void {
   AsyncStorage.setItem(PTS_KEYS[stage], String(Date.now())).catch(() => {});
@@ -408,6 +463,11 @@ function registerHeadlessTaskOnce(): void {
         // Diagnostics upload-ratio card can count headless successes and
         // failures without decoding the success boolean inside sdk_onHttp.
         // Mirrors the foreground handler's http_upload_success / http_upload_failure.
+        if (success) {
+          await incrementHttpCounter(HTTP_OK_COUNT_KEY);
+        } else {
+          await incrementHttpCounter(HTTP_FAIL_COUNT_KEY);
+        }
         if (success) {
           await logEvent('headless_http_ok', { status });
         } else {
@@ -1035,6 +1095,11 @@ function attachSdkListeners(lib: any): void {
       // "longitude":...,"last_seen":"..."}` is plenty to confirm
       // identity and freshness.
       recordPipelineTs('http_attempt');
+      if (evt?.success === true) {
+        void incrementHttpCounter(HTTP_OK_COUNT_KEY);
+      } else {
+        void incrementHttpCounter(HTTP_FAIL_COUNT_KEY);
+      }
       let bodyHead: string | null = null;
       let parsed: any = null;
       try {
