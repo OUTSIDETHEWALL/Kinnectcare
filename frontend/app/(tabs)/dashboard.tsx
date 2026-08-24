@@ -35,6 +35,7 @@ import { useAuth } from '../../src/AuthContext';
 import * as memberStore from '../../src/store/memberStore';
 import { logPipelineEvent } from '../../src/refreshPipelineLog';
 import { useActiveEmergency } from '../../src/activeEmergency';
+import { getBatteryDisplay } from '../../src/batteryStatus';
 // TrackingStatusPill removed — Build XX family screen simplification.
 import Svg, { Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
@@ -1158,34 +1159,21 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
               caregivers can judge how fresh the reading is. */}
           {(() => {
             const bLevel = (member as any).battery_level as number | null | undefined;
-            if (bLevel == null) return null; // No battery data ever recorded — hide row
             const updatedAt = (member as any).battery_updated_at as string | null | undefined;
             const isCharging = (member as any).is_charging as boolean | null | undefined;
-            const pct = Math.round(bLevel * 100);
-
-            // Status indicator + percentage on first line
-            let statusText: string;
-            let statusStyle: object;
-            if (isCharging) {
-              statusText = `🔌 Charging · ${pct}%`;
-              statusStyle = styles.batteryLineCharging;
-            } else if (bLevel <= 0.20) {
-              statusText = `🔴 ${pct}% · Low`;
-              statusStyle = styles.batteryLineLow;
-            } else {
-              statusText = `🟢 ${pct}%`;
-              statusStyle = styles.batteryLineOk;
-            }
-
-            // Age label on second line — "Updated 9 hours ago" or "Last update unknown"
-            const ageLabel = updatedAt
-              ? `Updated ${formatLastSeenAge(updatedAt)}`
-              : 'Last update unknown';
+            const battery = getBatteryDisplay(bLevel, isCharging, updatedAt);
+            if (!battery) return null;
+            const statusStyle =
+              battery.tone === 'charging'
+                ? styles.batteryLineCharging
+                : battery.tone === 'low'
+                  ? styles.batteryLineLow
+                  : styles.batteryLineOk;
 
             return (
               <>
-                <Text style={[styles.batteryLine, statusStyle]}>{statusText}</Text>
-                <Text style={[styles.batteryLine, styles.batteryLineAge]}>{ageLabel}</Text>
+                <Text style={[styles.batteryLine, statusStyle]}>{battery.statusText}</Text>
+                <Text style={[styles.batteryLine, styles.batteryLineAge]}>{battery.ageLabel}</Text>
               </>
             );
           })()}
