@@ -63,8 +63,10 @@ import {
   LocationEngineState,
   getPipelineTimestamps,
   getLastHttpSuccessTs,
+  getPersistentHttpUploadStats,
   isListenersAttached,
   PipelineTimestamps,
+  PersistentHttpUploadStats,
   triggerDeviceSnapshotNow,
   checkBatteryOptimization,
   requestShowIgnoreBatteryOptimizations,
@@ -582,6 +584,8 @@ export default function DiagnosticsScreen() {
 
   // Task #21 — Pipeline timestamps (per-stage AsyncStorage timestamps).
   const [pipelineTs, setPipelineTs] = useState<PipelineTimestamps | null>(null);
+  const [persistentUploadStats, setPersistentUploadStats] =
+    useState<PersistentHttpUploadStats | null>(null);
   const [listenersAttachedFlag, setListenersAttachedFlag] = useState<boolean>(false);
   // Task #53 — "Push snapshot now" test button state.
   const [snapshotPushing, setSnapshotPushing] = useState<boolean>(false);
@@ -879,11 +883,16 @@ export default function DiagnosticsScreen() {
 
     // Task #21 — pipeline timestamps.
     try {
-      const pts = await getPipelineTimestamps();
+      const [pts, httpStats] = await Promise.all([
+        getPipelineTimestamps(),
+        getPersistentHttpUploadStats(),
+      ]);
       setPipelineTs(pts);
+      setPersistentUploadStats(httpStats);
       setListenersAttachedFlag(isListenersAttached());
     } catch (_e) {
       setPipelineTs(null);
+      setPersistentUploadStats(null);
     }
 
     setLoading(false);
@@ -942,11 +951,15 @@ export default function DiagnosticsScreen() {
   useEffect(() => {
     const t = setInterval(async () => {
       try {
-        const httpSuccessMs = await getLastHttpSuccessTs();
+        const [httpSuccessMs, httpStats] = await Promise.all([
+          getLastHttpSuccessTs(),
+          getPersistentHttpUploadStats(),
+        ]);
         setPipelineTs((prev) => {
           if (!prev || prev.http_success === httpSuccessMs) return prev;
           return { ...prev, http_success: httpSuccessMs };
         });
+        setPersistentUploadStats(httpStats);
       } catch (_e) { /* swallow — hero card remains at last known state */ }
     }, 30_000);
     return () => clearInterval(t);
@@ -2527,13 +2540,10 @@ export default function DiagnosticsScreen() {
             </Text>
           </View>
 
-          {/* Task 68 — Upload ratio summary card.
-              Shows ok vs fail counts from the ring buffer so Charles can
-              confirm at a glance whether uploads are landing or bouncing
-              without reading individual log entries.  Both the foreground
-              (http_upload_success/failure) and headless (headless_http_ok/
-              headless_http_error) paths feed into sdk_onHttp, which is what
-              we count here to avoid double-counting. */}
+          {/* Upload ratio summary cards.
+              The first card is the current ring-buffer window. The second is
+              persistent across clears, so a failure that happened before a
+              support log was cleared remains visible to the caregiver. */}
           <Text style={[styles.subSectionLabel, { marginTop: 12 }]}>Upload ratio (this buffer)</Text>
           <View style={styles.card} testID="diagnostics-upload-ratio">
             {uploadRatio.total === 0 ? (
@@ -2557,6 +2567,31 @@ export default function DiagnosticsScreen() {
                   {uploadRatio.lastFailStatus !== null && (
                     <Text style={styles.entry}>  (last status: {uploadRatio.lastFailStatus})</Text>
                   )}
+                </Text>
+              </>
+            )}
+          </View>
+          <Text style={[styles.subSectionLabel, { marginTop: 12 }]}>Upload ratio (lifetime)</Text>
+          <View style={styles.card} testID="diagnostics-upload-ratio-lifetime">
+            {persistentUploadStats === null || persistentUploadStats.attempted === 0 ? (
+              <Text style={styles.entryLine}>
+                <Text style={styles.entry}>No uploads recorded in persistent history yet.</Text>
+              </Text>
+            ) : (
+              <>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>✅ ok: </Text>
+                  <Text style={[styles.bold, persistentUploadStats.ok > 0 ? { color: '#22c55e' } : {}]}>
+                    {persistentUploadStats.ok}
+                  </Text>
+                  <Text style={styles.entry}>  /  total: {persistentUploadStats.attempted}</Text>
+                </Text>
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>❌ failed: </Text>
+                  <Text style={[styles.bold, persistentUploadStats.fail > 0 ? { color: '#ef4444' } : {}]}>
+                    {persistentUploadStats.fail}
+                  </Text>
+                  <Text style={styles.entry}>  (survives clearing the engine log)</Text>
                 </Text>
               </>
             )}
