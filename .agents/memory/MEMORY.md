@@ -12,3 +12,4 @@
 - [Battery subsystem architecture](battery-subsystem-architecture.md) — two-path (headless + WorkManager); type guard fix; never use typeof===boolean for SDK values; react-native-background-fetch chosen over expo-background-task (already native-linked).
 - [Git push in Replit](git-push-replit.md) — Replit's git credential helper times out; git push only works with GITHUB_PAT secret + x-access-token URL scheme; main branch is protected (no force-push).
 - [Railway entrypoint parity](railway-entrypoint-parity.md) — root and backend Railway entrypoints can drift; security fixes must cover both until deployment is consolidated.
+- [Active Railway backend](active-railway-backend.md) — production serves the `backend/` tree; the root backend copy is stale and can mislead release reviews.
