@@ -89,12 +89,12 @@ import {
   HealthItem,
   healthIcon,
   formatAgeMs,
-  computeHealthItems,
   computeOverallHealth,
   heroTheme,
   OverallHealthResult,
   OverallHealthLevel,
 } from '../src/healthCheck';
+import { computeDiagnosticsHealthItems } from '../src/diagnosticsHealthItems';
 import { startDeviceComparisonRefresh } from '../src/deviceComparisonRefresh';
 import {
   ageCellColor,
@@ -662,7 +662,7 @@ export default function DiagnosticsScreen() {
   // entries and the last successful sdk_onHttp event was evicted.
   // pipelineTs is already loaded by reload() via getPipelineTimestamps().
   const healthItems = useMemo(
-    () => computeHealthItems(engineLog, nowTick, pipelineTs?.http_success ?? null),
+    () => computeDiagnosticsHealthItems(engineLog, nowTick, pipelineTs),
     [engineLog, nowTick, pipelineTs],
   );
 

@@ -7,7 +7,7 @@
  * pipelineTs?.http_success from the detail-row calculation.
  */
 
-import { computeHealthItems } from '../healthCheck';
+import { computeDiagnosticsHealthItems } from '../diagnosticsHealthItems';
 import type { EngineLogEvent, PipelineTimestamps } from '../locationEngine';
 
 let seq = 0;
@@ -50,12 +50,12 @@ describe('Diagnostics health-items upload row — failure burst then recovery', 
       listeners_attached: null,
     };
 
-    // Mirrors the healthItems useMemo call in diagnostics.tsx:
-    // computeHealthItems(engineLog, nowTick, pipelineTs?.http_success ?? null)
-    const items = computeHealthItems(
+    // This is the exact selector used by the healthItems useMemo in
+    // diagnostics.tsx.
+    const items = computeDiagnosticsHealthItems(
       engineLog,
       NOW,
-      pipelineTs?.http_success ?? null,
+      pipelineTs,
     );
     const uploadItem = items.find((item) => item.label.includes('Last location uploaded'));
 
@@ -68,12 +68,12 @@ describe('Diagnostics health-items upload row — failure burst then recovery', 
     const engineLog = failureBuffer(50, NOW);
     const pipelineTs = null as PipelineTimestamps | null;
 
-    // Before reload() supplies pipeline timestamps, the same call-site
-    // expression must not invent a successful upload.
-    const items = computeHealthItems(
+    // Before reload() supplies pipeline timestamps, the selector used by
+    // diagnostics.tsx must not invent a successful upload.
+    const items = computeDiagnosticsHealthItems(
       engineLog,
       NOW,
-      pipelineTs?.http_success ?? null,
+      pipelineTs,
     );
     const uploadItem = items.find((item) =>
       item.label.includes('Location upload: waiting for first upload'),
