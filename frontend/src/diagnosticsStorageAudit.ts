@@ -27,6 +27,9 @@ export const DIAGNOSTICS_STORAGE_KEYS = [
   '@kinnship/leonidas_recovery_log_v1',
   '@kinnship/location_engine_log_v1',
   'kc_stale_location_pipeline_snapshots_v1',
+  '@kinnship/tracking_pill_decisions_v1',
+  '@kinnship/resume_decisions_v1',
+  'kc_debug_overlay_v1',
 ] as const;
 
 export type DiagnosticsStorageKey = (typeof DIAGNOSTICS_STORAGE_KEYS)[number];
@@ -49,6 +52,8 @@ export type DiagnosticsStorageAuditEntry = {
   issue: string | null;
   /** Field names only, never field values. Useful for spotting legacy schemas. */
   fieldSets: string[];
+  /** Explicit version markers found in records, without copying record payloads. */
+  schemaVersions: string[];
 };
 
 export type DiagnosticsStorageAuditResult = {
@@ -61,7 +66,7 @@ export type DiagnosticsStorageAuditResult = {
 
 type StorageDefinition = {
   key: DiagnosticsStorageKey;
-  shape: 'array' | 'expansion-state';
+  shape: 'array' | 'expansion-state' | 'raw-boolean-flag';
   validateRecord?: (record: Record<string, unknown>) => string | null;
 };
 
@@ -93,6 +98,22 @@ const SCREEN_RENDER_SOURCES = new Set([
 ]);
 const PIPELINE_STAGES = new Set([
   'dashboard-load', 'store-upsert-one', 'store-upsert-many', 'store-fetch-all',
+]);
+const SAFE_SCHEMA_FIELDS = new Set([
+  'ageMs', 'age_label', 'api_to_store', 'at', 'batchAdvanced', 'batchId',
+  'alertId', 'body', 'broadcast_last_seen', 'cachedUserId', 'created_at', 'detail',
+  'device_coords', 'device_fix_at', 'distances_m', 'error', 'event',
+  'failure_detail', 'failure_stage', 'fromPathname', 'hasCoords', 'health_state', 'http_status',
+  'id', 'is_newer', 'kind', 'lastSeenIso', 'last_seen', 'latApprox',
+  'lonApprox', 'memberCount', 'member_count', 'member_id', 'native_to_backend',
+  'ok', 'phase', 'previous_to_native', 'prior_state_last_seen', 'raw_members',
+  'reason', 'refreshing', 'response', 'route', 'schemaVersion', 'schema_version',
+  'screen', 'seen_ms', 'seq', 'source', 'src', 'stage', 'staleness_triggered_for',
+  'status', 'store_to_map', 't', 't_get_received', 't_get_sent', 't_load_started',
+  't_setstate', 'tokenSuffix', 'trace_id', 'trigger', 'url', 'v', 'version',
+  'wrote', 'rotated', 'backend_coords', 'backend_received_at', 'api_coords',
+  'api_returned_at', 'store_coords', 'store_updated_at', 'map_coords',
+  'map_rendered_at',
 ]);
 
 function finiteNumber(record: Record<string, unknown>, field: string): string | null {
@@ -128,6 +149,14 @@ function optionalObject(record: Record<string, unknown>, field: string): string 
   return record[field] === undefined || isObject(record[field])
     ? null
     : `${field}_expected_object`;
+}
+
+function optionalNullableString(record: Record<string, unknown>, field: string): string | null {
+  return record[field] === undefined ? null : nullableString(record, field);
+}
+
+function optionalNullableNumber(record: Record<string, unknown>, field: string): string | null {
+  return record[field] === undefined ? null : nullableNumber(record, field);
 }
 
 function allValid(...issues: (string | null)[]): string | null {
@@ -268,6 +297,32 @@ const STORAGE_DEFINITIONS: StorageDefinition[] = [
     shape: 'array',
     validateRecord: (r) => isPipelineSnapshot(r) ? null : 'snapshot_schema_invalid',
   },
+  {
+    key: '@kinnship/tracking_pill_decisions_v1',
+    shape: 'array',
+    validateRecord: (r) => allValid(
+      finiteNumber(r, 't'),
+      requiredString(r, 'screen'),
+      requiredBoolean(r, 'hasCoords'),
+      nullableString(r, 'lastSeenIso'),
+      nullableNumber(r, 'ageMs'),
+      requiredString(r, 'kind'),
+      requiredString(r, 'reason'),
+    ),
+  },
+  {
+    key: '@kinnship/resume_decisions_v1',
+    shape: 'array',
+    validateRecord: (r) => allValid(
+      finiteNumber(r, 't'),
+      requiredString(r, 'reason'),
+      optionalNullableString(r, 'alertId'),
+      optionalNullableNumber(r, 'ageMs'),
+      optionalNullableString(r, 'fromPathname'),
+      optionalNullableString(r, 'detail'),
+    ),
+  },
+  { key: 'kc_debug_overlay_v1', shape: 'raw-boolean-flag' },
 ];
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -280,18 +335,50 @@ function jsonShape(value: unknown): string {
   return typeof value;
 }
 
+function safeFieldSignature(record: Record<string, unknown>): string {
+  const keys = Object.keys(record);
+  const safe = keys.filter((key) => SAFE_SCHEMA_FIELDS.has(key)).sort();
+  const unknownCount = keys.length - safe.length;
+  return [
+    ...safe,
+    ...(unknownCount > 0 ? [`<${unknownCount}_unknown_fields>`] : []),
+  ].join(',');
+}
+
 function fieldSets(value: unknown): string[] {
-  if (!Array.isArray(value)) return isObject(value) ? [Object.keys(value).sort().join(',')] : [];
+  if (!Array.isArray(value)) return isObject(value) ? [safeFieldSignature(value)] : [];
   const seen = new Set<string>();
-  for (const record of value.slice(0, 10)) {
+  for (const record of value) {
     if (!isObject(record)) {
       seen.add(`<${jsonShape(record)}>`);
     } else {
-      seen.add(Object.keys(record).sort().join(','));
+      seen.add(safeFieldSignature(record));
     }
     if (seen.size >= MAX_FIELD_SETS) break;
   }
   return [...seen];
+}
+
+function schemaVersions(value: unknown, key: DiagnosticsStorageKey): string[] {
+  const values = new Set<string>();
+  const keySuffix = key.match(/_v(\d+)$/);
+  if (keySuffix) values.add(`key_suffix=v${keySuffix[1]}`);
+  const records = Array.isArray(value) ? value : [value];
+  for (const record of records) {
+    if (!isObject(record)) continue;
+    for (const field of ['schemaVersion', 'schema_version', 'version', 'v']) {
+      const version = record[field];
+      if (typeof version === 'number' && Number.isInteger(version) && version >= 0 && version <= 999) {
+        values.add(`${field}=${version}`);
+      } else if (
+        typeof version === 'string'
+        && /^v?\d{1,3}(?:\.\d{1,3}){0,2}$/.test(version)
+      ) {
+        values.add(`${field}=${version}`);
+      }
+    }
+  }
+  return [...values];
 }
 
 function validateParsedValue(
@@ -302,10 +389,16 @@ function validateParsedValue(
     if (!isObject(parsed)) {
       return { valid: false, issue: `expected_object_received_${jsonShape(parsed)}`, recordCount: null };
     }
-    const invalidField = Object.entries(parsed).find(([, value]) => typeof value !== 'boolean');
-    return invalidField
-      ? { valid: false, issue: `field_${invalidField[0]}_expected_boolean`, recordCount: null }
+    const invalidField = Object.values(parsed).find((value) => typeof value !== 'boolean');
+    return invalidField !== undefined
+      ? { valid: false, issue: 'expansion_state_value_expected_boolean', recordCount: null }
       : { valid: true, issue: null, recordCount: null };
+  }
+
+  if (definition.shape === 'raw-boolean-flag') {
+    return parsed === '0' || parsed === '1'
+      ? { valid: true, issue: null, recordCount: null }
+      : { valid: false, issue: 'expected_raw_0_or_1', recordCount: null };
   }
 
   if (!Array.isArray(parsed)) {
@@ -372,10 +465,13 @@ export async function auditDiagnosticsStorage(): Promise<DiagnosticsStorageAudit
           recordCount: null,
           issue: null,
           fieldSets: [],
+          schemaVersions: schemaVersions({}, definition.key),
         };
       } else {
         try {
-          const parsed: unknown = JSON.parse(raw);
+          const parsed: unknown = definition.shape === 'raw-boolean-flag'
+            ? raw
+            : JSON.parse(raw);
           const validation = validateParsedValue(definition, parsed);
           entry = {
             key: definition.key,
@@ -385,6 +481,7 @@ export async function auditDiagnosticsStorage(): Promise<DiagnosticsStorageAudit
             recordCount: validation.recordCount,
             issue: validation.issue,
             fieldSets: fieldSets(parsed),
+            schemaVersions: schemaVersions(parsed, definition.key),
           };
         } catch {
           entry = {
@@ -395,6 +492,7 @@ export async function auditDiagnosticsStorage(): Promise<DiagnosticsStorageAudit
             recordCount: null,
             issue: 'json_parse_failed',
             fieldSets: [],
+            schemaVersions: schemaVersions({}, definition.key),
           };
         }
       }
@@ -407,6 +505,7 @@ export async function auditDiagnosticsStorage(): Promise<DiagnosticsStorageAudit
         recordCount: null,
         issue: 'storage_read_failed',
         fieldSets: [],
+        schemaVersions: schemaVersions({}, definition.key),
       };
     }
 
@@ -488,23 +587,13 @@ async function recordCleanup(keys: DiagnosticsStorageKey[]): Promise<void> {
   }
 }
 
-export async function clearDiagnosticsStorageKeys(
-  keys: readonly DiagnosticsStorageKey[],
+export async function clearDiagnosticsStorageKey(
+  key: DiagnosticsStorageKey,
 ): Promise<void> {
   const allowed = new Set<DiagnosticsStorageKey>(DIAGNOSTICS_STORAGE_KEYS);
-  const safeKeys = [...new Set(keys)].filter((key) => allowed.has(key));
-  if (safeKeys.length === 0) return;
-  await AsyncStorage.multiRemove(safeKeys);
-  await recordCleanup(safeKeys);
-}
-
-export async function clearInvalidDiagnosticsStorage(
-  audit: DiagnosticsStorageAuditResult,
-): Promise<DiagnosticsStorageKey[]> {
-  await clearDiagnosticsStorageKeys(audit.invalidKeys);
-  return audit.invalidKeys;
-}
-
-export async function clearAllDiagnosticsStorage(): Promise<void> {
-  await clearDiagnosticsStorageKeys(DIAGNOSTICS_STORAGE_KEYS);
+  if (!allowed.has(key)) {
+    throw new Error('diagnostics_storage_key_not_allowed');
+  }
+  await AsyncStorage.multiRemove([key]);
+  await recordCleanup([key]);
 }

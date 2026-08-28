@@ -55,8 +55,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { formatTimezone, formatPhone } from '../../src/timeFormat';
 import {
   auditDiagnosticsStorage,
-  clearAllDiagnosticsStorage,
-  clearInvalidDiagnosticsStorage,
+  clearDiagnosticsStorageKey,
+  DIAGNOSTICS_STORAGE_KEYS,
+  DiagnosticsStorageAuditEntry,
+  DiagnosticsStorageKey,
   DiagnosticsStorageAuditResult,
   readDiagnosticsStorageEvidence,
   readLatestDiagnosticsStorageAudit,
@@ -96,6 +98,55 @@ function NavRow(props: {
       </View>
       {!disabled ? <Icon name="chevron-forward" size={20} color={Colors.textTertiary} /> : null}
     </TouchableOpacity>
+  );
+}
+
+function DiagnosticsStorageRow({
+  entry,
+  onDelete,
+  disabled,
+}: {
+  entry: DiagnosticsStorageAuditEntry;
+  onDelete: (key: DiagnosticsStorageKey) => void;
+  disabled: boolean;
+}) {
+  const isBad = entry.status === 'invalid' || entry.status === 'read_error';
+  const statusLabel = entry.status === 'missing'
+    ? 'missing'
+    : entry.status === 'valid'
+      ? 'valid'
+      : entry.status;
+  const versionLabel = entry.schemaVersions?.length > 0
+    ? entry.schemaVersions.join(', ')
+    : 'no explicit version marker';
+  const fieldsLabel = entry.fieldSets.length > 0
+    ? entry.fieldSets.join(' · ')
+    : '—';
+
+  return (
+    <View style={styles.storageRow}>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={styles.storageKey} selectable>{entry.key}</Text>
+        <Text style={[styles.storageStatus, isBad && styles.storageStatusBad]}>
+          {statusLabel} · {entry.recordCount === null ? 'object' : `${entry.recordCount} record${entry.recordCount === 1 ? '' : 's'}`} · {entry.rawBytes} bytes
+        </Text>
+        {entry.issue ? (
+          <Text style={styles.storageIssue} selectable>Record/schema: {entry.issue}</Text>
+        ) : null}
+        <Text style={styles.storageMeta} selectable>Version: {versionLabel}</Text>
+        <Text style={styles.storageMeta} selectable numberOfLines={2}>Fields: {fieldsLabel}</Text>
+      </View>
+      <TouchableOpacity
+        testID={`me-diagnostics-storage-delete-${entry.key}`}
+        style={[styles.storageDelete, disabled && styles.storageDeleteDisabled]}
+        onPress={() => onDelete(entry.key)}
+        disabled={disabled}
+        accessibilityRole="button"
+        accessibilityLabel={`Delete ${entry.key}`}
+      >
+        <Text style={styles.storageDeleteText}>Delete</Text>
+      </TouchableOpacity>
+    </View>
   );
 }
 
@@ -432,6 +483,12 @@ export default function MeScreen() {
     }
   }, []);
 
+  useEffect(() => {
+    if (devMode && !storageAudit && !storageAuditBusy) {
+      void runDiagnosticsStorageAudit();
+    }
+  }, [devMode, runDiagnosticsStorageAudit, storageAudit, storageAuditBusy]);
+
   const onAuditDiagnosticsStorage = useCallback(async () => {
     const result = await runDiagnosticsStorageAudit();
     if (!result) return;
@@ -454,10 +511,10 @@ export default function MeScreen() {
     Alert.alert('Evidence copied', 'The report includes audit and cleanup history, but no stored payload contents.');
   }, [storageAudit]);
 
-  const offerReloadAfterCleanup = useCallback((removedCount: number) => {
+  const offerReloadAfterCleanup = useCallback((key: DiagnosticsStorageKey) => {
     Alert.alert(
       'Diagnostics storage removed',
-      `Removed ${removedCount} Diagnostics-only key${removedCount === 1 ? '' : 's'}. Account, identity, location sharing, SOS, and upload-operation state were preserved.`,
+      `Removed only:\n${key}\n\nAccount, identity, location sharing, SOS, and upload-operation state were preserved. The before/after audit history remains available.`,
       [
         { text: 'Later', style: 'cancel' },
         ...(Platform.OS === 'web'
@@ -467,26 +524,27 @@ export default function MeScreen() {
     );
   }, []);
 
-  const onClearInvalidDiagnosticsStorage = useCallback(() => {
-    if (!storageAudit || storageAudit.invalidKeys.length === 0) {
-      Alert.alert('Nothing to remove', 'The latest audit did not identify any malformed Diagnostics keys.');
-      return;
-    }
+  const onDeleteDiagnosticsKey = useCallback((key: DiagnosticsStorageKey) => {
+    const entry = storageAudit?.entries.find((candidate) => candidate.key === key);
     Alert.alert(
-      'Remove malformed Diagnostics data?',
-      `Only these keys will be removed:\n\n${storageAudit.invalidKeys.join('\n')}\n\nThe audit report will be preserved.`,
+      `Delete ${key}?`,
+      `This removes exactly one AsyncStorage key.\n\nStatus: ${entry?.status ?? 'not audited'}\n`
+        + `Record/schema: ${entry?.issue ?? 'no issue recorded'}\n\n`
+        + 'The audit and cleanup history will be preserved.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Remove malformed',
+          text: 'Delete this key',
           style: 'destructive',
           onPress: async () => {
             setStorageAuditBusy(true);
             try {
-              const removed = await clearInvalidDiagnosticsStorage(storageAudit);
-              offerReloadAfterCleanup(removed.length);
+              await clearDiagnosticsStorageKey(key);
+              const result = await auditDiagnosticsStorage();
+              setStorageAudit(result);
+              offerReloadAfterCleanup(key);
             } catch {
-              Alert.alert('Cleanup failed', 'AsyncStorage could not remove the selected Diagnostics keys.');
+              Alert.alert('Delete failed', 'AsyncStorage could not remove that Diagnostics key.');
             } finally {
               setStorageAuditBusy(false);
             }
@@ -495,31 +553,6 @@ export default function MeScreen() {
       ],
     );
   }, [offerReloadAfterCleanup, storageAudit]);
-
-  const onClearAllDiagnosticsStorage = useCallback(() => {
-    Alert.alert(
-      'Reset Diagnostics storage only?',
-      'This removes the 15 documented Diagnostics log/view keys only. It does not clear the account, session, member identity, location sharing, SOS, background-location identity, or upload-operation timestamps/counters. The audit report is preserved.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Reset Diagnostics',
-          style: 'destructive',
-          onPress: async () => {
-            setStorageAuditBusy(true);
-            try {
-              await clearAllDiagnosticsStorage();
-              offerReloadAfterCleanup(15);
-            } catch {
-              Alert.alert('Cleanup failed', 'AsyncStorage could not reset the Diagnostics-only keys.');
-            } finally {
-              setStorageAuditBusy(false);
-            }
-          },
-        },
-      ],
-    );
-  }, [offerReloadAfterCleanup]);
 
   const onOpenDiagnostics = useCallback(async () => {
     const result = await runDiagnosticsStorageAudit();
@@ -1338,26 +1371,27 @@ export default function MeScreen() {
                 onPress={onCopyDiagnosticsStorageAudit}
                 disabled={!storageAudit || storageAuditBusy}
               />
-              {storageAudit && storageAudit.invalidKeys.length > 0 ? (
-                <NavRow
-                  testID="me-diagnostics-storage-clear-invalid"
-                  icon="🧹"
-                  label="Remove malformed Diagnostics data"
-                  secondary={storageAudit.invalidKeys.join(', ')}
-                  onPress={onClearInvalidDiagnosticsStorage}
-                  danger
-                  disabled={storageAuditBusy}
+            </View>
+            <Text style={styles.storageInspectorNote}>
+              Each row is read outside Diagnostics. Delete one key at a time, reload, and retry
+              Diagnostics to isolate the culprit. There is intentionally no clear-all action.
+            </Text>
+            <View style={styles.storageInspectorCard}>
+              {storageAudit ? storageAudit.entries.map((entry) => (
+                <DiagnosticsStorageRow
+                  key={entry.key}
+                  entry={entry}
+                  onDelete={onDeleteDiagnosticsKey}
+                  disabled={storageAuditBusy || entry.status === 'missing'}
                 />
-              ) : null}
-              <NavRow
-                testID="me-diagnostics-storage-reset"
-                icon="🗑"
-                label="Reset Diagnostics storage only"
-                secondary="Isolation test: preserves account and location operation"
-                onPress={onClearAllDiagnosticsStorage}
-                danger
-                disabled={storageAuditBusy}
-              />
+              )) : (
+                <View style={styles.storageInspectorEmpty}>
+                  <ActivityIndicator color={Colors.primary} />
+                  <Text style={styles.storageMeta}>
+                    Reading all {DIAGNOSTICS_STORAGE_KEYS.length} Diagnostics keys…
+                  </Text>
+                </View>
+              )}
             </View>
           </>
         )}
@@ -1702,6 +1736,41 @@ const styles = StyleSheet.create({
   },
   devModeDot: { fontSize: 14 },
   devModeText: { fontSize: 12, color: Colors.textTertiary, fontWeight: '600' },
+  storageInspectorNote: {
+    marginTop: 10, paddingHorizontal: 4, fontSize: 12,
+    color: Colors.textSecondary, lineHeight: 18,
+  },
+  storageInspectorCard: {
+    marginTop: 8, backgroundColor: Colors.surface, borderRadius: 14,
+    borderWidth: 1, borderColor: Colors.border, overflow: 'hidden',
+  },
+  storageInspectorEmpty: {
+    minHeight: 72, padding: 16, alignItems: 'center',
+    justifyContent: 'center', gap: 8,
+  },
+  storageRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: 14, paddingVertical: 13,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: Colors.border,
+  },
+  storageKey: {
+    fontSize: 12, fontWeight: '800', color: Colors.textPrimary,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  storageStatus: { marginTop: 5, fontSize: 11.5, color: Colors.primary, fontWeight: '700' },
+  storageStatusBad: { color: Colors.error },
+  storageIssue: {
+    marginTop: 4, fontSize: 11.5, color: Colors.error, lineHeight: 16,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  storageMeta: { marginTop: 3, fontSize: 11, color: Colors.textTertiary, lineHeight: 15 },
+  storageDelete: {
+    alignSelf: 'center', paddingHorizontal: 11, paddingVertical: 8,
+    borderRadius: 9, borderWidth: 1, borderColor: Colors.error,
+    backgroundColor: Colors.surface,
+  },
+  storageDeleteDisabled: { opacity: 0.35 },
+  storageDeleteText: { fontSize: 12, fontWeight: '800', color: Colors.error },
   footer: { fontSize: 12, color: Colors.textTertiary, textAlign: 'center', marginTop: 22 },
   versionFooter: { fontSize: 11, color: Colors.textTertiary, textAlign: 'center', marginTop: 4, marginBottom: 8, opacity: 0.7 },
 

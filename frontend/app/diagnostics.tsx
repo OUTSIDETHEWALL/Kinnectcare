@@ -33,15 +33,14 @@ import * as Updates from 'expo-updates';
 import { getNotificationLog, clearNotificationLog } from '../src/notificationLog';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
-import { readRouteLog, clearRouteLog, RouteDiagEntry } from '../src/routeDiagnostics';
-import { readLocationRefreshLog, clearLocationRefreshLog, LocationRefreshEntry } from '../src/locationRefresh';
-import { readBgTaskLog, clearBgTaskLog, BgTaskLogEntry } from '../src/backgroundLocation';
+import { readRouteLog, RouteDiagEntry } from '../src/routeDiagnostics';
+import { readLocationRefreshLog, LocationRefreshEntry } from '../src/locationRefresh';
+import { readBgTaskLog, BgTaskLogEntry } from '../src/backgroundLocation';
 import {
   readBatteryTaskLog,
-  clearBatteryTaskLog,
   BatteryTaskLogEntry,
 } from '../src/batteryTask';
-import { readScreenRenderLog, clearScreenRenderLog, ScreenRenderEntry } from '../src/screenRenderLog';
+import { readScreenRenderLog, ScreenRenderEntry } from '../src/screenRenderLog';
 import {
   getDashboardLoadLog,
   clearDashboardLoadLog,
@@ -145,10 +144,6 @@ async function readAuthClearLog(): Promise<AuthClearEntry[]> {
   }
 }
 
-async function clearAuthClearLog(): Promise<void> {
-  try { await AsyncStorage.removeItem(AUTH_CLEAR_KEY); } catch (_e) {}
-}
-
 async function readPushRefreshLog(): Promise<PushRefreshEntry[]> {
   try {
     const raw = await AsyncStorage.getItem(PUSH_REFRESH_KEY);
@@ -156,10 +151,6 @@ async function readPushRefreshLog(): Promise<PushRefreshEntry[]> {
   } catch (_e) {
     return [];
   }
-}
-
-async function clearPushRefreshLog(): Promise<void> {
-  try { await AsyncStorage.removeItem(PUSH_REFRESH_KEY); } catch (_e) {}
 }
 
 function fmt(ts: number): string {
@@ -1216,38 +1207,6 @@ function DiagnosticsContent() {
     refreshNotifLog();
   }, [refreshNotifLog]);
 
-  const onClear = () => {
-    Alert.alert(
-      'Clear ALL Diagnostics?',
-      'This removes EVERY developer ring buffer from this device — engine log, dashboard log, card render log, Leonidas log, auth log, route log, push log, notification log, and more. Cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Clear ALL',
-          style: 'destructive',
-          onPress: async () => {
-            await Promise.all([
-              clearAuthClearLog(),
-              clearRouteLog(),
-              clearPushRefreshLog(),
-              clearLocationRefreshLog(),
-              clearBgTaskLog(),
-              clearScreenRenderLog(),
-              clearEngineLog(),
-              clearDashboardLoadLog(),
-              clearCardRenderLog(),
-              leonidas.clearRecoveryLog(),
-              clearNotificationLog(),
-              clearBatteryTaskLog(),
-            ]);
-            await reload();
-            try { await refreshNotifLog(); } catch (_e) {}
-          },
-        },
-      ],
-    );
-  };
-
   // Build 46 — Leonidas-specific actions.
   const onCopyMotionTimeline = useCallback(async () => {
     try {
@@ -1584,25 +1543,6 @@ function DiagnosticsContent() {
             )}
           </CollapsibleSection>
         )}
-
-        {/* =====================================================
-            Build 46 — Clear ALL Diagnostics.
-            One button at the top wipes every developer ring
-            buffer so testers don't have to scroll to each panel
-            to clear individually between test windows.
-            ===================================================== */}
-        <TouchableOpacity
-          testID="diagnostics-clear-all-top"
-          style={styles.clearAllBtn}
-          onPress={onClear}
-          activeOpacity={0.85}
-        >
-          <Text style={styles.clearAllBtnText}>🗑  Clear ALL Diagnostics</Text>
-        </TouchableOpacity>
-        <Text style={styles.clearAllHint}>
-          Clears engine, dashboard, card-render, Leonidas, auth, route, push,
-          notifications, and every other developer ring buffer in one tap.
-        </Text>
 
         {/* =====================================================
             Leonidas v1.1 — Background Restriction Warning.
@@ -3767,14 +3707,6 @@ function DiagnosticsContent() {
           </View>
         </View>
 
-        <TouchableOpacity
-          testID="diagnostics-clear"
-          style={styles.dangerBtn}
-          onPress={onClear}
-          activeOpacity={0.85}
-        >
-          <Text style={styles.dangerBtnText}>Clear all diagnostic logs</Text>
-        </TouchableOpacity>
         <Text style={styles.footer}>
           Logs are stored only on this device and never auto-uploaded.
         </Text>
@@ -3849,16 +3781,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '800',
     color: '#065F46',
-  },
-  clearAllBtn: {
-    marginBottom: 6, paddingVertical: 14, borderRadius: 12,
-    backgroundColor: Colors.error,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  clearAllBtnText: { color: Colors.surface, fontSize: 15, fontWeight: '800' },
-  clearAllHint: {
-    fontSize: 11.5, color: Colors.textTertiary,
-    textAlign: 'center', marginBottom: 18, lineHeight: 16, paddingHorizontal: 6,
   },
   sectionTitle: {
     fontSize: 13, fontWeight: '800', color: Colors.textTertiary,
