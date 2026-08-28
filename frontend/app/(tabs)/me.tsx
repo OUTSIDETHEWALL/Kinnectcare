@@ -28,6 +28,7 @@ import { useRouter, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
+import * as Clipboard from 'expo-clipboard';
 import { Icon } from '../../src/Icon';
 import { Colors } from '../../src/theme';
 import { useAuth } from '../../src/AuthContext';
@@ -52,6 +53,14 @@ import { getEngineLog, getLastHttpSuccessTs } from '../../src/locationEngine';
 import { computeHealthItems, worstHealthStatus, HealthItem } from '../../src/healthCheck';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { formatTimezone, formatPhone } from '../../src/timeFormat';
+import {
+  auditDiagnosticsStorage,
+  clearAllDiagnosticsStorage,
+  clearInvalidDiagnosticsStorage,
+  DiagnosticsStorageAuditResult,
+  readDiagnosticsStorageEvidence,
+  readLatestDiagnosticsStorageAudit,
+} from '../../src/diagnosticsStorageAudit';
 
 // ------ Small pieces ---------------------------------------------------
 
@@ -350,6 +359,8 @@ export default function MeScreen() {
   // each app launch so the gesture can't be triggered accidentally.
   const [devMode, setDevMode] = useState(false);
   const [devTapCount, setDevTapCount] = useState(0);
+  const [storageAudit, setStorageAudit] = useState<DiagnosticsStorageAuditResult | null>(null);
+  const [storageAuditBusy, setStorageAuditBusy] = useState(false);
 
   const onAppVersionTap = useCallback(() => {
     setDevTapCount((prev) => {
@@ -404,7 +415,128 @@ export default function MeScreen() {
     AsyncStorage.getItem('@kinnship/dev_mode_v1')
       .then((v) => { if (v === '1') setDevMode(true); })
       .catch(() => {});
+    readLatestDiagnosticsStorageAudit().then(setStorageAudit).catch(() => {});
   }, []);
+
+  const runDiagnosticsStorageAudit = useCallback(async (): Promise<DiagnosticsStorageAuditResult | null> => {
+    setStorageAuditBusy(true);
+    try {
+      const result = await auditDiagnosticsStorage();
+      setStorageAudit(result);
+      return result;
+    } catch {
+      Alert.alert('Storage audit failed', 'The app could not complete the Diagnostics storage audit.');
+      return null;
+    } finally {
+      setStorageAuditBusy(false);
+    }
+  }, []);
+
+  const onAuditDiagnosticsStorage = useCallback(async () => {
+    const result = await runDiagnosticsStorageAudit();
+    if (!result) return;
+    const invalid = result.entries.filter((entry) => entry.status === 'invalid' || entry.status === 'read_error');
+    Alert.alert(
+      invalid.length === 0 ? 'Diagnostics storage is structurally valid' : 'Invalid Diagnostics storage found',
+      invalid.length === 0
+        ? `Checked ${result.entries.length} exact keys. No malformed JSON or incompatible top-level schemas were found.`
+        : invalid.map((entry) => `${entry.key}\n${entry.issue || entry.status}`).join('\n\n'),
+    );
+  }, [runDiagnosticsStorageAudit]);
+
+  const onCopyDiagnosticsStorageAudit = useCallback(async () => {
+    if (!storageAudit) {
+      Alert.alert('No audit yet', 'Run the Diagnostics storage audit first.');
+      return;
+    }
+    const evidence = await readDiagnosticsStorageEvidence();
+    await Clipboard.setStringAsync(JSON.stringify(evidence, null, 2));
+    Alert.alert('Evidence copied', 'The report includes audit and cleanup history, but no stored payload contents.');
+  }, [storageAudit]);
+
+  const offerReloadAfterCleanup = useCallback((removedCount: number) => {
+    Alert.alert(
+      'Diagnostics storage removed',
+      `Removed ${removedCount} Diagnostics-only key${removedCount === 1 ? '' : 's'}. Account, identity, location sharing, SOS, and upload-operation state were preserved.`,
+      [
+        { text: 'Later', style: 'cancel' },
+        ...(Platform.OS === 'web'
+          ? []
+          : [{ text: 'Reload now', onPress: () => Updates.reloadAsync().catch(() => {}) }]),
+      ],
+    );
+  }, []);
+
+  const onClearInvalidDiagnosticsStorage = useCallback(() => {
+    if (!storageAudit || storageAudit.invalidKeys.length === 0) {
+      Alert.alert('Nothing to remove', 'The latest audit did not identify any malformed Diagnostics keys.');
+      return;
+    }
+    Alert.alert(
+      'Remove malformed Diagnostics data?',
+      `Only these keys will be removed:\n\n${storageAudit.invalidKeys.join('\n')}\n\nThe audit report will be preserved.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove malformed',
+          style: 'destructive',
+          onPress: async () => {
+            setStorageAuditBusy(true);
+            try {
+              const removed = await clearInvalidDiagnosticsStorage(storageAudit);
+              offerReloadAfterCleanup(removed.length);
+            } catch {
+              Alert.alert('Cleanup failed', 'AsyncStorage could not remove the selected Diagnostics keys.');
+            } finally {
+              setStorageAuditBusy(false);
+            }
+          },
+        },
+      ],
+    );
+  }, [offerReloadAfterCleanup, storageAudit]);
+
+  const onClearAllDiagnosticsStorage = useCallback(() => {
+    Alert.alert(
+      'Reset Diagnostics storage only?',
+      'This removes the 15 documented Diagnostics log/view keys only. It does not clear the account, session, member identity, location sharing, SOS, background-location identity, or upload-operation timestamps/counters. The audit report is preserved.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset Diagnostics',
+          style: 'destructive',
+          onPress: async () => {
+            setStorageAuditBusy(true);
+            try {
+              await clearAllDiagnosticsStorage();
+              offerReloadAfterCleanup(15);
+            } catch {
+              Alert.alert('Cleanup failed', 'AsyncStorage could not reset the Diagnostics-only keys.');
+            } finally {
+              setStorageAuditBusy(false);
+            }
+          },
+        },
+      ],
+    );
+  }, [offerReloadAfterCleanup]);
+
+  const onOpenDiagnostics = useCallback(async () => {
+    const result = await runDiagnosticsStorageAudit();
+    if (!result) return;
+    if (result.invalidKeys.length === 0) {
+      router.push('/diagnostics' as any);
+      return;
+    }
+    Alert.alert(
+      'Invalid Diagnostics storage found',
+      `Diagnostics was not opened yet. The audit identified:\n\n${result.invalidKeys.join('\n')}\n\nCopy the audit before removing anything.`,
+      [
+        { text: 'Stay here', style: 'cancel' },
+        { text: 'Open anyway', onPress: () => router.push('/diagnostics' as any) },
+      ],
+    );
+  }, [router, runDiagnosticsStorageAudit]);
 
   useEffect(() => subscribePushStatus(setPushStatus), []);
 
@@ -924,7 +1056,7 @@ export default function MeScreen() {
         {/* Health indicator — shown only when something needs attention.
             Always navigates to Diagnostics so non-developer users can
             share a health snapshot without the 7-tap unlock. */}
-        <HealthIndicator items={healthItems} onPress={() => router.push('/diagnostics' as any)} />
+        <HealthIndicator items={healthItems} onPress={onOpenDiagnostics} />
 
         {/* Profile — member fields visible to your family */}
         {myMemberId ? (
@@ -1179,9 +1311,52 @@ export default function MeScreen() {
               <NavRow
                 testID="me-diagnostics"
                 icon="🩺"
-                label="Diagnostics"
-                secondary="Technical details and app logs"
-                onPress={() => router.push('/diagnostics' as any)}
+                label={storageAuditBusy ? 'Checking Diagnostics storage…' : 'Diagnostics'}
+                secondary="Audits persisted data before opening"
+                onPress={onOpenDiagnostics}
+                disabled={storageAuditBusy}
+              />
+              <NavRow
+                testID="me-diagnostics-storage-audit"
+                icon="🔎"
+                label="Audit Diagnostics storage"
+                secondary={
+                  storageAudit
+                    ? storageAudit.invalidKeys.length > 0
+                      ? `${storageAudit.invalidKeys.length} invalid key${storageAudit.invalidKeys.length === 1 ? '' : 's'} found`
+                      : `Last audit: ${storageAudit.entries.length} keys structurally valid`
+                    : 'Identify legacy or malformed records without opening Diagnostics'
+                }
+                onPress={onAuditDiagnosticsStorage}
+                disabled={storageAuditBusy}
+              />
+              <NavRow
+                testID="me-diagnostics-storage-copy"
+                icon="📋"
+                label="Copy storage audit"
+                secondary="Copies key names and schema metadata only"
+                onPress={onCopyDiagnosticsStorageAudit}
+                disabled={!storageAudit || storageAuditBusy}
+              />
+              {storageAudit && storageAudit.invalidKeys.length > 0 ? (
+                <NavRow
+                  testID="me-diagnostics-storage-clear-invalid"
+                  icon="🧹"
+                  label="Remove malformed Diagnostics data"
+                  secondary={storageAudit.invalidKeys.join(', ')}
+                  onPress={onClearInvalidDiagnosticsStorage}
+                  danger
+                  disabled={storageAuditBusy}
+                />
+              ) : null}
+              <NavRow
+                testID="me-diagnostics-storage-reset"
+                icon="🗑"
+                label="Reset Diagnostics storage only"
+                secondary="Isolation test: preserves account and location operation"
+                onPress={onClearAllDiagnosticsStorage}
+                danger
+                disabled={storageAuditBusy}
               />
             </View>
           </>

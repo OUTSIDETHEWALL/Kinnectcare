@@ -21,14 +21,15 @@
  * production — both logs cap themselves and are rolling buffers.
  */
 import { useEffect, useState, useCallback, useRef, useMemo, ReactNode } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
+import {
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, ActivityIndicator, Platform,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
-import { Platform } from 'react-native';
 import { getNotificationLog, clearNotificationLog } from '../src/notificationLog';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
@@ -109,6 +110,7 @@ import {
   httpOkCellColor,
 } from '../src/deviceComparisonUtils';
 import { computeUploadRatio } from '../src/uploadRatio';
+import { auditDiagnosticsStorage } from '../src/diagnosticsStorageAudit';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
 const PUSH_REFRESH_KEY = 'kc_push_refresh_log';
@@ -560,6 +562,63 @@ function CollapsibleSection({
 
 export default function DiagnosticsScreen() {
   const router = useRouter();
+  const [gateState, setGateState] = useState<'checking' | 'ready' | 'blocked'>('checking');
+  const [blockedKeys, setBlockedKeys] = useState<string[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    auditDiagnosticsStorage()
+      .then((result) => {
+        if (!active) return;
+        setBlockedKeys(result.invalidKeys);
+        setGateState(result.invalidKeys.length > 0 ? 'blocked' : 'ready');
+      })
+      .catch(() => {
+        if (active) setGateState('blocked');
+      });
+    return () => { active = false; };
+  }, []);
+
+  if (gateState === 'ready') return <DiagnosticsContent />;
+
+  return (
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      <View style={{ flex: 1, justifyContent: 'center', padding: 24, gap: 16 }}>
+        {gateState === 'checking' ? (
+          <>
+            <ActivityIndicator size="large" color={Colors.primary} />
+            <Text style={{ color: Colors.textPrimary, fontSize: 18, fontWeight: '700', textAlign: 'center' }}>
+              Checking Diagnostics storage
+            </Text>
+            <Text style={{ color: Colors.textSecondary, textAlign: 'center', lineHeight: 20 }}>
+              Reading each Diagnostics-owned key before the screen mounts.
+            </Text>
+          </>
+        ) : (
+          <>
+            <Text style={{ color: Colors.error, fontSize: 20, fontWeight: '800', textAlign: 'center' }}>
+              Diagnostics storage needs review
+            </Text>
+            <Text selectable style={{ color: Colors.textSecondary, textAlign: 'center', lineHeight: 20 }}>
+              {blockedKeys.length > 0
+                ? `Invalid keys:\n${blockedKeys.join('\n')}`
+                : 'The storage audit could not complete. Open Me → Advanced to copy the audit evidence.'}
+            </Text>
+            <TouchableOpacity style={styles.primaryBtn} onPress={() => router.back()}>
+              <Text style={styles.primaryBtnText}>Back to Me</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.secondaryBtn} onPress={() => setGateState('ready')}>
+              <Text style={styles.secondaryBtnText}>Open anyway</Text>
+            </TouchableOpacity>
+          </>
+        )}
+      </View>
+    </SafeAreaView>
+  );
+}
+
+function DiagnosticsContent() {
+  const router = useRouter();
   const { user } = useAuth();
   const [routeLog, setRouteLog] = useState<RouteDiagEntry[]>([]);
   const [authLog, setAuthLog] = useState<AuthClearEntry[]>([]);
@@ -780,6 +839,12 @@ export default function DiagnosticsScreen() {
 
   const reload = useCallback(async () => {
     setLoading(true);
+    // Raw, sequential, per-key inspection runs before any legacy reader can
+    // swallow a parse error or normalize the value. The safe report remains
+    // available from Me even if this route later fails during render.
+    await auditDiagnosticsStorage().catch((error) => {
+      console.warn('[diagnostics-storage] pre-read audit failed', error);
+    });
     const [r, a, p, l, b, sr, eng, dl, cr, pl, ps, lsnap, llog, rs] = await Promise.all([
       readRouteLog(),
       readAuthClearLog(),
