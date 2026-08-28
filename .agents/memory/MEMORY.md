@@ -11,7 +11,7 @@
 - [PR verification rule](pr-verification-rule.md) — always curl-verify the PR URL returns 200 before reporting it; createPullRequest() success text is not enough.
 - [Battery subsystem architecture](battery-subsystem-architecture.md) — two-path (headless + WorkManager); type guard fix; never use typeof===boolean for SDK values; react-native-background-fetch chosen over expo-background-task (already native-linked).
 - [Git push in Replit](git-push-replit.md) — Replit's git credential helper times out; git push only works with GITHUB_PAT secret + x-access-token URL scheme; main branch is protected (no force-push).
-- [GitHub connector source uploads](github-connector-source-uploads.md) — connector blob uploads may WAF-block embedded literal script tags; Base64 alone may not bypass inspection.
 - [Railway entrypoint parity](railway-entrypoint-parity.md) — root and backend Railway entrypoints can drift; security fixes must cover both until deployment is consolidated.
 - [Active Railway backend](active-railway-backend.md) — production serves the `backend/` tree; the root backend copy is stale and can mislead release reviews.
 - [Mobile deployment workflow](mobile-deployment-workflow.md) — Kinnship releases through Railway plus Expo EAS OTA; never use Replit Web Publish unless website deployment is explicitly requested.
+- [Expo iOS notification actions](expo-ios-notification-actions.md) — SDK 54 needs native handling for terminated iOS action taps; Keychain lookup must match SecureStore storage semantics.
