@@ -20,7 +20,9 @@
  * Linked from Settings → "Diagnostics" (Beta) row. Safe to keep in
  * production — both logs cap themselves and are rolling buffers.
  */
-import { useEffect, useState, useCallback, useRef, useMemo, ReactNode } from 'react';
+import React, {
+  ErrorInfo, useEffect, useState, useCallback, useRef, useMemo, ReactNode,
+} from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, ActivityIndicator, Platform,
 } from 'react-native';
@@ -109,11 +111,74 @@ import {
   httpOkCellColor,
 } from '../src/deviceComparisonUtils';
 import { computeUploadRatio } from '../src/uploadRatio';
-import { auditDiagnosticsStorage } from '../src/diagnosticsStorageAudit';
+import {
+  attachDiagnosticsStorageRecordContext,
+  auditDiagnosticsStorage,
+  captureDiagnosticsCrash,
+  getDiagnosticsStorageRecordTraceContext,
+  traceDiagnosticsRecords,
+  traceDiagnosticsStorageRead,
+} from '../src/diagnosticsStorageAudit';
+import { DiagnosticsRecordCrashBoundary } from '../src/DiagnosticsRecordCrashBoundary';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
 const PUSH_REFRESH_KEY = 'kc_push_refresh_log';
 const EXPANSION_STATE_KEY = '@kinnship/diagnostics_expanded_v1';
+const DIAGNOSTICS_CRASH_DEBUG_ENABLED = typeof __DEV__ !== 'undefined' && __DEV__;
+
+function diagnosticsRuntimeIdentity() {
+  return {
+    appVersion: Constants.expoConfig?.version ?? 'unknown',
+    runtimeVersion: String(Updates.runtimeVersion ?? 'unknown'),
+    otaUpdateId: Updates.updateId ?? null,
+    otaChannel: Updates.channel ?? null,
+  };
+}
+
+function DiagnosticsStorageRecordGuard({
+  record,
+  renderRecord,
+}: {
+  record: unknown;
+  renderRecord: () => ReactNode;
+}) {
+  const router = useRouter();
+  const onError = useCallback((
+    error: Error,
+    componentStack: string,
+    failedRecord: unknown,
+  ) => {
+    attachDiagnosticsStorageRecordContext(error, failedRecord);
+    captureDiagnosticsCrash(error, componentStack, diagnosticsRuntimeIdentity());
+    setTimeout(() => router.back(), 0);
+  }, [router]);
+
+  return (
+    <DiagnosticsRecordCrashBoundary
+      record={record}
+      renderRecord={renderRecord}
+      onError={onError}
+    />
+  );
+}
+
+function renderDiagnosticsStorageRecord(
+  record: unknown,
+  renderRecord: () => ReactNode,
+): ReactNode {
+  if (!DIAGNOSTICS_CRASH_DEBUG_ENABLED) return renderRecord();
+  const context = getDiagnosticsStorageRecordTraceContext(record);
+  const key = context
+    ? `${context.key}:${context.recordIndex ?? 'unknown'}`
+    : undefined;
+  return (
+    <DiagnosticsStorageRecordGuard
+      key={key}
+      record={record}
+      renderRecord={renderRecord}
+    />
+  );
+}
 
 type AuthClearEntry = {
   t: number;
@@ -551,6 +616,41 @@ function CollapsibleSection({
   );
 }
 
+class DiagnosticsCrashBoundary extends React.Component<
+  { children: ReactNode; onBack: () => void },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    captureDiagnosticsCrash(error, info.componentStack ?? '', diagnosticsRuntimeIdentity());
+    setTimeout(this.props.onBack, 0);
+  }
+
+  render(): ReactNode {
+    if (!this.state.hasError) return this.props.children;
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={{ flex: 1, justifyContent: 'center', padding: 24, gap: 16 }}>
+          <Text style={{ color: Colors.error, fontSize: 20, fontWeight: '800', textAlign: 'center' }}>
+            Diagnostics stopped safely
+          </Text>
+          <Text style={{ color: Colors.textSecondary, textAlign: 'center', lineHeight: 20 }}>
+            The debug build saved the exception and local storage context, then returned to the previous screen.
+          </Text>
+          <TouchableOpacity style={styles.primaryBtn} onPress={this.props.onBack}>
+            <Text style={styles.primaryBtnText}>Back to Me</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+}
+
 export default function DiagnosticsScreen() {
   const router = useRouter();
   const [gateState, setGateState] = useState<'checking' | 'ready' | 'blocked'>('checking');
@@ -570,7 +670,14 @@ export default function DiagnosticsScreen() {
     return () => { active = false; };
   }, []);
 
-  if (gateState === 'ready') return <DiagnosticsContent />;
+  if (gateState === 'ready') {
+    if (!DIAGNOSTICS_CRASH_DEBUG_ENABLED) return <DiagnosticsContent />;
+    return (
+      <DiagnosticsCrashBoundary onBack={() => router.back()}>
+        <DiagnosticsContent />
+      </DiagnosticsCrashBoundary>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
@@ -666,6 +773,7 @@ function DiagnosticsContent() {
   // Leonidas (Build 46) — snapshot + recovery log
   const [leoSnapshot, setLeoSnapshot] = useState<leonidas.LeonidasSnapshotForUI | null>(null);
   const [leoLog, setLeoLog] = useState<leonidas.RecoveryLogEntry[]>([]);
+  const latestLeoEntry = leoLog.length > 0 ? leoLog[leoLog.length - 1] : null;
   const [restrictionStatus, setRestrictionStatus] = useState<RestrictionStatus>({
     isRestricted: false,
     powerSaveActive: false,
@@ -837,36 +945,39 @@ function DiagnosticsContent() {
       console.warn('[diagnostics-storage] pre-read audit failed', error);
     });
     const [r, a, p, l, b, sr, eng, dl, cr, pl, ps, lsnap, llog, rs] = await Promise.all([
-      readRouteLog(),
-      readAuthClearLog(),
-      readPushRefreshLog(),
-      readLocationRefreshLog(),
-      readBgTaskLog(),
-      readScreenRenderLog(),
-      getEngineDiagnostics(),
-      getDashboardLoadLog(),
-      getCardRenderLog(),
-      getRefreshPipelineLog(),
-      readPipelineSnapshots(),
+      traceDiagnosticsStorageRead('@kinnship/route_diagnostics_v1', readRouteLog),
+      traceDiagnosticsStorageRead('kc_auth_clear_diag', readAuthClearLog),
+      traceDiagnosticsStorageRead('kc_push_refresh_log', readPushRefreshLog),
+      traceDiagnosticsStorageRead('kc_location_refresh_log', readLocationRefreshLog),
+      traceDiagnosticsStorageRead('kc_bg_task_log', readBgTaskLog),
+      traceDiagnosticsStorageRead('kc_screen_render_log', readScreenRenderLog),
+      traceDiagnosticsStorageRead('@kinnship/location_engine_log_v1', getEngineDiagnostics),
+      traceDiagnosticsStorageRead('@kinnship/dashboard_load_log_v1', getDashboardLoadLog),
+      traceDiagnosticsStorageRead('@kinnship/card_render_log_v1', getCardRenderLog),
+      traceDiagnosticsStorageRead('@kinnship/refresh_pipeline_log_v1', getRefreshPipelineLog),
+      traceDiagnosticsStorageRead('kc_stale_location_pipeline_snapshots_v1', readPipelineSnapshots),
       Promise.resolve(leonidas.getSnapshot()),
       leonidas.getRecoveryLog(),
       getRestrictionStatus(),
     ]);
-    setRouteLog(r);
-    setAuthLog(a);
-    setPushLog(p);
-    setLocLog(l);
-    setBgLog(b);
-    setRenderLog(sr);
-    setEngineLog(eng.log);
+    setRouteLog(traceDiagnosticsRecords('@kinnship/route_diagnostics_v1', r));
+    setAuthLog(traceDiagnosticsRecords('kc_auth_clear_diag', a));
+    setPushLog(traceDiagnosticsRecords('kc_push_refresh_log', p));
+    setLocLog(traceDiagnosticsRecords('kc_location_refresh_log', l));
+    setBgLog(traceDiagnosticsRecords('kc_bg_task_log', b));
+    setRenderLog(traceDiagnosticsRecords('kc_screen_render_log', sr));
+    setEngineLog(traceDiagnosticsRecords('@kinnship/location_engine_log_v1', eng.log));
     setEngineState(eng.state);
     setEngineAvailable(eng.available);
-    setDashLoadLog(dl);
-    setCardLog(cr);
-    setPipelineLog(pl);
-    setPipelineSnapshots(normalizePipelineSnapshots(ps));
+    setDashLoadLog(traceDiagnosticsRecords('@kinnship/dashboard_load_log_v1', dl));
+    setCardLog(traceDiagnosticsRecords('@kinnship/card_render_log_v1', cr));
+    setPipelineLog(traceDiagnosticsRecords('@kinnship/refresh_pipeline_log_v1', pl));
+    setPipelineSnapshots(traceDiagnosticsRecords(
+      'kc_stale_location_pipeline_snapshots_v1',
+      normalizePipelineSnapshots(ps),
+    ));
     setLeoSnapshot(lsnap);
-    setLeoLog(llog);
+    setLeoLog(traceDiagnosticsRecords('@kinnship/leonidas_recovery_log_v1', llog));
     setRestrictionStatus(rs);
 
     // Build XX — GPS quality history from the backend location_history collection.
@@ -894,7 +1005,10 @@ function DiagnosticsContent() {
       setDeviceBatteryLevel(null);
     }
     try {
-      setBatteryTaskLog(await readBatteryTaskLog());
+      setBatteryTaskLog(traceDiagnosticsRecords(
+        '@kinnship/battery_task_log_v1',
+        await readBatteryTaskLog(),
+      ));
     } catch (_e) {
       setBatteryTaskLog([]);
     }
@@ -964,7 +1078,24 @@ function DiagnosticsContent() {
     setLoading(false);
   }, []);
 
-  useEffect(() => { reload(); }, [reload]);
+  useEffect(() => {
+    if (!DIAGNOSTICS_CRASH_DEBUG_ENABLED) {
+      void reload();
+      return;
+    }
+    let mounted = true;
+    void reload().catch((error) => {
+      captureDiagnosticsCrash(
+        error,
+        'DiagnosticsContent.reload',
+        diagnosticsRuntimeIdentity(),
+      );
+      if (mounted) setTimeout(() => router.back(), 0);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [reload, router]);
 
   // Build 46 — Leonidas-only fast-refresh tick.  Only ticks while the
   // Leonidas panel is expanded, so we don't burn cycles when the user
@@ -980,7 +1111,7 @@ function DiagnosticsContent() {
           leonidas.getRecoveryLog(),
         ]);
         setLeoSnapshot(snap);
-        setLeoLog(log);
+        setLeoLog(traceDiagnosticsRecords('@kinnship/leonidas_recovery_log_v1', log));
       } catch (_e) { /* swallow */ }
     }, 4000);
     return () => clearInterval(tick);
@@ -1185,7 +1316,7 @@ function DiagnosticsContent() {
 
   const refreshNotifLog = useCallback(async () => {
     const arr = await getNotificationLog();
-    setNotifLog(arr);
+    setNotifLog(traceDiagnosticsRecords('@kinnship/notification_log_v1', arr));
   }, []);
 
   const refreshTraceData = useCallback(async () => {
@@ -1267,7 +1398,7 @@ function DiagnosticsContent() {
               leonidas.getRecoveryLog(),
             ]);
             setLeoSnapshot(snap);
-            setLeoLog(log);
+            setLeoLog(traceDiagnosticsRecords('@kinnship/leonidas_recovery_log_v1', log));
           },
         },
       ],
@@ -1624,17 +1755,28 @@ function DiagnosticsContent() {
               <Text style={styles.entryK}>Last upload age: </Text>
               {formatAgeMs(leoSnapshot?.last_patrol?.last_upload_age_ms ?? null)}
             </Text>
-            <Text style={styles.entryLine}>
-              <Text style={styles.entryK}>Last decision: </Text>
-              <Text style={styles.bold}>
-                {formatLeonidasDecision(
-                  leoLog.length > 0 ? leoLog[leoLog.length - 1].event : null,
-                  leoLog.length > 0 ? leoLog[leoLog.length - 1].health_state : (leoSnapshot?.state ?? null),
-                  leoLog.length > 0 ? (leoLog[leoLog.length - 1].detail?.reason ?? null) : null,
-                  leoLog.length > 0 ? (leoLog[leoLog.length - 1].detail?.action ?? null) : null,
-                )}
-              </Text>
-            </Text>
+            {latestLeoEntry
+              ? renderDiagnosticsStorageRecord(latestLeoEntry, () => (
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>Last decision: </Text>
+                  <Text style={styles.bold}>
+                    {formatLeonidasDecision(
+                      latestLeoEntry.event,
+                      latestLeoEntry.health_state,
+                      latestLeoEntry.detail?.reason ?? null,
+                      latestLeoEntry.detail?.action ?? null,
+                    )}
+                  </Text>
+                </Text>
+              ))
+              : (
+                <Text style={styles.entryLine}>
+                  <Text style={styles.entryK}>Last decision: </Text>
+                  <Text style={styles.bold}>
+                    {formatLeonidasDecision(null, leoSnapshot?.state ?? null, null, null)}
+                  </Text>
+                </Text>
+              )}
             <Text style={styles.entryLine}>
               <Text style={styles.entryK}>Current recovery state: </Text>
               {leoSnapshot?.last_recovery
@@ -1658,7 +1800,7 @@ function DiagnosticsContent() {
               </Text>
             </View>
           ) : (
-            leoLog.slice().sort((a, b) => b.seq - a.seq).map((e) => (
+            leoLog.slice().sort((a, b) => b.seq - a.seq).map((e) => renderDiagnosticsStorageRecord(e, () => (
               <View key={`leo-${e.seq}`} style={styles.card}>
                 <Text style={styles.entryLine}>
                   <Text style={styles.entryK}>#{e.seq} {fmt(e.at)} </Text>
@@ -1714,7 +1856,7 @@ function DiagnosticsContent() {
                   </Text>
                 ) : null}
               </View>
-            ))
+            )))
           )}
 
           <View style={styles.actionRow}>
@@ -1834,7 +1976,7 @@ function DiagnosticsContent() {
                 {engineState?.isMoving === null ? '—' : engineState?.isMoving ? 'YES ▶' : 'NO ■'}
               </Text>
             </Text>
-            {lastActivityEvt ? (
+            {lastActivityEvt ? renderDiagnosticsStorageRecord(lastActivityEvt, () => (
               <Text style={styles.entryLine}>
                 <Text style={styles.entryK}>last activity: </Text>
                 <Text style={styles.entry}>
@@ -1843,7 +1985,7 @@ function DiagnosticsContent() {
                   {'  '}({fmtTime(lastActivityEvt.at)})
                 </Text>
               </Text>
-            ) : (
+            )) : (
               <Text style={styles.entryLine}>
                 <Text style={styles.entryK}>last activity: </Text>
                 <Text style={[styles.entry, { color: '#EF4444' }]}>
@@ -1851,7 +1993,7 @@ function DiagnosticsContent() {
                 </Text>
               </Text>
             )}
-            {lastHeartbeatEvt ? (
+            {lastHeartbeatEvt ? renderDiagnosticsStorageRecord(lastHeartbeatEvt, () => (
               <Text style={styles.entryLine}>
                 <Text style={styles.entryK}>last heartbeat: </Text>
                 <Text style={styles.entry}>
@@ -1859,7 +2001,7 @@ function DiagnosticsContent() {
                   {'  '}({formatAgeMs(Date.now() - lastHeartbeatEvt.at)})
                 </Text>
               </Text>
-            ) : null}
+            )) : null}
           </View>
 
           {/* Chronological timeline */}
@@ -1870,7 +2012,7 @@ function DiagnosticsContent() {
               </Text>
             </View>
           ) : (
-            motionEvents.map((entry, i) => {
+            motionEvents.map((entry, i) => renderDiagnosticsStorageRecord(entry, () => {
               const { badge, badgeColor, label, detail } = formatMotionEvent(entry);
               const isTransition = entry.event === 'sdk_onMotionChange';
               return (
@@ -1895,7 +2037,7 @@ function DiagnosticsContent() {
                   </View>
                 </View>
               );
-            })
+            }))
           )}
 
           <TouchableOpacity
@@ -2396,7 +2538,7 @@ function DiagnosticsContent() {
             <Text style={styles.muted}>
               No stale moving-location mismatch has been detected.
             </Text>
-          ) : pipelineSnapshots.map((snapshot) => (
+          ) : pipelineSnapshots.map((snapshot) => renderDiagnosticsStorageRecord(snapshot, () => (
             <View key={snapshot.trace_id} style={styles.card}>
               <Text style={[styles.entryLine, styles.divergent]}>
                 STALE LOCATION DETECTED · first stale stage:{' '}
@@ -2434,7 +2576,7 @@ function DiagnosticsContent() {
                 {' · '}trigger {typeof snapshot.trigger === 'string' ? snapshot.trigger : '—'}
               </Text>
             </View>
-          ))}
+          )))}
           {pipelineSnapshots.length > 0 ? (
             <>
               <TouchableOpacity
@@ -2483,7 +2625,7 @@ function DiagnosticsContent() {
           {pipelineLog.length === 0 ? (
             <Text style={styles.muted}>No pipeline events yet. Trigger a refresh or navigate to the dashboard.</Text>
           ) : (
-            pipelineLog.slice(0, 40).map((entry, i) => {
+            pipelineLog.slice(0, 40).map((entry, i) => renderDiagnosticsStorageRecord(entry, () => {
               const isDashLoad = entry.stage === 'dashboard-load';
               const isBatch = entry.stage === 'store-upsert-many' || entry.stage === 'store-fetch-all';
               const isRegression = (entry.lastSeenDeltaMs !== undefined && entry.lastSeenDeltaMs !== null && entry.lastSeenDeltaMs < 0)
@@ -2554,7 +2696,7 @@ function DiagnosticsContent() {
                   </View>
                 </View>
               );
-            })
+            }))
           )}
           <TouchableOpacity
             style={[styles.secondaryBtn, { marginTop: 8 }]}
@@ -2699,7 +2841,7 @@ function DiagnosticsContent() {
               </Text>
             </View>
           ) : (
-            engineLog.slice().reverse().map((entry, i) => (
+            engineLog.slice().reverse().map((entry, i) => renderDiagnosticsStorageRecord(entry, () => (
               <View key={`eng-${i}-${entry.at}`} style={styles.card}>
                 <Text style={styles.entryLine}>
                   <Text style={styles.entryK}>{fmt(entry.at)}: </Text>
@@ -2715,7 +2857,7 @@ function DiagnosticsContent() {
                   </Text>
                 ) : null}
               </View>
-            ))
+            )))
           )}
 
           <TouchableOpacity
@@ -2773,7 +2915,7 @@ function DiagnosticsContent() {
               </Text>
             </View>
           ) : (
-            dashLoadLog.slice().reverse().map((entry, i) => {
+            dashLoadLog.slice().reverse().map((entry, i) => renderDiagnosticsStorageRecord(entry, () => {
               const dur = (entry.t_get_received && entry.t_get_sent)
                 ? `${entry.t_get_received - entry.t_get_sent}ms`
                 : '—';
@@ -2819,7 +2961,7 @@ function DiagnosticsContent() {
                   ) : null}
                 </View>
               );
-            })
+            }))
           )}
           <TouchableOpacity
             testID="diagnostics-clear-dash-load"
@@ -2873,7 +3015,7 @@ function DiagnosticsContent() {
           ) : (
             // Sort by seq descending (newest first) to keep the most
             // diagnostically-interesting entries at the top.
-            cardLog.slice().sort((a, b) => b.seq - a.seq).map((entry) => {
+            cardLog.slice().sort((a, b) => b.seq - a.seq).map((entry) => renderDiagnosticsStorageRecord(entry, () => {
               const seqStr = `#${entry.seq}`;
               const mid = entry.member_id.slice(-6);
               if (entry.src === 'card-render') {
@@ -2913,7 +3055,7 @@ function DiagnosticsContent() {
                   </Text>
                 </View>
               );
-            })
+            }))
           )}
           <TouchableOpacity
             testID="diagnostics-clear-card-log"
@@ -2947,7 +3089,7 @@ function DiagnosticsContent() {
           <View style={styles.card} testID="diagnostics-notif-log">
             {notifLog.length === 0 ? (
               <Text style={styles.muted}>— no notifications observed yet.</Text>
-            ) : notifLog.slice(0, 20).map((n, i) => (
+            ) : notifLog.slice(0, 20).map((n, i) => renderDiagnosticsStorageRecord(n, () => (
               <View key={i} style={{ marginBottom: 8 }}>
                 <Text style={styles.entryLine}>
                   <Text style={styles.entryK}>{fmt(n.at)} </Text>
@@ -2978,7 +3120,7 @@ function DiagnosticsContent() {
                   </Text>
                 ) : null}
               </View>
-            ))}
+            )))}
           </View>
         </View>
 
@@ -3153,7 +3295,7 @@ function DiagnosticsContent() {
               authLog
                 .slice()
                 .reverse()
-                .map((e, i) => (
+                .map((e, i) => renderDiagnosticsStorageRecord(e, () => (
                   <View key={`a-${e.t}-${i}`} style={styles.entry}>
                     <Text style={styles.entryTime}>{fmt(e.t)}</Text>
                     <Text style={styles.entryLine}>
@@ -3176,7 +3318,7 @@ function DiagnosticsContent() {
                       <Text style={styles.entryBody}>{e.body}</Text>
                     ) : null}
                   </View>
-                ))
+                )))
             )}
           </View>
         </View>
@@ -3200,7 +3342,7 @@ function DiagnosticsContent() {
               locLog
                 .slice()
                 .reverse()
-                .map((e, i) => (
+                .map((e, i) => renderDiagnosticsStorageRecord(e, () => (
                   <View key={`l-${e.t}-${i}`} style={styles.entry}>
                     <Text style={styles.entryTime}>{fmt(e.t)}</Text>
                     <Text style={styles.entryLine}>
@@ -3230,7 +3372,7 @@ function DiagnosticsContent() {
                       </Text>
                     ) : null}
                   </View>
-                ))
+                )))
             )}
           </View>
         </View>
@@ -3273,20 +3415,19 @@ function DiagnosticsContent() {
               );
             }
 
-            const ageMs = Date.now() - winner.e.at;
-            const min = Math.round(ageMs / 60_000);
-            const ageStr = min < 60 ? `${min} min ago` : `${Math.round(ageMs / 3_600_000)} h ago`;
-            const ts = new Date(winner.e.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            return renderDiagnosticsStorageRecord(winner.e, () => {
+              const ageMs = Date.now() - winner.e.at;
+              const min = Math.round(ageMs / 60_000);
+              const ageStr = min < 60 ? `${min} min ago` : `${Math.round(ageMs / 3_600_000)} h ago`;
+              const ts = new Date(winner.e.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+              const level = winner.isB
+                ? winner.e.detail?.levelPct
+                : (winner.e.detail?.battLevel != null ? Math.round(Number(winner.e.detail.battLevel) * 100) : null);
+              const charging = winner.isB
+                ? winner.e.detail?.isCharging
+                : winner.e.detail?.battCharging;
 
-            const level = winner.isB
-              ? winner.e.detail?.levelPct
-              : (winner.e.detail?.battLevel != null ? Math.round(Number(winner.e.detail.battLevel) * 100) : null);
-            const charging = winner.isB
-              ? winner.e.detail?.isCharging
-              : winner.e.detail?.battCharging;
-
-            return (
-              <View style={styles.card}>
+              return <View style={styles.card}>
                 <Text style={styles.subSectionLabel}>Last battery update</Text>
                 <Text style={styles.entryLine}>
                   <Text style={styles.entryK}>Last background refresh  </Text>
@@ -3304,8 +3445,8 @@ function DiagnosticsContent() {
                   <Text style={styles.entryK}>Charging  </Text>
                   {charging != null ? (charging ? 'Yes' : 'No') : '—'}
                 </Text>
-              </View>
-            );
+              </View>;
+            });
           })()}
 
           {/* ── Live device state ─────────────────────────────────── */}
@@ -3347,24 +3488,36 @@ function DiagnosticsContent() {
               };
               return (
                 <>
-                  <Text style={styles.entryLine}>
-                    <Text style={styles.entryK}>Last patch_ok: </Text>
-                    {lastOk
-                      ? `${fmt(lastOk.at)}  level=${lastOk.detail?.battLevel != null ? Math.round(Number(lastOk.detail.battLevel) * 100) + ' %' : '?'}  charging=${lastOk.detail?.battCharging}`
-                      : '— not seen in ring buffer'}
-                  </Text>
-                  <Text style={styles.entryLine}>
-                    <Text style={styles.entryK}>Last skipped: </Text>
-                    {lastSkip
-                      ? `${fmt(lastSkip.at)}  reason=${lastSkip.detail?.reason ?? '?'}`
-                      : '—'}
-                  </Text>
-                  <Text style={styles.entryLine}>
-                    <Text style={styles.entryK}>Last error: </Text>
-                    {lastErr
-                      ? `${fmt(lastErr.at)}  ${String(lastErr.detail?.error ?? '').slice(0, 80)}`
-                      : '—'}
-                  </Text>
+                  {lastOk ? renderDiagnosticsStorageRecord(lastOk, () => (
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>Last patch_ok: </Text>
+                      {`${fmt(lastOk.at)}  level=${lastOk.detail?.battLevel != null ? Math.round(Number(lastOk.detail.battLevel) * 100) + ' %' : '?'}  charging=${lastOk.detail?.battCharging}`}
+                    </Text>
+                  )) : (
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>Last patch_ok: </Text>— not seen in ring buffer
+                    </Text>
+                  )}
+                  {lastSkip ? renderDiagnosticsStorageRecord(lastSkip, () => (
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>Last skipped: </Text>
+                      {`${fmt(lastSkip.at)}  reason=${lastSkip.detail?.reason ?? '?'}`}
+                    </Text>
+                  )) : (
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>Last skipped: </Text>—
+                    </Text>
+                  )}
+                  {lastErr ? renderDiagnosticsStorageRecord(lastErr, () => (
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>Last error: </Text>
+                      {`${fmt(lastErr.at)}  ${String(lastErr.detail?.error ?? '').slice(0, 80)}`}
+                    </Text>
+                  )) : (
+                    <Text style={styles.entryLine}>
+                      <Text style={styles.entryK}>Last error: </Text>—
+                    </Text>
+                  )}
                 </>
               );
             })()}
@@ -3381,7 +3534,7 @@ function DiagnosticsContent() {
                 No background task executions recorded yet. The first fire will appear here after ~4 hours (or sooner if the OS scheduler runs a maintenance window).
               </Text>
             ) : (
-              [...batteryTaskLog].reverse().slice(0, 10).map((entry, i) => {
+              [...batteryTaskLog].reverse().slice(0, 10).map((entry, i) => renderDiagnosticsStorageRecord(entry, () => {
                 const ageMs = Date.now() - entry.at;
                 const min = Math.round(ageMs / 60_000);
                 const ageStr = min < 60 ? `${min} min ago` : `${Math.round(ageMs / 3_600_000)} h ago`;
@@ -3402,7 +3555,7 @@ function DiagnosticsContent() {
                     </Text>
                   </View>
                 );
-              })
+              }))
             )}
           </View>
 
@@ -3504,7 +3657,7 @@ function DiagnosticsContent() {
               renderLog
                 .slice(-25)
                 .reverse()
-                .map((e, i) => (
+                .map((e, i) => renderDiagnosticsStorageRecord(e, () => (
                   <View key={`sr-${e.t}-${i}`} style={styles.entry}>
                     <Text style={styles.entryTime}>{fmt(e.t)}</Text>
                     <Text style={styles.entryLine}>
@@ -3545,7 +3698,7 @@ function DiagnosticsContent() {
                       </Text>
                     ) : null}
                   </View>
-                ))
+                )))
             )}
           </View>
         </View>
@@ -3575,7 +3728,7 @@ function DiagnosticsContent() {
               bgLog
                 .slice()
                 .reverse()
-                .map((e, i) => (
+                .map((e, i) => renderDiagnosticsStorageRecord(e, () => (
                   <View key={`b-${e.t}-${i}`} style={styles.entry}>
                     <Text style={styles.entryTime}>{fmt(e.t)}</Text>
                     <Text style={styles.entryLine}>
@@ -3615,7 +3768,7 @@ function DiagnosticsContent() {
                       </Text>
                     ) : null}
                   </View>
-                ))
+                )))
             )}
           </View>
         </View>
@@ -3639,7 +3792,7 @@ function DiagnosticsContent() {
               pushLog
                 .slice()
                 .reverse()
-                .map((e, i) => (
+                .map((e, i) => renderDiagnosticsStorageRecord(e, () => (
                   <View key={`p-${e.t}-${i}`} style={styles.entry}>
                     <Text style={styles.entryTime}>{fmt(e.t)}</Text>
                     <Text style={styles.entryLine}>
@@ -3653,7 +3806,7 @@ function DiagnosticsContent() {
                       <Text style={styles.entryK}>token: </Text>…{e.tokenSuffix || '—'}
                     </Text>
                   </View>
-                ))
+                )))
             )}
           </View>
         </View>
@@ -3676,7 +3829,7 @@ function DiagnosticsContent() {
               routeLog
                 .slice()
                 .reverse()
-                .map((e, i) => (
+                .map((e, i) => renderDiagnosticsStorageRecord(e, () => (
                   <View key={`r-${e.t}-${i}`} style={styles.entry}>
                     <Text style={styles.entryTime}>{fmt(e.t)}</Text>
                     <Text style={styles.entryLine}>
@@ -3702,7 +3855,7 @@ function DiagnosticsContent() {
                       </Text>
                     ) : null}
                   </View>
-                ))
+                )))
             )}
           </View>
         </View>

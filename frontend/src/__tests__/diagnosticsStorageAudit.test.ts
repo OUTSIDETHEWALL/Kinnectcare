@@ -1,4 +1,6 @@
 /* eslint-disable import/first */
+(globalThis as any).__DEV__ = true;
+
 jest.mock('@react-native-async-storage/async-storage', () => {
   const values = new Map<string, string>();
   return {
@@ -21,12 +23,20 @@ jest.mock('../pipelineSnapshot', () => ({
 }));
 
 import {
+  attachDiagnosticsStorageRecordContext,
   auditDiagnosticsStorage,
+  captureDiagnosticsCrash,
   clearDiagnosticsStorageKey,
+  DIAGNOSTICS_CRASH_DEBUG_KEY,
   DIAGNOSTICS_STORAGE_KEYS,
   readDiagnosticsStorageEvidence,
+  traceDiagnosticsRecords,
+  traceDiagnosticsStorageRead,
 } from '../diagnosticsStorageAudit';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import React from 'react';
+import TestRenderer, { act } from 'react-test-renderer';
+import { DiagnosticsRecordCrashBoundary } from '../DiagnosticsRecordCrashBoundary';
 
 const mockAsyncStorage = AsyncStorage as typeof AsyncStorage & {
   __storage: Map<string, string>;
@@ -223,5 +233,191 @@ describe('Diagnostics storage isolation', () => {
 
     expect(result.entries[0].issue).toBe('storage_read_failed');
     expect(serialized).not.toContain('private-payload-should-not-be-copied');
+  });
+
+  it('captures the exact traced key, record, stack, schema, and OTA identity locally', async () => {
+    const raw = JSON.stringify([
+      { t: 1, schemaVersion: 3 },
+      { t: 2, schemaVersion: 4, obsoleteValue: 'exact-local-debug-value' },
+    ]);
+    storage.set('kc_auth_clear_diag', raw);
+    await auditDiagnosticsStorage();
+    const traced = traceDiagnosticsRecords('kc_auth_clear_diag', [
+      { t: 1, schemaVersion: 3 },
+      { t: 2, schemaVersion: 4 },
+    ]);
+    const reversed = traced.slice().reverse();
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    const error = new Error('renderer exploded');
+    attachDiagnosticsStorageRecordContext(error, reversed[0]);
+    captureDiagnosticsCrash(error, 'component-stack', {
+      appVersion: '1.0.8',
+      runtimeVersion: 'runtime-8',
+      otaUpdateId: 'ota-update-id',
+      otaChannel: 'preview',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const reports = JSON.parse(storage.get(DIAGNOSTICS_CRASH_DEBUG_KEY) ?? '[]');
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      appVersion: '1.0.8',
+      runtimeVersion: 'runtime-8',
+      otaUpdateId: 'ota-update-id',
+      diagnosticsSchema: 'v1',
+      storageKey: 'kc_auth_clear_diag',
+      recordIndex: 1,
+      schemaVersion: 'schemaVersion=4',
+      rawJson: raw,
+      rawRecordJson: JSON.stringify({
+        t: 2,
+        schemaVersion: 4,
+        obsoleteValue: 'exact-local-debug-value',
+      }),
+      componentStack: 'component-stack',
+    });
+    expect(reports[0].errorStack).toContain('renderer exploded');
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('exact-local-debug-value'));
+    const safeAudit = await auditDiagnosticsStorage();
+    expect(JSON.stringify(safeAudit)).not.toContain('exact-local-debug-value');
+    consoleError.mockRestore();
+  });
+
+  it('associates a React reconciliation failure with the exact persisted record', async () => {
+    const rawRecord = {
+      seq: 1,
+      src: 'engine',
+      at: 1,
+      event: 'sdk_onActivityChange',
+      schemaVersion: 7,
+      detail: { confidence: { value: 'invalid-react-child' } },
+    };
+    storage.set('@kinnship/location_engine_log_v1', JSON.stringify([rawRecord]));
+    await auditDiagnosticsStorage();
+    const traced = traceDiagnosticsRecords('@kinnship/location_engine_log_v1', [{ ...rawRecord }]);
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await act(async () => {
+      TestRenderer.create(
+        React.createElement(DiagnosticsRecordCrashBoundary, {
+          record: traced[0],
+          renderRecord: () => React.createElement(
+            'div',
+            null,
+            traced[0].detail.confidence as unknown as React.ReactNode,
+          ),
+          onError: (error: Error, componentStack: string, record: unknown) => {
+            attachDiagnosticsStorageRecordContext(error, record);
+            captureDiagnosticsCrash(error, componentStack, {
+              appVersion: '1.0.8',
+              runtimeVersion: 'runtime-8',
+              otaUpdateId: 'ota-update-id',
+              otaChannel: 'preview',
+            });
+          },
+        }),
+      );
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const reports = JSON.parse(storage.get(DIAGNOSTICS_CRASH_DEBUG_KEY) ?? '[]');
+    expect(reports[0]).toMatchObject({
+      storageKey: '@kinnship/location_engine_log_v1',
+      recordIndex: 0,
+      schemaVersion: 'schemaVersion=7',
+      rawJson: JSON.stringify([rawRecord]),
+      rawRecordJson: JSON.stringify(rawRecord),
+    });
+    expect(reports[0].errorStack).toContain('Objects are not valid as a React child');
+    consoleError.mockRestore();
+  });
+
+  it('does not capture or print raw crash context outside debug builds', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    (globalThis as any).__DEV__ = false;
+
+    captureDiagnosticsCrash(new Error('must-not-be-written'), 'component-stack', {
+      appVersion: '1.0.8',
+      runtimeVersion: 'runtime-8',
+      otaUpdateId: 'ota-update-id',
+      otaChannel: 'production',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(storage.has(DIAGNOSTICS_CRASH_DEBUG_KEY)).toBe(false);
+    expect(consoleError).not.toHaveBeenCalled();
+    (globalThis as any).__DEV__ = true;
+    consoleError.mockRestore();
+  });
+
+  it('keeps async reader attribution attached to the matching error under concurrent rejection', async () => {
+    storage.set('kc_auth_clear_diag', JSON.stringify([{ t: 1 }]));
+    storage.set('kc_push_refresh_log', JSON.stringify([{ t: 2 }]));
+    await auditDiagnosticsStorage();
+    const firstError = new Error('first reader failed');
+    const secondError = new Error('second reader failed');
+    const first = traceDiagnosticsStorageRead('kc_auth_clear_diag', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      throw firstError;
+    });
+    const second = traceDiagnosticsStorageRead('kc_push_refresh_log', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      throw secondError;
+    });
+    let caught: unknown;
+    try {
+      await Promise.all([first, second]);
+    } catch (error) {
+      caught = error;
+    }
+    await Promise.allSettled([first, second]);
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    captureDiagnosticsCrash(caught, 'async-reload', {
+      appVersion: '1.0.8',
+      runtimeVersion: 'runtime-8',
+      otaUpdateId: 'ota-update-id',
+      otaChannel: 'preview',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const reports = JSON.parse(storage.get(DIAGNOSTICS_CRASH_DEBUG_KEY) ?? '[]');
+    expect(reports[0]).toMatchObject({
+      errorMessage: 'first reader failed',
+      storageKey: 'kc_auth_clear_diag',
+      rawJson: JSON.stringify([{ t: 1 }]),
+    });
+    consoleError.mockRestore();
+  });
+
+  it('does not attribute an unrelated render failure to a previously read storage record', async () => {
+    storage.set('kc_auth_clear_diag', JSON.stringify([{ t: 1 }]));
+    await auditDiagnosticsStorage();
+    const traced = traceDiagnosticsRecords('kc_auth_clear_diag', [{ t: 1 }]);
+    void traced[0].t;
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    captureDiagnosticsCrash(
+      new Error('native metadata failed'),
+      'DiagnosticsContent.reload',
+      {
+        appVersion: '1.0.8',
+        runtimeVersion: 'runtime-8',
+        otaUpdateId: 'ota-update-id',
+        otaChannel: 'preview',
+      },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const reports = JSON.parse(storage.get(DIAGNOSTICS_CRASH_DEBUG_KEY) ?? '[]');
+    expect(reports[0]).toMatchObject({
+      errorMessage: 'native metadata failed',
+      storageKey: null,
+      recordIndex: null,
+      rawJson: null,
+      rawRecordJson: null,
+    });
+    consoleError.mockRestore();
   });
 });

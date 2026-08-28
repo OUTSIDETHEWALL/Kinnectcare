@@ -57,6 +57,7 @@ import {
   auditDiagnosticsStorage,
   clearDiagnosticsStorageKey,
   DIAGNOSTICS_STORAGE_KEYS,
+  DIAGNOSTICS_STORAGE_SCHEMA_VERSION,
   DiagnosticsStorageAuditEntry,
   DiagnosticsStorageKey,
   DiagnosticsStorageAuditResult,
@@ -1057,7 +1058,17 @@ export default function MeScreen() {
         String(createdAt.getUTCMinutes()).padStart(2, '0') + ' UTC'
       : null;
 
-    return { appVersion, buildStr, otaStatus, otaId, otaPublished, runtimeVersion, channel, isEmbedded };
+    return {
+      appVersion,
+      buildStr,
+      otaStatus,
+      otaId,
+      updateId,
+      otaPublished,
+      runtimeVersion,
+      channel,
+      isEmbedded,
+    };
   }, []);
 
   return (
@@ -1376,6 +1387,20 @@ export default function MeScreen() {
               Each row is read outside Diagnostics. Delete one key at a time, reload, and retry
               Diagnostics to isolate the culprit. There is intentionally no clear-all action.
             </Text>
+            <View style={styles.storageIdentityCard}>
+              <Text style={styles.storageIdentityText} selectable>
+                App Version: {buildInfo.appVersion}
+              </Text>
+              <Text style={styles.storageIdentityText} selectable>
+                Runtime Version: {buildInfo.runtimeVersion}
+              </Text>
+              <Text style={styles.storageIdentityText} selectable>
+                OTA Update ID: {buildInfo.updateId ?? 'embedded bundle'}
+              </Text>
+              <Text style={styles.storageIdentityText} selectable>
+                Diagnostics Schema: {DIAGNOSTICS_STORAGE_SCHEMA_VERSION}
+              </Text>
+            </View>
             <View style={styles.storageInspectorCard}>
               {storageAudit ? storageAudit.entries.map((entry) => (
                 <DiagnosticsStorageRow
@@ -1739,6 +1764,19 @@ const styles = StyleSheet.create({
   storageInspectorNote: {
     marginTop: 10, paddingHorizontal: 4, fontSize: 12,
     color: Colors.textSecondary, lineHeight: 18,
+  },
+  storageIdentityCard: {
+    marginBottom: 10,
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: Colors.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: Colors.border,
+  },
+  storageIdentityText: {
+    fontSize: 12,
+    lineHeight: 18,
+    color: Colors.textSecondary,
   },
   storageInspectorCard: {
     marginTop: 8, backgroundColor: Colors.surface, borderRadius: 14,
