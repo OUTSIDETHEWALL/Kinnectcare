@@ -279,6 +279,7 @@ jest.mock('../dashboardLoadLog', () => ({
 
 const mockApiGet           = jest.fn();
 const mockApiPut           = jest.fn();
+const mockApiPost          = jest.fn();
 const mockGetBillingStatus = jest.fn();
 const mockListFamilyInvites = jest.fn();
 
@@ -286,6 +287,7 @@ jest.mock('../api', () => ({
   api: {
     get: (...args: any[]) => mockApiGet(...args),
     put: (...args: any[]) => mockApiPut(...args),
+    post: (...args: any[]) => mockApiPost(...args),
   },
   getBillingStatus:   (...args: any[]) => mockGetBillingStatus(...args),
   listFamilyInvites:  (...args: any[]) => mockListFamilyInvites(...args),
@@ -778,5 +780,83 @@ describe('Dashboard — Needs Attention clears on non-dashboard tab when battery
 
     // Background must not add any calls.
     expect(mockApiGet.mock.calls.length).toBe(callCountAfterMount);
+  });
+});
+
+describe('Dashboard — interactive welfare check', () => {
+  it("sends an Are you OK request and shows the member's reply on the next 10-second poll", async () => {
+    let responded = false;
+    mockApiPost.mockResolvedValue({
+      data: {
+        request_id: 'welfare-request-1',
+        status: 'pending',
+        created_at: '2026-08-28T12:00:00.000Z',
+      },
+    });
+    mockApiGet.mockImplementation((url: string) => {
+      if (url === '/members') return Promise.resolve(membersResponse());
+      if (url === '/summary') return Promise.resolve(summaryResponse());
+      if (url === '/alerts') return Promise.resolve({ data: [] });
+      if (url === `/checkin-requests/member/${MOCK_MEMBER_ID}`) {
+        return Promise.resolve({
+          data: responded ? [{
+            id: 'welfare-request-1',
+            status: 'responded',
+            responded_at: new Date().toISOString(),
+          }] : [],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected GET ${url}`));
+    });
+
+    const renderer = await mountAndSettle();
+    const button = renderer.root.findByProps({
+      testID: `member-welfare-check-${MOCK_MEMBER_ID}`,
+    });
+    await act(async () => { await button.props.onPress(); });
+
+    expect(mockApiPost).toHaveBeenCalledWith(
+      `/members/${MOCK_MEMBER_ID}/welfare-check`,
+    );
+    expect(renderer.root.findByProps({
+      testID: `member-welfare-pending-${MOCK_MEMBER_ID}`,
+    })).toBeTruthy();
+
+    responded = true;
+    await act(async () => { jest.advanceTimersByTime(10_000); });
+    await flushAsync(4);
+
+    const confirmation = renderer.root.findByProps({
+      testID: `member-welfare-confirmed-${MOCK_MEMBER_ID}`,
+    });
+    expect(collectTextContent(confirmation).replace(/\s+/g, ' ')).toContain(
+      'Joyce Doe confirmed OK',
+    );
+  });
+
+  it('stops the 10-second welfare polling immediately when the dashboard loses focus', async () => {
+    mockApiGet.mockImplementation((url: string) => {
+      if (url === '/members') return Promise.resolve(membersResponse());
+      if (url === '/summary') return Promise.resolve(summaryResponse());
+      if (url === '/alerts') return Promise.resolve({ data: [] });
+      if (url === `/checkin-requests/member/${MOCK_MEMBER_ID}`) {
+        return Promise.resolve({ data: [] });
+      }
+      return Promise.reject(new Error(`Unexpected GET ${url}`));
+    });
+
+    await mountAndSettle();
+    const beforeBlur = mockApiGet.mock.calls.filter(
+      (call: any[]) => call[0] === `/checkin-requests/member/${MOCK_MEMBER_ID}`,
+    ).length;
+
+    await act(async () => { focusHarness.blur(); });
+    await act(async () => { jest.advanceTimersByTime(30_000); });
+    await flushAsync(2);
+
+    const afterBlur = mockApiGet.mock.calls.filter(
+      (call: any[]) => call[0] === `/checkin-requests/member/${MOCK_MEMBER_ID}`,
+    ).length;
+    expect(afterBlur).toBe(beforeBlur);
   });
 });

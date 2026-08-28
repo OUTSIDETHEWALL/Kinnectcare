@@ -22,6 +22,7 @@
  */
 const TRANSISTOR_LICENSE_ANDROID = process.env.TRANSISTOR_LICENSE_ANDROID || '';
 const TRANSISTOR_LICENSE_IOS = process.env.TRANSISTOR_LICENSE_IOS || '';
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || '';
 
 module.exports = ({ config }) => ({
   ...config,
@@ -62,6 +63,9 @@ module.exports = ({ config }) => ({
         ITSAppUsesNonExemptEncryption: false,
         // Transistor SDK iOS license — read from EAS Secrets / .env.
         TSLocationManagerLicense: TRANSISTOR_LICENSE_IOS,
+        // Read by the native lock-screen welfare-check action. This is a
+        // public API origin, not a credential.
+        KinnshipBackendURL: BACKEND_URL,
         UIBackgroundModes: [
           'location',
           'fetch',
@@ -108,6 +112,7 @@ module.exports = ({ config }) => ({
     plugins: [
       'expo-router',
       './plugins/withAndroidTelQueries',
+      './plugins/withIosWelfareCheckAction',
       // ----- Transistor Software react-native-background-geolocation -----
       // Order matters: the Transistor plugin must come BEFORE expo-location
       // so its AndroidManifest entries land first.  License key is read from

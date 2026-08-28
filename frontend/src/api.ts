@@ -67,8 +67,26 @@ function notifyTokenChange(token: string | null): void {
 
 export async function saveToken(token: string) {
   if (Platform.OS === 'web') await AsyncStorage.setItem(TOKEN_KEY, token);
-  else await SecureStore.setItemAsync(TOKEN_KEY, token);
+  else {
+    await SecureStore.setItemAsync(TOKEN_KEY, token, {
+      // The iOS notification-service action handler must be able to read the
+      // token while the phone is locked. This remains device-local and only
+      // becomes available after the first unlock following a reboot.
+      keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+    });
+  }
   notifyTokenChange(token);
+}
+
+export async function migrateTokenForBackgroundActions(): Promise<void> {
+  if (Platform.OS === 'web') return;
+  const token = await SecureStore.getItemAsync(TOKEN_KEY);
+  if (!token) return;
+  // Re-writing the existing value upgrades pre-feature installations whose
+  // token was stored with SecureStore's old WHEN_UNLOCKED default.
+  await SecureStore.setItemAsync(TOKEN_KEY, token, {
+    keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+  });
 }
 
 export async function clearToken() {
@@ -232,8 +250,6 @@ export type Member = {
   // UTC ISO-8601 timestamp of the most recent successful battery reading.
   // Null for member docs written before battery sync was introduced.
   battery_updated_at?: string | null;
-  /** Diagnostic-only trace for the latest accepted map-coordinate write. */
-  location_pipeline?: import('./pipelineSnapshot').LocationPipelineTrace | null;
 };
 
 export type Alert = {
