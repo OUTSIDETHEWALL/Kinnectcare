@@ -59,6 +59,7 @@ import {
 import {
   readPipelineSnapshots,
   clearPipelineSnapshots,
+  normalizePipelineSnapshots,
   StaleLocationPipelineSnapshot,
 } from '../src/pipelineSnapshot';
 import {
@@ -807,7 +808,7 @@ export default function DiagnosticsScreen() {
     setDashLoadLog(dl);
     setCardLog(cr);
     setPipelineLog(pl);
-    setPipelineSnapshots(ps);
+    setPipelineSnapshots(normalizePipelineSnapshots(ps));
     setLeoSnapshot(lsnap);
     setLeoLog(llog);
     setRestrictionStatus(rs);
@@ -2393,7 +2394,10 @@ export default function DiagnosticsScreen() {
           ) : pipelineSnapshots.map((snapshot) => (
             <View key={snapshot.trace_id} style={styles.card}>
               <Text style={[styles.entryLine, styles.divergent]}>
-                STALE LOCATION DETECTED · first stale stage: {snapshot.failure_stage.toUpperCase()}
+                STALE LOCATION DETECTED · first stale stage:{' '}
+                {typeof snapshot.failure_stage === 'string'
+                  ? snapshot.failure_stage.toUpperCase()
+                  : 'UNKNOWN'}
               </Text>
               <Text style={styles.entryLine}>
                 <Text style={styles.entryK}>Native GPS: </Text>
@@ -2419,8 +2423,10 @@ export default function DiagnosticsScreen() {
                 {snapshot.map_render_timestamp} · {JSON.stringify(snapshot.map_render_coordinates)}
               </Text>
               <Text style={styles.entryLine}>
-                speed {snapshot.speed_mph == null ? '—' : `${snapshot.speed_mph.toFixed(1)} mph`}
-                {' · '}trigger {snapshot.trigger}
+                speed {typeof snapshot.speed_mph === 'number' && Number.isFinite(snapshot.speed_mph)
+                  ? `${snapshot.speed_mph.toFixed(1)} mph`
+                  : '—'}
+                {' · '}trigger {typeof snapshot.trigger === 'string' ? snapshot.trigger : '—'}
               </Text>
             </View>
           ))}
