@@ -67,10 +67,27 @@ function notifyTokenChange(token: string | null): void {
 
 export async function saveToken(token: string) {
   if (Platform.OS === 'web') await AsyncStorage.setItem(TOKEN_KEY, token);
-  else await SecureStore.setItemAsync(TOKEN_KEY, token);
+  else {
+    await SecureStore.setItemAsync(TOKEN_KEY, token, {
+      // The iOS notification-service action handler must be able to read the
+      // token while the phone is locked. This remains device-local and only
+      // becomes available after the first unlock following a reboot.
+      keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+    });
+  }
   notifyTokenChange(token);
 }
 
+export async function migrateTokenForBackgroundActions(): Promise<void> {
+  if (Platform.OS === 'web') return;
+  const token = await SecureStore.getItemAsync(TOKEN_KEY);
+  if (!token) return;
+  // Re-writing the existing value upgrades pre-feature installations whose
+  // token was stored with SecureStore's old WHEN_UNLOCKED default.
+  await SecureStore.setItemAsync(TOKEN_KEY, token, {
+    keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+  });
+}
 export async function clearToken() {
   if (Platform.OS === 'web') await AsyncStorage.removeItem(TOKEN_KEY);
   else await SecureStore.deleteItemAsync(TOKEN_KEY);

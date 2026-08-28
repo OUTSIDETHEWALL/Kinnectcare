@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
   RefreshControl, ActivityIndicator, Animated, Pressable, Platform,
-  AppState,
+  AppState, Alert,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
@@ -110,6 +110,34 @@ export default function Dashboard() {
   // first time.  Auto-dismisses after 3 s.  Keyed by userId so it fires
   // once per account, not once per install (handles re-installs cleanly).
   const [showWelcomeBanner, setShowWelcomeBanner] = useState(false);
+  type WelfareCheckState = {
+    request_id: string;
+    status: 'pending' | 'responded' | 'need_help';
+    created_at?: string;
+    responded_at?: string;
+  };
+  const [welfareChecks, setWelfareChecks] = useState<Record<string, WelfareCheckState>>({});
+  const [sendingWelfareCheck, setSendingWelfareCheck] = useState<Record<string, boolean>>({});
+  const refreshWelfareChecks = useCallback(async () => {
+    const targets = members.filter((m) => m.user_id && m.user_id !== user?.id);
+    if (!targets.length) return;
+    const rows = await Promise.all(targets.map(async (m) => {
+      try {
+        const response = await api.get(`/checkin-requests/member/${m.id}`);
+        const latest = Array.isArray(response.data) ? response.data[0] : null;
+        return latest ? [m.id, latest] as const : null;
+      } catch (_e) {
+        return null;
+      }
+    }));
+    setWelfareChecks((previous) => {
+      const next = { ...previous };
+      for (const row of rows) {
+        if (row) next[row[0]] = row[1];
+      }
+      return next;
+    });
+  }, [members, user?.id]);
   useEffect(() => {
     if (!user?.id) return;
     const key = `@kinnship/welcomed_v1_${user.id}`;
@@ -445,6 +473,10 @@ export default function Dashboard() {
     const pollId = setInterval(() => {
       load('interval-60s').catch(() => {});
     }, 60_000);
+    refreshWelfareChecks().catch(() => {});
+    const welfarePollId = setInterval(() => {
+      refreshWelfareChecks().catch(() => {});
+    }, 10_000);
 
     const appStateSub = AppState.addEventListener('change', (next) => {
       if (next === 'active') load('appstate-active').catch(() => {});
@@ -452,6 +484,7 @@ export default function Dashboard() {
 
     const notifSub = Notifications.addNotificationReceivedListener(() => {
       load('notif-received').catch(() => {});
+      refreshWelfareChecks().catch(() => {});
     });
 
     // v1.2.9 — active-mode location watcher.
@@ -501,6 +534,7 @@ export default function Dashboard() {
 
     return () => {
       clearInterval(pollId);
+      clearInterval(welfarePollId);
       appStateSub.remove();
       notifSub.remove();
       try { watcherSub?.remove?.(); } catch (_e) {}
@@ -653,6 +687,26 @@ export default function Dashboard() {
     // and shows Loading → Success → Error (mirrors the SOS architecture).
     // Success is only shown after the server returns 200.
     router.push({ pathname: '/check-in', params: { memberId: m.id, name: m.name } });
+  };
+
+  const sendWelfareCheck = async (m: Member) => {
+    if (sendingWelfareCheck[m.id]) return;
+    setSendingWelfareCheck((previous) => ({ ...previous, [m.id]: true }));
+    try {
+      const response = await api.post(`/members/${m.id}/welfare-check`);
+      setWelfareChecks((previous) => ({
+        ...previous,
+        [m.id]: {
+          request_id: response.data.request_id,
+          status: 'pending',
+          created_at: response.data.created_at || new Date().toISOString(),
+        },
+      }));
+    } catch (_e) {
+      Alert.alert('Couldn’t send check-in', 'Please check your connection and try again.');
+    } finally {
+      setSendingWelfareCheck((previous) => ({ ...previous, [m.id]: false }));
+    }
   };
 
   if (loading) {
@@ -842,6 +896,9 @@ export default function Dashboard() {
           <MemberCard key={m.id} member={m} sum={sumOf(m.id)} isSenior
             onPress={() => router.push(`/member/${m.id}`)}
             onCheckIn={m.user_id === user?.id ? () => quickCheckIn(m) : undefined}
+            onWelfareCheck={m.user_id && m.user_id !== user?.id ? () => sendWelfareCheck(m) : undefined}
+            welfareCheck={welfareChecks[m.id]}
+            welfareCheckSending={!!sendingWelfareCheck[m.id]}
           />
         ))}
 
@@ -850,6 +907,9 @@ export default function Dashboard() {
           <MemberCard key={m.id} member={m} sum={sumOf(m.id)}
             onPress={() => router.push(`/member/${m.id}`)}
             onCheckIn={m.user_id === user?.id ? () => quickCheckIn(m) : undefined}
+            onWelfareCheck={m.user_id && m.user_id !== user?.id ? () => sendWelfareCheck(m) : undefined}
+            welfareCheck={welfareChecks[m.id]}
+            welfareCheckSending={!!sendingWelfareCheck[m.id]}
           />
         ))}
 
@@ -1061,9 +1121,11 @@ function PendingInviteCard({
 }
 
 
-function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
+function MemberCard({ member, sum, isSenior, onPress, onCheckIn, onWelfareCheck, welfareCheck, welfareCheckSending }: {
   member: Member; sum?: MemberSummary; isSenior?: boolean;
-  onPress: () => void; onCheckIn?: () => void;
+  onPress: () => void; onCheckIn?: () => void; onWelfareCheck?: () => void;
+  welfareCheck?: { status: string; responded_at?: string; created_at?: string };
+  welfareCheckSending?: boolean;
 }) {
   const initials = member.name.split(' ').map(s => s[0]).slice(0, 2).join('').toUpperCase();
   // Build #58 — Location Sharing overrides the health dot.  When a
@@ -1259,6 +1321,32 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn }: {
           <Text style={styles.checkinPillText}>✅ Check in</Text>
         </TouchableOpacity>
       )}
+      {onWelfareCheck && (
+        <View style={styles.welfareCheckWrap}>
+          <TouchableOpacity
+            testID={`member-welfare-check-${member.id}`}
+            onPress={onWelfareCheck}
+            disabled={welfareCheckSending}
+            activeOpacity={0.85}
+            style={[styles.welfareCheckButton, welfareCheckSending && styles.welfareCheckButtonDisabled]}
+          >
+            {welfareCheckSending ? (
+              <ActivityIndicator color={Colors.primary} size="small" />
+            ) : (
+              <Text style={styles.welfareCheckButtonText}>Are you OK?</Text>
+            )}
+          </TouchableOpacity>
+          {welfareCheck?.status === 'responded' && welfareCheck.responded_at ? (
+            <Text testID={`member-welfare-confirmed-${member.id}`} style={styles.welfareConfirmed}>
+              ✓ {member.name} confirmed OK · {formatTimeAgo(new Date(welfareCheck.responded_at).getTime())}
+            </Text>
+          ) : welfareCheck?.status === 'pending' ? (
+            <Text testID={`member-welfare-pending-${member.id}`} style={styles.welfarePending}>
+              Waiting for {member.name} to reply
+            </Text>
+          ) : null}
+        </View>
+      )}
     </View>
   );
 }
@@ -1362,6 +1450,15 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   checkinPillText: { color: Colors.surface, fontWeight: '700', fontSize: 14 },
+  welfareCheckWrap: { marginTop: 10, gap: 8 },
+  welfareCheckButton: {
+    minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: Colors.primary,
+    alignItems: 'center', justifyContent: 'center', backgroundColor: Colors.surface,
+  },
+  welfareCheckButtonDisabled: { opacity: 0.6 },
+  welfareCheckButtonText: { color: Colors.primary, fontWeight: '800', fontSize: 15 },
+  welfareConfirmed: { color: Colors.primary, fontWeight: '700', fontSize: 13 },
+  welfarePending: { color: Colors.textSecondary, fontWeight: '600', fontSize: 13 },
   mapPreviewWrap: {
     marginTop: 12, borderRadius: 12, overflow: 'hidden', height: 140,
   },

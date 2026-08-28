@@ -495,7 +495,11 @@ class CheckinRequest(BaseModel):
     def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
         return _to_utc_iso(v) if v else None
 
-
+class WelfareCheckResponseCreate(BaseModel):
+    request_id: str
+    location_name: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 class LocationUpdate(BaseModel):
     """
     Shape-agnostic location payload.
@@ -740,7 +744,15 @@ async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
 
     # ----- Quiet Hours gate -----
     push_type = (data or {}).get("type") or ""
-    BYPASS_TYPES = {"sos", "request_location_refresh", "alert_resolved"}
+    BYPASS_TYPES = {
+        "sos",
+        "request_location_refresh",
+        "alert_resolved",
+        # A caregiver is actively asking for a safety confirmation. Suppressing
+        # the prompt would leave a persisted "pending" request the recipient
+        # never had an opportunity to answer.
+        "are_you_ok_request",
+    }
     if push_type not in BYPASS_TYPES and _is_in_quiet_hours(user):
         logger.info(
             f"quiet-hours-suppress user={user_id} type={push_type or '(none)'} "
@@ -3837,6 +3849,7 @@ async def list_recent_checkins(current=Depends(get_current_user)):
 
 # ========== Checkin Requests ("Are You OK?") ==========
 
+@api_router.post("/members/{member_id}/welfare-check")
 @api_router.post("/checkin-requests/{member_id}")
 async def send_checkin_request(member_id: str, current=Depends(get_current_user)):
     """Build XX — send an 'Are You OK?' prompt to a family member's device.
@@ -3849,6 +3862,9 @@ async def send_checkin_request(member_id: str, current=Depends(get_current_user)
     Self-requests are not blocked (you can send one to your own linked member)
     but the primary use case is caregiver → senior.
     """
+    if current.get("family_group_role") != "owner":
+        raise HTTPException(status_code=403, detail="Only family caregivers can send welfare checks")
+
     target = await db.members.find_one(
         {"id": member_id, "family_group_id": current["family_group_id"]},
         {"_id": 0, "id": 1, "user_id": 1, "name": 1},
@@ -3909,7 +3925,12 @@ async def send_checkin_request(member_id: str, current=Depends(get_current_user)
     except Exception as e:
         logger.warning(f"checkin_request visible push failed (non-fatal): {e}")
 
-    return {"ok": True, "request_id": req.id}
+    return {
+        "ok": True,
+        "request_id": req.id,
+        "status": req.status,
+        "created_at": _to_utc_iso(req.created_at),
+    }
 
 
 @api_router.post("/checkin-requests/{request_id}/respond", response_model=CheckIn)
@@ -3942,6 +3963,86 @@ async def respond_to_checkin_request(
     if member.get("user_id") != current["id"]:
         raise HTTPException(status_code=403, detail="Only the member can respond to their own check-in request")
 
+    # Notification actions can be delivered more than once by the OS (for
+    # example, once to the background task and again when JS resumes). Return
+    # the original check-in rather than creating duplicate confirmations or
+    # sending duplicate caregiver pushes.
+    if req_doc.get("status") == "responded" and req_doc.get("checkin_id"):
+        existing = await db.checkins.find_one(
+            {
+                "id": req_doc["checkin_id"],
+                "family_group_id": current["family_group_id"],
+            },
+            {"_id": 0},
+        )
+        if existing:
+            if req_doc.get("response_notification_status") in {"pending", "sending"}:
+                await deliver_welfare_response_notification(
+                    req_doc,
+                    existing["id"],
+                    existing.get("location_name"),
+                )
+            return CheckIn(**existing)
+
+    # Claim the request before creating any side effects. Notification actions
+    # may reach both Expo's background task and the foreground listener.
+    processing_started_at = datetime.now(timezone.utc)
+    stale_processing_before = processing_started_at - timedelta(seconds=30)
+    claim = await db.checkin_requests.update_one(
+        {
+            "id": request_id,
+            "family_group_id": current["family_group_id"],
+            "$or": [
+                {"status": "pending"},
+                {
+                    "status": "processing",
+                    "processing_started_at": {"$lt": stale_processing_before},
+                },
+            ],
+        },
+        {"$set": {
+            "status": "processing",
+            "processing_started_at": processing_started_at,
+        }},
+    )
+    if claim.modified_count != 1:
+        latest = await db.checkin_requests.find_one(
+            {"id": request_id, "family_group_id": current["family_group_id"]},
+            {"_id": 0},
+        )
+        if latest and latest.get("status") == "responded" and latest.get("checkin_id"):
+            existing = await db.checkins.find_one(
+                {"id": latest["checkin_id"], "family_group_id": current["family_group_id"]},
+                {"_id": 0},
+            )
+            if existing:
+                return CheckIn(**existing)
+        raise HTTPException(status_code=409, detail="Check-in response is already being processed")
+
+    async def run_claimed_write(operation):
+        try:
+            return await operation
+        except Exception:
+            # A transient DB failure must not strand the notification action in
+            # "processing" forever. The same lock-screen action can retry after
+            # the claim is released.
+            try:
+                await db.checkin_requests.update_one(
+                    {
+                        "id": request_id,
+                        "family_group_id": current["family_group_id"],
+                        "status": "processing",
+                        "processing_started_at": processing_started_at,
+                    },
+                    {
+                        "$set": {"status": "pending"},
+                        "$unset": {"processing_started_at": ""},
+                    },
+                )
+            except Exception:
+                logger.exception("failed to release welfare-check response claim")
+            raise
+
     ci = CheckIn(
         owner_id=current["id"],
         family_group_id=current["family_group_id"],
@@ -3953,7 +4054,35 @@ async def respond_to_checkin_request(
         confirmed_by=member["name"],
         source="request_response",
     )
-    await db.checkins.insert_one(ci.model_dump())
+    canonical_mongo_id = f"welfare-check:{request_id}"
+    try:
+        await db.checkins.insert_one({
+            **ci.model_dump(),
+            "_id": canonical_mongo_id,
+        })
+    except Exception:
+        # `_id` is MongoDB's durable uniqueness boundary. If a previous attempt
+        # inserted the response and then crashed before finalizing the request,
+        # resume from that canonical check-in rather than creating a duplicate.
+        existing = await db.checkins.find_one(
+            {"_id": canonical_mongo_id},
+            {"_id": 0},
+        )
+        if not existing:
+            await db.checkin_requests.update_one(
+                {
+                    "id": request_id,
+                    "family_group_id": current["family_group_id"],
+                    "status": "processing",
+                    "processing_started_at": processing_started_at,
+                },
+                {
+                    "$set": {"status": "pending"},
+                    "$unset": {"processing_started_at": ""},
+                },
+            )
+            raise
+        ci = CheckIn(**existing)
 
     # Update member last_seen + location.
     update: dict = {"last_seen": datetime.now(timezone.utc), "status": "healthy"}
@@ -3962,56 +4091,78 @@ async def respond_to_checkin_request(
     if data.latitude is not None and data.longitude is not None:
         update["latitude"] = data.latitude
         update["longitude"] = data.longitude
-    await db.members.update_one({"id": req_doc["member_id"]}, {"$set": update})
+    await run_claimed_write(
+        db.members.update_one({"id": req_doc["member_id"]}, {"$set": update})
+    )
 
     # Ack any missed-checkin alerts for today.
     tz = user_tz(current)
     now_local = datetime.now(tz)
     day_start_utc = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz).astimezone(timezone.utc)
-    await db.alerts.update_many(
-        {"family_group_id": current["family_group_id"], "member_id": req_doc["member_id"],
-         "type": "missed_checkin", "created_at": {"$gte": day_start_utc}},
-        {"$set": {"acknowledged": True}},
+    await run_claimed_write(
+        db.alerts.update_many(
+            {"family_group_id": current["family_group_id"], "member_id": req_doc["member_id"],
+             "type": "missed_checkin", "created_at": {"$gte": day_start_utc}},
+            {"$set": {"acknowledged": True}},
+        )
     )
 
-    # Mark the request as responded.
-    await db.checkin_requests.update_one(
-        {"id": request_id},
-        {"$set": {"status": "responded", "responded_at": datetime.now(timezone.utc)}},
-    )
-
-    # Notify the requester.
-    loc_str = f" from {data.location_name}" if data.location_name else ""
-    try:
-        await push_to_user(
-            req_doc["requester_id"],
-            f"✅ {member['name']} is OK",
-            f"{member['name']} confirmed they are okay{loc_str}.",
+    response_time = datetime.now(timezone.utc)
+    await run_claimed_write(
+        db.checkin_requests.update_one(
             {
-                "type": "are_you_ok_response",
-                "member_id": req_doc["member_id"],
-                "checkin_id": ci.id,
-                "request_id": request_id,
+                "id": request_id,
+                "family_group_id": current["family_group_id"],
+                "status": "processing",
+                "processing_started_at": processing_started_at,
+            },
+            {
+                "$set": {
+                    "status": "responded",
+                    "responded_at": response_time,
+                    "checkin_id": ci.id,
+                    "response_notification_status": "pending",
+                },
+                "$unset": {"processing_started_at": ""},
             },
         )
-    except Exception as e:
-        logger.warning(f"checkin_request response notify failed (non-fatal): {e}")
+    )
 
-    # Notify the rest of the family too.
-    try:
-        await push_to_family_group(
-            current["family_group_id"],
-            f"✅ {member['name']} checked in",
-            f"{member['name']} is safe — confirmed they are okay{loc_str}.",
-            {"type": "checkin", "member_id": req_doc["member_id"], "checkin_id": ci.id},
-            exclude_user_id=current["id"],
-        )
-    except Exception as e:
-        logger.warning(f"checkin_request family fanout failed (non-fatal): {e}")
+    await deliver_welfare_response_notification(
+        req_doc,
+        ci.id,
+        data.location_name,
+    )
 
     return ci
 
-
+@api_router.post("/members/{member_id}/welfare-check-response", response_model=CheckIn)
+async def respond_to_member_welfare_check(
+    member_id: str,
+    data: WelfareCheckResponseCreate,
+    current=Depends(get_current_user),
+):
+    """Member-scoped action endpoint used by lock-screen notification intents."""
+    request = await db.checkin_requests.find_one(
+        {
+            "id": data.request_id,
+            "member_id": member_id,
+            "family_group_id": current["family_group_id"],
+        },
+        {"_id": 0, "id": 1},
+    )
+    if not request:
+        raise HTTPException(status_code=404, detail="Welfare check not found for this member")
+    return await respond_to_checkin_request(
+        data.request_id,
+        CheckInCreate(
+            member_id=member_id,
+            location_name=data.location_name,
+            latitude=data.latitude,
+            longitude=data.longitude,
+        ),
+        current,
+    )
 @api_router.get("/checkin-requests/member/{member_id}")
 async def list_checkin_requests_for_member(member_id: str, current=Depends(get_current_user)):
     """Build XX — returns the last 50 checkin requests for a member (for history timeline)."""
@@ -6534,3 +6685,80 @@ async def _heal_missing_self_member_rows():
         })
     except Exception as e:
         logger.warning(f"_heal_missing_self_member_rows skipped: {e}")
+
+async def deliver_welfare_response_notification(
+    request: dict,
+    checkin_id: str,
+    location_name: Optional[str] = None,
+) -> None:
+    """Atomically claim and deliver one confirmation to the requester."""
+    claimed_at = datetime.now(timezone.utc)
+    stale_before = claimed_at - timedelta(seconds=30)
+    claim = await db.checkin_requests.update_one(
+        {
+            "id": request["id"],
+            "family_group_id": request["family_group_id"],
+            "status": "responded",
+            "$or": [
+                {"response_notification_status": "pending"},
+                {
+                    "response_notification_status": "sending",
+                    "response_notification_claimed_at": {"$lt": stale_before},
+                },
+            ],
+        },
+        {
+            "$set": {
+                "response_notification_status": "sending",
+                "response_notification_claimed_at": claimed_at,
+            }
+        },
+    )
+    if claim.modified_count != 1:
+        return
+
+    member_name = request["member_name"]
+    loc_str = f" from {location_name}" if location_name else ""
+    try:
+        await push_to_user(
+            request["requester_id"],
+            f"✅ {member_name} is OK",
+            f"{member_name} confirmed they are okay{loc_str}.",
+            {
+                "type": "are_you_ok_response",
+                "member_id": request["member_id"],
+                "checkin_id": checkin_id,
+                "request_id": request["id"],
+            },
+        )
+    except Exception as error:
+        logger.warning(f"welfare response notify failed; delivery remains retryable: {error}")
+        await db.checkin_requests.update_one(
+            {
+                "id": request["id"],
+                "family_group_id": request["family_group_id"],
+                "response_notification_status": "sending",
+                "response_notification_claimed_at": claimed_at,
+            },
+            {
+                "$set": {"response_notification_status": "pending"},
+                "$unset": {"response_notification_claimed_at": ""},
+            },
+        )
+        return
+
+    await db.checkin_requests.update_one(
+        {
+            "id": request["id"],
+            "family_group_id": request["family_group_id"],
+            "response_notification_status": "sending",
+            "response_notification_claimed_at": claimed_at,
+        },
+        {
+            "$set": {
+                "response_notification_status": "sent",
+                "response_notification_sent_at": datetime.now(timezone.utc),
+            },
+            "$unset": {"response_notification_claimed_at": ""},
+        },
+    )

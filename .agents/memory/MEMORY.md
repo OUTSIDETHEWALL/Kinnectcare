@@ -15,3 +15,6 @@
 - [Railway entrypoint parity](railway-entrypoint-parity.md) — root and backend Railway entrypoints can drift; security fixes must cover both until deployment is consolidated.
 - [Active Railway backend](active-railway-backend.md) — production serves the `backend/` tree; the root backend copy is stale and can mislead release reviews.
 - [Mobile deployment workflow](mobile-deployment-workflow.md) — Kinnship releases through Railway plus Expo EAS OTA; never use Replit Web Publish unless website deployment is explicitly requested.
+- [Resume navigation test boundary](resume-navigation-test-boundary.md) — foreground/resume route tests must mount the app-level lifecycle coordinator, not only the destination screen.
+- [Hero health clock-skew tolerance](hero-health-clock-skew-tolerance.md) — persisted upload timestamps up to 5s ahead render as just now; larger future jumps are rejected.
+- [Expo iOS notification actions](expo-ios-notification-actions.md) — SDK 54 needs native handling for terminated iOS action taps; Keychain lookup must match SecureStore storage semantics.

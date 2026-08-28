@@ -1,15 +1,56 @@
 import { useEffect, useState } from 'react';
 import * as Notifications from 'expo-notifications';
+import * as TaskManager from 'expo-task-manager';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
 import { AppState, Platform } from 'react-native';
-import { api } from './api';
+import { api, migrateTokenForBackgroundActions } from './api';
 
 // Hardcoded fallback in case Constants.expoConfig is unavailable (this happens
 // in some standalone build configurations). Keep in sync with app.json →
 // extra.eas.projectId. Without a projectId, getExpoPushTokenAsync() throws on
 // FCM/APNs builds and push tokens never register.
 const HARDCODED_EAS_PROJECT_ID = '11cb65a8-eab0-4745-9b4a-7b8964805381';
+const WELFARE_CHECK_TASK = 'KINNSHIP_WELFARE_CHECK_RESPONSE';
+
+export async function handleWelfareCheckAction(response: any): Promise<boolean> {
+  const actionId = response?.actionIdentifier;
+  if (actionId !== 'IM_OK') return false;
+
+  const notification = response?.notification;
+  const data: any = notification?.request?.content?.data || {};
+  const notificationId: string | undefined = notification?.request?.identifier;
+  const requestId: string | undefined = data.request_id;
+  const memberId: string | undefined = data.member_id;
+
+  if (requestId && memberId) {
+    await api.post(`/members/${memberId}/welfare-check-response`, {
+      request_id: requestId,
+    });
+  }
+  if (notificationId) {
+    await Notifications.dismissNotificationAsync(notificationId).catch(() => {});
+  }
+  return true;
+}
+
+// Expo invokes registered notification tasks for action-button responses while
+// the app is backgrounded or terminated. The foreground listener below uses
+// the same idempotent backend endpoint, so either delivery path is safe.
+if (Platform.OS !== 'web') {
+  migrateTokenForBackgroundActions().catch((error) => {
+    console.warn('[push] Could not upgrade notification-action token access', error);
+  });
+  if (!TaskManager.isTaskDefined(WELFARE_CHECK_TASK)) {
+    TaskManager.defineTask(WELFARE_CHECK_TASK, async ({ data }: any) => {
+      const response = data?.actionIdentifier ? data : data?.response;
+      if (response?.actionIdentifier === 'IM_OK') {
+        await handleWelfareCheckAction(response);
+      }
+    });
+  }
+  Notifications.registerTaskAsync(WELFARE_CHECK_TASK).catch(() => {});
+}
 
 export type PushStatus =
   | { state: 'unknown' }
@@ -308,7 +349,7 @@ async function ensureNotificationCategories() {
     await Notifications.setNotificationCategoryAsync('ARE_YOU_OK', [
       {
         identifier: 'IM_OK',
-        buttonTitle: "✅  I'M OK",
+        buttonTitle: "✓ I'm OK",
         options: { opensAppToForeground: false },
       },
       {
@@ -1034,22 +1075,7 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
       // a background handler; the endpoint accepts lat/lon as optional.
       if (actionId === 'IM_OK') {
         markNotificationConsumed(reqId);
-        const checkinReqId: string | undefined = data.request_id;
-        const checkinMemberId: string | undefined = data.member_id;
-        if (checkinReqId && checkinMemberId) {
-          try {
-            await api.post(`/checkin-requests/${checkinReqId}/respond`, {
-              member_id: checkinMemberId,
-            });
-          } catch (_e) {
-            // Silent — if the network call fails the notification is still
-            // dismissed; Joyce can open the app and retry from the response
-            // screen if Charles doesn't see her confirmation.
-          }
-          try {
-            await Notifications.dismissNotificationAsync(reqId);
-          } catch (_e) {}
-        }
+        await handleWelfareCheckAction(r).catch(() => {});
         return;
       }
       // NEED_HELP — opens the app (opensAppToForeground: true) so Joyce
