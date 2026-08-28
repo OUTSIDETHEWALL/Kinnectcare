@@ -18,3 +18,4 @@
 - [Resume navigation test boundary](resume-navigation-test-boundary.md) — foreground/resume route tests must mount the app-level lifecycle coordinator, not only the destination screen.
 - [Hero health clock-skew tolerance](hero-health-clock-skew-tolerance.md) — persisted upload timestamps up to 5s ahead render as just now; larger future jumps are rejected.
 - [Expo iOS notification actions](expo-ios-notification-actions.md) — SDK 54 needs native handling for terminated iOS action taps; Keychain lookup must match SecureStore storage semantics.
+- [Exact Diagnostics crash attribution](diagnostics-crash-attribution.md) — attach storage provenance to the exact thrown error via per-record React boundaries; never use global last-read context.

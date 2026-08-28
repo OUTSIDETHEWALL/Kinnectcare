@@ -30,9 +30,12 @@ export const DIAGNOSTICS_STORAGE_KEYS = [
   '@kinnship/tracking_pill_decisions_v1',
   '@kinnship/resume_decisions_v1',
   'kc_debug_overlay_v1',
+  '@kinnship/diagnostics_crash_debug_v1',
 ] as const;
 
 export type DiagnosticsStorageKey = (typeof DIAGNOSTICS_STORAGE_KEYS)[number];
+export const DIAGNOSTICS_STORAGE_SCHEMA_VERSION = 'v1';
+export const DIAGNOSTICS_CRASH_DEBUG_KEY = '@kinnship/diagnostics_crash_debug_v1';
 
 const AUDIT_RESULT_KEY = '@kinnship/diagnostics_storage_audit_v1';
 const AUDIT_PROGRESS_KEY = '@kinnship/diagnostics_storage_audit_progress_v1';
@@ -66,7 +69,7 @@ export type DiagnosticsStorageAuditResult = {
 
 type StorageDefinition = {
   key: DiagnosticsStorageKey;
-  shape: 'array' | 'expansion-state' | 'raw-boolean-flag';
+  shape: 'array' | 'expansion-state' | 'raw-boolean-flag' | 'debug-crash-journal';
   validateRecord?: (record: Record<string, unknown>) => string | null;
 };
 
@@ -79,6 +82,23 @@ export type DiagnosticsStorageEvidence = {
   audits: DiagnosticsStorageAuditResult[];
   cleanups: DiagnosticsStorageCleanupRecord[];
 };
+
+export type DiagnosticsStorageTraceContext = {
+  key: DiagnosticsStorageKey;
+  recordIndex: number | null;
+  rawJson: string | null;
+  rawRecordJson: string | null;
+  schemaVersion: string;
+};
+
+const rawJsonByKey = new Map<DiagnosticsStorageKey, string>();
+const parsedRecordsByKey = new Map<DiagnosticsStorageKey, unknown>();
+const traceContextByError = new WeakMap<object, DiagnosticsStorageTraceContext>();
+const traceContextByRecord = new WeakMap<object, DiagnosticsStorageTraceContext>();
+
+function isDiagnosticsDebugBuild(): boolean {
+  return typeof __DEV__ !== 'undefined' && __DEV__;
+}
 
 const NOTIFICATION_SOURCES = new Set([
   'foreground-handler', 'received-listener', 'response-listener', 'data-push',
@@ -323,6 +343,16 @@ const STORAGE_DEFINITIONS: StorageDefinition[] = [
     ),
   },
   { key: 'kc_debug_overlay_v1', shape: 'raw-boolean-flag' },
+  {
+    key: DIAGNOSTICS_CRASH_DEBUG_KEY,
+    shape: 'debug-crash-journal',
+    validateRecord: (r) => allValid(
+      requiredString(r, 'at'),
+      requiredString(r, 'errorStack'),
+      requiredString(r, 'appVersion'),
+      requiredString(r, 'runtimeVersion'),
+    ),
+  },
 ];
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -379,6 +409,103 @@ function schemaVersions(value: unknown, key: DiagnosticsStorageKey): string[] {
     }
   }
   return [...values];
+}
+
+export function schemaVersionForRecord(
+  value: unknown,
+  key: DiagnosticsStorageKey,
+): string {
+  const explicit = schemaVersions(value, key).find((version) => !version.startsWith('key_suffix='));
+  return explicit ?? `key_suffix=${key.match(/_v(\d+)$/)?.[1] ? `v${key.match(/_v(\d+)$/)?.[1]}` : DIAGNOSTICS_STORAGE_SCHEMA_VERSION}`;
+}
+
+export function traceDiagnosticsRecords<T extends unknown[]>(
+  key: DiagnosticsStorageKey,
+  records: T,
+): T {
+  if (!isDiagnosticsDebugBuild() || !Array.isArray(records)) return records;
+  const parsed = parsedRecordsByKey.get(key);
+  const rawRecords = Array.isArray(parsed) ? parsed : [];
+  const availableIndices = new Map<string, number[]>();
+  rawRecords.forEach((record, index) => {
+    const signature = JSON.stringify(record);
+    const indices = availableIndices.get(signature) ?? [];
+    indices.push(index);
+    availableIndices.set(signature, indices);
+  });
+
+  records.forEach((record, returnedIndex) => {
+    if (!record || typeof record !== 'object') return record;
+    const signature = JSON.stringify(record);
+    const matchingIndices = availableIndices.get(signature);
+    const rawIndex = matchingIndices?.shift() ?? (
+      returnedIndex < rawRecords.length ? returnedIndex : null
+    );
+    const rawRecord = rawIndex !== null ? rawRecords[rawIndex] : null;
+
+    traceContextByRecord.set(record, {
+      key,
+      recordIndex: rawIndex,
+      rawJson: rawJsonByKey.get(key) ?? null,
+      rawRecordJson: rawRecord === null ? null : JSON.stringify(rawRecord),
+      schemaVersion: schemaVersionForRecord(rawRecord, key),
+    });
+  });
+  return records;
+}
+
+export function getDiagnosticsStorageRecordTraceContext(
+  record: unknown,
+): DiagnosticsStorageTraceContext | null {
+  if (
+    !isDiagnosticsDebugBuild()
+    || record === null
+    || (typeof record !== 'object' && typeof record !== 'function')
+  ) return null;
+  const context = traceContextByRecord.get(record as object);
+  return context ? { ...context } : null;
+}
+
+export function attachDiagnosticsStorageRecordContext(
+  error: unknown,
+  record: unknown,
+): void {
+  if (
+    !isDiagnosticsDebugBuild()
+    || record === null
+    || (typeof record !== 'object' && typeof record !== 'function')
+    || error === null
+    || (typeof error !== 'object' && typeof error !== 'function')
+  ) return;
+  const context = traceContextByRecord.get(record as object);
+  if (context) traceContextByError.set(error as object, context);
+}
+
+export async function traceDiagnosticsStorageRead<T>(
+  key: DiagnosticsStorageKey,
+  read: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (isDiagnosticsDebugBuild()) {
+      const parsed = parsedRecordsByKey.get(key);
+      const context: DiagnosticsStorageTraceContext = {
+        key,
+        recordIndex: null,
+        rawJson: rawJsonByKey.get(key) ?? null,
+        rawRecordJson: null,
+        schemaVersion: schemaVersionForRecord(
+          Array.isArray(parsed) ? parsed[0] : parsed,
+          key,
+        ),
+      };
+      if ((typeof error === 'object' && error !== null) || typeof error === 'function') {
+        traceContextByError.set(error as object, context);
+      }
+    }
+    throw error;
+  }
 }
 
 function validateParsedValue(
@@ -446,6 +573,10 @@ async function writeProgress(
 }
 
 export async function auditDiagnosticsStorage(): Promise<DiagnosticsStorageAuditResult> {
+  if (isDiagnosticsDebugBuild()) {
+    rawJsonByKey.clear();
+    parsedRecordsByKey.clear();
+  }
   const auditId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const entries: DiagnosticsStorageAuditEntry[] = [];
 
@@ -457,6 +588,10 @@ export async function auditDiagnosticsStorage(): Promise<DiagnosticsStorageAudit
     try {
       const raw = await AsyncStorage.getItem(definition.key);
       if (raw === null) {
+        if (isDiagnosticsDebugBuild()) {
+          rawJsonByKey.delete(definition.key);
+          parsedRecordsByKey.delete(definition.key);
+        }
         entry = {
           key: definition.key,
           status: 'missing',
@@ -468,10 +603,14 @@ export async function auditDiagnosticsStorage(): Promise<DiagnosticsStorageAudit
           schemaVersions: schemaVersions({}, definition.key),
         };
       } else {
+        if (isDiagnosticsDebugBuild()) rawJsonByKey.set(definition.key, raw);
         try {
           const parsed: unknown = definition.shape === 'raw-boolean-flag'
             ? raw
             : JSON.parse(raw);
+          if (isDiagnosticsDebugBuild()) {
+            parsedRecordsByKey.set(definition.key, parsed);
+          }
           const validation = validateParsedValue(definition, parsed);
           entry = {
             key: definition.key,
@@ -596,4 +735,74 @@ export async function clearDiagnosticsStorageKey(
   }
   await AsyncStorage.multiRemove([key]);
   await recordCleanup([key]);
+}
+
+export type DiagnosticsCrashReport = {
+  at: string;
+  appVersion: string;
+  runtimeVersion: string;
+  otaUpdateId: string | null;
+  otaChannel: string | null;
+  diagnosticsSchema: string;
+  errorName: string;
+  errorMessage: string;
+  errorStack: string;
+  componentStack: string;
+  storageKey: DiagnosticsStorageKey | null;
+  recordIndex: number | null;
+  schemaVersion: string;
+  rawJson: string | null;
+  rawRecordJson: string | null;
+};
+
+export function captureDiagnosticsCrash(
+  error: unknown,
+  componentStack: string,
+  identity: {
+    appVersion: string;
+    runtimeVersion: string;
+    otaUpdateId: string | null;
+    otaChannel: string | null;
+  },
+): void {
+  if (!isDiagnosticsDebugBuild()) return;
+  const errorContext = (
+    (typeof error === 'object' && error !== null) || typeof error === 'function'
+  ) ? traceContextByError.get(error as object) ?? null : null;
+  const context = errorContext;
+  const report: DiagnosticsCrashReport = {
+    at: new Date().toISOString(),
+    appVersion: identity.appVersion,
+    runtimeVersion: identity.runtimeVersion,
+    otaUpdateId: identity.otaUpdateId,
+    otaChannel: identity.otaChannel,
+    diagnosticsSchema: DIAGNOSTICS_STORAGE_SCHEMA_VERSION,
+    errorName: error instanceof Error ? error.name : 'UnknownError',
+    errorMessage: error instanceof Error ? error.message : String(error),
+    errorStack: error instanceof Error ? (error.stack ?? '') : String(error),
+    componentStack,
+    storageKey: context?.key ?? null,
+    recordIndex: context?.recordIndex ?? null,
+    schemaVersion: context?.schemaVersion ?? DIAGNOSTICS_STORAGE_SCHEMA_VERSION,
+    rawJson: context?.rawJson ?? null,
+    rawRecordJson: context?.rawRecordJson ?? null,
+  };
+  const serialized = JSON.stringify(report);
+  console.error(`[diagnostics-crash-debug] ${serialized}`);
+  void AsyncStorage.getItem(DIAGNOSTICS_CRASH_DEBUG_KEY)
+    .then((raw) => {
+      let history: DiagnosticsCrashReport[] = [];
+      try {
+        const parsed = raw ? JSON.parse(raw) : [];
+        if (Array.isArray(parsed)) history = parsed;
+      } catch {
+        history = [];
+      }
+      history.push(report);
+      return AsyncStorage.setItem(
+        DIAGNOSTICS_CRASH_DEBUG_KEY,
+        JSON.stringify(history.slice(-5)),
+      );
+    })
+    .catch(() => {});
 }
