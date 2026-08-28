@@ -465,6 +465,7 @@ export default function MemberDetail() {
                     memberName={member.name}
                     locationName={member.location_name || undefined}
                     memberId={member.id}
+                    locationPipeline={(member as any).location_pipeline ?? null}
                     height={220}
                   />
                 </View>

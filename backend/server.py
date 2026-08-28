@@ -314,6 +314,9 @@ class FamilyMember(BaseModel):
     gps_accuracy: Optional[float] = None  # horizontal accuracy in metres (lower = better)
     gps_speed:    Optional[float] = None  # m/s as reported by the device
     gps_heading:  Optional[float] = None  # degrees 0-360 (0 = North)
+    # Diagnostic-only end-to-end trace for the latest accepted coordinate.
+    # Caregiver clients append fetch/store/render timestamps locally.
+    location_pipeline: Optional[Dict[str, Any]] = None
     # Build XX — Battery telemetry from the monitored device (expo-battery).
     # Reported in every location PUT so caregivers can see why uploads may
     # eventually stop.  None for rows written before this build.
@@ -2286,6 +2289,15 @@ async def delete_account(
 @api_router.get("/members", response_model=List[FamilyMember])
 async def list_members(current=Depends(get_current_user)):
     docs = await db.members.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).to_list(1000)
+    members_response_at = datetime.now(timezone.utc).isoformat()
+    for d in docs:
+        trace = d.get("location_pipeline")
+        if isinstance(trace, dict):
+            d["location_pipeline"] = {
+                **trace,
+                "mongo_write_at": _to_utc_iso(d.get("location_pipeline_mongo_write_at")),
+                "members_response_at": members_response_at,
+            }
     # CP5 — log what battery_level is in the GET /members response for each member.
     for d in docs:
         logger.info(
@@ -2521,6 +2533,13 @@ async def get_member(member_id: str, current=Depends(get_current_user)):
                 f"lazy_geocode single: member={member_id} "
                 f"lat={lat} lon={lon} raised {_lge!r}"
             )
+    trace = doc.get("location_pipeline")
+    if isinstance(trace, dict):
+        doc["location_pipeline"] = {
+            **trace,
+            "mongo_write_at": _to_utc_iso(doc.get("location_pipeline_mongo_write_at")),
+            "members_response_at": datetime.now(timezone.utc).isoformat(),
+        }
     return FamilyMember(**doc)
 
 
@@ -2843,6 +2862,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         prev_doc = await db.members.find_one(
             {"id": member_id, "family_group_id": current["family_group_id"]},
             {"_id": 0, "last_seen": 1, "captured_at": 1, "name": 1,
+             "latitude": 1, "longitude": 1,
              "low_battery_alerted": 1, "low_battery_warn_alerted": 1,
              "battery_level": 1, "battery_updated_at": 1, "is_charging": 1},
         )
@@ -3041,6 +3061,28 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         update.pop("longitude", None)
         update.pop("location_name", None)
 
+    # A single immutable trace joins this accepted moving fix to the
+    # caregiver's /members → store → map evidence.  The SDK payload does not
+    # expose an HTTP-send timestamp, so upload_at is explicitly stamped at the
+    # first server observation and its provenance is retained.
+    if incoming_captured_at is not None and not coord_suppressed:
+        update["location_pipeline"] = {
+            "trace_id": str(uuid.uuid4()),
+            "native_gps_at": _to_utc_iso(incoming_captured_at),
+            "native_latitude": data.latitude,
+            "native_longitude": data.longitude,
+            "upload_at": _to_utc_iso(server_now),
+            "upload_timestamp_source": "backend_first_observed",
+            "backend_received_at": _to_utc_iso(server_now),
+            "mongo_write_at": None,
+            "stored_latitude": data.latitude,
+            "stored_longitude": data.longitude,
+            "speed_mps": raw_speed,
+            "accuracy_m": raw_accuracy,
+            "provider": str(raw_provider) if raw_provider is not None else None,
+            "is_moving": bool(raw_is_moving) if raw_is_moving is not None else None,
+        }
+
     # Atomic conditional write
     if incoming_captured_at is not None:
         # Only write lat/lon if the incoming GPS capture is strictly
@@ -3061,7 +3103,12 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         # No GPS timestamp — unconditional write (pre-Build-60 path)
         filter_doc = {"id": member_id, "family_group_id": current["family_group_id"]}
 
-    r = await db.members.update_one(filter_doc, {"$set": update})
+    mongo_update: Dict[str, Any] = {"$set": update}
+    if "location_pipeline" in update:
+        # MongoDB supplies this timestamp atomically in the same write as the
+        # coordinates and trace, so concurrent uploads cannot split the chain.
+        mongo_update["$currentDate"] = {"location_pipeline_mongo_write_at": True}
+    r = await db.members.update_one(filter_doc, mongo_update)
 
     write_accepted: bool
     rejection_reason: Optional[str]
@@ -3089,6 +3136,11 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         write_accepted   = True
         rejection_reason = "replay_suppressed" if coord_suppressed else None
         doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+    if doc and isinstance(doc.get("location_pipeline"), dict):
+        doc["location_pipeline"] = {
+            **doc["location_pipeline"],
+            "mongo_write_at": _to_utc_iso(doc.get("location_pipeline_mongo_write_at")),
+        }
     # CP4 — log what MongoDB actually contains immediately after the write.
     logger.info(
         f"batt_pipeline CP4_mongo: member_id={member_id} "

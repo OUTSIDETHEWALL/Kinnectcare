@@ -66,6 +66,7 @@
 import { useSyncExternalStore } from 'react';
 import { api, Member } from '../api';
 import { logPipelineEvent } from '../refreshPipelineLog';
+import { observeStoreCommit } from '../pipelineSnapshot';
 
 // ============================================================
 //  Module-level state
@@ -260,6 +261,7 @@ export function upsertOne(incoming: MemberRecord, seq: number | null = null): vo
   const committedLocationName = (record as any).location_name ?? null;
   const next = { ...state.members, [id]: record };
   commit(next, [id]);
+  observeStoreCommit(incoming, record, prev);
   notifyLegacy(record);
   // Log after commit so the entry reflects committed state.
   try {
@@ -287,6 +289,7 @@ export function upsertOne(incoming: MemberRecord, seq: number | null = null): vo
  */
 export function upsertMany(incoming: MemberRecord[]): void {
   if (!incoming || incoming.length === 0) return;
+  const previousMembers = state.members;
   // Pipeline instrumentation: compute aggregate stats BEFORE mutating state.
   let batchAdvanced = 0, batchUnchanged = 0, batchRegressed = 0, batchFirstWrite = 0;
   const next: Record<string, MemberRecord> = { ...state.members };
@@ -311,6 +314,10 @@ export function upsertMany(incoming: MemberRecord[]): void {
     touched.push(m.id);
   }
   commit(next, touched);
+  for (const m of incoming) {
+    if (!m?.id || !next[m.id]) continue;
+    observeStoreCommit(m, next[m.id], previousMembers[m.id]);
+  }
   for (const m of incoming) notifyLegacy(m);
   try {
     logPipelineEvent({
