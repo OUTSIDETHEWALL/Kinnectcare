@@ -68,6 +68,74 @@ export type StaleLocationPipelineSnapshot = {
   };
 };
 
+const FAILURE_STAGES = new Set<PipelineFailureStage>(['device', 'backend', 'api', 'store', 'ui']);
+
+function isCoordinate(value: unknown): value is Coordinate {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<Coordinate>;
+  return typeof candidate.latitude === 'number'
+    && Number.isFinite(candidate.latitude)
+    && typeof candidate.longitude === 'number'
+    && Number.isFinite(candidate.longitude);
+}
+
+function isNullableCoordinate(value: unknown): value is Coordinate | null {
+  return value === null || isCoordinate(value);
+}
+
+function isNullableFiniteNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === 'number' && Number.isFinite(value));
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string';
+}
+
+function isPipelineSnapshot(value: unknown): value is StaleLocationPipelineSnapshot {
+  if (!value || typeof value !== 'object') return false;
+  const snapshot = value as Partial<StaleLocationPipelineSnapshot>;
+  return snapshot.kind === 'STALE_LOCATION_PIPELINE_SNAPSHOT'
+    && typeof snapshot.trace_id === 'string'
+    && snapshot.trace_id.length > 0
+    && typeof snapshot.member_id === 'string'
+    && typeof snapshot.created_at === 'string'
+    && (snapshot.trigger === 'speed_over_5_mph' || snapshot.trigger === 'significant_location_change')
+    && typeof snapshot.failure_stage === 'string'
+    && FAILURE_STAGES.has(snapshot.failure_stage as PipelineFailureStage)
+    && isNullableString(snapshot.native_gps_timestamp)
+    && isNullableCoordinate(snapshot.native_gps_coordinates)
+    && typeof snapshot.upload_timestamp === 'string'
+    && typeof snapshot.upload_timestamp_source === 'string'
+    && typeof snapshot.backend_receive_timestamp === 'string'
+    && typeof snapshot.mongo_write_timestamp === 'string'
+    && isNullableString(snapshot.members_response_timestamp)
+    && isNullableString(snapshot.dashboard_response_timestamp)
+    && typeof snapshot.dashboard_store_timestamp === 'string'
+    && isNullableString(snapshot.map_props_timestamp)
+    && isNullableCoordinate(snapshot.map_props_coordinates)
+    && typeof snapshot.map_render_timestamp === 'string'
+    && isCoordinate(snapshot.map_render_coordinates)
+    && isNullableCoordinate(snapshot.backend_stored_coordinates)
+    && isNullableCoordinate(snapshot.api_response_coordinates)
+    && isNullableCoordinate(snapshot.dashboard_store_coordinates)
+    && isNullableCoordinate(snapshot.previous_dashboard_coordinates)
+    && isNullableFiniteNumber(snapshot.speed_mps)
+    && isNullableFiniteNumber(snapshot.speed_mph)
+    && isNullableFiniteNumber(snapshot.accuracy_m)
+    && isNullableString(snapshot.provider)
+    && (snapshot.is_moving === null || typeof snapshot.is_moving === 'boolean')
+    && !!snapshot.distances_m
+    && typeof snapshot.distances_m === 'object';
+}
+
+/**
+ * AsyncStorage JSON is untrusted at runtime. Keep malformed or partially
+ * written records out of Diagnostics so one bad entry cannot blank the screen.
+ */
+export function normalizePipelineSnapshots(value: unknown): StaleLocationPipelineSnapshot[] {
+  return Array.isArray(value) ? value.filter(isPipelineSnapshot) : [];
+}
+
 type Candidate = Omit<
   StaleLocationPipelineSnapshot,
   | 'kind'
@@ -123,7 +191,7 @@ async function ensureLoaded(): Promise<void> {
   loaded = true;
   try {
     const raw = await AsyncStorage.getItem(SNAPSHOT_KEY);
-    snapshots = raw ? JSON.parse(raw) : [];
+    snapshots = normalizePipelineSnapshots(raw ? JSON.parse(raw) : []);
     for (const item of snapshots) emittedTraceIds.add(item.trace_id);
   } catch {
     snapshots = [];
