@@ -91,7 +91,7 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === 'string';
 }
 
-function isPipelineSnapshot(value: unknown): value is StaleLocationPipelineSnapshot {
+export function isPipelineSnapshot(value: unknown): value is StaleLocationPipelineSnapshot {
   if (!value || typeof value !== 'object') return false;
   const snapshot = value as Partial<StaleLocationPipelineSnapshot>;
   return snapshot.kind === 'STALE_LOCATION_PIPELINE_SNAPSHOT'

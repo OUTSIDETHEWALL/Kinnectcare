@@ -28,6 +28,7 @@ import { useRouter, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
+import * as Clipboard from 'expo-clipboard';
 import { Icon } from '../../src/Icon';
 import { Colors } from '../../src/theme';
 import { useAuth } from '../../src/AuthContext';
@@ -52,6 +53,16 @@ import { getEngineLog, getLastHttpSuccessTs } from '../../src/locationEngine';
 import { computeHealthItems, worstHealthStatus, HealthItem } from '../../src/healthCheck';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { formatTimezone, formatPhone } from '../../src/timeFormat';
+import {
+  auditDiagnosticsStorage,
+  clearDiagnosticsStorageKey,
+  DIAGNOSTICS_STORAGE_KEYS,
+  DiagnosticsStorageAuditEntry,
+  DiagnosticsStorageKey,
+  DiagnosticsStorageAuditResult,
+  readDiagnosticsStorageEvidence,
+  readLatestDiagnosticsStorageAudit,
+} from '../../src/diagnosticsStorageAudit';
 
 // ------ Small pieces ---------------------------------------------------
 
@@ -87,6 +98,55 @@ function NavRow(props: {
       </View>
       {!disabled ? <Icon name="chevron-forward" size={20} color={Colors.textTertiary} /> : null}
     </TouchableOpacity>
+  );
+}
+
+function DiagnosticsStorageRow({
+  entry,
+  onDelete,
+  disabled,
+}: {
+  entry: DiagnosticsStorageAuditEntry;
+  onDelete: (key: DiagnosticsStorageKey) => void;
+  disabled: boolean;
+}) {
+  const isBad = entry.status === 'invalid' || entry.status === 'read_error';
+  const statusLabel = entry.status === 'missing'
+    ? 'missing'
+    : entry.status === 'valid'
+      ? 'valid'
+      : entry.status;
+  const versionLabel = entry.schemaVersions?.length > 0
+    ? entry.schemaVersions.join(', ')
+    : 'no explicit version marker';
+  const fieldsLabel = entry.fieldSets.length > 0
+    ? entry.fieldSets.join(' · ')
+    : '—';
+
+  return (
+    <View style={styles.storageRow}>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={styles.storageKey} selectable>{entry.key}</Text>
+        <Text style={[styles.storageStatus, isBad && styles.storageStatusBad]}>
+          {statusLabel} · {entry.recordCount === null ? 'object' : `${entry.recordCount} record${entry.recordCount === 1 ? '' : 's'}`} · {entry.rawBytes} bytes
+        </Text>
+        {entry.issue ? (
+          <Text style={styles.storageIssue} selectable>Record/schema: {entry.issue}</Text>
+        ) : null}
+        <Text style={styles.storageMeta} selectable>Version: {versionLabel}</Text>
+        <Text style={styles.storageMeta} selectable numberOfLines={2}>Fields: {fieldsLabel}</Text>
+      </View>
+      <TouchableOpacity
+        testID={`me-diagnostics-storage-delete-${entry.key}`}
+        style={[styles.storageDelete, disabled && styles.storageDeleteDisabled]}
+        onPress={() => onDelete(entry.key)}
+        disabled={disabled}
+        accessibilityRole="button"
+        accessibilityLabel={`Delete ${entry.key}`}
+      >
+        <Text style={styles.storageDeleteText}>Delete</Text>
+      </TouchableOpacity>
+    </View>
   );
 }
 
@@ -350,6 +410,8 @@ export default function MeScreen() {
   // each app launch so the gesture can't be triggered accidentally.
   const [devMode, setDevMode] = useState(false);
   const [devTapCount, setDevTapCount] = useState(0);
+  const [storageAudit, setStorageAudit] = useState<DiagnosticsStorageAuditResult | null>(null);
+  const [storageAuditBusy, setStorageAuditBusy] = useState(false);
 
   const onAppVersionTap = useCallback(() => {
     setDevTapCount((prev) => {
@@ -404,7 +466,110 @@ export default function MeScreen() {
     AsyncStorage.getItem('@kinnship/dev_mode_v1')
       .then((v) => { if (v === '1') setDevMode(true); })
       .catch(() => {});
+    readLatestDiagnosticsStorageAudit().then(setStorageAudit).catch(() => {});
   }, []);
+
+  const runDiagnosticsStorageAudit = useCallback(async (): Promise<DiagnosticsStorageAuditResult | null> => {
+    setStorageAuditBusy(true);
+    try {
+      const result = await auditDiagnosticsStorage();
+      setStorageAudit(result);
+      return result;
+    } catch {
+      Alert.alert('Storage audit failed', 'The app could not complete the Diagnostics storage audit.');
+      return null;
+    } finally {
+      setStorageAuditBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (devMode && !storageAudit && !storageAuditBusy) {
+      void runDiagnosticsStorageAudit();
+    }
+  }, [devMode, runDiagnosticsStorageAudit, storageAudit, storageAuditBusy]);
+
+  const onAuditDiagnosticsStorage = useCallback(async () => {
+    const result = await runDiagnosticsStorageAudit();
+    if (!result) return;
+    const invalid = result.entries.filter((entry) => entry.status === 'invalid' || entry.status === 'read_error');
+    Alert.alert(
+      invalid.length === 0 ? 'Diagnostics storage is structurally valid' : 'Invalid Diagnostics storage found',
+      invalid.length === 0
+        ? `Checked ${result.entries.length} exact keys. No malformed JSON or incompatible top-level schemas were found.`
+        : invalid.map((entry) => `${entry.key}\n${entry.issue || entry.status}`).join('\n\n'),
+    );
+  }, [runDiagnosticsStorageAudit]);
+
+  const onCopyDiagnosticsStorageAudit = useCallback(async () => {
+    if (!storageAudit) {
+      Alert.alert('No audit yet', 'Run the Diagnostics storage audit first.');
+      return;
+    }
+    const evidence = await readDiagnosticsStorageEvidence();
+    await Clipboard.setStringAsync(JSON.stringify(evidence, null, 2));
+    Alert.alert('Evidence copied', 'The report includes audit and cleanup history, but no stored payload contents.');
+  }, [storageAudit]);
+
+  const offerReloadAfterCleanup = useCallback((key: DiagnosticsStorageKey) => {
+    Alert.alert(
+      'Diagnostics storage removed',
+      `Removed only:\n${key}\n\nAccount, identity, location sharing, SOS, and upload-operation state were preserved. The before/after audit history remains available.`,
+      [
+        { text: 'Later', style: 'cancel' },
+        ...(Platform.OS === 'web'
+          ? []
+          : [{ text: 'Reload now', onPress: () => Updates.reloadAsync().catch(() => {}) }]),
+      ],
+    );
+  }, []);
+
+  const onDeleteDiagnosticsKey = useCallback((key: DiagnosticsStorageKey) => {
+    const entry = storageAudit?.entries.find((candidate) => candidate.key === key);
+    Alert.alert(
+      `Delete ${key}?`,
+      `This removes exactly one AsyncStorage key.\n\nStatus: ${entry?.status ?? 'not audited'}\n`
+        + `Record/schema: ${entry?.issue ?? 'no issue recorded'}\n\n`
+        + 'The audit and cleanup history will be preserved.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete this key',
+          style: 'destructive',
+          onPress: async () => {
+            setStorageAuditBusy(true);
+            try {
+              await clearDiagnosticsStorageKey(key);
+              const result = await auditDiagnosticsStorage();
+              setStorageAudit(result);
+              offerReloadAfterCleanup(key);
+            } catch {
+              Alert.alert('Delete failed', 'AsyncStorage could not remove that Diagnostics key.');
+            } finally {
+              setStorageAuditBusy(false);
+            }
+          },
+        },
+      ],
+    );
+  }, [offerReloadAfterCleanup, storageAudit]);
+
+  const onOpenDiagnostics = useCallback(async () => {
+    const result = await runDiagnosticsStorageAudit();
+    if (!result) return;
+    if (result.invalidKeys.length === 0) {
+      router.push('/diagnostics' as any);
+      return;
+    }
+    Alert.alert(
+      'Invalid Diagnostics storage found',
+      `Diagnostics was not opened yet. The audit identified:\n\n${result.invalidKeys.join('\n')}\n\nCopy the audit before removing anything.`,
+      [
+        { text: 'Stay here', style: 'cancel' },
+        { text: 'Open anyway', onPress: () => router.push('/diagnostics' as any) },
+      ],
+    );
+  }, [router, runDiagnosticsStorageAudit]);
 
   useEffect(() => subscribePushStatus(setPushStatus), []);
 
@@ -924,7 +1089,7 @@ export default function MeScreen() {
         {/* Health indicator — shown only when something needs attention.
             Always navigates to Diagnostics so non-developer users can
             share a health snapshot without the 7-tap unlock. */}
-        <HealthIndicator items={healthItems} onPress={() => router.push('/diagnostics' as any)} />
+        <HealthIndicator items={healthItems} onPress={onOpenDiagnostics} />
 
         {/* Profile — member fields visible to your family */}
         {myMemberId ? (
@@ -1179,10 +1344,54 @@ export default function MeScreen() {
               <NavRow
                 testID="me-diagnostics"
                 icon="🩺"
-                label="Diagnostics"
-                secondary="Technical details and app logs"
-                onPress={() => router.push('/diagnostics' as any)}
+                label={storageAuditBusy ? 'Checking Diagnostics storage…' : 'Diagnostics'}
+                secondary="Audits persisted data before opening"
+                onPress={onOpenDiagnostics}
+                disabled={storageAuditBusy}
               />
+              <NavRow
+                testID="me-diagnostics-storage-audit"
+                icon="🔎"
+                label="Audit Diagnostics storage"
+                secondary={
+                  storageAudit
+                    ? storageAudit.invalidKeys.length > 0
+                      ? `${storageAudit.invalidKeys.length} invalid key${storageAudit.invalidKeys.length === 1 ? '' : 's'} found`
+                      : `Last audit: ${storageAudit.entries.length} keys structurally valid`
+                    : 'Identify legacy or malformed records without opening Diagnostics'
+                }
+                onPress={onAuditDiagnosticsStorage}
+                disabled={storageAuditBusy}
+              />
+              <NavRow
+                testID="me-diagnostics-storage-copy"
+                icon="📋"
+                label="Copy storage audit"
+                secondary="Copies key names and schema metadata only"
+                onPress={onCopyDiagnosticsStorageAudit}
+                disabled={!storageAudit || storageAuditBusy}
+              />
+            </View>
+            <Text style={styles.storageInspectorNote}>
+              Each row is read outside Diagnostics. Delete one key at a time, reload, and retry
+              Diagnostics to isolate the culprit. There is intentionally no clear-all action.
+            </Text>
+            <View style={styles.storageInspectorCard}>
+              {storageAudit ? storageAudit.entries.map((entry) => (
+                <DiagnosticsStorageRow
+                  key={entry.key}
+                  entry={entry}
+                  onDelete={onDeleteDiagnosticsKey}
+                  disabled={storageAuditBusy || entry.status === 'missing'}
+                />
+              )) : (
+                <View style={styles.storageInspectorEmpty}>
+                  <ActivityIndicator color={Colors.primary} />
+                  <Text style={styles.storageMeta}>
+                    Reading all {DIAGNOSTICS_STORAGE_KEYS.length} Diagnostics keys…
+                  </Text>
+                </View>
+              )}
             </View>
           </>
         )}
@@ -1527,6 +1736,41 @@ const styles = StyleSheet.create({
   },
   devModeDot: { fontSize: 14 },
   devModeText: { fontSize: 12, color: Colors.textTertiary, fontWeight: '600' },
+  storageInspectorNote: {
+    marginTop: 10, paddingHorizontal: 4, fontSize: 12,
+    color: Colors.textSecondary, lineHeight: 18,
+  },
+  storageInspectorCard: {
+    marginTop: 8, backgroundColor: Colors.surface, borderRadius: 14,
+    borderWidth: 1, borderColor: Colors.border, overflow: 'hidden',
+  },
+  storageInspectorEmpty: {
+    minHeight: 72, padding: 16, alignItems: 'center',
+    justifyContent: 'center', gap: 8,
+  },
+  storageRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: 14, paddingVertical: 13,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: Colors.border,
+  },
+  storageKey: {
+    fontSize: 12, fontWeight: '800', color: Colors.textPrimary,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  storageStatus: { marginTop: 5, fontSize: 11.5, color: Colors.primary, fontWeight: '700' },
+  storageStatusBad: { color: Colors.error },
+  storageIssue: {
+    marginTop: 4, fontSize: 11.5, color: Colors.error, lineHeight: 16,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  storageMeta: { marginTop: 3, fontSize: 11, color: Colors.textTertiary, lineHeight: 15 },
+  storageDelete: {
+    alignSelf: 'center', paddingHorizontal: 11, paddingVertical: 8,
+    borderRadius: 9, borderWidth: 1, borderColor: Colors.error,
+    backgroundColor: Colors.surface,
+  },
+  storageDeleteDisabled: { opacity: 0.35 },
+  storageDeleteText: { fontSize: 12, fontWeight: '800', color: Colors.error },
   footer: { fontSize: 12, color: Colors.textTertiary, textAlign: 'center', marginTop: 22 },
   versionFooter: { fontSize: 11, color: Colors.textTertiary, textAlign: 'center', marginTop: 4, marginBottom: 8, opacity: 0.7 },
 

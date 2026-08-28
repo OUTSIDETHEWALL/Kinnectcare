@@ -21,26 +21,26 @@
  * production — both logs cap themselves and are rolling buffers.
  */
 import { useEffect, useState, useCallback, useRef, useMemo, ReactNode } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
+import {
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, ActivityIndicator, Platform,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
-import { Platform } from 'react-native';
 import { getNotificationLog, clearNotificationLog } from '../src/notificationLog';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
-import { readRouteLog, clearRouteLog, RouteDiagEntry } from '../src/routeDiagnostics';
-import { readLocationRefreshLog, clearLocationRefreshLog, LocationRefreshEntry } from '../src/locationRefresh';
-import { readBgTaskLog, clearBgTaskLog, BgTaskLogEntry } from '../src/backgroundLocation';
+import { readRouteLog, RouteDiagEntry } from '../src/routeDiagnostics';
+import { readLocationRefreshLog, LocationRefreshEntry } from '../src/locationRefresh';
+import { readBgTaskLog, BgTaskLogEntry } from '../src/backgroundLocation';
 import {
   readBatteryTaskLog,
-  clearBatteryTaskLog,
   BatteryTaskLogEntry,
 } from '../src/batteryTask';
-import { readScreenRenderLog, clearScreenRenderLog, ScreenRenderEntry } from '../src/screenRenderLog';
+import { readScreenRenderLog, ScreenRenderEntry } from '../src/screenRenderLog';
 import {
   getDashboardLoadLog,
   clearDashboardLoadLog,
@@ -109,6 +109,7 @@ import {
   httpOkCellColor,
 } from '../src/deviceComparisonUtils';
 import { computeUploadRatio } from '../src/uploadRatio';
+import { auditDiagnosticsStorage } from '../src/diagnosticsStorageAudit';
 
 const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
 const PUSH_REFRESH_KEY = 'kc_push_refresh_log';
@@ -143,10 +144,6 @@ async function readAuthClearLog(): Promise<AuthClearEntry[]> {
   }
 }
 
-async function clearAuthClearLog(): Promise<void> {
-  try { await AsyncStorage.removeItem(AUTH_CLEAR_KEY); } catch (_e) {}
-}
-
 async function readPushRefreshLog(): Promise<PushRefreshEntry[]> {
   try {
     const raw = await AsyncStorage.getItem(PUSH_REFRESH_KEY);
@@ -154,10 +151,6 @@ async function readPushRefreshLog(): Promise<PushRefreshEntry[]> {
   } catch (_e) {
     return [];
   }
-}
-
-async function clearPushRefreshLog(): Promise<void> {
-  try { await AsyncStorage.removeItem(PUSH_REFRESH_KEY); } catch (_e) {}
 }
 
 function fmt(ts: number): string {
@@ -560,6 +553,63 @@ function CollapsibleSection({
 
 export default function DiagnosticsScreen() {
   const router = useRouter();
+  const [gateState, setGateState] = useState<'checking' | 'ready' | 'blocked'>('checking');
+  const [blockedKeys, setBlockedKeys] = useState<string[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    auditDiagnosticsStorage()
+      .then((result) => {
+        if (!active) return;
+        setBlockedKeys(result.invalidKeys);
+        setGateState(result.invalidKeys.length > 0 ? 'blocked' : 'ready');
+      })
+      .catch(() => {
+        if (active) setGateState('blocked');
+      });
+    return () => { active = false; };
+  }, []);
+
+  if (gateState === 'ready') return <DiagnosticsContent />;
+
+  return (
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      <View style={{ flex: 1, justifyContent: 'center', padding: 24, gap: 16 }}>
+        {gateState === 'checking' ? (
+          <>
+            <ActivityIndicator size="large" color={Colors.primary} />
+            <Text style={{ color: Colors.textPrimary, fontSize: 18, fontWeight: '700', textAlign: 'center' }}>
+              Checking Diagnostics storage
+            </Text>
+            <Text style={{ color: Colors.textSecondary, textAlign: 'center', lineHeight: 20 }}>
+              Reading each Diagnostics-owned key before the screen mounts.
+            </Text>
+          </>
+        ) : (
+          <>
+            <Text style={{ color: Colors.error, fontSize: 20, fontWeight: '800', textAlign: 'center' }}>
+              Diagnostics storage needs review
+            </Text>
+            <Text selectable style={{ color: Colors.textSecondary, textAlign: 'center', lineHeight: 20 }}>
+              {blockedKeys.length > 0
+                ? `Invalid keys:\n${blockedKeys.join('\n')}`
+                : 'The storage audit could not complete. Open Me → Advanced to copy the audit evidence.'}
+            </Text>
+            <TouchableOpacity style={styles.primaryBtn} onPress={() => router.back()}>
+              <Text style={styles.primaryBtnText}>Back to Me</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.secondaryBtn} onPress={() => setGateState('ready')}>
+              <Text style={styles.secondaryBtnText}>Open anyway</Text>
+            </TouchableOpacity>
+          </>
+        )}
+      </View>
+    </SafeAreaView>
+  );
+}
+
+function DiagnosticsContent() {
+  const router = useRouter();
   const { user } = useAuth();
   const [routeLog, setRouteLog] = useState<RouteDiagEntry[]>([]);
   const [authLog, setAuthLog] = useState<AuthClearEntry[]>([]);
@@ -780,6 +830,12 @@ export default function DiagnosticsScreen() {
 
   const reload = useCallback(async () => {
     setLoading(true);
+    // Raw, sequential, per-key inspection runs before any legacy reader can
+    // swallow a parse error or normalize the value. The safe report remains
+    // available from Me even if this route later fails during render.
+    await auditDiagnosticsStorage().catch((error) => {
+      console.warn('[diagnostics-storage] pre-read audit failed', error);
+    });
     const [r, a, p, l, b, sr, eng, dl, cr, pl, ps, lsnap, llog, rs] = await Promise.all([
       readRouteLog(),
       readAuthClearLog(),
@@ -1151,38 +1207,6 @@ export default function DiagnosticsScreen() {
     refreshNotifLog();
   }, [refreshNotifLog]);
 
-  const onClear = () => {
-    Alert.alert(
-      'Clear ALL Diagnostics?',
-      'This removes EVERY developer ring buffer from this device — engine log, dashboard log, card render log, Leonidas log, auth log, route log, push log, notification log, and more. Cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Clear ALL',
-          style: 'destructive',
-          onPress: async () => {
-            await Promise.all([
-              clearAuthClearLog(),
-              clearRouteLog(),
-              clearPushRefreshLog(),
-              clearLocationRefreshLog(),
-              clearBgTaskLog(),
-              clearScreenRenderLog(),
-              clearEngineLog(),
-              clearDashboardLoadLog(),
-              clearCardRenderLog(),
-              leonidas.clearRecoveryLog(),
-              clearNotificationLog(),
-              clearBatteryTaskLog(),
-            ]);
-            await reload();
-            try { await refreshNotifLog(); } catch (_e) {}
-          },
-        },
-      ],
-    );
-  };
-
   // Build 46 — Leonidas-specific actions.
   const onCopyMotionTimeline = useCallback(async () => {
     try {
@@ -1519,25 +1543,6 @@ export default function DiagnosticsScreen() {
             )}
           </CollapsibleSection>
         )}
-
-        {/* =====================================================
-            Build 46 — Clear ALL Diagnostics.
-            One button at the top wipes every developer ring
-            buffer so testers don't have to scroll to each panel
-            to clear individually between test windows.
-            ===================================================== */}
-        <TouchableOpacity
-          testID="diagnostics-clear-all-top"
-          style={styles.clearAllBtn}
-          onPress={onClear}
-          activeOpacity={0.85}
-        >
-          <Text style={styles.clearAllBtnText}>🗑  Clear ALL Diagnostics</Text>
-        </TouchableOpacity>
-        <Text style={styles.clearAllHint}>
-          Clears engine, dashboard, card-render, Leonidas, auth, route, push,
-          notifications, and every other developer ring buffer in one tap.
-        </Text>
 
         {/* =====================================================
             Leonidas v1.1 — Background Restriction Warning.
@@ -3702,14 +3707,6 @@ export default function DiagnosticsScreen() {
           </View>
         </View>
 
-        <TouchableOpacity
-          testID="diagnostics-clear"
-          style={styles.dangerBtn}
-          onPress={onClear}
-          activeOpacity={0.85}
-        >
-          <Text style={styles.dangerBtnText}>Clear all diagnostic logs</Text>
-        </TouchableOpacity>
         <Text style={styles.footer}>
           Logs are stored only on this device and never auto-uploaded.
         </Text>
@@ -3784,16 +3781,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '800',
     color: '#065F46',
-  },
-  clearAllBtn: {
-    marginBottom: 6, paddingVertical: 14, borderRadius: 12,
-    backgroundColor: Colors.error,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  clearAllBtnText: { color: Colors.surface, fontSize: 15, fontWeight: '800' },
-  clearAllHint: {
-    fontSize: 11.5, color: Colors.textTertiary,
-    textAlign: 'center', marginBottom: 18, lineHeight: 16, paddingHorizontal: 6,
   },
   sectionTitle: {
     fontSize: 13, fontWeight: '800', color: Colors.textTertiary,
