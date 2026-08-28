@@ -19,8 +19,18 @@
  * on iOS, exactly the same as expo-background-task under the hood.
  */
 
-import BackgroundFetch from 'react-native-background-fetch';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
+
+type BackgroundFetchModule = typeof import('react-native-background-fetch').default;
+
+function getBackgroundFetch(): BackgroundFetchModule | null {
+  if (Platform.OS === 'web') return null;
+  // Lazy-load the native module so Expo web can render without evaluating
+  // react-native-background-fetch's Android-only native bridge.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require('react-native-background-fetch').default as BackgroundFetchModule;
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -103,6 +113,9 @@ export async function clearBatteryTaskLog(): Promise<void> {
  * foreground/background handler and the headless (app-terminated) handler.
  */
 async function executeBatteryRefresh(taskId: string): Promise<void> {
+  const backgroundFetch = getBackgroundFetch();
+  if (!backgroundFetch) return;
+
   await appendLog('background_battery_task_start', { taskId });
 
   try {
@@ -121,7 +134,7 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
         reason: 'invalid_battery_level',
         rawLevel,
       });
-      BackgroundFetch.finish(taskId);
+      backgroundFetch.finish(taskId);
       return;
     }
 
@@ -153,7 +166,7 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
         hasJwt: !!jwt,
         hasBaseUrl: !!baseUrl,
       });
-      BackgroundFetch.finish(taskId);
+      backgroundFetch.finish(taskId);
       return;
     }
 
@@ -190,7 +203,7 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
     await appendLog('background_battery_error', { error: err });
   }
 
-  BackgroundFetch.finish(taskId);
+  backgroundFetch.finish(taskId);
 }
 
 // ── Headless task registration (Android) ──────────────────────────────────────
@@ -201,7 +214,7 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
 // in locationEngine.ts.
 
 try {
-  BackgroundFetch.registerHeadlessTask(
+  getBackgroundFetch()?.registerHeadlessTask(
     async ({ taskId }: { taskId: string }) => {
       await executeBatteryRefresh(taskId);
     },
@@ -226,8 +239,11 @@ try {
 export async function configureBatteryTask(
   onStatusChange?: (status: number) => void,
 ): Promise<void> {
+  const backgroundFetch = getBackgroundFetch();
+  if (!backgroundFetch) return;
+
   try {
-    const status = await BackgroundFetch.configure(
+    const status = await backgroundFetch.configure(
       {
         minimumFetchInterval: BATTERY_TASK_INTERVAL_MINUTES,
         stopOnTerminate: false,   // Keep running after force-close (Android)
@@ -236,7 +252,7 @@ export async function configureBatteryTask(
         forceAlarmManager: false, // Use WorkManager (preferred over AlarmManager)
         requiresCharging: false,
         requiresDeviceIdle: false,
-        requiredNetworkType: BackgroundFetch.NETWORK_TYPE_ANY,
+        requiredNetworkType: backgroundFetch.NETWORK_TYPE_ANY,
       },
       // Foreground / background handler (app is alive or in background)
       async (taskId: string) => {
@@ -245,7 +261,7 @@ export async function configureBatteryTask(
       // Timeout handler — OS is revoking the CPU budget
       async (taskId: string) => {
         await appendLog('background_battery_timeout', { taskId });
-        BackgroundFetch.finish(taskId);
+        backgroundFetch.finish(taskId);
       },
     );
 
