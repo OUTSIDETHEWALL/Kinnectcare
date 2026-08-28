@@ -555,22 +555,9 @@ export default function MeScreen() {
     );
   }, [offerReloadAfterCleanup, storageAudit]);
 
-  const onOpenDiagnostics = useCallback(async () => {
-    const result = await runDiagnosticsStorageAudit();
-    if (!result) return;
-    if (result.invalidKeys.length === 0) {
-      router.push('/diagnostics' as any);
-      return;
-    }
-    Alert.alert(
-      'Invalid Diagnostics storage found',
-      `Diagnostics was not opened yet. The audit identified:\n\n${result.invalidKeys.join('\n')}\n\nCopy the audit before removing anything.`,
-      [
-        { text: 'Stay here', style: 'cancel' },
-        { text: 'Open anyway', onPress: () => router.push('/diagnostics' as any) },
-      ],
-    );
-  }, [router, runDiagnosticsStorageAudit]);
+  const onOpenDiagnostics = useCallback(() => {
+    router.push('/diagnostics' as any);
+  }, [router]);
 
   useEffect(() => subscribePushStatus(setPushStatus), []);
 
@@ -1355,8 +1342,8 @@ export default function MeScreen() {
               <NavRow
                 testID="me-diagnostics"
                 icon="🩺"
-                label={storageAuditBusy ? 'Checking Diagnostics storage…' : 'Diagnostics'}
-                secondary="Audits persisted data before opening"
+                label="Diagnostics"
+                secondary="Opens the isolated Diagnostics bootloader"
                 onPress={onOpenDiagnostics}
                 disabled={storageAuditBusy}
               />
