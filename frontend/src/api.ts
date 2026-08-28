@@ -88,7 +88,6 @@ export async function migrateTokenForBackgroundActions(): Promise<void> {
     keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
   });
 }
-
 export async function clearToken() {
   if (Platform.OS === 'web') await AsyncStorage.removeItem(TOKEN_KEY);
   else await SecureStore.deleteItemAsync(TOKEN_KEY);
@@ -250,6 +249,8 @@ export type Member = {
   // UTC ISO-8601 timestamp of the most recent successful battery reading.
   // Null for member docs written before battery sync was introduced.
   battery_updated_at?: string | null;
+  /** Diagnostic-only trace for the latest accepted map-coordinate write. */
+  location_pipeline?: import('./pipelineSnapshot').LocationPipelineTrace | null;
 };
 
 export type Alert = {

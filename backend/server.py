@@ -314,6 +314,9 @@ class FamilyMember(BaseModel):
     gps_accuracy: Optional[float] = None  # horizontal accuracy in metres (lower = better)
     gps_speed:    Optional[float] = None  # m/s as reported by the device
     gps_heading:  Optional[float] = None  # degrees 0-360 (0 = North)
+    # Diagnostic-only end-to-end trace for the latest accepted coordinate.
+    # Caregiver clients append fetch/store/render timestamps locally.
+    location_pipeline: Optional[Dict[str, Any]] = None
     # Build XX — Battery telemetry from the monitored device (expo-battery).
     # Reported in every location PUT so caregivers can see why uploads may
     # eventually stop.  None for rows written before this build.
@@ -492,92 +495,11 @@ class CheckinRequest(BaseModel):
     def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
         return _to_utc_iso(v) if v else None
 
-
 class WelfareCheckResponseCreate(BaseModel):
     request_id: str
     location_name: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
-
-
-async def deliver_welfare_response_notification(
-    request: dict,
-    checkin_id: str,
-    location_name: Optional[str] = None,
-) -> None:
-    """Atomically claim and deliver one confirmation to the requester."""
-    claimed_at = datetime.now(timezone.utc)
-    stale_before = claimed_at - timedelta(seconds=30)
-    claim = await db.checkin_requests.update_one(
-        {
-            "id": request["id"],
-            "family_group_id": request["family_group_id"],
-            "status": "responded",
-            "$or": [
-                {"response_notification_status": "pending"},
-                {
-                    "response_notification_status": "sending",
-                    "response_notification_claimed_at": {"$lt": stale_before},
-                },
-            ],
-        },
-        {
-            "$set": {
-                "response_notification_status": "sending",
-                "response_notification_claimed_at": claimed_at,
-            }
-        },
-    )
-    if claim.modified_count != 1:
-        return
-
-    member_name = request["member_name"]
-    loc_str = f" from {location_name}" if location_name else ""
-    try:
-        await push_to_user(
-            request["requester_id"],
-            f"✅ {member_name} is OK",
-            f"{member_name} confirmed they are okay{loc_str}.",
-            {
-                "type": "are_you_ok_response",
-                "member_id": request["member_id"],
-                "checkin_id": checkin_id,
-                "request_id": request["id"],
-            },
-        )
-    except Exception as error:
-        logger.warning(f"welfare response notify failed; delivery remains retryable: {error}")
-        await db.checkin_requests.update_one(
-            {
-                "id": request["id"],
-                "family_group_id": request["family_group_id"],
-                "response_notification_status": "sending",
-                "response_notification_claimed_at": claimed_at,
-            },
-            {
-                "$set": {"response_notification_status": "pending"},
-                "$unset": {"response_notification_claimed_at": ""},
-            },
-        )
-        return
-
-    await db.checkin_requests.update_one(
-        {
-            "id": request["id"],
-            "family_group_id": request["family_group_id"],
-            "response_notification_status": "sending",
-            "response_notification_claimed_at": claimed_at,
-        },
-        {
-            "$set": {
-                "response_notification_status": "sent",
-                "response_notification_sent_at": datetime.now(timezone.utc),
-            },
-            "$unset": {"response_notification_claimed_at": ""},
-        },
-    )
-
-
 class LocationUpdate(BaseModel):
     """
     Shape-agnostic location payload.
@@ -2379,6 +2301,15 @@ async def delete_account(
 @api_router.get("/members", response_model=List[FamilyMember])
 async def list_members(current=Depends(get_current_user)):
     docs = await db.members.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).to_list(1000)
+    members_response_at = datetime.now(timezone.utc).isoformat()
+    for d in docs:
+        trace = d.get("location_pipeline")
+        if isinstance(trace, dict):
+            d["location_pipeline"] = {
+                **trace,
+                "mongo_write_at": _to_utc_iso(d.get("location_pipeline_mongo_write_at")),
+                "members_response_at": members_response_at,
+            }
     # CP5 — log what battery_level is in the GET /members response for each member.
     for d in docs:
         logger.info(
@@ -2614,6 +2545,13 @@ async def get_member(member_id: str, current=Depends(get_current_user)):
                 f"lazy_geocode single: member={member_id} "
                 f"lat={lat} lon={lon} raised {_lge!r}"
             )
+    trace = doc.get("location_pipeline")
+    if isinstance(trace, dict):
+        doc["location_pipeline"] = {
+            **trace,
+            "mongo_write_at": _to_utc_iso(doc.get("location_pipeline_mongo_write_at")),
+            "members_response_at": datetime.now(timezone.utc).isoformat(),
+        }
     return FamilyMember(**doc)
 
 
@@ -2936,6 +2874,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         prev_doc = await db.members.find_one(
             {"id": member_id, "family_group_id": current["family_group_id"]},
             {"_id": 0, "last_seen": 1, "captured_at": 1, "name": 1,
+             "latitude": 1, "longitude": 1,
              "low_battery_alerted": 1, "low_battery_warn_alerted": 1,
              "battery_level": 1, "battery_updated_at": 1, "is_charging": 1},
         )
@@ -3134,6 +3073,28 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         update.pop("longitude", None)
         update.pop("location_name", None)
 
+    # A single immutable trace joins this accepted moving fix to the
+    # caregiver's /members → store → map evidence.  The SDK payload does not
+    # expose an HTTP-send timestamp, so upload_at is explicitly stamped at the
+    # first server observation and its provenance is retained.
+    if incoming_captured_at is not None and not coord_suppressed:
+        update["location_pipeline"] = {
+            "trace_id": str(uuid.uuid4()),
+            "native_gps_at": _to_utc_iso(incoming_captured_at),
+            "native_latitude": data.latitude,
+            "native_longitude": data.longitude,
+            "upload_at": _to_utc_iso(server_now),
+            "upload_timestamp_source": "backend_first_observed",
+            "backend_received_at": _to_utc_iso(server_now),
+            "mongo_write_at": None,
+            "stored_latitude": data.latitude,
+            "stored_longitude": data.longitude,
+            "speed_mps": raw_speed,
+            "accuracy_m": raw_accuracy,
+            "provider": str(raw_provider) if raw_provider is not None else None,
+            "is_moving": bool(raw_is_moving) if raw_is_moving is not None else None,
+        }
+
     # Atomic conditional write
     if incoming_captured_at is not None:
         # Only write lat/lon if the incoming GPS capture is strictly
@@ -3154,7 +3115,12 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         # No GPS timestamp — unconditional write (pre-Build-60 path)
         filter_doc = {"id": member_id, "family_group_id": current["family_group_id"]}
 
-    r = await db.members.update_one(filter_doc, {"$set": update})
+    mongo_update: Dict[str, Any] = {"$set": update}
+    if "location_pipeline" in update:
+        # MongoDB supplies this timestamp atomically in the same write as the
+        # coordinates and trace, so concurrent uploads cannot split the chain.
+        mongo_update["$currentDate"] = {"location_pipeline_mongo_write_at": True}
+    r = await db.members.update_one(filter_doc, mongo_update)
 
     write_accepted: bool
     rejection_reason: Optional[str]
@@ -3182,6 +3148,11 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         write_accepted   = True
         rejection_reason = "replay_suppressed" if coord_suppressed else None
         doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+    if doc and isinstance(doc.get("location_pipeline"), dict):
+        doc["location_pipeline"] = {
+            **doc["location_pipeline"],
+            "mongo_write_at": _to_utc_iso(doc.get("location_pipeline_mongo_write_at")),
+        }
     # CP4 — log what MongoDB actually contains immediately after the write.
     logger.info(
         f"batt_pipeline CP4_mongo: member_id={member_id} "
@@ -4165,7 +4136,6 @@ async def respond_to_checkin_request(
 
     return ci
 
-
 @api_router.post("/members/{member_id}/welfare-check-response", response_model=CheckIn)
 async def respond_to_member_welfare_check(
     member_id: str,
@@ -4193,8 +4163,6 @@ async def respond_to_member_welfare_check(
         ),
         current,
     )
-
-
 @api_router.get("/checkin-requests/member/{member_id}")
 async def list_checkin_requests_for_member(member_id: str, current=Depends(get_current_user)):
     """Build XX — returns the last 50 checkin requests for a member (for history timeline)."""
@@ -6717,3 +6685,80 @@ async def _heal_missing_self_member_rows():
         })
     except Exception as e:
         logger.warning(f"_heal_missing_self_member_rows skipped: {e}")
+
+async def deliver_welfare_response_notification(
+    request: dict,
+    checkin_id: str,
+    location_name: Optional[str] = None,
+) -> None:
+    """Atomically claim and deliver one confirmation to the requester."""
+    claimed_at = datetime.now(timezone.utc)
+    stale_before = claimed_at - timedelta(seconds=30)
+    claim = await db.checkin_requests.update_one(
+        {
+            "id": request["id"],
+            "family_group_id": request["family_group_id"],
+            "status": "responded",
+            "$or": [
+                {"response_notification_status": "pending"},
+                {
+                    "response_notification_status": "sending",
+                    "response_notification_claimed_at": {"$lt": stale_before},
+                },
+            ],
+        },
+        {
+            "$set": {
+                "response_notification_status": "sending",
+                "response_notification_claimed_at": claimed_at,
+            }
+        },
+    )
+    if claim.modified_count != 1:
+        return
+
+    member_name = request["member_name"]
+    loc_str = f" from {location_name}" if location_name else ""
+    try:
+        await push_to_user(
+            request["requester_id"],
+            f"✅ {member_name} is OK",
+            f"{member_name} confirmed they are okay{loc_str}.",
+            {
+                "type": "are_you_ok_response",
+                "member_id": request["member_id"],
+                "checkin_id": checkin_id,
+                "request_id": request["id"],
+            },
+        )
+    except Exception as error:
+        logger.warning(f"welfare response notify failed; delivery remains retryable: {error}")
+        await db.checkin_requests.update_one(
+            {
+                "id": request["id"],
+                "family_group_id": request["family_group_id"],
+                "response_notification_status": "sending",
+                "response_notification_claimed_at": claimed_at,
+            },
+            {
+                "$set": {"response_notification_status": "pending"},
+                "$unset": {"response_notification_claimed_at": ""},
+            },
+        )
+        return
+
+    await db.checkin_requests.update_one(
+        {
+            "id": request["id"],
+            "family_group_id": request["family_group_id"],
+            "response_notification_status": "sending",
+            "response_notification_claimed_at": claimed_at,
+        },
+        {
+            "$set": {
+                "response_notification_status": "sent",
+                "response_notification_sent_at": datetime.now(timezone.utc),
+            },
+            "$unset": {"response_notification_claimed_at": ""},
+        },
+    )

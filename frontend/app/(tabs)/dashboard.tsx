@@ -37,6 +37,7 @@ import { logPipelineEvent } from '../../src/refreshPipelineLog';
 import { useActiveEmergency } from '../../src/activeEmergency';
 import { getBatteryDisplay } from '../../src/batteryStatus';
 import { confirmPendingInviteCancellation } from '../../src/pendingInviteCancellation';
+import { stampMembersResponse } from '../../src/pipelineSnapshot';
 // TrackingStatusPill removed — Build XX family screen simplification.
 import Svg, { Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
@@ -335,7 +336,11 @@ export default function Dashboard() {
         // detail screen, Leonidas via getMyLastSeenMs, etc.) sees the
         // exact same record at the same moment.  Never partial:
         // upsertMany replaces each member's full object reference.
-        memberStore.upsertMany(Array.isArray(m.data) ? m.data : []);
+        const receivedMembers = stampMembersResponse(
+          Array.isArray(m.data) ? m.data : [],
+          Date.now(),
+        );
+        memberStore.upsertMany(receivedMembers);
         setSummary(s.data.members || []);
         // Only update activeAlerts when the fetch actually succeeded (ar !== null).
         // When /alerts fails, ar is null and we preserve the previous state
