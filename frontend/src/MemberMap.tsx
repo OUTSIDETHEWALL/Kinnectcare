@@ -29,11 +29,12 @@
  *   memberId              – passed through to the instrumentation log
  */
 import { Platform, View, Text, StyleSheet } from 'react-native';
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { WebView } from 'react-native-webview';
 import type { WebView as WebViewType } from 'react-native-webview';
 import { Colors } from './theme';
 import { logScreenRender } from './screenRenderLog';
+import { observeMapProps, observeMapRendered } from './pipelineSnapshot';
 
 const KEY = (process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || '').trim();
 const PIN_COLOR = '#1B5E35';
@@ -45,6 +46,7 @@ type Props = {
   locationName?: string;
   height?: number;
   memberId?: string | null;
+  locationPipeline?: import('./pipelineSnapshot').LocationPipelineTrace | null;
 };
 
 function escapeJs(s: string): string {
@@ -68,8 +70,11 @@ function escapeJs(s: string): string {
  *  • window.addEventListener('message', ...) — receives {type:'kinn-move',lat,lng}
  *    from the web-path parent frame.
  */
-function buildHtml(lat: number, lng: number, label: string): string {
+function buildHtml(lat: number, lng: number, label: string, traceId: string): string {
   const safeLabel = escapeJs(label);
+  const safeTraceId = escapeJs(traceId);
+  const scriptOpen = '<scr' + 'ipt>';
+  const scriptClose = '</scr' + 'ipt>';
   return `<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8"/>
@@ -85,10 +90,11 @@ function buildHtml(lat: number, lng: number, label: string): string {
 </head><body>
 <div id="map"></div>
 <div id="fallback">⚠️ Map failed to load. Check Google Maps API key.</div>
-<script>
+${scriptOpen}
 (function(){
   // ── shared map state ──────────────────────────────────────────────────────
   var gmap, ringMarker, pinMarker;
+  var renderedLat=${lat}, renderedLng=${lng}, renderedTraceId='${safeTraceId}';
 
   function showFallback(msg){
     var fb=document.getElementById('fallback');
@@ -99,12 +105,21 @@ function buildHtml(lat: number, lng: number, label: string): string {
 
   // v1.2.8 instrumentation: posts back to React Native confirming the
   // marker has been placed at the given coordinates.
-  function postRendered(lat,lng){
+  function postRendered(requestedTraceId, applied, messageType){
     try{
+      var payload=JSON.stringify({
+        type:messageType || 'kinn-map-rendered',
+        traceId:requestedTraceId,
+        renderedTraceId:renderedTraceId,
+        applied:applied,
+        lat:renderedLat,
+        lng:renderedLng
+      });
       if(window.ReactNativeWebView && window.ReactNativeWebView.postMessage){
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type:'kinn-map-rendered', lat:lat, lng:lng
-        }));
+        window.ReactNativeWebView.postMessage(payload);
+      }
+      if(window.parent && window.parent !== window && window.parent.postMessage){
+        window.parent.postMessage(payload, '*');
       }
     }catch(_e){}
   }
@@ -112,13 +127,21 @@ function buildHtml(lat: number, lng: number, label: string): string {
   // ── Build 65: live position update (no page reload) ───────────────────────
   // Called by injectJavaScript (native) or postMessage listener (web).
   // Safe to call before the map is ready — guard prevents errors.
-  window.__kinnUpdatePosition = function(lat, lng){
-    if(!gmap || !ringMarker || !pinMarker) return;
+  window.__kinnUpdatePosition = function(lat, lng, traceId){
+    if(!gmap || !ringMarker || !pinMarker){
+      // Diagnostic acknowledgement only: the requested generation was not
+      // applied, and these are the coordinates the map still contains.
+      postRendered(traceId, false);
+      return;
+    }
     var pos = { lat: lat, lng: lng };
     ringMarker.setPosition(pos);
     pinMarker.setPosition(pos);
     gmap.panTo(pos);
-    postRendered(lat, lng);
+    renderedLat=lat;
+    renderedLng=lng;
+    renderedTraceId=traceId;
+    postRendered(traceId, true);
   };
 
   // Web-iframe path: parent sends { type:'kinn-move', lat, lng }
@@ -126,7 +149,7 @@ function buildHtml(lat: number, lng: number, label: string): string {
     try{
       var d = (typeof evt.data === 'string') ? JSON.parse(evt.data) : evt.data;
       if(d && d.type === 'kinn-move' && typeof d.lat === 'number'){
-        window.__kinnUpdatePosition(d.lat, d.lng);
+        window.__kinnUpdatePosition(d.lat, d.lng, d.traceId || '');
       }
     }catch(_e){}
   });
@@ -172,7 +195,7 @@ function buildHtml(lat: number, lng: number, label: string): string {
           strokeWeight: 3,
         },
       });
-      postRendered(${lat}, ${lng});
+      postRendered('${safeTraceId}', true, 'kinn-map-ready');
     }catch(e){
       showFallback('Map error: '+(e&&e.message?e.message:e));
     }
@@ -180,7 +203,12 @@ function buildHtml(lat: number, lng: number, label: string): string {
 
   // Load Maps JS API
   var s = document.createElement('script');
-  s.src = 'https://maps.googleapis.com/maps/api/js?key=${KEY}&callback=__initKinnshipMap&loading=async&v=weekly';
+  var mapsUrl = new URL('https://maps.googleapis.com/maps/api/js');
+  mapsUrl.searchParams.set('key', '${KEY}');
+  mapsUrl.searchParams.set('callback', '__initKinnshipMap');
+  mapsUrl.searchParams.set('loading', 'async');
+  mapsUrl.searchParams.set('v', 'weekly');
+  s.src = mapsUrl.toString();
   s.async = true; s.defer = true;
   s.onerror = function(){ showFallback('Could not load Google Maps script.'); };
   document.head.appendChild(s);
@@ -188,13 +216,13 @@ function buildHtml(lat: number, lng: number, label: string): string {
     if(!window.google || !window.google.maps) showFallback('Google Maps did not load (network or key).');
   }, 8000);
 })();
-</script>
+${scriptClose}
 </body></html>`;
 }
 
 export default function MemberMap({
   latitude, longitude, memberName, locationName, height = 220,
-  memberId,
+  memberId, locationPipeline,
 }: Props) {
   const hasCoords = (
     typeof latitude === 'number' && typeof longitude === 'number'
@@ -210,15 +238,43 @@ export default function MemberMap({
   if (hasCoords && !htmlRef.current) {
     const label = memberName || locationName || 'Last known location';
     initialLabelRef.current = label;
-    htmlRef.current = buildHtml(latitude as number, longitude as number, label);
+    htmlRef.current = buildHtml(
+      latitude as number,
+      longitude as number,
+      label,
+      locationPipeline?.trace_id ?? '',
+    );
   }
 
   // WebView ref (native) and iframe ref (web) for injecting position updates.
   const webViewRef = useRef<WebViewType>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const latestTraceRef = useRef(locationPipeline?.trace_id ?? '');
+  latestTraceRef.current = locationPipeline?.trace_id ?? '';
 
   // Tracks whether the Maps API callback has fired (safe to inject).
   const mapReadyRef = useRef(false);
+
+  const handleMapRenderedMessage = useCallback((m: any) => {
+    if (m?.type !== 'kinn-map-rendered' && m?.type !== 'kinn-map-ready') return;
+    if (m.applied !== false && !mapReadyRef.current) mapReadyRef.current = true;
+    const dt = propTsRef.current ? Date.now() - propTsRef.current : undefined;
+    logScreenRender({
+      src: 'map-rendered',
+      memberId,
+      lat: typeof m.lat === 'number' ? m.lat : null,
+      lon: typeof m.lng === 'number' ? m.lng : null,
+      renderLatencyMs: dt,
+    });
+    observeMapRendered(
+      memberId,
+      typeof m.lat === 'number' ? m.lat : NaN,
+      typeof m.lng === 'number' ? m.lng : NaN,
+      m.type === 'kinn-map-ready'
+        ? latestTraceRef.current
+        : (typeof m.traceId === 'string' ? m.traceId : null),
+    );
+  }, [memberId]);
 
   // v1.2.8 instrumentation: timestamp when new coords arrive via props.
   const propTsRef = useRef<number>(0);
@@ -232,7 +288,23 @@ export default function MemberMap({
       lon: longitude as number,
       locationName: locationName ?? null,
     });
-  }, [hasCoords, latitude, longitude, memberId, locationName]);
+    observeMapProps(memberId, latitude as number, longitude as number);
+  }, [hasCoords, latitude, longitude, memberId, locationName, locationPipeline?.trace_id]);
+
+  // Browser iframe equivalent of WebView.onMessage. Restrict messages to this
+  // map iframe and require the correlated trace id before evaluating a mismatch.
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const onMessage = (evt: MessageEvent) => {
+      if (evt.source !== iframeRef.current?.contentWindow) return;
+      try {
+        const m = typeof evt.data === 'string' ? JSON.parse(evt.data) : evt.data;
+        handleMapRenderedMessage(m);
+      } catch (_e) {}
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [handleMapRenderedMessage]);
 
   // ── Build 65: push coordinate updates into the live page ─────────────────
   // Runs whenever lat/lng change AFTER the initial mount.
@@ -246,7 +318,12 @@ export default function MemberMap({
       const iframe = iframeRef.current;
       if (!iframe?.contentWindow) return;
       iframe.contentWindow.postMessage(
-        JSON.stringify({ type: 'kinn-move', lat, lng }),
+        JSON.stringify({
+          type: 'kinn-move',
+          lat,
+          lng,
+          traceId: locationPipeline?.trace_id ?? '',
+        }),
         '*',
       );
       return;
@@ -258,12 +335,16 @@ export default function MemberMap({
     // coordinates are already baked into the HTML so nothing is lost.
     const js = `
       if (typeof window.__kinnUpdatePosition === 'function') {
-        window.__kinnUpdatePosition(${lat}, ${lng});
+        window.__kinnUpdatePosition(
+          ${lat},
+          ${lng},
+          ${JSON.stringify(locationPipeline?.trace_id ?? '')}
+        );
       }
       true;
     `;
     webViewRef.current?.injectJavaScript(js);
-  }, [hasCoords, latitude, longitude]);
+  }, [hasCoords, latitude, longitude, locationPipeline?.trace_id]);
 
   // ── Early-out: no coordinates ─────────────────────────────────────────────
   if (!hasCoords) {
@@ -327,18 +408,7 @@ export default function MemberMap({
           // v1.2.8 instrumentation: WebView confirms the marker has been
           // placed/moved.  Compare against propTsRef to compute render latency.
           try {
-            const m = JSON.parse(evt.nativeEvent.data || '{}');
-            if (m?.type === 'kinn-map-rendered') {
-              if (!mapReadyRef.current) mapReadyRef.current = true;
-              const dt = propTsRef.current ? Date.now() - propTsRef.current : undefined;
-              logScreenRender({
-                src: 'map-rendered',
-                memberId,
-                lat: typeof m.lat === 'number' ? m.lat : null,
-                lon: typeof m.lng === 'number' ? m.lng : null,
-                renderLatencyMs: dt,
-              });
-            }
+            handleMapRenderedMessage(JSON.parse(evt.nativeEvent.data || '{}'));
           } catch (_e) {}
         }}
       />

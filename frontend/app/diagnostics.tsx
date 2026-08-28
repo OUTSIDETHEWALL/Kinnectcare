@@ -57,6 +57,11 @@ import {
   PipelineEntry,
 } from '../src/refreshPipelineLog';
 import {
+  readPipelineSnapshots,
+  clearPipelineSnapshots,
+  StaleLocationPipelineSnapshot,
+} from '../src/pipelineSnapshot';
+import {
   getEngineDiagnostics,
   clearEngineLog,
   EngineLogEvent,
@@ -567,6 +572,7 @@ export default function DiagnosticsScreen() {
   const [dashLoadLog, setDashLoadLog] = useState<DashboardLoadEntry[]>([]);
   const [cardLog, setCardLog] = useState<CardRenderEntry[]>([]);
   const [pipelineLog, setPipelineLog] = useState<PipelineEntry[]>([]);
+  const [pipelineSnapshots, setPipelineSnapshots] = useState<StaleLocationPipelineSnapshot[]>([]);
   const [serverState, setServerState] = useState<any>(null);
   const [serverStateLoading, setServerStateLoading] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -730,6 +736,7 @@ export default function DiagnosticsScreen() {
     leonidas: true,
     engine: true,
     pipeline: true,  // Build XX — Refresh Pipeline investigation, default open
+    'pipeline-snapshots': true, // Task #178 — correlated stale-location smoking gun
     'pipeline-ts': true, // Task #21 — Pipeline Timestamps, default open
     'device-comparison': true, // Task #30 — open by default so stale events are visible immediately
     'background-reliability': false, // Closed by default — tester opens when investigating
@@ -772,7 +779,7 @@ export default function DiagnosticsScreen() {
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [r, a, p, l, b, sr, eng, dl, cr, pl, lsnap, llog, rs] = await Promise.all([
+    const [r, a, p, l, b, sr, eng, dl, cr, pl, ps, lsnap, llog, rs] = await Promise.all([
       readRouteLog(),
       readAuthClearLog(),
       readPushRefreshLog(),
@@ -783,6 +790,7 @@ export default function DiagnosticsScreen() {
       getDashboardLoadLog(),
       getCardRenderLog(),
       getRefreshPipelineLog(),
+      readPipelineSnapshots(),
       Promise.resolve(leonidas.getSnapshot()),
       leonidas.getRecoveryLog(),
       getRestrictionStatus(),
@@ -799,6 +807,7 @@ export default function DiagnosticsScreen() {
     setDashLoadLog(dl);
     setCardLog(cr);
     setPipelineLog(pl);
+    setPipelineSnapshots(ps);
     setLeoSnapshot(lsnap);
     setLeoLog(llog);
     setRestrictionStatus(rs);
@@ -1049,6 +1058,7 @@ export default function DiagnosticsScreen() {
         log: engineLog,
       },
       dashboardLoadLog: dashLoadLog,
+      staleLocationPipelineSnapshots: pipelineSnapshots,
       serverState,
       counts: {
         authClear: authLog.length,
@@ -1059,9 +1069,10 @@ export default function DiagnosticsScreen() {
         screenRender: renderLog.length,
         engineLog: engineLog.length,
         dashboardLoad: dashLoadLog.length,
+        staleLocationPipelineSnapshots: pipelineSnapshots.length,
       },
     };
-  }, [authLog, routeLog, pushLog, locLog, bgLog, renderLog, engineLog, engineState, engineAvailable, dashLoadLog, serverState, user]);
+  }, [authLog, routeLog, pushLog, locLog, bgLog, renderLog, engineLog, engineState, engineAvailable, dashLoadLog, pipelineSnapshots, serverState, user]);
 
   const onCopy = async () => {
     try {
@@ -2363,6 +2374,74 @@ export default function DiagnosticsScreen() {
               </Text>
             </View>
           )}
+        </CollapsibleSection>
+
+        <CollapsibleSection
+          id="pipeline-snapshots"
+          title="Stale Location Smoking Gun"
+          count={pipelineSnapshots.length}
+          hint="One correlated snapshot per moving fix whose rendered map coordinate stayed behind."
+          defaultExpanded
+          expanded={!!expanded['pipeline-snapshots']}
+          onToggle={toggleSection}
+          testID="diagnostics-pipeline-snapshots"
+        >
+          {pipelineSnapshots.length === 0 ? (
+            <Text style={styles.muted}>
+              No stale moving-location mismatch has been detected.
+            </Text>
+          ) : pipelineSnapshots.map((snapshot) => (
+            <View key={snapshot.trace_id} style={styles.card}>
+              <Text style={[styles.entryLine, styles.divergent]}>
+                STALE LOCATION DETECTED · first stale stage: {snapshot.failure_stage.toUpperCase()}
+              </Text>
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryK}>Native GPS: </Text>
+                {snapshot.native_gps_timestamp ?? '—'} · {JSON.stringify(snapshot.native_gps_coordinates)}
+              </Text>
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryK}>Upload: </Text>{snapshot.upload_timestamp}
+              </Text>
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryK}>Backend receive: </Text>{snapshot.backend_receive_timestamp}
+              </Text>
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryK}>Mongo write: </Text>{snapshot.mongo_write_timestamp}
+              </Text>
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryK}>/members response: </Text>{snapshot.members_response_timestamp ?? '—'}
+              </Text>
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryK}>Dashboard store: </Text>{snapshot.dashboard_store_timestamp}
+              </Text>
+              <Text style={styles.entryLine}>
+                <Text style={styles.entryK}>Map rendered: </Text>
+                {snapshot.map_render_timestamp} · {JSON.stringify(snapshot.map_render_coordinates)}
+              </Text>
+              <Text style={styles.entryLine}>
+                speed {snapshot.speed_mph == null ? '—' : `${snapshot.speed_mph.toFixed(1)} mph`}
+                {' · '}trigger {snapshot.trigger}
+              </Text>
+            </View>
+          ))}
+          {pipelineSnapshots.length > 0 ? (
+            <>
+              <TouchableOpacity
+                style={[styles.secondaryBtn, { marginTop: 8 }]}
+                onPress={() => Clipboard.setStringAsync(JSON.stringify(pipelineSnapshots, null, 2))}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.secondaryBtnText}>Copy smoking-gun snapshots</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.dangerBtn, { marginTop: 6 }]}
+                onPress={() => clearPipelineSnapshots().then(reload)}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.dangerBtnText}>Clear smoking-gun snapshots</Text>
+              </TouchableOpacity>
+            </>
+          ) : null}
         </CollapsibleSection>
 
         {/* =====================================================

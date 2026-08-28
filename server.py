@@ -11,7 +11,7 @@ import uuid
 import asyncio
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import jwt
@@ -250,6 +250,8 @@ class FamilyMember(BaseModel):
     location_name: Optional[str] = "Home"
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    # Diagnostic-only end-to-end trace for the latest coordinate write.
+    location_pipeline: Optional[Dict[str, Any]] = None
     avatar_url: Optional[str] = None
     daily_checkin_time: Optional[str] = None
     # Interval-based check-ins (mutually exclusive with daily_checkin_time).
@@ -1655,6 +1657,15 @@ async def delete_account(
 @api_router.get("/members", response_model=List[FamilyMember])
 async def list_members(current=Depends(get_current_user)):
     docs = await db.members.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).to_list(1000)
+    members_response_at = datetime.now(timezone.utc).isoformat()
+    for d in docs:
+        trace = d.get("location_pipeline")
+        if isinstance(trace, dict):
+            d["location_pipeline"] = {
+                **trace,
+                "mongo_write_at": _to_utc_iso(d.get("location_pipeline_mongo_write_at")),
+                "members_response_at": members_response_at,
+            }
     return [FamilyMember(**d) for d in docs]
 
 
@@ -1750,6 +1761,13 @@ async def get_member(member_id: str, current=Depends(get_current_user)):
     doc = await db.members.find_one({"id": member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Member not found")
+    trace = doc.get("location_pipeline")
+    if isinstance(trace, dict):
+        doc["location_pipeline"] = {
+            **trace,
+            "mongo_write_at": _to_utc_iso(doc.get("location_pipeline_mongo_write_at")),
+            "members_response_at": datetime.now(timezone.utc).isoformat(),
+        }
     return FamilyMember(**doc)
 
 
@@ -1834,13 +1852,46 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             status_code=403,
             detail="You can only update your own member location.",
         )
-    update = {"latitude": data.latitude, "longitude": data.longitude, "last_seen": datetime.now(timezone.utc)}
+    server_now = datetime.now(timezone.utc)
+    location_trace_id = str(uuid.uuid4())
+    update = {
+        "latitude": data.latitude,
+        "longitude": data.longitude,
+        "last_seen": server_now,
+        "location_pipeline": {
+            "trace_id": location_trace_id,
+            "native_gps_at": None,
+            "native_latitude": data.latitude,
+            "native_longitude": data.longitude,
+            "upload_at": _to_utc_iso(server_now),
+            "upload_timestamp_source": "backend_first_observed",
+            "backend_received_at": _to_utc_iso(server_now),
+            "mongo_write_at": None,
+            "stored_latitude": data.latitude,
+            "stored_longitude": data.longitude,
+            "speed_mps": None,
+            "accuracy_m": None,
+            "provider": None,
+            "is_moving": None,
+        },
+    }
     if data.location_name:
         update["location_name"] = data.location_name
-    r = await db.members.update_one({"id": member_id, "family_group_id": current["family_group_id"]}, {"$set": update})
+    r = await db.members.update_one(
+        {"id": member_id, "family_group_id": current["family_group_id"]},
+        {
+            "$set": update,
+            "$currentDate": {"location_pipeline_mongo_write_at": True},
+        },
+    )
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
     doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+    if doc and isinstance(doc.get("location_pipeline"), dict):
+        doc["location_pipeline"] = {
+            **doc["location_pipeline"],
+            "mongo_write_at": _to_utc_iso(doc.get("location_pipeline_mongo_write_at")),
+        }
     # v1.2.6 diagnostic: every successful location write logs the
     # write-vs-read shape so we can correlate Railway logs against
     # the per-device kc_bg_task_log / kc_location_refresh_log
