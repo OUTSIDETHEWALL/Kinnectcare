@@ -6,7 +6,10 @@ accounts and a new family group. Do not reuse existing family data.
 ## Automated and repository checks
 
 - [x] No legacy test-person text remains in shipped UI or developer diagnostics.
-- [x] No legacy test-person accounts, names, emails, IDs, or mock fixtures ship in source or tests.
+- [x] No legacy test-person identifiers remain in application source, tests, documentation, or
+      shipped sample assets outside the quarantined historical migration exports.
+- [ ] Remove or anonymize the quarantined historical migration exports. This repository-history
+      cleanup is tracked separately; the exports are not bundled into the app and do not block beta.
 - [x] Sample screenshot sets contain no legacy test-person text.
 - [x] TypeScript compiles.
 - [x] Lint completes with no errors.

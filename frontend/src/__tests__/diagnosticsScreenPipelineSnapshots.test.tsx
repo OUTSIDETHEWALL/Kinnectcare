@@ -166,6 +166,7 @@ jest.mock('../locationEngine', () => ({
 import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
 import DiagnosticsScreen from '../diagnosticsFull';
+import DiagnosticsRoute from '../../app/diagnostics';
 
 async function mountDiagnostics() {
   let renderer: any;
@@ -190,6 +191,26 @@ describe('Diagnostics stale-location snapshot boundary', () => {
   it('mounts with zero smoking-gun snapshots', async () => {
     mockReadPipelineSnapshots.mockResolvedValueOnce([]);
     const renderer = await mountDiagnostics();
+    expect(renderer.root.findByProps({ testID: 'diagnostics-pipeline-snapshots' })).toBeTruthy();
+    await act(async () => renderer.unmount());
+  });
+
+  it('loads Full Diagnostics from the user-facing route bootloader', async () => {
+    mockReadPipelineSnapshots.mockResolvedValueOnce([]);
+    let renderer: any;
+    await act(async () => {
+      renderer = TestRenderer.create(<DiagnosticsRoute />);
+    });
+
+    const fullDiagnosticsButton = renderer.root.findByProps({
+      accessibilityLabel: 'Full Diagnostics',
+    });
+    await act(async () => {
+      fullDiagnosticsButton.props.onPress();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
     expect(renderer.root.findByProps({ testID: 'diagnostics-pipeline-snapshots' })).toBeTruthy();
     await act(async () => renderer.unmount());
   });
