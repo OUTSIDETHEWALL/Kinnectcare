@@ -23,8 +23,3 @@ If the PAT is rejected, construct the remote commit from the local diff through 
 ## Branch protection constraint
 `main` is a protected branch — force-push is blocked even with the PAT. If the remote diverges (e.g., from a partial API push), do `git fetch origin && git merge origin/main --no-edit` first, then push normally.
 
-## CodeExecution sandbox limitations (reference)
-- `shellExec` with `maxOutputBytes` or `timeoutMs` params breaks silently (exit 1 for every call).
-- `readFile` inside CodeExecution cannot reach `/home/runner/workspace` — returns `notFound`.
-- `fs.readFile` via `import('node:fs/promises')` inside `"use impure"` also cannot reach the workspace, but **can** reach `/tmp`.
-- Workaround: Python script (via regular ShellExec tool) writes a JSON manifest to `/tmp/`, impure function reads from `/tmp/` and calls `proxyFetch` to GitHub.
