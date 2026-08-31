@@ -51,6 +51,7 @@ jest.mock('react-native', () => {
 
 jest.mock('expo-router', () => ({
   useFocusEffect: (cb: () => (() => void) | void) => {
+    mockFocusHarness.latestCb = cb;
     const { useEffect } = require('react');
     useEffect(() => {
       const cleanup = cb();
@@ -124,9 +125,14 @@ jest.mock('../api', () => ({
 
 const MOCK_USER_ID = 'user-42';
 const CACHE_KEY = `@kinnship/alerts_v1_${MOCK_USER_ID}`;
+const mockAuthUser: { id: string | null | undefined } = { id: MOCK_USER_ID };
+
+const mockFocusHarness = {
+  latestCb: null as null | (() => (() => void) | void),
+};
 
 jest.mock('../AuthContext', () => ({
-  useAuth: () => ({ user: { id: MOCK_USER_ID } }),
+  useAuth: () => ({ user: mockAuthUser }),
 }));
 
 // ── Imports (after all mocks) ─────────────────────────────────────────────────
@@ -210,6 +216,8 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.useRealTimers();
+  mockAuthUser.id = MOCK_USER_ID;
+  mockFocusHarness.latestCb = null;
 });
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -275,7 +283,64 @@ describe('Alerts screen — AsyncStorage cache', () => {
     expect(mockGetItem).toHaveBeenCalledWith(CACHE_KEY);
   });
 
-  // ── 3. Successful fetch writes to cache ─────────────────────────────────────
+  // ── 3. Anonymous sessions never hydrate another user's cache ────────────────
+  //
+  // A caregiver who has not completed account setup has no user ID.  The
+  // component must not read any cache in that state, because AsyncStorage may
+  // contain alerts belonging to a previous user on the same device.
+
+  it.each([null, undefined])('does not read AsyncStorage when user.id is %s', async (anonymousId) => {
+    mockAuthUser.id = anonymousId;
+    mockApiGet.mockResolvedValue({ data: [] });
+
+    await act(async () => {
+      create(<Alerts />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockGetItem).not.toHaveBeenCalled();
+  });
+
+  // ── 4. A changed user ID uses the new cache key ──────────────────────────────
+  //
+  // Switching accounts must not reuse the prior user's cache key.  Re-run the
+  // focus callback after a render with the new auth user to model returning to
+  // the Alerts tab after the account switch.
+
+  it('reads the new user cache key when user.id changes between renders', async () => {
+    mockApiGet.mockResolvedValue({ data: [] });
+
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<Alerts />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockGetItem).toHaveBeenCalledWith(CACHE_KEY);
+
+    const newUserId = 'user-99';
+    const newCacheKey = `@kinnship/alerts_v1_${newUserId}`;
+    mockGetItem.mockClear();
+    mockAuthUser.id = newUserId;
+
+    await act(async () => {
+      renderer.update(<Alerts />);
+      await Promise.resolve();
+      await Promise.resolve();
+      const focus = mockFocusHarness.latestCb;
+      expect(focus).not.toBeNull();
+      focus!();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockGetItem).toHaveBeenCalledWith(newCacheKey);
+    expect(mockGetItem).not.toHaveBeenCalledWith(CACHE_KEY);
+  });
+
+  // ── 5. Successful fetch writes to cache ─────────────────────────────────────
 
   it('persists the freshly-fetched list into AsyncStorage after a successful /alerts call', async () => {
     const freshAlerts = [makeAlert({ id: 'fresh-001' })];
@@ -293,7 +358,7 @@ describe('Alerts screen — AsyncStorage cache', () => {
     );
   });
 
-  // ── 4. Network-failure resilience ──────────────────────────────────────────
+  // ── 6. Network-failure resilience ──────────────────────────────────────────
   //
   // When /alerts rejects, the component must NOT clear the displayed list.
   // With a pre-populated cache the user must continue seeing their cached
@@ -322,7 +387,7 @@ describe('Alerts screen — AsyncStorage cache', () => {
     expect(mockSetItem).not.toHaveBeenCalled();
   });
 
-  // ── 5. Network failure shows offline banner, not a blank error card ─────────
+  // ── 7. Network failure shows offline banner, not a blank error card ─────────
   //
   // When cache exists and fetch fails, the compact offline banner must appear
   // (the list stays visible); the full-screen "Couldn't load alerts" error
@@ -350,7 +415,7 @@ describe('Alerts screen — AsyncStorage cache', () => {
     expect(text.toLowerCase()).toContain('cached');
   });
 
-  // ── 6. Clear-all invalidates the AsyncStorage cache ────────────────────────
+  // ── 8. Clear-all invalidates the AsyncStorage cache ────────────────────────
   //
   // After a successful DELETE /alerts, AsyncStorage.removeItem must be called
   // with the user-scoped cache key so a force-kill restart starts fresh.
@@ -398,7 +463,7 @@ describe('Alerts screen — AsyncStorage cache', () => {
     expect(mockRemoveItem).toHaveBeenCalledWith(CACHE_KEY);
   });
 
-  // ── 7. Clear-all does NOT remove cache when DELETE /alerts fails ────────────
+  // ── 9. Clear-all does NOT remove cache when DELETE /alerts fails ────────────
   //
   // If the server DELETE rejects, the local cache must be left intact so the
   // alerts remain visible on the next restart.
@@ -438,7 +503,7 @@ describe('Alerts screen — AsyncStorage cache', () => {
     expect(mockRemoveItem).not.toHaveBeenCalled();
   });
 
-  // ── 8. No-cache first launch shows spinner until network responds ───────────
+  // ── 10. No-cache first launch shows spinner until network responds ──────────
   //
   // When there is no cache and the network is still in flight, the full-screen
   // ActivityIndicator must be shown (loading = true).  Once the fetch

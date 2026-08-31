@@ -24,6 +24,8 @@
 
 // ── Native-module mocks (before imports) ─────────────────────────────────────
 
+let mockAppStateChangeHandler: ((nextState: string) => void) | null = null;
+
 jest.mock('react-native', () => {
   const React = require('react');
 
@@ -49,7 +51,16 @@ jest.mock('react-native', () => {
     Alert: { alert: jest.fn() },
     Linking: { openURL: jest.fn(() => Promise.resolve()) },
     AppState: {
-      addEventListener: jest.fn(() => ({ remove: jest.fn() })),
+      addEventListener: jest.fn((_event: string, handler: (nextState: string) => void) => {
+        mockAppStateChangeHandler = handler;
+        return {
+          remove: jest.fn(() => {
+            if (mockAppStateChangeHandler === handler) {
+              mockAppStateChangeHandler = null;
+            }
+          }),
+        };
+      }),
       currentState: 'active',
     },
   };
@@ -207,6 +218,7 @@ async function renderAlertDetail(
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockAppStateChangeHandler = null;
   jest.useFakeTimers();
 });
 
@@ -352,6 +364,30 @@ describe('AlertDetail — breadcrumb removal & Return to Dashboard button', () =
     expect(mockRouterReplace).toHaveBeenCalledTimes(1);
     expect(mockRouterReplace).toHaveBeenCalledWith('/(tabs)/dashboard');
     expect(RNAlert.alert).not.toHaveBeenCalled();
+  });
+
+  it('keeps the active-SOS return button tappable after backgrounding and resuming', async () => {
+    const renderer = await renderAlertDetail([makeSosAlert()]);
+    const buttonBeforeResume = findByTestID(renderer.root, 'alert-back');
+    expect(buttonBeforeResume).not.toBeNull();
+    expect(mockAppStateChangeHandler).not.toBeNull();
+
+    await act(async () => {
+      mockAppStateChangeHandler?.('background');
+      mockAppStateChangeHandler?.('active');
+      await Promise.resolve();
+    });
+
+    const buttonAfterResume = findByTestID(renderer.root, 'alert-back');
+    expect(buttonAfterResume).not.toBeNull();
+    expect(buttonAfterResume?.props.disabled).not.toBe(true);
+
+    await act(async () => {
+      buttonAfterResume?.props.onPress();
+    });
+
+    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
+    expect(mockRouterReplace).toHaveBeenCalledWith('/(tabs)/dashboard');
   });
 
   // ── 6. Button wrapper style is a full-width block (not an inline link) ──────

@@ -7,6 +7,7 @@
 (global as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mockReadPipelineSnapshots = jest.fn<Promise<unknown[]>, []>();
+const mockRouter = { back: jest.fn(), push: jest.fn() };
 
 jest.mock('react-native', () => {
   const React = require('react');
@@ -21,6 +22,7 @@ jest.mock('react-native', () => {
     Text: wrap('Text'),
     ScrollView: wrap('ScrollView'),
     TouchableOpacity: wrap('TouchableOpacity'),
+    ActivityIndicator: wrap('ActivityIndicator'),
     StyleSheet: { create: (styles: any) => styles },
     Alert: { alert: jest.fn() },
     Platform: { OS: 'ios', Version: 'test', select: (values: any) => values.ios ?? values.default },
@@ -36,7 +38,7 @@ jest.mock('react-native-safe-area-context', () => {
 });
 
 jest.mock('expo-router', () => ({
-  useRouter: () => ({ back: jest.fn(), push: jest.fn() }),
+  useRouter: () => mockRouter,
 }));
 jest.mock('expo-clipboard', () => ({ setStringAsync: jest.fn() }));
 jest.mock('expo-constants', () => ({
@@ -51,6 +53,14 @@ jest.mock('expo-updates', () => ({
   runtimeVersion: 'test',
 }));
 jest.mock('expo-battery', () => ({ getBatteryLevelAsync: async () => 0.5 }));
+jest.mock('@react-native-async-storage/async-storage', () => ({
+  __esModule: true,
+  default: {
+    getItem: jest.fn(async () => null),
+    setItem: jest.fn(async () => {}),
+    removeItem: jest.fn(async () => {}),
+  },
+}));
 
 jest.mock('../Icon', () => {
   const React = require('react');
@@ -116,13 +126,27 @@ jest.mock('../refreshPipelineLog', () => ({
   getRefreshPipelineLog: async () => [],
   clearRefreshPipelineLog: async () => {},
 }));
-jest.mock('../pipelineSnapshot', () => ({
-  readPipelineSnapshots: () => mockReadPipelineSnapshots(),
-  clearPipelineSnapshots: async () => {},
-  normalizePipelineSnapshots: (value: unknown) => {
-    const actual = jest.requireActual('../pipelineSnapshot');
-    return actual.normalizePipelineSnapshots(value);
-  },
+jest.mock('../pipelineSnapshot', () => {
+  const actual = jest.requireActual('../pipelineSnapshot');
+  return {
+    readPipelineSnapshots: () => mockReadPipelineSnapshots(),
+    clearPipelineSnapshots: async () => {},
+    normalizePipelineSnapshots: actual.normalizePipelineSnapshots,
+  };
+});
+jest.mock('../diagnosticsStorageAudit', () => ({
+  attachDiagnosticsStorageRecordContext: jest.fn(),
+  auditDiagnosticsStorage: async () => ({
+    version: 1,
+    auditId: 'test-audit',
+    createdAt: '2026-08-31T00:00:00.000Z',
+    entries: [],
+    invalidKeys: [],
+  }),
+  captureDiagnosticsCrash: jest.fn(),
+  getDiagnosticsStorageRecordTraceContext: () => null,
+  traceDiagnosticsRecords: (_key: string, records: unknown) => records,
+  traceDiagnosticsStorageRead: async (_key: string, reader: () => unknown) => reader(),
 }));
 jest.mock('../locationEngine', () => ({
   getEngineDiagnostics: async () => ({ log: [], state: null, available: false }),
@@ -141,7 +165,7 @@ jest.mock('../locationEngine', () => ({
 
 import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
-import DiagnosticsScreen from '../../app/diagnostics';
+import DiagnosticsScreen from '../diagnosticsFull';
 
 async function mountDiagnostics() {
   let renderer: any;
@@ -154,7 +178,12 @@ async function mountDiagnostics() {
 }
 
 describe('Diagnostics stale-location snapshot boundary', () => {
+  beforeEach(() => {
+    jest.spyOn(global, 'setInterval').mockImplementation(() => 0 as any);
+  });
+
   afterEach(() => {
+    jest.restoreAllMocks();
     jest.clearAllMocks();
   });
 

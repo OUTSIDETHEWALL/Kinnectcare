@@ -12,8 +12,8 @@ Top-level imports in React Native (Metro) are evaluated synchronously when the m
 
 This crash is particularly dangerous because Expo's automatic OTA rollback does not trigger: the failure happens at module-evaluation time, before the framework's crash-detection heuristic can observe a "fully booted, then crashed" lifecycle. The broken bundle is written to disk and loaded on every subsequent launch → crash loop that only reinstalling or a fix OTA can break.
 
-**Real incident:**
-`expo-battery` was added to `locationRefresh.ts` as an OTA-only update (runtime 1.2.0 binary did not include it). `reloadAsync()` loaded the new bundle → instant crash → blank dark screen on both test phones. Persistent after force-close. Required a hotfix OTA + reinstall for already-stuck devices.
+**Why this is enforced:**
+An OTA once imported a native package that was absent from the installed binary. Module evaluation failed before the app could render, producing a persistent launch crash that required a corrective OTA or reinstall.
 
 **How to apply:**
 - Before adding any new `expo-*` or third-party package with native code, check whether it is already in the native binary (i.e. was it in `package.json` at the time of the last `eas build`?).

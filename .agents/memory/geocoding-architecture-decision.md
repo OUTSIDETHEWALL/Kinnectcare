@@ -44,7 +44,7 @@ Remove in one PR:
 - `location_name` from client PUT request body
 - Platform fallback geocoder (`Location.reverseGeocodeAsync` path)
 
-**Why:** Charles explicitly approved removing the Expo key fallback and client geocoding in the same cleanup PR.
+**Why:** The product owner approved removing the Expo key fallback and client geocoding together so one canonical path replaces both.
 
 ## Google Maps API key restriction (outstanding)
 

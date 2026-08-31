@@ -296,6 +296,12 @@ const MOTION_EVENT_SET = new Set([
   'headless_task_invoked',
   'headless_heartbeat_ok',
   'headless_heartbeat_error',
+  'motion_recovery_start',
+  'getCurrentPosition_start',
+  'gps_fix_received',
+  'upload_queued',
+  'headless_motionchange_getCurrentPosition_ok',
+  'headless_motionchange_getCurrentPosition_error',
   'started_ok',
   'requestFreshLocation_ok',
   'requestFreshLocation_error',
@@ -342,7 +348,14 @@ function formatMotionEvent(entry: EngineLogEvent): MotionFmt {
         detail: d.eventName ? `event=${d.eventName}` : null,
       };
     case 'headless_heartbeat_ok':
-      return { badge: 'HB ✓', badgeColor: '#9CA3AF', label: 'Headless heartbeat — fix ok', detail: null };
+      return d.trigger && d.trigger !== 'heartbeat'
+        ? {
+            badge: 'WAKE ✓',
+            badgeColor: '#10B981',
+            label: 'Headless motion wake — GPS fix acquired',
+            detail: `trigger=${d.trigger}`,
+          }
+        : { badge: 'HB ✓', badgeColor: '#9CA3AF', label: 'Headless heartbeat — fix ok', detail: null };
     case 'headless_heartbeat_error':
       return {
         badge: 'HB ✗', badgeColor: '#EF4444',
@@ -355,6 +368,51 @@ function formatMotionEvent(entry: EngineLogEvent): MotionFmt {
       return {
         badge: 'FIX ✗', badgeColor: '#EF4444',
         label: 'JS heartbeat — GPS fix FAILED',
+        detail: String(d.error ?? ''),
+      };
+    case 'motion_recovery_start':
+      return {
+        badge: 'WAKE',
+        badgeColor: '#3B82F6',
+        label: `${d.source === 'headless' ? 'Headless' : 'JS'} motion recovery started`,
+        detail: [
+          d.trigger ? `trigger=${d.trigger}` : null,
+          d.activity ? `activity=${d.activity}` : null,
+        ].filter(Boolean).join(' · ') || null,
+      };
+    case 'getCurrentPosition_start':
+      return {
+        badge: 'GPS…',
+        badgeColor: '#3B82F6',
+        label: `${d.source === 'headless' ? 'Headless' : 'JS'} recovery — requesting GPS fix`,
+        detail: d.source ? `source=${d.source}` : null,
+      };
+    case 'gps_fix_received':
+      return {
+        badge: 'GPS ✓',
+        badgeColor: '#10B981',
+        label: `${d.source === 'headless' ? 'Headless' : 'JS'} recovery — GPS fix received`,
+        detail: d.accuracy != null ? `accuracy=${d.accuracy}m` : null,
+      };
+    case 'upload_queued':
+      return {
+        badge: 'UPLOAD',
+        badgeColor: '#10B981',
+        label: `${d.source === 'headless' ? 'Headless' : 'JS'} recovery — persisted upload queued`,
+        detail: d.source ? `source=${d.source}` : null,
+      };
+    case 'headless_motionchange_getCurrentPosition_ok':
+      return {
+        badge: 'CHAIN ✓',
+        badgeColor: '#10B981',
+        label: 'Headless motion-to-upload chain completed',
+        detail: null,
+      };
+    case 'headless_motionchange_getCurrentPosition_error':
+      return {
+        badge: 'CHAIN ✗',
+        badgeColor: '#EF4444',
+        label: 'Headless motion-to-upload chain FAILED',
         detail: String(d.error ?? ''),
       };
     case 'sdk_onLocation':
@@ -881,7 +939,9 @@ function DiagnosticsContent() {
   );
   const lastHeartbeatEvt = useMemo(
     () => [...motionEvents].reverse().find(
-      (e) => e.event === 'sdk_onHeartbeat' || e.event === 'headless_heartbeat_ok',
+      (e) =>
+        e.event === 'sdk_onHeartbeat' ||
+        (e.event === 'headless_heartbeat_ok' && !e.detail?.trigger),
     ) ?? null,
     [motionEvents],
   );

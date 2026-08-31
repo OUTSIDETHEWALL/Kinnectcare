@@ -44,6 +44,11 @@ export type OverallHealthResult = {
   uploadAgeMs: number | null;
 };
 
+// A small clock correction can briefly put the persisted upload timestamp
+// ahead of the Diagnostics ticker.  Treat that bounded skew as "just now",
+// while still rejecting timestamps that are implausibly far in the future.
+const CLOCK_SKEW_TOLERANCE_MS = 5_000;
+
 export function computeOverallHealth(
   log: EngineLogEvent[],
   now: number,
@@ -89,9 +94,14 @@ export function computeOverallHealth(
   // ── Tertiary signal: persistent AsyncStorage key kc_pts_http_ok ───────────
   // Immune to ring-buffer eviction.  Written by both the foreground onHttp
   // listener and the headless HTTP event handler (recordPipelineTs).
-  const httpSuccessAge = (lastHttpSuccessMs != null && lastHttpSuccessMs > 0 && lastHttpSuccessMs <= now)
-    ? now - lastHttpSuccessMs
-    : null;
+  const httpSuccessAge =
+    lastHttpSuccessMs != null && lastHttpSuccessMs > 0
+      ? lastHttpSuccessMs <= now
+        ? now - lastHttpSuccessMs
+        : lastHttpSuccessMs <= now + CLOCK_SKEW_TOLERANCE_MS
+          ? 0
+          : null
+      : null;
 
   // Combine all three evidence streams — pick the freshest (lowest age).
   const candidateAges = [logUploadAge, lastSeenAge, httpSuccessAge].filter(
