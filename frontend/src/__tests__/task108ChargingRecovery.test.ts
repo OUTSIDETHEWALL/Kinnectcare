@@ -1,9 +1,9 @@
 /**
  * Task 108 — charging recovery after a long offline period.
  *
- * Joyce can remain stationary long enough for Android to kill the main JS
+ * The test member can remain stationary long enough for Android to kill the main JS
  * runtime.  The caregiver-facing charging badge must still recover from the
- * next Transistor heartbeat, without requiring Joyce to open the app.
+ * next Transistor heartbeat, without requiring the test member to open the app.
  *
  * This test intentionally invokes only the registered native-context
  * headless task.  It does not call start(), attach foreground listeners, or
@@ -12,7 +12,7 @@
 
 import { getBatteryDisplay } from '../batteryStatus';
 
-const BATTERY_URL = 'https://api.example.com/api/members/joyce-001/battery';
+const BATTERY_URL = 'https://api.example.com/api/members/member-001/battery';
 const LOG_KEY = '@kinnship/location_engine_log_v1';
 
 async function flushPromises(): Promise<void> {
@@ -82,7 +82,7 @@ describe('Task 108 — headless charging recovery', () => {
           getCurrentPosition,
           getState: jest.fn().mockResolvedValue({
             enabled: true,
-            url: 'https://api.example.com/api/members/joyce-001/location',
+            url: 'https://api.example.com/api/members/member-001/location',
             authorization: { accessToken: 'headless-jwt' },
           }),
           start: jest.fn().mockResolvedValue(undefined),
@@ -107,7 +107,7 @@ describe('Task 108 — headless charging recovery', () => {
       tone: 'low',
     });
 
-    // Joyce plugs in after a long stationary/offline period.  The next
+    // The test member plugs in after a long stationary/offline period.  The next
     // heartbeat is one minute later, comfortably inside the two-minute SLO.
     const pluggedInAt = Date.now();
     jest.advanceTimersByTime(60_000);

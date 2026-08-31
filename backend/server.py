@@ -484,7 +484,7 @@ class CheckinRequest(BaseModel):
     family_group_id: str
     requester_id: str       # user_id of the caregiver who sent the request
     requester_name: str
-    member_id: str          # member record id of the target (Joyce)
+    member_id: str          # member record id of the target
     member_name: str
     target_user_id: Optional[str] = None   # user_id of target device (for push)
     status: str = "pending"    # "pending" | "responded" | "need_help"
@@ -967,7 +967,7 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
             # — the rest get DuplicateKeyError and are skipped.  Without
             # this guard, every poll of /api/alerts or /api/summary from
             # every device in the family group fired its own duplicate
-            # push (see "Joyce missed check-in" 15× duplicate report).
+            # push (see duplicate missed-check-in reports).
             label = f"every {interval} hours"
             slot_key = f"interval_{last_due_utc.replace(microsecond=0).isoformat()}"
             a = Alert(
@@ -1642,7 +1642,7 @@ async def verify_otp(data: OtpVerify):
             doc["family_group_id"] = target_group["id"]
             doc["family_group_role"] = "member"
             # === Member-record auto-linkage ===
-            # When a caregiver pre-created a member row (e.g. "Joyce, 78")
+            # When a caregiver pre-created a member row (e.g. "Test Member, 78")
             # and later invited that person by email, the freshly-signed-up
             # user account is still NOT linked to the member row — the
             # `members.user_id` field stays null, blocking self-targeted
@@ -1750,10 +1750,11 @@ async def verify_otp(data: OtpVerify):
         #      NOT create a self-member row for Charles.
         #   3. Charles's GET /members returns [] (there's literally no
         #      row for him).
-        #   4. Joyce accepts her invite and gets her OWN self-member
+        #   4. The invited member accepts the invite and gets their OWN self-member
         #      row via ensure_self_member_row (Build #59 hotfix).
-        #   5. Charles's dashboard shows only Joyce; Joyce's dashboard
-        #      shows only herself.  Charles is invisible on both.
+        #   5. The caregiver's dashboard shows only the invited member; the
+        #      member's dashboard shows only themselves.  The caregiver is
+        #      invisible on both.
         #
         # Root cause: ensure_self_member_row was ONLY called on the
         # invite-acceptance path (both Path A /join and Path B verify-
@@ -1782,10 +1783,10 @@ async def verify_otp(data: OtpVerify):
 
     # === EXISTING USER + INVITE CODE on signup path ===
     #
-    # Joyce reinstalls, enters her INV- code in join-family.tsx, which
+    # A member reinstalls, enters their INV- code in join-family.tsx, which
     # routes her through the signup screen (passing invite_code to
     # request-otp).  The OTP is stored with purpose=signup and the
-    # invite_code.  But if Joyce already has an account the
+    # invite_code.  But if the member already has an account the
     # `if purpose == "signup" and not user:` block above is skipped —
     # so the invite_code would be silently ignored and she would land in
     # her old solo group with no family visible.
@@ -1881,7 +1882,7 @@ async def verify_otp(data: OtpVerify):
     #
     # Fix: call ensure_self_member_row for every login where the user
     # already has a family_group_id.  If the row exists this is a no-op.
-    # If it was missing (Joyce's exact situation), it is created here so
+    # If it was missing, it is created here so
     # the dashboard reflects the correct membership on the very next poll.
     gid_for_heal = user.get("family_group_id")
     if gid_for_heal:
@@ -2121,15 +2122,15 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
             # Build #59 — CRITICAL FIX for the caregiver location-sharing
             # cross-contamination bug.  Root cause:
             #
-            #   When Caregiver A (Charles) adds Senior B (Joyce) via
-            #   POST /members, Joyce's member row is stamped with
-            #   `owner_id = charles_id` (see create_member).  The
+            #   When Caregiver A adds Senior B via
+            #   POST /members, the member row is stamped with
+            #   `owner_id = caregiver_id` (see create_member).  The
             #   previous `$or: [{user_id: A}, {owner_id: A}]` query
             #   would then match BOTH:
             #     • Charles's own personal row  (user_id == charles)
-            #     • Joyce's row                 (owner_id == charles)
+            #     • The other member's row       (owner_id == caregiver)
             #
-            #   → toggling Charles's location OFF also wiped Joyce's
+            #   → toggling the caregiver's location OFF also wiped the other member's
             #     location.  This was the P3 blocker reported for
             #     Build #59.
             #
@@ -2179,7 +2180,7 @@ async def register_push_token(data: PushTokenRegister, current=Depends(get_curre
     Expo ROTATES tokens whenever the app is reinstalled, the dev/prod
     signature changes, or certain Android FCM-registration events fire.
     Over time `$addToSet` accumulated DIFFERENT tokens (Charles had 28,
-    Joyce had 5) — each one a "ghost" install that FCM still happily
+    the other user had 5) — each one a "ghost" install that FCM still happily
     delivered to.  Result: a single push fanned out 28×, causing the
     notification floods.  Replacing the array with [token] on every
     registration is the v6.7+ fix.  Side effect: only ONE device per
@@ -3225,7 +3226,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 "provider":         raw_provider,
                 "event":            raw_event,
                 "coord_suppressed": coord_suppressed,
-                # TEMP DIAG — battery timeline. Remove after Joyce investigation.
+                # TEMP DIAG — battery timeline.
                 "battery_level":    data.battery_level,
                 "is_charging":      data.is_charging,
                 "raw_battery":      data.battery,
@@ -3537,7 +3538,7 @@ async def resolve_alert(alert_id: str, current=Depends(get_current_user)):
         # and can replay them when a device comes back online or a user
         # reinstalls — producing confusing stale "SOS resolved" banners
         # hours or days after the event (observed in the field: Charles
-        # received a duplicate during Joyce's onboarding 5 h after the
+        # received a duplicate during member onboarding 5 h after the
         # original SOS was cleared).
         "_ttl": 3600,
     }
@@ -3939,7 +3940,7 @@ async def respond_to_checkin_request(
     data: CheckInCreate,
     current=Depends(get_current_user),
 ):
-    """Build XX — Joyce taps 'I'm OK' and her device calls this endpoint.
+    """Build XX — a member taps 'I'm OK' and their device calls this endpoint.
 
     Accepts the GPS fix captured at response time, creates a self check-in,
     marks the request responded, and notifies the requester.
@@ -4586,7 +4587,7 @@ _REFRESH_PUSH_THROTTLE: dict = {}
 #
 # The user reported a "timestamp lie": Charles taps Refresh, spinner
 # runs ~30 s, server reports success, dashboard still shows "17 min
-# ago" — while Joyce's device reports "just now".  We need to be
+# ago" — while one device reports "just now".  We need to be
 # able to answer "for member X, what was the timing of:
 #   request_received -> push_sent -> gps_received -> ui_polled".
 # Without persistence we can only guess.
@@ -4996,7 +4997,7 @@ async def diagnostics_family_snapshot(current=Depends(get_current_user)):
 
     Returns all members in the caller's family group with location-
     freshness and device-snapshot fields so the Diagnostics screen
-    can show Charles's and Joyce's pipeline state side-by-side without
+    can show two family members' pipeline state side-by-side without
     either of them needing to touch the other's phone.
 
     Included per member:
@@ -5119,7 +5120,7 @@ async def put_device_snapshot(
     Called by locationEngine.ts → pushDeviceSnapshotToBackend() on every JS
     heartbeat (~60 s cadence), regardless of whether uploads are stale or
     fresh.  This means Charles's Device Comparison table shows current
-    pipeline ages for Joyce during normal healthy operation — not only after
+    pipeline ages for a member during normal healthy operation — not only after
     an upload gap is detected.  The stale-detection log entry
     (engine_snapshot_stale) is a separate concern gated at > 5 min in the
     client; the PUT itself is unconditional.
@@ -5767,7 +5768,7 @@ async def _ensure_alert_dedup_index():
     from every device in a family group (caregivers + senior + others)
     can ALL win the find-then-insert race against `detect_missed_checkins`
     and create N duplicate alerts, each of which fans out a push to every
-    family member.  Result: "Joyce missed check-in" appears 15+ times in
+    family member.  Result: a missed-check-in alert appears 15+ times in
     the same minute.
 
     The index is PARTIAL — only enforced on documents that carry a
@@ -5948,7 +5949,7 @@ async def _migrate_dedupe_push_tokens():
     Background: an earlier `$addToSet`-based registration path accumulated
     DIFFERENT-VALUED tokens whenever Expo rotated the token (which it does
     on app reinstall, dev/prod signature flip, or certain FCM events).
-    Real-world impact: Charles had 28 tokens, Joyce had 5 — every push
+    Real-world impact: one caregiver had 28 tokens, another user had 5 — every push
     fanned out to N ghosts, causing notification floods.
 
     This migration is conservative — it only DEDUPES exact duplicates
@@ -6511,8 +6512,8 @@ async def _sync_user_sharing_pref_to_members():
     (not owner_id) — matching on owner_id would incorrectly wipe
     location on rows this user created FOR OTHER PEOPLE (their
     parents, spouse, etc.).  That was the exact P3 blocker fixed in
-    Build #59: Charles turning sharing OFF was also wiping Joyce's
-    location because Joyce's row had owner_id=charles.
+    Build #59: one caregiver turning sharing OFF was also wiping another
+    member's location because that row had the caregiver as owner.
 
     When the preference is OFF we also null the coord fields so no
     stale location leaks.  Idempotent.
@@ -6557,7 +6558,7 @@ async def _heal_cross_user_sharing_leaks():
 
     Prior sweeps used ``$or: [{user_id: X}, {owner_id: X}]`` which
     over-matched: any member row that Caregiver X had created for
-    another person (e.g. Joyce's row created by Charles) got its
+    another person (e.g. a member row created by a caregiver) got its
     ``location_sharing_enabled`` incorrectly flipped to False and
     coords wiped.
 

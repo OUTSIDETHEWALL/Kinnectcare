@@ -1,7 +1,7 @@
 /**
  * Task 107 — stationary / force-killed battery visibility.
  *
- * The dashboard must keep showing the last known battery state while Joyce's
+ * The dashboard must keep showing the last known battery state while the test member's
  * phone is stationary or the main JS runtime has been killed.  The headless
  * Transistor heartbeat is the independent path that refreshes the backend and
  * records diagnostic evidence in that situation.
@@ -98,7 +98,7 @@ describe('Task 107 — headless heartbeat battery path', () => {
           }),
           getState: jest.fn().mockResolvedValue({
             enabled: true,
-            url: 'https://api.example.com/api/members/joyce-001/location',
+            url: 'https://api.example.com/api/members/member-001/location',
             authorization: { accessToken: 'headless-jwt' },
           }),
           start: jest.fn().mockResolvedValue(undefined),
@@ -114,7 +114,7 @@ describe('Task 107 — headless heartbeat battery path', () => {
     await headlessTask!({ name: 'heartbeat' });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.example.com/api/members/joyce-001/battery',
+      'https://api.example.com/api/members/member-001/battery',
       expect.objectContaining({
         method: 'PATCH',
         headers: expect.objectContaining({

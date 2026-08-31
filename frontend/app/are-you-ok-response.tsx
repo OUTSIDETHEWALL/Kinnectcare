@@ -1,7 +1,7 @@
 /**
  * Build XX — "Are You OK?" response screen.
  *
- * Joyce arrives here in two ways:
+ * A member arrives here in two ways:
  *   1. She taps the notification body → _layout routes type='are_you_ok_request' here.
  *      She sees both buttons and chooses.
  *   2. She taps an action button (IM_OK / NEED_HELP) → push.ts enqueues the deep-link

@@ -15,7 +15,7 @@
  * Both bounds are applied via `pruneBuffer()` so behaviour is
  * identical across all modules.
  *
- * Per Build 46 spec (Joyce, "Diagnostics & Developer Tooling"):
+ * Per Build 46 spec ("Diagnostics & Developer Tooling"):
  *   "The diagnostics should reflect recent history, not an entire
  *    day of activity."
  */

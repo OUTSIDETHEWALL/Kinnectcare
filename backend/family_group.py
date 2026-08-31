@@ -660,7 +660,7 @@ def build_router(
             {
               "valid": true,
               "family_name": "Smith Family",
-              "inviter_name": "Joyce",        # null for KINN- codes
+              "inviter_name": "Family Member", # null for KINN- codes
               "invitee_email": "char@x.com",  # null for KINN- codes
               "code_type": "per-invite" | "family-wide",
             }
@@ -792,7 +792,7 @@ def build_router(
         # receive a targeted "Invite accepted" push below.  Sending them the
         # generic "New family member joined" push AS WELL produces two
         # notifications describing the same event.  We confirmed this in
-        # production: Charles received both pushes on each of Joyce's five
+        # production: the caregiver received both pushes on each of the member's
         # successful joins (10 notifications for 5 events).
         #
         # Fix: resolve the inviter_id before the generic loop runs and
@@ -946,7 +946,7 @@ def build_router(
 
         # Duplicate guard 1 — invitee is already a member of this family.
         # Return a structured 409 so the client can show a friendly
-        # "Joyce is already part of your family" prompt rather than a
+        # "This person is already part of your family" prompt rather than a
         # generic error.
         existing_member = await db.users.find_one(
             {"family_group_id": gid, "email": email},

@@ -1,17 +1,17 @@
 """
 Regression test — Build 60: GPS capture timestamp guard.
 
-Tests four things Charles asked for:
+Tests four things requested for the regression:
   1. Buffered historical upload cannot overwrite a newer current location.
   2. Current live uploads continue to update immediately.
   3. Offline replay completes without location oscillation.
-  4. Diagnostics (captured_at in member doc) and last_seen (Leonidas) intact.
+   4. Diagnostics (captured_at in member doc) and last_seen remain intact.
 
 PART 1 — Unit tests: LocationUpdate.captured_at parsing.
 PART 2 — Guard logic simulation: proves the MongoDB filter accepts/rejects
           correctly.  No write access needed — the filter is pure comparison
           logic ($lt / $exists) verifiable in Python.
-PART 3 — Production read-only: verifies Charles's live doc shape is valid
+ PART 3 — Production read-only: verifies a test member doc shape is valid
           and that captured_at (if present) is correctly typed.
 """
 
@@ -261,47 +261,47 @@ async def run_readonly_checks() -> int:
     try:
         db = client["test_database"]
 
-        # Check Charles's member doc
-        charles = await db.members.find_one(
-            {"id": "2339f670-679d-42e5-a20b-1799684b3655"},
+        # Check the primary test member doc
+        primary_test_member = await db.members.find_one(
+            {"id": "test-primary-member-build60"},
             {"_id": 0, "last_seen": 1, "captured_at": 1, "latitude": 1, "longitude": 1},
         )
-        if charles:
-            ls = charles.get("last_seen")
-            ca = charles.get("captured_at")
-            check("Charles: last_seen is a datetime",
+        if primary_test_member:
+            ls = primary_test_member.get("last_seen")
+            ca = primary_test_member.get("captured_at")
+            check("Primary test member: last_seen is a datetime",
                   isinstance(ls, datetime), True)
             # Pre-Build-60: captured_at not yet in prod DB (first real upload populates it)
             # Post-first-upload: should be a datetime
             ca_valid = ca is None or isinstance(ca, datetime)
-            check("Charles: captured_at is None or datetime (not corrupt)", ca_valid, True)
+            check("Primary test member: captured_at is None or datetime (not corrupt)", ca_valid, True)
             print(f"        last_seen={ls!r}")
             print(f"        captured_at={ca!r}  ← None until first post-Build-60 upload")
-            print(f"        lat={charles.get('latitude')}, lon={charles.get('longitude')}")
+            print(f"        lat={primary_test_member.get('latitude')}, lon={primary_test_member.get('longitude')}")
         else:
-            print("  SKIP  Charles member doc not found (unexpected)")
+            print("  SKIP  Primary test member doc not found")
 
-        # Check Joyce's member doc — must be completely unaffected
-        joyce = await db.members.find_one(
-            {"family_group_id": "bd3e462a-86b3-4b1f-a011-b696aeff4497",
-             "id": {"$ne": "2339f670-679d-42e5-a20b-1799684b3655"}},
+        # Check the secondary test member doc — must be completely unaffected
+        test_member = await db.members.find_one(
+            {"family_group_id": "test-family-build60",
+             "id": {"$ne": "test-primary-member-build60"}},
             {"_id": 0, "name": 1, "last_seen": 1, "captured_at": 1},
         )
-        if joyce:
-            ls_j = joyce.get("last_seen")
-            ca_j = joyce.get("captured_at")
-            check("Joyce: last_seen is a datetime",
+        if test_member:
+            ls_j = test_member.get("last_seen")
+            ca_j = test_member.get("captured_at")
+            check("Test member: last_seen is a datetime",
                   isinstance(ls_j, datetime), True)
             ca_j_valid = ca_j is None or isinstance(ca_j, datetime)
-            check("Joyce: captured_at is None or datetime (not corrupt)", ca_j_valid, True)
-            print(f"        Joyce last_seen={ls_j!r}  captured_at={ca_j!r}")
+            check("Test member: captured_at is None or datetime (not corrupt)", ca_j_valid, True)
+            print(f"        Test member last_seen={ls_j!r}  captured_at={ca_j!r}")
         else:
-            print("  SKIP  Joyce member doc not found")
+            print("  SKIP  Test member doc not found")
 
         # Verify ingest log schema — check a recent entry has the new fields
         # (will be None for pre-Build-60 entries, present on new ones)
         recent_log = await db.location_ingest_log.find_one(
-            {"member_id": "2339f670-679d-42e5-a20b-1799684b3655"},
+            {"member_id": "test-primary-member-build60"},
             {"_id": 0, "write_accepted": 1, "incoming_captured_at": 1,
              "stored_captured_at": 1, "rejection_reason": 1, "at": 1},
             sort=[("at", -1)],

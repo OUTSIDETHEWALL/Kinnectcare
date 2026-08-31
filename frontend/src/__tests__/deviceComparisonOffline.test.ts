@@ -2,7 +2,7 @@
  * deviceComparisonOffline.test.ts  — Task #94
  *
  * Confirms that the Device Comparison table's http_ok row turns amber within
- * 5 minutes when Joyce's phone loses connectivity — not only when she recovers.
+ * 5 minutes when the test member's phone loses connectivity — not only when they recover.
  *
  * The key regression this test guards against:
  *   If `stored_at` (the server write time) were used instead of an advancing
@@ -28,7 +28,7 @@
  *      red (>15 min).
  *
  * Failure mode under test:
- *   Joyce stops uploading.  Her `device_snapshot` is still from the last
+ *   The test member stops uploading.  Their `device_snapshot` is still from the last
  *   heartbeat (pushed N minutes ago with small `http_ok_age_ms`).  As nowTick
  *   advances, `effectiveSnapshotAgeMs` must grow and eventually cross 5 min,
  *   turning the cell amber — without waiting for a new server fetch.
@@ -56,7 +56,7 @@ const EPOCH = 1_720_000_000_000;
 /**
  * Build a simulated device_snapshot as returned by the server.
  *
- * @param snapshotPushedMsAgo  How many ms ago Joyce's device pushed this snapshot.
+ * @param snapshotPushedMsAgo  How many ms ago the test member's device pushed this snapshot.
  * @param httpOkAgeAtPushMs    How old the last HTTP upload was AT push time.
  */
 function makeSnapshot(snapshotPushedMsAgo: number, httpOkAgeAtPushMs: number) {
@@ -70,11 +70,11 @@ function makeSnapshot(snapshotPushedMsAgo: number, httpOkAgeAtPushMs: number) {
 
 // ─── Suite 1: http_ok row turns amber as nowTick advances (core Task #94) ────
 
-describe('Device Comparison — http_ok row turns amber when Joyce goes offline', () => {
+describe('Device Comparison — http_ok row turns amber when a test member goes offline', () => {
 
   // ── 1a. Snapshot is fresh → http_ok row is green ───────────────────────────
   it('shows green when the snapshot was just pushed and http_ok was healthy at push', () => {
-    // Snapshot pushed 10 s ago; Joyce uploaded 5 s before that → http_ok_age_ms = 5 s.
+    // Snapshot pushed 10 s ago; the test member uploaded 5 s before that → http_ok_age_ms = 5 s.
     const ds = makeSnapshot(10_000, 5_000);
     const nowTick = EPOCH; // current wall clock
 
@@ -87,7 +87,7 @@ describe('Device Comparison — http_ok row turns amber when Joyce goes offline'
 
   // ── 1b. 4 minutes of silence → still green (not yet at threshold) ───────────
   it('stays green after 4 minutes of silence (below the 5-min warn threshold)', () => {
-    // Snapshot was pushed right when Joyce's last upload fired:
+    // Snapshot was pushed right when the test member's last upload fired:
     //   snapshotPushedMsAgo = 4 min, httpOkAgeAtPushMs = 30 s
     //   effective age = 4 min + 30 s = 4 min 30 s < 5 min → green
     const ds = makeSnapshot(4 * 60_000, 30_000);
@@ -161,7 +161,7 @@ describe('Device Comparison — http_ok row turns amber when Joyce goes offline'
 
   // ── 1f. Worst-case: snapshot age alone (no http_ok_age_ms) — row shows "—" ──
   it('shows no age (null) when device_snapshot is absent — table renders "—"', () => {
-    // When Joyce has never pushed a device_snapshot, both snapshotAt values are absent.
+    // When the test member has never pushed a device_snapshot, both snapshotAt values are absent.
     const result = effectiveSnapshotAgeMs(undefined, undefined, EPOCH, 30_000);
     expect(result).toBeNull();
   });

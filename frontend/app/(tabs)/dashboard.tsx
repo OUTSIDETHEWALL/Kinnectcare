@@ -407,7 +407,7 @@ export default function Dashboard() {
           if (!seenMs || (now - seenMs) >= STALE_THRESHOLD_MS) {
             requestMemberRefresh(mb.id, seenMs || null);
             // Record exactly which members triggered the silent-push
-            // cascade.  This is what links Joyce's per-minute "K"
+            // cascade.  This is what links the member's per-minute "K"
             // notifications back to Charles's pull-on-stale logic.
             if (dlogId) await dashRecordStaleness(dlogId, mb.id).catch(() => {});
           }
@@ -437,7 +437,7 @@ export default function Dashboard() {
     //  Until v1.2.1, the only triggers that refetched /members and
     //  /summary were (a) tab focus, (b) pull-to-refresh, and (c) the
     //  load() inside quickCheckIn.  Symptom: Charles could sit on
-    //  Dashboard for hours with Joyce's location going stale in
+    //  Dashboard for hours with a member's location going stale in
     //  React state while the backend was being updated normally —
     //  he'd only see fresh data after switching tabs or pull-down.
     //
@@ -451,12 +451,12 @@ export default function Dashboard() {
     //
     //   2. AppState 'active' — refetch the instant the user brings
     //      the app back to foreground (most common path for "I just
-    //      opened the app and Joyce's dot is wrong").
+    //      opened the app and a member's dot is wrong").
     //
     //   3. Notification arrival — refetch whenever ANY push lands
     //      while focused (member checked in, fall, missed check-in,
     //      battery_recovered, etc.).  This covers the foreground path
-    //      for battery recovery: when Joyce's phone is plugged in,
+    //      for battery recovery: when a member's phone is plugged in,
     //      check_low_battery() resolves the low_battery alert and sends
     //      a battery_recovered push; this listener fires load() so
     //      Needs Attention drops to 0 immediately without waiting for
@@ -493,7 +493,7 @@ export default function Dashboard() {
     // family map), subscribe to high-accuracy position updates and
     // upload directly on every >50 m / >15 s of movement.  This is
     // the "near-realtime tracking while in the app" mode — the
-    // background task can still throttle, but as long as Joyce has
+    // background task can still throttle, but as long as the member has
     // the app open while moving, her dot keeps pace with her.
     //
     // Auto-tears down on tab blur, so battery cost only applies
@@ -560,10 +560,10 @@ export default function Dashboard() {
         //
         //   1. Caregivers (who don't have a member record of their own)
         //      were overwriting the senior's coordinates.
-        //   2. With multiple seniors in one group (e.g. Charles + Joyce),
+        //   2. With multiple seniors in one group (e.g. two family members),
         //      whoever opened the app would overwrite the other's
-        //      location — symptom Charles reported: "Joyce's location
-        //      shows Charles's stale coords; Joyce has moved 10mi but
+        //      location — symptom reported: "the member's location
+        //      shows another member's stale coords; the member has moved
         //      her dot never updates."
         //
         // Correct match: members[].user_id === current user.id.  This

@@ -132,7 +132,7 @@ function RootNav() {
         void locationEngine.logEvent('app_foregrounded');
         // Task #21 — Before/After snapshot for root cause investigation.
         //
-        // If Joyce's location is stale and opening the app immediately
+        // If a member's location is stale and opening the app immediately
         // restores uploads, the diff between the snapshot fired by the
         // stale-detection heartbeat and THIS snapshot identifies the
         // exact restoring action — without needing to guess.
@@ -415,7 +415,7 @@ function RootNav() {
       }
     }
     if (t === 'are_you_ok_request') {
-      // Build XX — "Are You OK?" request arrives on Joyce's device.
+      // Build XX — "Are You OK?" request arrives on the member's device.
       // Route to the response screen; _action drives auto-submit vs. prompt.
       const rid = data?.request_id;
       const mid = data?.member_id;
@@ -435,7 +435,7 @@ function RootNav() {
       }
     }
     if (t === 'are_you_ok_response' || t === 'checkin') {
-      // Build XX — caregiver (Charles) receives confirmation that Joyce is OK.
+      // Build XX — caregiver receives confirmation that the member is OK.
       // Just refresh the dashboard data; no navigation needed.
       // The 30s foreground poll will pick this up on the next tick automatically,
       // but we can trigger an immediate refresh here for instant UI update.
@@ -470,7 +470,7 @@ function RootNav() {
   //  Auto push-token refresh on app foreground (v1.2.1)
   // ============================================================
   //
-  // Joyce reported SOS deliveries silently failing after extended
+  // A member reported SOS deliveries silently failing after extended
   // idle periods (multi-day on-charger). Root cause: Expo/FCM
   // occasionally rotates the device push token AND the JS process
   // can stay alive across days without any useEffect re-running —
@@ -656,12 +656,12 @@ function RootNav() {
   //  v1.2.2 — Cache "my member id" + foreground location refresh
   // ============================================================
   //
-  //  Joyce's location went stale on Charles's dashboard despite the
+  //  A member's location went stale on the caregiver's dashboard despite the
   //  backend holding fresh data.  Adding (a) a 60-second visible-tab
   //  poll, (b) an AppState 'active' refetch, and (c) a notification-
   //  arrival refetch on Dashboard handles the read side.  This
   //  effect handles the corresponding WRITE side — every foreground
-  //  transition (on Joyce's own phone) also uploads a fresh GPS fix
+  //  transition (on the member's own phone) also uploads a fresh GPS fix
   //  to /members/{id}/location, so even if the OS-owned background
   //  task has been throttled into silence by Android App Standby,
   //  the backend stays current.

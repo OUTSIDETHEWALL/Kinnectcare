@@ -67,7 +67,7 @@ It landed during the migration to the protected-branch workflow: a `gitPush` cal
 ## Known polish backlog (not yet assigned to tasks)
 
 These were identified during the July 9, 2026 design review and are awaiting task creation:
-- age=0 placeholder showing as "Joyce, 0" on family dashboard and member cards
+- age=0 placeholder showing on family dashboard and member cards
 - Redundant triple status indicators per member card (avatar dot + emoji dot + badge)
 - SOS button placement interrupts the member list — needs a fixed anchor position
 - Manual "Refresh" pill buttons — replace with pull-to-refresh
@@ -75,7 +75,7 @@ These were identified during the July 9, 2026 design review and are awaiting tas
 - "DANGER ZONE" label in Me screen — too developer-facing for a consumer app
 - "Role: Member" showing for the account owner on the Me screen
 - Detail page title says "Member" instead of the person's name
-- Alerts cleared card: "SOS Emergency — Joyce / Joyce" name repeated twice
+- Alerts cleared card repeats the member name twice
 - "All clear!" green checkmark icon is visually inconsistent with design system
 - "Check In" vs "Check in" capitalization inconsistency between list and detail
 

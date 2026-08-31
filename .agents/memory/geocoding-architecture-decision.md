@@ -33,7 +33,7 @@ db.location_ingest_log.find(
 ).sort({ at:-1 }).limit(50)
 ```
 
-`geocode_label_matched: false` = backend and client labels diverged. Review each during Charles + Joyce field test.
+`geocode_label_matched: false` = backend and client labels diverged. Review each during two-device field testing.
 
 ## Stage 2 — future PR (after beta validates consistency)
 

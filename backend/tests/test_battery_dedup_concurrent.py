@@ -58,7 +58,7 @@ _LOW_BATTERY    = 0.10   # well below the 0.15 trigger threshold
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _make_prev_doc(*, was_alerted: bool = False, name: str = "Joyce") -> dict:
+def _make_prev_doc(*, was_alerted: bool = False, name: str = "Test Member") -> dict:
     # When critical fired (was_alerted=True), warn was also set — mirror real state.
     return {
         "low_battery_alerted":      was_alerted,

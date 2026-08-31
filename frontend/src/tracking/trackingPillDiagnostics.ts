@@ -3,7 +3,7 @@
  *
  * Records every render of the shared <TrackingStatusPill />: the exact
  * inputs it received and the status kind it chose.  Meant for
- * remote-debugging Charles's "why yellow when Joyce is fine" reports
+ * remote-debugging caregiver reports about an unexpected yellow status
  * without shipping console.log spam.
  *
  * Hidden behind the Diagnostics screen; will be removed before RC.

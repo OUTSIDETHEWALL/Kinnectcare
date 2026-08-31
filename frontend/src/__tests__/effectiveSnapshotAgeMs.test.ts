@@ -10,7 +10,7 @@
  *   computeSnapshotElapsedMs — how long ago the device_snapshot was pushed
  *
  * Key invariant (Task #93):
- *   With Joyce uploading every ~60 s and the heartbeat pushing a snapshot every
+ *   With the test member uploading every ~60 s and the heartbeat pushing a snapshot every
  *   ~60 s, the worst-case effective age for any stage is:
  *     snapshotElapsed (≤ 60 s) + stageAgeAtPush (≤ 60 s) ≤ 120 s
  *   The green threshold is 5 min (300 000 ms), so 120 s is comfortably green.
@@ -29,7 +29,7 @@ import {
 // ─── Constants used across tests ─────────────────────────────────────────────
 
 const HEARTBEAT_INTERVAL_MS = 60_000;  // SDK heartbeat cadence
-const UPLOAD_INTERVAL_MS    = 60_000;  // Joyce's nominal upload cadence
+const UPLOAD_INTERVAL_MS    = 60_000;  // Test member's nominal upload cadence
 
 const WARN_MS = 5  * 60_000;  // 300 000 ms — green→amber boundary
 const CRIT_MS = 15 * 60_000;  // 900 000 ms — amber→red   boundary

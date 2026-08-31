@@ -6,7 +6,7 @@
  *
  * Background: Task #32 moved the pushDeviceSnapshotToBackend() call outside
  * the stale-detection gate so Charles's Device Comparison table shows fresh
- * pipeline ages for Joyce during normal operation — not only after an upload
+ * pipeline ages for the test member during normal operation — not only after an upload
  * gap.  These tests guard that the two concerns stay separated:
  *
  *   • Snapshot push   — always fires (confirms Task #32 is intact)
@@ -23,7 +23,7 @@
  */
 
 const FAKE_CFG = {
-  memberId: 'member-joyce-001',
+  memberId: 'member-001',
   jwt: 'fake-jwt-token',
   backendBaseUrl: 'https://api.example.com',
 };

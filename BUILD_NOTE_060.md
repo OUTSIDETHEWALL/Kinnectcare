@@ -90,7 +90,7 @@ These fields are permanent, not temporary debugging. They provide the evidence t
 ## What does not change
 
 - **`last_seen`** remains the server contact timestamp used by Leonidas, the dashboard staleness indicator, and all existing queries. Its meaning and update behaviour are unchanged.
-- **Joyce's device** is unaffected. Her member row has its own `captured_at`; Charles's uploads never touch it.
+- **The other member's device** is unaffected. Their member row has its own `captured_at`; the caregiver's uploads never touch it.
 - **The `/members` response shape** gains one optional field (`captured_at`). Old app builds ignore unknown fields; no client change is required.
 - **The JS-side heartbeat path** (callers that don't use the Transistor SDK directly) receives the unconditional write fallback. No behaviour change.
 
@@ -104,7 +104,7 @@ These fields are permanent, not temporary debugging. They provide the evidence t
 |---|---|---|
 | 1 — Unit | 12 | `captured_at` parsing: ISO-8601 ± ms, epoch ms int/float, `coords.timestamp` fallback, absent, unparseable, future, upper-bound guard |
 | 2 — Simulation | 15 | Guard filter logic: first upload, historical reject, duplicate reject, newer accept, 30-upload buffer-replay scenario, no-timestamp fallback |
-| 3 — Prod read-only | 4 | Charles and Joyce live doc shape; ingest log schema validity |
+| 3 — Prod read-only | 4 | Two-member live doc shape; ingest log schema validity |
 
 The 30-upload replay scenario (Part 2, test E) directly reproduces today's incident: a current fix is written, then 30 stale buffered points arrive in sequence. All 30 are rejected; the member row remains at the current location throughout.
 

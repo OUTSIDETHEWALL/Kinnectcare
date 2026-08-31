@@ -13,12 +13,12 @@ describe('pending invitation cancellation', () => {
   it('shows the confirmation and revokes only after the destructive action is chosen', () => {
     const onConfirm = jest.fn();
 
-    confirmPendingInviteCancellation({ invitee_name: 'Joyce' }, onConfirm);
+    confirmPendingInviteCancellation({ invitee_name: 'Test Member' }, onConfirm);
 
     expect(Alert.alert).toHaveBeenCalledTimes(1);
     expect(Alert.alert).toHaveBeenCalledWith(
       'Cancel invitation?',
-      "Joyce won't be able to accept this invitation anymore. You can send a new one later.",
+      "Test Member won't be able to accept this invitation anymore. You can send a new one later.",
       expect.any(Array),
     );
 

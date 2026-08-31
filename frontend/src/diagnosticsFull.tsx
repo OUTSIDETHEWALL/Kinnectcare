@@ -278,7 +278,7 @@ function formatLeonidasDecision(
 //  Motion Timeline helpers — Build 64.
 //
 //  Filters the engine ring buffer to show only motion-relevant
-//  events in strict chronological order so Charles and Joyce's
+//  events in strict chronological order so two family members'
 //  phone behaviour can be compared side-by-side during the same
 //  trip.  Oldest-first so the sequence reads top → bottom.
 // ===========================================================
@@ -1951,7 +1951,7 @@ function DiagnosticsContent() {
             Filters the engine log to show only motion-relevant
             events (Activity Recognition, motion state changes,
             GPS fixes, HTTP uploads) in strict chronological order
-            so Charles's and Joyce's phone behaviour can be
+            so two family members' phone behaviour can be
             compared side-by-side during the same trip.
             ===================================================== */}
         <CollapsibleSection
@@ -1960,7 +1960,7 @@ function DiagnosticsContent() {
           count={motionEvents.length}
           hint={
             'Activity Recognition → Motion Change → GPS Fix → HTTP Upload, oldest first. ' +
-            'Compare Charles and Joyce side-by-side. Missing sdk_onActivityChange entries ' +
+            'Compare two family members side-by-side. Missing sdk_onActivityChange entries ' +
             'mean Android never delivered a motion event to the SDK.'
           }
           expanded={!!expanded['motion-timeline']}
@@ -2196,9 +2196,9 @@ function DiagnosticsContent() {
 
         {/* =====================================================
             Task #21 Deliverable 2 — Device Comparison
-            Side-by-side table of Charles vs Joyce (or any two
-            family members) so Charles can see exactly which
-            pipeline stage diverges while Joyce is stale.
+            Side-by-side table of two family members so a caregiver
+            can see exactly which pipeline stage diverges while
+            one member is stale.
 
             Data sources:
               • last_seen / captured_at / is_moving / battery —

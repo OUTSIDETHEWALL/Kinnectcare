@@ -137,7 +137,7 @@ v1.4.0 and add OS-DND inheritance in v1.4.1.
    background capability).
 5. Bump `runtimeVersion.versionCode` 38 → 39.
 6. `eas build --platform android --profile production`.
-7. Submit to Play Console internal track for OTA install on Charles/Joyce phones.
+7. Submit to Play Console internal track for OTA install on beta test phones.
 8. Field-test the build with the SAME couch-toss / pillow-drop matrix
    that produced 0 detections on Sunday.  Compare to v1.3.3 telemetry.
 

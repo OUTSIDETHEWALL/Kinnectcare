@@ -517,8 +517,8 @@ function registerHeadlessTaskOnce(): void {
       // when it transitions from stationary → moving.  However, on devices
       // where Android battery optimisation throttles or kills the foreground
       // service, that native autoSync chain can silently stall.  The symptom
-      // is exactly what Charles observed: Joyce starts driving but no upload
-      // arrives until she manually opens the app (which triggers locationRefresh).
+      // is exactly what the caregiver observed: a member starts driving but no
+      // upload arrives until they manually open the app (which triggers locationRefresh).
       //
       // Forcing getCurrentPosition here gives us a JS-triggered upload in the
       // same headless execution window as the motionchange event.  This is
@@ -891,9 +891,9 @@ export async function pushBatteryUpdate(source: string = 'unknown'): Promise<voi
 //
 // Called from the stale-detection path on every JS heartbeat where
 // the last HTTP upload is >5 min old.  Sends a lightweight payload
-// to the backend so Charles's Diagnostics screen can show both phones'
-// pipeline state side-by-side without Charles needing to physically
-// touch Joyce's phone.
+// to the backend so a caregiver's Diagnostics screen can show both phones'
+// pipeline state side-by-side without needing to physically touch the
+// member's phone.
 //
 // Uses the same cachedConfig / require('./api') pattern as
 // pushBatteryUpdate() — safe in JS-alive (foreground/just-backgrounded)
@@ -1283,7 +1283,7 @@ function attachSdkListeners(lib: any): void {
     //   → GPS active, distanceFilter applies, uploads begin
     //
     // Without this listener we had NO visibility into whether Android
-    // Activity Recognition was firing at all on Joyce's device.
+    // Activity Recognition was firing at all on the member's device.
     // Deduplicated (see _lastActivity* vars above) to avoid flooding
     // the ring buffer — only transitions are logged.
     if (typeof lib.onActivityChange === 'function') {
@@ -1328,7 +1328,7 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
     // as fastestLocationUpdateInterval) so Android's fused-location provider
     // delivers GPS fixes as quickly as the hardware allows when MOVING.
     // Previously the 30 s hint caused Android to batch fixes, producing
-    // 3–5 min latency even though Joyce's device was uploading correctly.
+    // 3–5 min latency even though the member's device was uploading correctly.
     locationUpdateInterval: 10000,
     fastestLocationUpdateInterval: 10000,
 
@@ -1339,8 +1339,8 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
     //
     // Transistor SDK default elasticity = 3: each heartbeat cycle without
     // detected movement multiplies the next AR poll interval by 3.
-    // After Joyce's phone sits still for several hours the AR poll interval
-    // can reach 270 s or more (10 s × 3^N).  When she finally starts
+    // After the member's phone sits still for several hours the AR poll interval
+    // can reach 270 s or more (10 s × 3^N).  When they finally start
     // driving, Android may take minutes to deliver the first motionchange
     // event — which is exactly the stale-location symptom we are
     // investigating.
@@ -1386,7 +1386,7 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
       // adaptive icon.  Android OEMs that strictly enforce the monochrome
       // rule (Samsung One UI, Xiaomi MIUI, etc.) replace any coloured small
       // icon with a white square placeholder — which is exactly the symptom
-      // reported on Joyce's device.  Charles's device is on a more permissive
+      // reported on the member's device.  The caregiver's device is on a more permissive
       // firmware that renders coloured icons anyway, masking the bug.
       smallIcon: 'drawable/notification_icon',
       channelName: 'Location sharing',
@@ -1495,9 +1495,9 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
       //
       // Log the SDK's ACTUAL resolved config immediately after ready().
       // The SDK merges the JS config with any values already persisted
-      // in its native SQLite database.  If Charles and Joyce ever show
+      // in its native SQLite database.  If two family members ever show
       // different values here, the persisted database is the explanation.
-      // Charles's and Joyce's logs can then be compared side-by-side to
+      // Their logs can then be compared side-by-side to
       // identify which field differs and why.
       try {
         await logEvent('sdk_config_snapshot', {

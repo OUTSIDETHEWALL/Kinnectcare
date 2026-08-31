@@ -129,11 +129,11 @@ function makeAlertDoc(overrides: Record<string, unknown> = {}) {
   return {
     id: 'alert-001',
     member_id: 'member-001',
-    member_name: 'Joyce Doe',
+    member_name: 'Test Member',
     type: 'low_battery',
     severity: 'warning',
-    title: "Joyce's battery is low",
-    message: "Joyce's phone battery is at 10%.",
+    title: "Test Member's battery is low",
+    message: "Test Member's phone battery is at 10%.",
     acknowledged: false,
     member_phone: '+14805550100',
     created_at: '2026-08-11T12:00:00.000Z',
@@ -273,20 +273,20 @@ describe('Alerts screen — Call button (component-level)', () => {
 
   // ── 5. Button label uses first name only ───────────────────────────────────
   //
-  // accessibilityLabel carries the FULL name ("Call Joyce Doe") for screen
+  // accessibilityLabel carries the FULL name ("Call Test Member") for screen
   // readers; the visible text rendered inside the button shows first-name only
-  // ("Call Joyce").  We verify the accessible label here and rely on the pure
+  // ("Call Test").  We verify the accessible label here and rely on the pure
   // unit tests in callButtonGuard.test.ts for the first-name extraction logic.
 
   it('Call button accessibilityLabel contains the full member name', async () => {
     const renderer = await renderWithAlerts([
-      makeAlertDoc({ member_name: 'Joyce Doe' }),
+      makeAlertDoc({ member_name: 'Test Member' }),
     ]);
     const btn = findByTestID(renderer.root, 'alert-call-alert-001');
     expect(btn).not.toBeNull();
 
     // accessibilityLabel is set to `Call ${a.member_name}` in alerts.tsx
-    expect(btn.props.accessibilityLabel).toBe('Call Joyce Doe');
+    expect(btn.props.accessibilityLabel).toBe('Call Test Member');
   });
 
   // ── 6. Multiple alerts dial their own numbers independently ────────────────

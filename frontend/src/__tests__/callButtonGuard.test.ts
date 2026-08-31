@@ -13,7 +13,7 @@
  *      caregiver taps "Call [First Name]".
  *
  *   3. callerFirstName() — the display name extracted from member_name so the
- *      button reads "Call Joyce" rather than "Call Joyce Doe".
+ *      button reads "Call Test" rather than "Call Test Member".
  *
  * These are the three composable pieces of the Call button.  They are tested
  * here at the pure-function level so any future refactor of the JSX can rely
@@ -48,11 +48,11 @@ function makeAlert(overrides: Partial<Alert> = {}): Alert {
   return {
     id: 'alert-001',
     member_id: 'member-001',
-    member_name: 'Joyce Doe',
+    member_name: 'Test Member',
     type: 'low_battery',
     severity: 'warning',
-    title: "Joyce's battery is low",
-    message: "Joyce's phone battery is at 10%.",
+    title: "Test Member's battery is low",
+    message: "Test Member's phone battery is at 10%.",
     acknowledged: false,
     created_at: '2026-08-11T12:00:00.000Z',
     ...overrides,
@@ -148,19 +148,19 @@ describe('buildDialUrl — tel: URL for Linking.openURL', () => {
   });
 });
 
-// ─── Suite 3: callerFirstName — "Call Joyce" not "Call Joyce Doe" ─────────────
+// ─── Suite 3: callerFirstName — "Call Test" not "Call Test Member" ─────────────
 
 describe('callerFirstName — first-name extraction for button label', () => {
   it('returns the first token of a full name', () => {
-    expect(callerFirstName('Joyce Doe')).toBe('Joyce');
+    expect(callerFirstName('Test Member')).toBe('Test');
   });
 
   it('returns the only token of a single-word name', () => {
-    expect(callerFirstName('Joyce')).toBe('Joyce');
+    expect(callerFirstName('Test')).toBe('Test');
   });
 
   it('returns the first token of a three-part name', () => {
-    expect(callerFirstName('Joyce Ann Doe')).toBe('Joyce');
+    expect(callerFirstName('Test Example Member')).toBe('Test');
   });
 
   it('works with member_name from a real alert fixture', () => {
@@ -181,7 +181,7 @@ describe('end-to-end: alert → Call button → dialer URL', () => {
     const a = makeAlert({ member_phone: '+14805550100' });
     expect(shouldShowCallButton(a)).toBe(true);
     expect(buildDialUrl(a.member_phone!)).toBe('tel:+14805550100');
-    expect(callerFirstName(a.member_name)).toBe('Joyce');
+    expect(callerFirstName(a.member_name)).toBe('Test');
   });
 
   it('no-phone path: alert created, button hidden, no URL constructed', () => {

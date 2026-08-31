@@ -230,9 +230,9 @@ This is mechanically identical to having the engine stopped when the phone is no
 | Engine log | `requestPermission_ok` with `status: 2` |
 | Engine log | `sdk_onHeartbeat` and `sdk_onLocation` events stop immediately after `app_backgrounded` |
 | Engine log | `sdk_onHttp` entries only correlate with `app_foregrounded` events |
-| Ingest log | All successful writes cluster within minutes of Joyce opening the app |
+| Ingest log | All successful writes cluster within minutes of the member opening the app |
 
-**This pattern is consistent with Joyce's live data.** The 8 ingest log entries observed July 9 at 23:39–23:46 UTC all occurred during an active foreground session. The prior 44-hour gap had zero entries despite the notification being visible.
+**This pattern is consistent with the observed live data.** The 8 ingest log entries observed July 9 at 23:39–23:46 UTC all occurred during an active foreground session. The prior 44-hour gap had zero entries despite the notification being visible.
 
 ---
 
@@ -278,11 +278,11 @@ If heartbeats are firing but `sdk_onHttp` is absent, the GPS acquisition step is
 
 When an app is in the Rare or Restricted bucket, Android throttles heartbeat delivery to the headless task. The native Transistor foreground service continues running (the notification remains visible), but the OS-level job scheduler defers the heartbeat callback. The headless JS task never fires. No `getCurrentPosition()` is called. The ingest log goes silent.
 
-**This is the most probable explanation for Joyce's 44-hour gap.** The sequence:
-1. Joyce joined July 8, 00:39 UTC. First 2.5 hours had uploads every few minutes (onboarding + active use → Active bucket).
-2. Joyce stopped using the app. Android moved it toward Frequent/Rare over hours.
+**This is the most probable explanation for the observed 44-hour gap.** The sequence:
+1. The member joined July 8, 00:39 UTC. First 2.5 hours had uploads every few minutes (onboarding + active use → Active bucket).
+2. The member stopped using the app. Android moved it toward Frequent/Rare over hours.
 3. At 03:17 UTC July 8, the last heartbeat-driven upload fired. After that, the bucket throttle deferred heartbeats to intervals longer than the monitoring window.
-4. At 23:39 UTC July 9 (~44 h later), Joyce opened the app. Android moved it back to Active. The foreground `refreshLocationIfStale` fired immediately. The Transistor engine also processed a new location. Eight uploads arrived in 7 minutes.
+4. At 23:39 UTC July 9 (~44 h later), the member opened the app. Android moved it back to Active. The foreground `refreshLocationIfStale` fired immediately. The Transistor engine also processed a new location. Eight uploads arrived in 7 minutes.
 
 **What the notification proves vs. does not prove:**  
 The foreground service notification (`"Kinnship is sharing your location"`) is displayed by the Android notification system based on the service's running state. A service can run continuously with its notification visible while the OS defers its scheduled callbacks. The notification proves the native service has not been killed. It does not prove heartbeats are being delivered to JavaScript.
@@ -291,9 +291,9 @@ The foreground service notification (`"Kinnship is sharing your location"`) is d
 
 | Log source | Event to look for |
 |---|---|
-| Engine log (Joyce's device) | `app_backgrounded` followed by zero `sdk_onHeartbeat` for hours |
+| Engine log (member device) | `app_backgrounded` followed by zero `sdk_onHeartbeat` for hours |
 | Engine log | `sdk_onHeartbeat` events resume the moment `app_foregrounded` is logged |
-| Ingest log (MongoDB) | Gap duration correlates with lack of app opens on Joyce's device |
+| Ingest log (MongoDB) | Gap duration correlates with lack of app opens on the member device |
 | Engine log | `registerHeadlessTask_ok` present (confirms registration succeeded) but headless events never log (because they run in a separate JS context that writes to a different buffer) |
 
 **Important note on headless task diagnostics:** The headless task runs in a separate Android JS context with no access to AsyncStorage (per the comment at `locationEngine.ts:100–108`). The `logEvent('registerHeadlessTask_ok')` entry only confirms the registration was accepted. There is no log entry for individual headless task invocations unless `logEvent` is called from within the headless task itself — and it cannot be, because AsyncStorage is unavailable in that context. **Headless task invocations are therefore invisible in the existing diagnostic log.**
@@ -518,7 +518,7 @@ Because `engineBootedForUserIdRef.current` is set to `user.id` unconditionally, 
 Use this to diagnose a specific gap in the ingest log without making code changes first.
 
 ```
-STEP 1: Is the ingest log gap correlated with Joyce opening the app?
+STEP 1: Is the ingest log gap correlated with the member opening the app?
   YES → The Transistor engine is not the primary path; she only uploads on
         foreground (foreground refresh + Transistor foreground tracking).
         → Suspect PATH 7 (App Standby throttle) combined with PATH 5 (WHEN_IN_USE).
