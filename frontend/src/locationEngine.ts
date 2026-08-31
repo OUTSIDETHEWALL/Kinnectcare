@@ -511,14 +511,14 @@ function registerHeadlessTaskOnce(): void {
         }
       }
 
-      // Sprint 1 stale-location fix — headless motionchange handler.
+      // Stale-location recovery — headless motion/activity handler.
       //
       // The Transistor SDK normally handles GPS → native HTTP upload by itself
       // when it transitions from stationary → moving.  However, on devices
       // where Android battery optimisation throttles or kills the foreground
       // service, that native autoSync chain can silently stall.  The symptom
-      // is exactly what Charles observed: Joyce starts driving but no upload
-      // arrives until she manually opens the app (which triggers locationRefresh).
+      // is exactly what the caregiver observed: a member starts driving but no
+      // upload arrives until they manually open the app (which triggers locationRefresh).
       //
       // Forcing getCurrentPosition here gives us a JS-triggered upload in the
       // same headless execution window as the motionchange event.  This is
@@ -526,12 +526,27 @@ function registerHeadlessTaskOnce(): void {
       // the two uploads are idempotent (server keeps the newer last_seen).
       // If native is stalled, this upload becomes the recovery.
       //
-      // Event shape: HeadlessEvent wraps the SDK payload in either
-      //   event.event.isMoving  (newer SDK versions)  or
-      //   event.isMoving        (older SDK versions, direct unwrapping)
-      if (name === 'motionchange') {
+      // SDK 5.x HeadlessEvent carries event data in `params`.  Keep the
+      // historical `event` and top-level reads as compatibility fallbacks.
+      //
+      // Some Android devices deliver an activitychange (for example,
+      // in_vehicle) without the SDK subsequently promoting that evidence to
+      // motionchange.  That was the observed gap: Activity Recognition was
+      // alive, so permission was present, but the location pipeline never woke.
+      // Treat a moving activitychange as an equivalent wake signal.
+      if (name === 'motionchange' || name === 'activitychange') {
+        const activity = String(
+          event?.params?.activity ?? event?.event?.activity ?? event?.activity ?? '',
+        ).toLowerCase();
+        const activityImpliesMoving =
+          activity !== '' &&
+          activity !== 'still' &&
+          activity !== 'unknown';
         const isMoving: boolean = !!(
-          (event?.event?.isMoving) ?? (event?.isMoving)
+          event?.params?.isMoving ??
+          event?.event?.isMoving ??
+          event?.isMoving ??
+          activityImpliesMoving
         );
         if (isMoving) {
           // Cooldown gate: Android Activity Recognition can re-evaluate
@@ -554,6 +569,8 @@ function registerHeadlessTaskOnce(): void {
             // where the chain succeeds or fails, without guessing.
             await logEvent('motion_recovery_start', {
               source: 'headless',
+              trigger: name,
+              activity: activity || null,
               secondsSinceLast: Math.floor(msSinceLast / 1000),
             });
             try {
@@ -576,6 +593,11 @@ function registerHeadlessTaskOnce(): void {
               // opens, but persist:true guarantees it will happen.
               await logEvent('upload_queued', { source: 'headless', persist: true });
               recordPipelineTs('headless_heartbeat');
+              // Keep the existing drive-test success marker: Diagnostics uses
+              // this event to prove a headless wake reached a persisted GPS
+              // sample, whether the wake began as heartbeat, motionchange, or
+              // the activitychange fallback above.
+              await logEvent('headless_heartbeat_ok', { trigger: name });
               await logEvent('headless_motionchange_getCurrentPosition_ok');
             } catch (e: any) {
               await logEvent('headless_motionchange_getCurrentPosition_error', {
@@ -891,9 +913,9 @@ export async function pushBatteryUpdate(source: string = 'unknown'): Promise<voi
 //
 // Called from the stale-detection path on every JS heartbeat where
 // the last HTTP upload is >5 min old.  Sends a lightweight payload
-// to the backend so Charles's Diagnostics screen can show both phones'
-// pipeline state side-by-side without Charles needing to physically
-// touch Joyce's phone.
+// to the backend so a caregiver's Diagnostics screen can show both phones'
+// pipeline state side-by-side without needing to physically touch the
+// member's phone.
 //
 // Uses the same cachedConfig / require('./api') pattern as
 // pushBatteryUpdate() — safe in JS-alive (foreground/just-backgrounded)
@@ -1283,7 +1305,7 @@ function attachSdkListeners(lib: any): void {
     //   → GPS active, distanceFilter applies, uploads begin
     //
     // Without this listener we had NO visibility into whether Android
-    // Activity Recognition was firing at all on Joyce's device.
+    // Activity Recognition was firing at all on the member's device.
     // Deduplicated (see _lastActivity* vars above) to avoid flooding
     // the ring buffer — only transitions are logged.
     if (typeof lib.onActivityChange === 'function') {
@@ -1328,34 +1350,14 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
     // as fastestLocationUpdateInterval) so Android's fused-location provider
     // delivers GPS fixes as quickly as the hardware allows when MOVING.
     // Previously the 30 s hint caused Android to batch fixes, producing
-    // 3–5 min latency even though Joyce's device was uploading correctly.
+    // 3–5 min latency even though the member's device was uploading correctly.
     locationUpdateInterval: 10000,
     fastestLocationUpdateInterval: 10000,
 
-    // Activity Recognition / motion detection
-    activityRecognitionInterval: 10000,
-    minimumActivityRecognitionConfidence: 75,
-    // Sprint 1 motion recovery — eliminate Activity Recognition back-off.
-    //
-    // Transistor SDK default elasticity = 3: each heartbeat cycle without
-    // detected movement multiplies the next AR poll interval by 3.
-    // After Joyce's phone sits still for several hours the AR poll interval
-    // can reach 270 s or more (10 s × 3^N).  When she finally starts
-    // driving, Android may take minutes to deliver the first motionchange
-    // event — which is exactly the stale-location symptom we are
-    // investigating.
-    //
-    // elasticity: 1 disables the back-off entirely and keeps AR polling
-    // at activityRecognitionInterval (10 s) regardless of how long the
-    // phone has been stationary.  Battery cost is negligible: AR uses
-    // the accelerometer / fused-sensor stack, not GPS.  Power-budget
-    // impact is far smaller than one extra GPS fix per hour.
-    //
-    // Evidence: SDK docs + Transistor GitHub issue #1567 confirm that
-    // high elasticity is the #1 cause of slow stationary-to-moving
-    // transitions after long idle periods.  If drive-test logs show
-    // motionchange firing quickly at elasticity:1, this was the root cause.
-    elasticity: 1,
+    // Activity Recognition / motion detection is managed natively by SDK 5.x.
+    // activityRecognitionInterval and minimumActivityRecognitionConfidence
+    // remain in its type surface only as deprecated, unused compatibility
+    // fields.  Do not rely on them to change Android wake behaviour.
 
     // Heartbeat — fires onHeartbeat every N seconds while STILL.  Used
     // here purely as a "the SDK is alive" signal in the diagnostic log.
@@ -1386,7 +1388,7 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
       // adaptive icon.  Android OEMs that strictly enforce the monochrome
       // rule (Samsung One UI, Xiaomi MIUI, etc.) replace any coloured small
       // icon with a white square placeholder — which is exactly the symptom
-      // reported on Joyce's device.  Charles's device is on a more permissive
+      // reported on the member's device.  The caregiver's device is on a more permissive
       // firmware that renders coloured icons anyway, masking the bug.
       smallIcon: 'drawable/notification_icon',
       channelName: 'Location sharing',
@@ -1495,9 +1497,9 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
       //
       // Log the SDK's ACTUAL resolved config immediately after ready().
       // The SDK merges the JS config with any values already persisted
-      // in its native SQLite database.  If Charles and Joyce ever show
+      // in its native SQLite database.  If two family members ever show
       // different values here, the persisted database is the explanation.
-      // Charles's and Joyce's logs can then be compared side-by-side to
+      // Their logs can then be compared side-by-side to
       // identify which field differs and why.
       try {
         await logEvent('sdk_config_snapshot', {

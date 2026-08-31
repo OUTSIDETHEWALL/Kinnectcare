@@ -111,7 +111,7 @@ def _member_document():
         "id": "task-101-member",
         "owner_id": "task-101-owner",
         "family_group_id": "task-101-family",
-        "name": "Joyce",
+        "name": "Test Member",
         "age": 78,
         "phone": "+15550001234",
         "gender": "female",

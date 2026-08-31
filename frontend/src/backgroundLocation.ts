@@ -91,7 +91,7 @@ let uploadStartedAt = 0;
 // Until v1.2.4, every failure mode in this file was silently swallowed:
 // task errors, missing member-ids, in-flight zombie locks, HTTP 401s
 // from rotated JWTs, network failures.  We had ZERO ability to tell
-// from Joyce's phone whether the OS task was running at the expected
+// from the member's phone whether the OS task was running at the expected
 // cadence, whether it was running and failing, or whether it was being
 // suppressed entirely by Android Doze / iOS deferred-update gating.
 //

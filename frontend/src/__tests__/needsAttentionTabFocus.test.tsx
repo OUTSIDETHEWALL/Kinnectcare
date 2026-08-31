@@ -297,7 +297,7 @@ jest.mock('../api', () => ({
 // ── AuthContext ───────────────────────────────────────────────────────────────
 
 const MOCK_USER_ID   = 'caregiver-001';
-const MOCK_MEMBER_ID = 'member-joyce-001';
+const MOCK_MEMBER_ID = 'member-001';
 
 jest.mock('../AuthContext', () => ({
   useAuth: () => ({
@@ -329,11 +329,11 @@ function makeLowBatteryAlert(overrides: Record<string, unknown> = {}) {
   return {
     id:           'alert-batt-001',
     member_id:    MOCK_MEMBER_ID,
-    member_name:  'Joyce Doe',
+    member_name:  'Test Member',
     type:         'low_battery',
     severity:     'warning',
-    title:        "Joyce's battery is low",
-    message:      "Joyce's phone battery is at 10%.",
+    title:        "Test Member's battery is low",
+    message:      "Test Member's phone battery is at 10%.",
     acknowledged: false,
     resolved:     false,
     created_at:   '2026-08-16T10:00:00.000Z',
@@ -346,11 +346,11 @@ function makeLowBatteryAlert(overrides: Record<string, unknown> = {}) {
  * check is suppressed independently — letting the alert-based flag be the
  * sole contributor to the Needs Attention count.
  */
-function makeJoyceMember(overrides: Record<string, unknown> = {}) {
+function makeTestMember(overrides: Record<string, unknown> = {}) {
   return {
     id:                 MOCK_MEMBER_ID,
-    user_id:            'joyce-user-id',
-    name:               'Joyce Doe',
+    user_id:            'member-user-001',
+    name:               'Test Member',
     role:               'senior',
     status:             'healthy',
     battery_level:      0.10,
@@ -488,9 +488,9 @@ beforeEach(() => {
   focusHarness.cleanup  = null;
   appStateListeners.length = 0;
 
-  // Member store: Joyce with a stale battery timestamp so the real-time
+  // Member store: test member with a stale battery timestamp so the real-time
   // battery check doesn't fire independently of the alert record.
-  mockMembersArray = [makeJoyceMember()];
+  mockMembersArray = [makeTestMember()];
 
   // AsyncStorage: no pre-existing cache.
   mockGetItem.mockResolvedValue(null);
@@ -541,7 +541,7 @@ describe('Dashboard — Needs Attention clears on non-dashboard tab when battery
       (c: any[]) => c[0] === '/alerts',
     ).length;
 
-    // Phase 2 — Joyce plugs in.  Server resolves the alert.
+    // Phase 2 — the test member plugs in.  Server resolves the alert.
     // Caregiver is on Alerts tab (push arrived, notifSub inactive).
     // Now they switch back to Dashboard → useFocusEffect re-fires.
     mockApiGet.mockImplementation((url: string) => {
@@ -632,14 +632,14 @@ describe('Dashboard — Needs Attention clears on non-dashboard tab when battery
 
   // ── A4. is_charging suppresses the real-time battery flag ─────────────────────
   //
-  // Joyce plugs in: is_charging=true.  Even if battery_level is still 10%
+  // The test member plugs in: is_charging=true.  Even if battery_level is still 10%
   // and battery_updated_at is recent (< 15 min), the real-time check uses
   // `&& !_m.is_charging` — so it is suppressed.  Combined with a resolved
   // alert on refocus, NA must drop to 0.
 
-  it('A4: NA drops to 0 on refocus when Joyce is charging and the alert is resolved', async () => {
+  it('A4: NA drops to 0 on refocus when the test member is charging and the alert is resolved', async () => {
     // Member has a RECENT battery update but is_charging = true.
-    mockMembersArray = [makeJoyceMember({
+    mockMembersArray = [makeTestMember({
       battery_level:      0.10,
       is_charging:        true,
       battery_updated_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
@@ -699,7 +699,7 @@ describe('Dashboard — Needs Attention clears on non-dashboard tab when battery
       (c: any[]) => c[0] === '/alerts',
     ).length;
 
-    // Phase 2: Joyce plugs in while the app is backgrounded.  Switch /alerts.
+    // Phase 2: the test member plugs in while the app is backgrounded.  Switch /alerts.
     mockApiGet.mockImplementation((url: string) => {
       if (url === '/members') return Promise.resolve(membersResponse());
       if (url === '/summary') return Promise.resolve(summaryResponse());
@@ -830,7 +830,7 @@ describe('Dashboard — interactive welfare check', () => {
       testID: `member-welfare-confirmed-${MOCK_MEMBER_ID}`,
     });
     expect(collectTextContent(confirmation).replace(/\s+/g, ' ')).toContain(
-      'Joyce Doe confirmed OK',
+      'Test Member confirmed OK',
     );
   });
 

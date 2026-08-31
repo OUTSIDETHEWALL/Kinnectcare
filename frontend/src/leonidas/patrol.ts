@@ -59,7 +59,7 @@ let recoveryInProgress = false;
 //  app was backgrounded and her engine was uploading silently),
 //  Leonidas would silently switch sources to engine-log-fresh and
 //  report a different `last_upload_age_ms` than the Member screen
-//  rendered.  Joyce's UI said 48 min ago; Joyce's Leonidas said 4
+//  rendered.  The UI said 48 min ago; the device log said 4
 //  min ago.  Both were "right" from their own data source, but
 //  the invariant "everywhere shows the same timestamp" was broken.
 //

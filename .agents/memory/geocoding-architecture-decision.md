@@ -33,7 +33,7 @@ db.location_ingest_log.find(
 ).sort({ at:-1 }).limit(50)
 ```
 
-`geocode_label_matched: false` = backend and client labels diverged. Review each during Charles + Joyce field test.
+`geocode_label_matched: false` = backend and client labels diverged. Review each during two-device field testing.
 
 ## Stage 2 — future PR (after beta validates consistency)
 
@@ -44,7 +44,7 @@ Remove in one PR:
 - `location_name` from client PUT request body
 - Platform fallback geocoder (`Location.reverseGeocodeAsync` path)
 
-**Why:** Charles explicitly approved removing the Expo key fallback and client geocoding in the same cleanup PR.
+**Why:** The product owner approved removing the Expo key fallback and client geocoding together so one canonical path replaces both.
 
 ## Google Maps API key restriction (outstanding)
 

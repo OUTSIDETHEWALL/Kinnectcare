@@ -318,7 +318,7 @@ export default function MeScreen() {
   const [bioOn, setBioOn] = useState(false);
 
   // OTA update check state — used by the always-visible "Check for update" row
-  // in the Account card so Joyce can trigger a forced check even when the
+  // in the Account card so a member can trigger a forced check even when the
   // Software / Advanced sections are not reachable due to clipping bugs.
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const onCheckForUpdate = useCallback(async () => {

@@ -28,7 +28,7 @@ with patch("motor.motor_asyncio.AsyncIOMotorClient", MagicMock()):
     import server  # noqa: E402
 
 
-MEMBER_ID = "task-107-joyce"
+MEMBER_ID = "task-107-test-member"
 FAMILY_GROUP_ID = "task-107-family"
 OWNER_ID = "task-107-owner"
 
@@ -38,8 +38,8 @@ def _member_doc(**overrides):
         "id": MEMBER_ID,
         "owner_id": OWNER_ID,
         "family_group_id": FAMILY_GROUP_ID,
-        "user_id": "joyce-user",
-        "name": "Joyce",
+        "user_id": "test-member-user",
+        "name": "Test Member",
         "age": 78,
         "phone": "+15550001234",
         "gender": "female",

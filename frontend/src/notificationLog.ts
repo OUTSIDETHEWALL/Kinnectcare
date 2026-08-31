@@ -3,7 +3,7 @@
  *
  * Why this module exists:
  *   We're chasing an intermittent "silent" push sound leak — sometimes
- *   when Charles opens Kinnship, sometimes when he opens Joyce's
+ *   when a caregiver opens Kinnship, sometimes when they open a member's
  *   profile, sometimes on Refresh, sometimes never.  The Android OS
  *   plays the sound but we have NO visibility into which payload /
  *   channel / priority triggered it.  Logging every received

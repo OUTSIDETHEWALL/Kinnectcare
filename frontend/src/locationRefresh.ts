@@ -2,7 +2,7 @@
  * Foreground location refresh (v1.2.2 — P2 Location Freshness fix).
  *
  * THE BUG WE FIXED:
- *  Joyce's location on Charles's dashboard was 5+ miles stale despite
+ *  A member's location on the caregiver's dashboard was 5+ miles stale despite
  *  her phone holding the correct GPS fix.  Investigation traced this
  *  to three converging issues:
  *
@@ -19,7 +19,7 @@
  *  3. The AppState 'active' listener added in v1.2.1 only refreshed
  *     the push token; there was no parallel location refresh.
  *
- *  Net effect: the only thing that broke Joyce out of stale state was
+ *  Net effect: the only thing that broke the member out of stale state was
  *  pressing Check In, which side-effects a `members.location` write
  *  via the `POST /checkins` backend handler (server.py:2081-2083).
  *
@@ -30,7 +30,7 @@
  *  60 seconds so rapid bg/fg flips don't hammer GPS or the backend.
  *
  *  We also write a rolling diagnostic log so Charles can verify on
- *  Joyce's device that the refresh is firing — same pattern as
+ *  the member's device that the refresh is firing — same pattern as
  *  push-token diagnostics.
  *
  * PRIVACY NOTE:
@@ -191,7 +191,7 @@ function roundCoord(x: number): number {
 //   value happened to be ("Home" default from member creation,
 //   or "Current Location" from a past check-in).  The dashboard
 //   renders `📍 {member.location_name}` as a text label, so even
-//   though the BACKEND had Joyce's correct Walmart coordinates,
+//   though the BACKEND had the member's correct coordinates,
 //   Charles's dashboard read "📍 Home" — looking 5 miles stale.
 //
 // THE FIX:
@@ -206,7 +206,7 @@ function roundCoord(x: number): number {
 //   API requires the platform's geocoder service which has subtle
 //   reliability quirks from a detached OS-task JS context.  The
 //   label will refresh on the next foreground transition, which
-//   is the common path on Joyce's device anyway (v1.2.2's AppState
+//   is the common path on the member's device anyway (v1.2.2's AppState
 //   wiring fires the foreground refresh on every app activation).
 //
 // LABEL FORMAT:
@@ -640,7 +640,7 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
       //  Build 48 — close the data-integrity gap.
       //  The PUT response body is the canonical post-write Member
       //  doc with the fresh server-stamped `last_seen`.  Upsert it
-      //  directly into the canonical store so Joyce's own phone
+      //  directly into the canonical store so the member's own phone
       //  re-renders her Member screen (and Leonidas re-evaluates
       //  her last upload age) with the EXACT same timestamp the
       //  backend just persisted — no waiting for the next /members

@@ -63,7 +63,7 @@ type PartialMember = {
 
 function member(overrides: PartialMember): any {
   return {
-    name: 'Joyce',
+    name: 'Test Member',
     last_seen: '2024-06-01T12:00:00.000Z',
     location_name: 'Bullhead City',
     ...overrides,
@@ -89,16 +89,16 @@ describe('memberStore — sequence-number race protection', () => {
     const id = 'member-1';
 
     // Step 1 — higher-seq result commits first (e.g. from requestRefresh polling)
-    upsertOne(member({ id, name: 'Joyce (fresh)', last_seen: '2024-06-01T12:01:00.000Z', location_name: 'Bullhead City' }), 10);
+    upsertOne(member({ id, name: 'Test Member (fresh)', last_seen: '2024-06-01T12:01:00.000Z', location_name: 'Bullhead City' }), 10);
 
     const afterHighSeq = getMemberById(id);
-    expect(afterHighSeq?.name).toBe('Joyce (fresh)');
+    expect(afterHighSeq?.name).toBe('Test Member (fresh)');
 
     // Step 2 — lower-seq fetchOne() response arrives later — must be dropped
-    upsertOne(member({ id, name: 'Joyce (stale)', last_seen: '2024-06-01T11:00:00.000Z', location_name: 'Stale Location' }), 5);
+    upsertOne(member({ id, name: 'Test Member (stale)', last_seen: '2024-06-01T11:00:00.000Z', location_name: 'Stale Location' }), 5);
 
     const stored = getMemberById(id);
-    expect(stored?.name).toBe('Joyce (fresh)');
+    expect(stored?.name).toBe('Test Member (fresh)');
     expect((stored as any)?.location_name).toBe('Bullhead City');
     expect(stored?.last_seen).toBe('2024-06-01T12:01:00.000Z');
   });
@@ -108,12 +108,12 @@ describe('memberStore — sequence-number race protection', () => {
   it('accepts a second upsertOne with the same seq number (idempotent retry)', () => {
     const id = 'member-1';
 
-    upsertOne(member({ id, name: 'Joyce (v1)', location_name: 'City A' }), 7);
-    upsertOne(member({ id, name: 'Joyce (v2)', location_name: 'City B' }), 7);
+    upsertOne(member({ id, name: 'Test Member (v1)', location_name: 'City A' }), 7);
+    upsertOne(member({ id, name: 'Test Member (v2)', location_name: 'City B' }), 7);
 
     // seq === fetchSeq[id] is NOT < cur, so the second write is accepted.
     const stored = getMemberById(id);
-    expect(stored?.name).toBe('Joyce (v2)');
+    expect(stored?.name).toBe('Test Member (v2)');
   });
 
   // ── 3. Higher-seq always wins regardless of wall-clock order ─────────────
@@ -122,13 +122,13 @@ describe('memberStore — sequence-number race protection', () => {
     const id = 'member-1';
 
     // Lower seq commits first (initial fetchOne)
-    upsertOne(member({ id, name: 'Joyce (initial)', location_name: 'Old City' }), 3);
+    upsertOne(member({ id, name: 'Test Member (initial)', location_name: 'Old City' }), 3);
 
     // Higher seq arrives later (newer refresh wins)
-    upsertOne(member({ id, name: 'Joyce (updated)', location_name: 'New City' }), 8);
+    upsertOne(member({ id, name: 'Test Member (updated)', location_name: 'New City' }), 8);
 
     const stored = getMemberById(id);
-    expect(stored?.name).toBe('Joyce (updated)');
+    expect(stored?.name).toBe('Test Member (updated)');
     expect((stored as any)?.location_name).toBe('New City');
   });
 
@@ -165,13 +165,13 @@ describe('memberStore — sequence-number race protection', () => {
     const id = 'member-1';
 
     // Set a high seq floor
-    upsertOne(member({ id, name: 'Joyce (fetched)', location_name: 'City A' }), 50);
+    upsertOne(member({ id, name: 'Test Member (fetched)', location_name: 'City A' }), 50);
 
     // Push notification bypasses the guard
-    upsertOne(member({ id, name: 'Joyce (push)', location_name: 'City B' }), null);
+    upsertOne(member({ id, name: 'Test Member (push)', location_name: 'City B' }), null);
 
     const stored = getMemberById(id);
-    expect(stored?.name).toBe('Joyce (push)');
+    expect(stored?.name).toBe('Test Member (push)');
     expect((stored as any)?.location_name).toBe('City B');
   });
 
@@ -183,16 +183,16 @@ describe('memberStore — sequence-number race protection', () => {
     const id = 'member-1';
 
     // Push a high seq before the sign-out
-    upsertOne(member({ id, name: 'Joyce (before)', location_name: 'Old City' }), 100);
+    upsertOne(member({ id, name: 'Test Member (before)', location_name: 'Old City' }), 100);
 
     // Sign-out
     clearAll();
 
     // After clearAll the seq floor is gone — even a seq=1 is accepted
-    upsertOne(member({ id, name: 'Joyce (after sign-in)', location_name: 'New City' }), 1);
+    upsertOne(member({ id, name: 'Test Member (after sign-in)', location_name: 'New City' }), 1);
 
     const stored = getMemberById(id);
-    expect(stored?.name).toBe('Joyce (after sign-in)');
+    expect(stored?.name).toBe('Test Member (after sign-in)');
     expect((stored as any)?.location_name).toBe('New City');
   });
 
@@ -207,15 +207,15 @@ describe('memberStore — sequence-number race protection', () => {
     const id = 'member-1';
 
     // Simulate fetchAll() / upsertMany arriving with seq = high number
-    upsertMany([member({ id, name: 'Joyce (batch)', location_name: 'Batch City' })]);
+    upsertMany([member({ id, name: 'Test Member (batch)', location_name: 'Batch City' })]);
 
     // Stale fetchOne(id) with a lower explicit seq — must be dropped.
     // NOTE: upsertMany sets fetchSeq[id] = nextSeq++ (a global counter, always ≥ 1).
     // We pass seq=0 which is guaranteed to be less than any real seq counter value.
-    upsertOne(member({ id, name: 'Joyce (stale single)', location_name: 'Stale City' }), 0);
+    upsertOne(member({ id, name: 'Test Member (stale single)', location_name: 'Stale City' }), 0);
 
     const stored = getMemberById(id);
-    expect(stored?.name).toBe('Joyce (batch)');
+    expect(stored?.name).toBe('Test Member (batch)');
     expect((stored as any)?.location_name).toBe('Batch City');
   });
 
@@ -251,14 +251,14 @@ describe('memberStore — sequence-number race protection', () => {
   it('getAllMembers reflects the higher-seq committed value after a stale drop', () => {
     const id = 'member-1';
 
-    upsertOne(member({ id, name: 'Joyce (fresh)', location_name: 'Bullhead City' }), 10);
-    upsertOne(member({ id, name: 'Joyce (stale)', location_name: 'Stale City'  }), 3);
+    upsertOne(member({ id, name: 'Test Member (fresh)', location_name: 'Bullhead City' }), 10);
+    upsertOne(member({ id, name: 'Test Member (stale)', location_name: 'Stale City'  }), 3);
 
     const all = getAllMembers();
     const found = all.find((m: any) => m.id === id);
 
     expect(found).toBeDefined();
-    expect(found?.name).toBe('Joyce (fresh)');
+    expect(found?.name).toBe('Test Member (fresh)');
     expect((found as any)?.location_name).toBe('Bullhead City');
   });
 });

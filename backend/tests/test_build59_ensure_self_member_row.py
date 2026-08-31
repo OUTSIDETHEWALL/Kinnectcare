@@ -49,7 +49,7 @@ async def db():
 
 # ---------- Helpers ----------
 
-def _mk_user(email="joiner@example.com", full_name="Joyce Miller"):
+def _mk_user(email="joiner@example.com", full_name="Test Member"):
     return {
         "id": str(uuid.uuid4()),
         "email": email,
@@ -66,7 +66,7 @@ def _mk_invite(inviter_id, group_id, relationship=None, role=None,
         "family_group_id": group_id,
         "invited_by_user_id": inviter_id,
         "inviter_name": "Charles",
-        "invitee_name": "Joyce Miller",
+        "invitee_name": "Test Member",
         "invitee_email": invitee_email,
         "relationship": relationship,
         "role": role,
@@ -94,7 +94,7 @@ async def test_existing_placeholder_is_preserved_not_clobbered(db):
         "user_id": user["id"],  # already bound by auto-bind heuristic
         "owner_id": caregiver_id,
         "family_group_id": group_id,
-        "name": "Joyce M.",  # caregiver typed a custom short name
+        "name": "Test Member",  # caregiver typed a custom short name
         "age": 78,            # caregiver filled in age
         "phone": "+15551234", # caregiver added phone
         "gender": "female",
@@ -108,7 +108,7 @@ async def test_existing_placeholder_is_preserved_not_clobbered(db):
     # Same doc returned — helper detected the existing bound row.
     assert result["id"] == placeholder["id"]
     # None of the pre-filled fields were clobbered.
-    assert result["name"] == "Joyce M."
+    assert result["name"] == "Test Member"
     assert result["age"] == 78
     assert result["phone"] == "+15551234"
     assert result["gender"] == "female"
@@ -129,7 +129,7 @@ async def test_no_placeholder_creates_fresh_row_with_invite_metadata(db):
     must insert a new row keyed to the joiner, pulling relationship
     and role from the invite so caregiver intent is preserved."""
     group_id = str(uuid.uuid4())
-    user = _mk_user(full_name="Joyce Miller")
+    user = _mk_user(full_name="Test Member")
     invite = _mk_invite(str(uuid.uuid4()), group_id,
                         relationship="Mom", role="senior")
 
@@ -138,7 +138,7 @@ async def test_no_placeholder_creates_fresh_row_with_invite_metadata(db):
     assert result["user_id"] == user["id"]
     assert result["owner_id"] == user["id"]  # joiner owns their own row
     assert result["family_group_id"] == group_id
-    assert result["name"] == "Joyce Miller"
+    assert result["name"] == "Test Member"
     assert result["role"] == "senior"           # from invite
     assert result["relationship"] == "Mom"      # from invite
     assert result["location_sharing_enabled"] is True
@@ -265,7 +265,7 @@ async def test_caregiver_and_invitee_members_query_returns_new_row(db):
     """
     group_id = str(uuid.uuid4())
     caregiver = _mk_user(email="care@example.com", full_name="Charles Smith")
-    invitee = _mk_user(email="joyce@example.com", full_name="Joyce Miller")
+    invitee = _mk_user(email="test-member@example.com", full_name="Test Member")
     invite = _mk_invite(caregiver["id"], group_id, role="senior")
 
     # Caregiver's own self-member row (as if they'd been in the app already).

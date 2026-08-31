@@ -161,7 +161,7 @@ export default function AddFamilyMember() {
               testID="invite-name-input"
               value={name}
               onChangeText={setName}
-              placeholder="e.g. Joyce Miller"
+              placeholder="e.g. Alex Miller"
               placeholderTextColor={Colors.textTertiary}
               style={styles.input}
               autoCapitalize="words"
@@ -174,7 +174,7 @@ export default function AddFamilyMember() {
               testID="invite-email-input"
               value={email}
               onChangeText={setEmail}
-              placeholder="e.g. joyce@example.com"
+              placeholder="e.g. alex@example.com"
               placeholderTextColor={Colors.textTertiary}
               style={styles.input}
               autoCapitalize="none"

@@ -131,13 +131,13 @@ class TestPathA_ExistingUserJoin:
         a_uid = a["user"]["id"]
         assert a_gid, "Caregiver A missing family_group_id"
 
-        # 2. Invite Joyce (User B)
+        # 2. Invite the test member (User B)
         b_email = f"test-b59h-b-{uuid.uuid4().hex[:8]}@example.com"
-        inv_token = _mint_invite(a, "Joyce", b_email,
+        inv_token = _mint_invite(a, "Test Member", b_email,
                                  relationship="Mom", role="senior")
 
         # 3. Sign up B WITHOUT invite_code (solo group)
-        b = _signup(b_email, "Joyce Miller")
+        b = _signup(b_email, "Test Member")
         b_uid = b["user"]["id"]
         b_solo_gid = b["user"]["family_group_id"]
         assert b_solo_gid and b_solo_gid != a_gid, \
@@ -153,24 +153,24 @@ class TestPathA_ExistingUserJoin:
         assert join_r.status_code == 200, \
             f"join failed: {join_r.status_code} {join_r.text}"
 
-        # 5. Immediately (NO restart) — A's /members must include Joyce row
+        # 5. Immediately (NO restart) — A's /members must include the test-member row
         a_members = _get_members(a)
-        joyce_rows = [
+        test_member_rows = [
             m for m in a_members
-            if m.get("user_id") == b_uid or m.get("name") == "Joyce Miller"
+            if m.get("user_id") == b_uid or m.get("name") == "Test Member"
         ]
-        assert len(joyce_rows) >= 1, \
+        assert len(test_member_rows) >= 1, \
             f"A's /members has no row for joiner. Members={a_members}"
-        # The name may come from full_name (Joyce Miller) since helper
-        # uses user.full_name, not the invite's invitee_name ("Joyce").
-        joyce = next(
+        # The name may come from full_name (Test Member) since helper
+        # uses user.full_name, not the invite's invitee_name ("Test Member").
+        test_member = next(
             (m for m in a_members if m.get("user_id") == b_uid), None
         )
-        assert joyce is not None, \
+        assert test_member is not None, \
             f"No members row with user_id={b_uid} for A. Members={a_members}"
-        assert joyce.get("family_group_id") == a_gid
-        assert joyce.get("role") == "senior", \
-            f"role should be from invite; got {joyce.get('role')}"
+        assert test_member.get("family_group_id") == a_gid
+        assert test_member.get("role") == "senior", \
+            f"role should be from invite; got {test_member.get('role')}"
         # DB-level check for `relationship` — the FamilyMember Pydantic
         # response model does NOT declare a `relationship` field, so it
         # is stripped from the API payload even though the helper
@@ -183,8 +183,8 @@ class TestPathA_ExistingUserJoin:
         assert db_row.get("relationship") == "Mom", \
             f"DB row missing relationship=Mom (helper broken): {db_row}"
         # Helper uses user.full_name for display
-        assert joyce.get("name") == "Joyce Miller", \
-            f"name should be joiner's full_name; got {joyce.get('name')!r}"
+        assert test_member.get("name") == "Test Member", \
+            f"name should be joiner's full_name; got {test_member.get('name')!r}"
 
         # 6. B's /members includes BOTH A's row AND B's own row.
         b_members = _get_members(b)
@@ -205,8 +205,8 @@ class TestPathA_ExistingUserJoin:
             f"expected 1 row for B in A's group, got {dupe_count}"
 
         # 8. location_sharing_enabled default = True on joiner's row
-        assert joyce.get("location_sharing_enabled") is True, \
-            f"joiner location_sharing_enabled should default True; got {joyce.get('location_sharing_enabled')}"
+        assert test_member.get("location_sharing_enabled") is True, \
+            f"joiner location_sharing_enabled should default True; got {test_member.get('location_sharing_enabled')}"
 
         # Test 3 — Idempotency: retry the same token
         retry = requests.post(

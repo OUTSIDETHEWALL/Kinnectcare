@@ -736,7 +736,7 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
             # — the rest get DuplicateKeyError and are skipped.  Without
             # this guard, every poll of /api/alerts or /api/summary from
             # every device in the family group fired its own duplicate
-            # push (see "Joyce missed check-in" 15× duplicate report).
+            # push (see duplicate missed-check-in reports).
             label = f"every {interval} hours"
             slot_key = f"interval_{last_due_utc.replace(microsecond=0).isoformat()}"
             a = Alert(
@@ -1281,7 +1281,7 @@ async def verify_otp(data: OtpVerify):
             doc["family_group_id"] = target_group["id"]
             doc["family_group_role"] = "member"
             # === Member-record auto-linkage ===
-            # When a caregiver pre-created a member row (e.g. "Joyce, 78")
+            # When a caregiver pre-created a member row (e.g. "Test Member, 78")
             # and later invited that person by email, the freshly-signed-up
             # user account is still NOT linked to the member row — the
             # `members.user_id` field stays null, blocking self-targeted
@@ -1535,7 +1535,7 @@ async def register_push_token(data: PushTokenRegister, current=Depends(get_curre
     Expo ROTATES tokens whenever the app is reinstalled, the dev/prod
     signature changes, or certain Android FCM-registration events fire.
     Over time `$addToSet` accumulated DIFFERENT tokens (Charles had 28,
-    Joyce had 5) — each one a "ghost" install that FCM still happily
+    the other user had 5) — each one a "ghost" install that FCM still happily
     delivered to.  Result: a single push fanned out 28×, causing the
     notification floods.  Replacing the array with [token] on every
     registration is the v6.7+ fix.  Side effect: only ONE device per
@@ -2759,7 +2759,7 @@ _REFRESH_PUSH_THROTTLE: dict = {}
 #
 # The user reported a "timestamp lie": Charles taps Refresh, spinner
 # runs ~30 s, server reports success, dashboard still shows "17 min
-# ago" — while Joyce's device reports "just now".  We need to be
+# ago" — while one device reports "just now".  We need to be
 # able to answer "for member X, what was the timing of:
 #   request_received -> push_sent -> gps_received -> ui_polled".
 # Without persistence we can only guess.
@@ -3170,7 +3170,7 @@ async def _ensure_alert_dedup_index():
     from every device in a family group (caregivers + senior + others)
     can ALL win the find-then-insert race against `detect_missed_checkins`
     and create N duplicate alerts, each of which fans out a push to every
-    family member.  Result: "Joyce missed check-in" appears 15+ times in
+    family member.  Result: a missed-check-in alert appears 15+ times in
     the same minute.
 
     The index is PARTIAL — only enforced on documents that carry a
@@ -3244,7 +3244,7 @@ async def _migrate_dedupe_push_tokens():
     Background: an earlier `$addToSet`-based registration path accumulated
     DIFFERENT-VALUED tokens whenever Expo rotated the token (which it does
     on app reinstall, dev/prod signature flip, or certain FCM events).
-    Real-world impact: Charles had 28 tokens, Joyce had 5 — every push
+    Real-world impact: one caregiver had 28 tokens, another user had 5 — every push
     fanned out to N ghosts, causing notification floods.
 
     This migration is conservative — it only DEDUPES exact duplicates

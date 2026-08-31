@@ -55,7 +55,7 @@ def _call(
     battery_level: float,
     was_alerted: bool = False,
     was_warn_alerted: bool = False,
-    name: str = "Joyce",
+    name: str = "Test Member",
     is_charging: Optional[bool] = None,
 ):
     """Invoke check_low_battery() with the given battery level and flag states.
@@ -126,7 +126,7 @@ class TestCriticalTrigger:
         assert doc["member_id"] == MEMBER_ID
         assert doc["family_group_id"] == FAMILY_GROUP_ID
         assert "14%" in doc["message"]
-        assert "Joyce" in doc["title"]
+        assert "Test Member" in doc["title"]
         assert "critically low" in doc["title"].lower()
 
     def test_push_sent(self, mock_db, mock_push):
@@ -179,7 +179,7 @@ class TestWarningTier:
         assert doc["type"] == "low_battery_warning"
         assert doc["severity"] == "warning"
         assert "19%" in doc["message"]
-        assert "Joyce" in doc["title"]
+        assert "Test Member" in doc["title"]
         assert "getting low" in doc["title"].lower()
 
     def test_warning_push_sent(self, mock_db, mock_push):
@@ -309,9 +309,9 @@ class TestRecovery:
         assert data_arg["member_id"] == MEMBER_ID
 
     def test_recovery_push_content(self, mock_db, mock_push):
-        _call(battery_level=0.26, was_alerted=True, was_warn_alerted=True, name="Joyce")
+        _call(battery_level=0.26, was_alerted=True, was_warn_alerted=True, name="Test Member")
         kwargs = mock_push.call_args[1]
-        assert "Joyce" in kwargs["title"]
+        assert "Test Member" in kwargs["title"]
         assert "charging" in kwargs["title"].lower()
         assert "26%" in kwargs["body"]
 

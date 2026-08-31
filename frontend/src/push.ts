@@ -78,7 +78,7 @@ export function subscribePushStatus(cb: (s: PushStatus) => void): () => void {
 
 // ---------- Push-token freshness tracking ----------
 //
-// v1.2.1 fix: Joyce's SOS deliveries were silently failing after
+// v1.2.1 fix: member SOS deliveries were silently failing after
 // extended idle periods (multi-day phone-on-charger overnight runs).
 // Root cause: Expo/FCM occasionally rotates the device push token,
 // AND the JS process can stay alive across days without any
@@ -184,7 +184,7 @@ export async function refreshPushTokenIfStale(reason: string): Promise<void> {
     lastPushTokenSyncAt = now;
 
     // Diagnostic log — capture every attempt (including no-ops) so
-    // we can confirm the refresh is firing on Joyce's device even
+    // we can confirm the refresh is firing on the member's device even
     // when nothing rotated.
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -345,7 +345,7 @@ async function ensureNotificationCategories() {
     // the endpoint accepts lat/lon as optional and gracefully omits
     // the location line from the caregiver confirmation.
     //
-    // NEED_HELP — opens the app so Joyce reaches the SOS flow.
+    // NEED_HELP — opens the app so the member reaches the SOS flow.
     await Notifications.setNotificationCategoryAsync('ARE_YOU_OK', [
       {
         identifier: 'IM_OK',
@@ -717,10 +717,10 @@ async function rePresentSticky(n: Notifications.Notification) {
 // Build XX — Auto-dismiss stale "Are You OK?" confirmation notifications.
 //
 // `are_you_ok_response` and `checkin` push notifications (the ✅ banner
-// Charles sees when Joyce confirms she's OK) are NOT in the rePresentSticky
+// a caregiver sees when the member confirms they're OK) are NOT in the rePresentSticky
 // allowlist, so they accumulate in the OS notification tray until manually
 // dismissed.  After a few days of check-ins, the tray fills with
-// "Joyce confirmed they are OK" entries that have long since served their purpose.
+// confirmation entries that have long since served their purpose.
 //
 // Two call sites:
 //   1. On each app foreground: dismisses notifications older than `maxAgeMs`
@@ -1068,7 +1068,7 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
 
       // "Are You OK?" action button taps.
       //
-      // IM_OK — silent path (opensAppToForeground: false).  Joyce never
+      // IM_OK — silent path (opensAppToForeground: false).  The member never
       // sees a screen — we call /respond directly here, dismiss the
       // notification, and let Charles's device receive the confirmation
       // push.  GPS is intentionally skipped: expo-location is unsafe in
@@ -1078,7 +1078,7 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
         await handleWelfareCheckAction(r).catch(() => {});
         return;
       }
-      // NEED_HELP — opens the app (opensAppToForeground: true) so Joyce
+      // NEED_HELP — opens the app (opensAppToForeground: true) so the member
       // can reach the SOS flow which requires foreground GPS + UI consent.
       if (actionId === 'NEED_HELP') {
         markNotificationConsumed(reqId);

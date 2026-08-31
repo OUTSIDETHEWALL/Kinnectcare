@@ -300,7 +300,7 @@ async def send_expo_push(
         # are true data-only wake-ups that never surface visually.
         #
         # Build 49's JS-side dismissNotificationAsync() only works when
-        # the JS runtime is alive to fire the listener.  On Joyce's
+        # the JS runtime is alive to fire the listener.  On the member's
         # phone during long idle periods (OS kills JS after 30-60 min of
         # background per audit P4), the notification arrives, the OS
         # draws the tray entry, and nothing dismisses it because there

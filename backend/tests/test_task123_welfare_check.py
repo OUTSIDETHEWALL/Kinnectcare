@@ -39,7 +39,7 @@ def test_caregiver_welfare_check_persists_request_and_sends_action_category():
         "id": MEMBER_ID,
         "family_group_id": FAMILY_ID,
         "user_id": MEMBER_USER_ID,
-        "name": "Joyce",
+        "name": "Test Member",
     })
     database.checkin_requests.insert_one = AsyncMock()
     database.users.find_one = AsyncMock(return_value={
@@ -81,7 +81,7 @@ def test_non_owner_cannot_send_welfare_check():
         "id": MEMBER_USER_ID,
         "family_group_id": FAMILY_ID,
         "family_group_role": "member",
-        "name": "Joyce",
+        "name": "Test Member",
     }
 
     with patch.object(server, "db", database):
@@ -122,7 +122,7 @@ def test_failed_response_write_releases_processing_claim_for_retry():
         "requester_id": CAREGIVER_ID,
         "requester_name": "Charles",
         "member_id": MEMBER_ID,
-        "member_name": "Joyce",
+        "member_name": "Test Member",
         "target_user_id": MEMBER_USER_ID,
         "status": "pending",
     }
@@ -138,14 +138,14 @@ def test_failed_response_write_releases_processing_claim_for_retry():
         "id": MEMBER_ID,
         "family_group_id": FAMILY_ID,
         "user_id": MEMBER_USER_ID,
-        "name": "Joyce",
+        "name": "Test Member",
     })
     database.checkins.insert_one = AsyncMock(side_effect=RuntimeError("mongo unavailable"))
     database.checkins.find_one = AsyncMock(return_value=None)
     current = {
         "id": MEMBER_USER_ID,
         "family_group_id": FAMILY_ID,
-        "name": "Joyce",
+        "name": "Test Member",
         "timezone": "UTC",
     }
 
@@ -169,7 +169,7 @@ def test_retry_after_partial_failure_reuses_canonical_checkin_without_duplicate_
         "requester_id": CAREGIVER_ID,
         "requester_name": "Charles",
         "member_id": MEMBER_ID,
-        "member_name": "Joyce",
+        "member_name": "Test Member",
         "target_user_id": MEMBER_USER_ID,
         "status": "pending",
     }
@@ -194,7 +194,7 @@ def test_retry_after_partial_failure_reuses_canonical_checkin_without_duplicate_
         "id": MEMBER_ID,
         "family_group_id": FAMILY_ID,
         "user_id": MEMBER_USER_ID,
-        "name": "Joyce",
+        "name": "Test Member",
     })
     database.checkins.insert_one = AsyncMock(side_effect=insert_once)
     database.checkins.find_one = AsyncMock(
@@ -210,7 +210,7 @@ def test_retry_after_partial_failure_reuses_canonical_checkin_without_duplicate_
     current = {
         "id": MEMBER_USER_ID,
         "family_group_id": FAMILY_ID,
-        "name": "Joyce",
+        "name": "Test Member",
         "timezone": "UTC",
     }
 
@@ -246,7 +246,7 @@ def test_repeated_notification_action_returns_original_checkin_without_duplicate
         "requester_id": CAREGIVER_ID,
         "requester_name": "Charles",
         "member_id": MEMBER_ID,
-        "member_name": "Joyce",
+        "member_name": "Test Member",
         "target_user_id": MEMBER_USER_ID,
         "status": "pending",
     }
@@ -267,7 +267,7 @@ def test_repeated_notification_action_returns_original_checkin_without_duplicate
         "id": MEMBER_ID,
         "family_group_id": FAMILY_ID,
         "user_id": MEMBER_USER_ID,
-        "name": "Joyce",
+        "name": "Test Member",
     })
     database.members.update_one = AsyncMock()
     database.alerts.update_many = AsyncMock()
@@ -279,7 +279,7 @@ def test_repeated_notification_action_returns_original_checkin_without_duplicate
     current = {
         "id": MEMBER_USER_ID,
         "family_group_id": FAMILY_ID,
-        "name": "Joyce",
+        "name": "Test Member",
         "timezone": "UTC",
     }
     body = server.CheckInCreate(member_id=MEMBER_ID)

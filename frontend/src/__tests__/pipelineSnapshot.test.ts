@@ -20,8 +20,8 @@ const fresh = { latitude: 35.1400, longitude: -114.5700 };
 
 function member(coords = fresh, overrides: Record<string, unknown> = {}): any {
   return {
-    id: 'joyce',
-    name: 'Joyce',
+    id: 'member-001',
+    name: 'Test Member',
     latitude: coords.latitude,
     longitude: coords.longitude,
     last_seen: '2026-08-28T18:00:01.000Z',
@@ -55,10 +55,10 @@ describe('stale-location pipeline snapshot', () => {
   it('emits one complete UI-stage smoking gun when the map renders the prior coordinate', async () => {
     const apiMember = stampMembersResponse([member()], Date.parse('2026-08-28T18:00:03Z'))[0];
     observeStoreCommit(apiMember, apiMember, member(old), Date.parse('2026-08-28T18:00:04Z'));
-    observeMapProps('joyce', fresh.latitude, fresh.longitude, Date.parse('2026-08-28T18:00:05Z'));
+    observeMapProps('member-001', fresh.latitude, fresh.longitude, Date.parse('2026-08-28T18:00:05Z'));
 
     const emitted = observeMapRendered(
-      'joyce', old.latitude, old.longitude, 'trace-1', Date.parse('2026-08-28T18:00:06Z'),
+      'member-001', old.latitude, old.longitude, 'trace-1', Date.parse('2026-08-28T18:00:06Z'),
     );
     expect(emitted).toMatchObject({
       kind: 'STALE_LOCATION_PIPELINE_SNAPSHOT',
@@ -73,7 +73,7 @@ describe('stale-location pipeline snapshot', () => {
     });
 
     // Same trace cannot create a second snapshot.
-    expect(observeMapRendered('joyce', old.latitude, old.longitude, 'trace-1')).toBeNull();
+    expect(observeMapRendered('member-001', old.latitude, old.longitude, 'trace-1')).toBeNull();
     const saved = await readPipelineSnapshots();
     expect(saved).toHaveLength(1);
     expect(saved[0].trace_id).toBe('trace-1');
@@ -82,20 +82,20 @@ describe('stale-location pipeline snapshot', () => {
   it('does not emit when the moving coordinate reaches the map', async () => {
     const m = member();
     observeStoreCommit(m, m, member(old));
-    observeMapProps('joyce', fresh.latitude, fresh.longitude);
-    expect(observeMapRendered('joyce', fresh.latitude, fresh.longitude, 'trace-1')).toBeNull();
+    observeMapProps('member-001', fresh.latitude, fresh.longitude);
+    expect(observeMapRendered('member-001', fresh.latitude, fresh.longitude, 'trace-1')).toBeNull();
     expect(await readPipelineSnapshots()).toEqual([]);
   });
 
   it('does not reopen a completed moving trace when the same API record is fetched again', async () => {
     const m = member();
     observeStoreCommit(m, m, member(old));
-    observeMapProps('joyce', fresh.latitude, fresh.longitude);
-    expect(observeMapRendered('joyce', fresh.latitude, fresh.longitude, 'trace-1')).toBeNull();
+    observeMapProps('member-001', fresh.latitude, fresh.longitude);
+    expect(observeMapRendered('member-001', fresh.latitude, fresh.longitude, 'trace-1')).toBeNull();
 
     observeStoreCommit(m, m, m);
-    observeMapProps('joyce', fresh.latitude, fresh.longitude);
-    expect(observeMapRendered('joyce', fresh.latitude, fresh.longitude, 'trace-1')).toBeNull();
+    observeMapProps('member-001', fresh.latitude, fresh.longitude);
+    expect(observeMapRendered('member-001', fresh.latitude, fresh.longitude, 'trace-1')).toBeNull();
     expect(await readPipelineSnapshots()).toEqual([]);
   });
 
@@ -103,8 +103,8 @@ describe('stale-location pipeline snapshot', () => {
     const apiMember = member();
     const staleStore = member(old);
     observeStoreCommit(apiMember, staleStore, member(old));
-    observeMapProps('joyce', old.latitude, old.longitude);
-    const emitted = observeMapRendered('joyce', old.latitude, old.longitude, 'trace-1');
+    observeMapProps('member-001', old.latitude, old.longitude);
+    const emitted = observeMapRendered('member-001', old.latitude, old.longitude, 'trace-1');
     expect(emitted?.failure_stage).toBe('store');
   });
 
@@ -120,8 +120,8 @@ describe('stale-location pipeline snapshot', () => {
       },
     });
     observeStoreCommit(noProgress, noProgress, member(old));
-    observeMapProps('joyce', old.latitude, old.longitude);
-    const emitted = observeMapRendered('joyce', old.latitude, old.longitude, 'trace-device');
+    observeMapProps('member-001', old.latitude, old.longitude);
+    const emitted = observeMapRendered('member-001', old.latitude, old.longitude, 'trace-device');
     expect(emitted?.failure_stage).toBe('device');
     expect(emitted?.trigger).toBe('speed_over_5_mph');
   });
@@ -129,8 +129,8 @@ describe('stale-location pipeline snapshot', () => {
   it('ignores a delayed acknowledgement from an older map generation', async () => {
     const m = member();
     observeStoreCommit(m, m, member(old));
-    observeMapProps('joyce', fresh.latitude, fresh.longitude);
-    expect(observeMapRendered('joyce', old.latitude, old.longitude, 'older-trace')).toBeNull();
+    observeMapProps('member-001', fresh.latitude, fresh.longitude);
+    expect(observeMapRendered('member-001', old.latitude, old.longitude, 'older-trace')).toBeNull();
     expect(await readPipelineSnapshots()).toEqual([]);
   });
 });

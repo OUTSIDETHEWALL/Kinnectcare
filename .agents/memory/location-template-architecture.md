@@ -28,7 +28,7 @@ compatibility during the OTA rollout window.
 top-level fields the rest of the handler reads:
 
 - **Coordinates:** `coords.latitude` / `coords.longitude` → `latitude` / `longitude`
-  (Build 50, unchanged)
+  (unchanged)
 - **Battery:** `battery.level` → `battery_level`, `battery.is_charging` → `is_charging`
   (added alongside locationTemplate removal)
 
@@ -47,7 +47,7 @@ Two reasons, neither battery-related:
 
 `locationTemplate` replaces the SDK's entire HTTP payload. Any template variable that
 is undefined (not null) in the SDK's render context produces invalid JSON and causes
-the upload to be silently dropped. PR #65 (battery fields in template) triggered this
+the upload to be silently dropped. Adding battery fields to the template exposed this
 failure mode and stopped all background uploads. The native payload has no render step
 and no failure surface of this kind.
 

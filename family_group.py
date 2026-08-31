@@ -514,7 +514,7 @@ def build_router(
             {
               "valid": true,
               "family_name": "Smith Family",
-              "inviter_name": "Joyce",        # null for KINN- codes
+              "inviter_name": "Family Member", # null for KINN- codes
               "invitee_email": "char@x.com",  # null for KINN- codes
               "code_type": "per-invite" | "family-wide",
             }

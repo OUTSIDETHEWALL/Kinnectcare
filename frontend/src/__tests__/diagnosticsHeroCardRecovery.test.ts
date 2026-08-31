@@ -86,7 +86,7 @@ describe('Diagnostics hero card — failure-burst then pipelineTs recovery', () 
 
   // ── 1. Core scenario: ring buffer full of failures + recent pipelineTs ──────
   //
-  // Joyce's phone goes into airplane mode for ~10 minutes.  The Transistor SDK
+  // The test member's phone goes into airplane mode for ~10 minutes.  The Transistor SDK
   // keeps retrying; each retry fires sdk_onHttp(success=false).  After ~50
   // failures the ring buffer is saturated and the last successful sdk_onHttp
   // entry has been evicted.

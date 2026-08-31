@@ -121,7 +121,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       //   (b) successfully called /auth/me (online path), OR
       //   (c) confirmed the token is invalid via a 401 from /auth/me.
       // Any earlier loading=false would flash the welcome screen
-      // through to the user — the exact bug Joyce + Charles saw on
+      // through to the user — the exact bug the caregiver and member saw on
       // notification tap.
       const cachedUser = await readUserCache();
       if (cachedUser) {

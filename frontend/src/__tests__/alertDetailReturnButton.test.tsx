@@ -24,6 +24,8 @@
 
 // ── Native-module mocks (before imports) ─────────────────────────────────────
 
+let mockAppStateChangeHandler: ((nextState: string) => void) | null = null;
+
 jest.mock('react-native', () => {
   const React = require('react');
 
@@ -49,7 +51,16 @@ jest.mock('react-native', () => {
     Alert: { alert: jest.fn() },
     Linking: { openURL: jest.fn(() => Promise.resolve()) },
     AppState: {
-      addEventListener: jest.fn(() => ({ remove: jest.fn() })),
+      addEventListener: jest.fn((_event: string, handler: (nextState: string) => void) => {
+        mockAppStateChangeHandler = handler;
+        return {
+          remove: jest.fn(() => {
+            if (mockAppStateChangeHandler === handler) {
+              mockAppStateChangeHandler = null;
+            }
+          }),
+        };
+      }),
       currentState: 'active',
     },
   };
@@ -96,7 +107,7 @@ jest.mock('../theme', () => ({
 jest.mock('../store/memberStore', () => ({
   useMember: () => ({
     id: 'member-001',
-    name: 'Joyce Doe',
+    name: 'Test Member',
     latitude: 33.45,
     longitude: -112.07,
     last_seen: new Date(Date.now() - 30_000).toISOString(),
@@ -147,11 +158,11 @@ function makeSosAlert(overrides: Record<string, unknown> = {}) {
   return {
     id: 'sos-alert-001',
     member_id: 'member-001',
-    member_name: 'Joyce Doe',
+    member_name: 'Test Member',
     type: 'sos',
     severity: 'critical',
-    title: "Joyce's SOS",
-    message: "Joyce triggered an SOS.",
+    title: "Test Member's SOS",
+    message: "Test Member triggered an SOS.",
     acknowledged: false,
     resolved: false,
     resolved_by_name: null,
@@ -207,6 +218,7 @@ async function renderAlertDetail(
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockAppStateChangeHandler = null;
   jest.useFakeTimers();
 });
 
@@ -352,6 +364,30 @@ describe('AlertDetail — breadcrumb removal & Return to Dashboard button', () =
     expect(mockRouterReplace).toHaveBeenCalledTimes(1);
     expect(mockRouterReplace).toHaveBeenCalledWith('/(tabs)/dashboard');
     expect(RNAlert.alert).not.toHaveBeenCalled();
+  });
+
+  it('keeps the active-SOS return button tappable after backgrounding and resuming', async () => {
+    const renderer = await renderAlertDetail([makeSosAlert()]);
+    const buttonBeforeResume = findByTestID(renderer.root, 'alert-back');
+    expect(buttonBeforeResume).not.toBeNull();
+    expect(mockAppStateChangeHandler).not.toBeNull();
+
+    await act(async () => {
+      mockAppStateChangeHandler?.('background');
+      mockAppStateChangeHandler?.('active');
+      await Promise.resolve();
+    });
+
+    const buttonAfterResume = findByTestID(renderer.root, 'alert-back');
+    expect(buttonAfterResume).not.toBeNull();
+    expect(buttonAfterResume?.props.disabled).not.toBe(true);
+
+    await act(async () => {
+      buttonAfterResume?.props.onPress();
+    });
+
+    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
+    expect(mockRouterReplace).toHaveBeenCalledWith('/(tabs)/dashboard');
   });
 
   // ── 6. Button wrapper style is a full-width block (not an inline link) ──────

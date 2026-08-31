@@ -156,6 +156,61 @@ function applyHttpSuccessUpdate(
   return { ...prev, http_success: httpSuccessMs };
 }
 
+// ─── Three-state fresh-install sequence ─────────────────────────────────────
+//
+// A fresh install has an intentional intermediate state between "nothing has
+// happened yet" and "the first upload succeeded":
+//   starting → heartbeat received → warn → upload confirmed → ok
+//
+// Keep this sequence separate from the broader timing and state-refresh tests
+// below so a future change to the heartbeat fallback cannot silently remove
+// the amber state caregivers see during startup.
+describe('Fresh-install hero card three-state sequence — starting → warn → ok', () => {
+  beforeEach(() => { seq = 0; });
+
+  const T_INSTALL = 20_000_000;
+
+  it('shows starting when a fresh install has no heartbeat and no upload', () => {
+    const result = heroCard([], T_INSTALL, null, null);
+
+    expect(result.level).toBe('starting');
+  });
+
+  it('shows warn, not starting or error, after the first heartbeat but before the first upload', () => {
+    const heartbeatAt = T_INSTALL + 60_000;
+    const log = [makeEvent('sdk_onHeartbeat', heartbeatAt)];
+    const result = heroCard(log, heartbeatAt + 1_000, null, null);
+
+    expect(result.level).toBe('warn');
+    expect(result.level).not.toBe('starting');
+    expect(result.level).not.toBe('error');
+    expect(heroTheme[result.level].bg).toBe('#FFFBEB');
+    // This is the prominent copy rendered by the hero card; it must not
+    // regress to the red "monitoring stopped" message.
+    expect(result.headline).toBe('Engine running, no upload confirmed yet');
+    expect(result.subline).toContain('upload confirmation expected');
+    expect(result.subline).not.toMatch(/stopped|error|permission/i);
+  });
+
+  it('shows ok after the first heartbeat is followed by the first upload', () => {
+    const heartbeatAt = T_INSTALL + 60_000;
+    const uploadAt = heartbeatAt + 30_000;
+    const log = [
+      makeEvent('sdk_onHeartbeat', heartbeatAt),
+      makeEvent('sdk_onHttp', uploadAt, { success: true }),
+    ];
+    const result = heroCard(
+      log,
+      uploadAt + 1_000,
+      null,
+      firstUploadPipelineTs(uploadAt),
+    );
+
+    expect(result.level).toBe('ok');
+    expect(result.headline).toMatch(/healthy/i);
+  });
+});
+
 // ─── Suite ───────────────────────────────────────────────────────────────────
 
 describe('Fresh-install hero card startup — starting → ok within 5 minutes', () => {
@@ -261,6 +316,54 @@ describe('Fresh-install hero card startup — starting → ok within 5 minutes',
     expect(result.subline).toMatch(/ago/);
     // Must NOT fall back to the starting-up copy
     expect(result.subline).not.toMatch(/Waiting for first/i);
+  });
+
+  // ── Clock-skew tolerance ──────────────────────────────────────────────────
+  //
+  // A timestamp can briefly be ahead of nowTick if the device clock changes
+  // between recordPipelineTs() and the Diagnostics interval tick.  Small
+  // bounded skew should keep the hero green, while a larger future jump must
+  // not be treated as upload evidence.
+
+  it.each([1, 3, 5])(
+    'Clock skew: keeps the hero green when pipelineTs.http_success is %i second(s) in the future',
+    (secondsAhead) => {
+      const nowTick = T_INSTALL + 2 * 60_000;
+      const futureUploadTs = nowTick + secondsAhead * 1_000;
+      const pipelineTs = firstUploadPipelineTs(futureUploadTs);
+
+      const result = heroCard([], nowTick, null, pipelineTs);
+
+      expect(result.level).toBe('ok');
+      expect(result.uploadAgeMs).toBe(0);
+      expect(heroTheme[result.level].bg).toBe('#ECFDF5');
+    },
+  );
+
+  it('Clock skew: stays green when the next 1-second tick catches up with the timestamp', () => {
+    const nowTick = T_INSTALL + 2 * 60_000;
+    const uploadTs = nowTick + 1_000;
+    const pipelineTs = firstUploadPipelineTs(uploadTs);
+
+    const beforeCatchUp = heroCard([], nowTick, null, pipelineTs);
+    expect(beforeCatchUp.level).toBe('ok');
+    expect(beforeCatchUp.uploadAgeMs).toBe(0);
+
+    const afterCatchUp = heroCard([], nowTick + 1_000, null, pipelineTs);
+    expect(afterCatchUp.level).toBe('ok');
+    expect(afterCatchUp.uploadAgeMs).toBe(0);
+    expect(heroTheme[afterCatchUp.level].bg).toBe('#ECFDF5');
+  });
+
+  it('Clock skew: rejects a timestamp more than 5 seconds ahead and remains starting', () => {
+    const nowTick = T_INSTALL + 2 * 60_000;
+    const pipelineTs = firstUploadPipelineTs(nowTick + 6_000);
+
+    const result = heroCard([], nowTick, null, pipelineTs);
+
+    expect(result.level).toBe('starting');
+    expect(result.uploadAgeMs).toBeNull();
+    expect(heroTheme[result.level].bg).toBe('#F9FAFB');
   });
 
   // ── pipelineTs state refresh — the real update path ──────────────────────

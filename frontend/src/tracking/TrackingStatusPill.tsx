@@ -268,7 +268,7 @@ export function TrackingStatusPill({
   const textStyle = size === 'compact' ? styles.labelCompact : styles.label;
 
   // Build 53 — temporary decision log.  Records pill inputs + outcome
-  // so we can post-mortem "why was this green when Joyce was stale?"
+  // so we can post-mortem "why was this green when a member was stale?"
   // Only fires when inputs change (not on every 20-s auto-tick).
   useEffect(() => {
     const ageMs = lastSeenIso ? Date.now() - new Date(lastSeenIso).getTime() : null;

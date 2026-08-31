@@ -19,7 +19,7 @@
  *      then fired `requestMemberRefresh()` (i.e. they failed the
  *      60-s freshness threshold and the dashboard kicked off a
  *      silent push to the device).  This documents the link between
- *      Joyce's per-minute "K" notifications and Charles's stale
+ *      the member's per-minute "K" notifications and the caregiver's stale
  *      view.
  *
  * Buffer persists to AsyncStorage so it survives app kill / restart

@@ -87,7 +87,7 @@ class TestMemberWithPhone:
     def test_member_phone_written_to_alert(self, mock_db, mock_push):
         prev_doc = {
             "low_battery_alerted": False,
-            "name": "Joyce",
+            "name": "Test Member",
             "phone": MEMBER_PHONE,
         }
         _call(battery_level=0.10, prev_doc=prev_doc)
@@ -101,7 +101,7 @@ class TestMemberWithPhone:
     def test_member_phone_exact_value_preserved(self, mock_db, mock_push):
         """No reformatting: the raw phone string stored on the member is passed through."""
         raw_phone = "602-555-0100"
-        prev_doc = {"low_battery_alerted": False, "name": "Joyce", "phone": raw_phone}
+        prev_doc = {"low_battery_alerted": False, "name": "Test Member", "phone": raw_phone}
         _call(battery_level=0.10, prev_doc=prev_doc)
 
         doc = mock_db.alerts.insert_one.call_args[0][0]
@@ -109,7 +109,7 @@ class TestMemberWithPhone:
 
     def test_alert_type_is_low_battery(self, mock_db, mock_push):
         """Sanity: type must be 'low_battery' so the frontend guard matches."""
-        prev_doc = {"low_battery_alerted": False, "name": "Joyce", "phone": MEMBER_PHONE}
+        prev_doc = {"low_battery_alerted": False, "name": "Test Member", "phone": MEMBER_PHONE}
         _call(battery_level=0.10, prev_doc=prev_doc)
 
         doc = mock_db.alerts.insert_one.call_args[0][0]
@@ -123,7 +123,7 @@ class TestMemberWithoutPhone:
     hides the Call button (the guard is: type==='low_battery' && !!member_phone)."""
 
     def test_member_phone_is_none_when_absent(self, mock_db, mock_push):
-        prev_doc = {"low_battery_alerted": False, "name": "Joyce"}  # no 'phone' key
+        prev_doc = {"low_battery_alerted": False, "name": "Test Member"}  # no 'phone' key
         _call(battery_level=0.10, prev_doc=prev_doc)
 
         mock_db.alerts.insert_one.assert_called_once()
@@ -135,7 +135,7 @@ class TestMemberWithoutPhone:
 
     def test_empty_string_phone_treated_as_none(self, mock_db, mock_push):
         """An empty-string phone is indistinguishable from no phone — must be stored as None."""
-        prev_doc = {"low_battery_alerted": False, "name": "Joyce", "phone": ""}
+        prev_doc = {"low_battery_alerted": False, "name": "Test Member", "phone": ""}
         _call(battery_level=0.10, prev_doc=prev_doc)
 
         doc = mock_db.alerts.insert_one.call_args[0][0]
@@ -146,7 +146,7 @@ class TestMemberWithoutPhone:
 
     def test_no_phone_still_creates_alert(self, mock_db, mock_push):
         """Missing phone must not block alert creation — just hide the Call button."""
-        prev_doc = {"low_battery_alerted": False, "name": "Joyce"}
+        prev_doc = {"low_battery_alerted": False, "name": "Test Member"}
         result = _call(battery_level=0.10, prev_doc=prev_doc)
         mock_db.alerts.insert_one.assert_called_once()
         assert result == {"low_battery_alerted": True}
@@ -167,26 +167,26 @@ class TestFrontendGuardCondition:
         return doc.get("type") == "low_battery" and bool(doc.get("member_phone"))
 
     def test_call_button_shown_for_member_with_phone(self, mock_db, mock_push):
-        prev_doc = {"low_battery_alerted": False, "name": "Joyce", "phone": MEMBER_PHONE}
+        prev_doc = {"low_battery_alerted": False, "name": "Test Member", "phone": MEMBER_PHONE}
         _call(battery_level=0.10, prev_doc=prev_doc)
         doc = mock_db.alerts.insert_one.call_args[0][0]
         assert self._would_show_call_button(doc) is True
 
     def test_call_button_hidden_for_member_without_phone(self, mock_db, mock_push):
-        prev_doc = {"low_battery_alerted": False, "name": "Joyce"}
+        prev_doc = {"low_battery_alerted": False, "name": "Test Member"}
         _call(battery_level=0.10, prev_doc=prev_doc)
         doc = mock_db.alerts.insert_one.call_args[0][0]
         assert self._would_show_call_button(doc) is False
 
     def test_call_button_hidden_for_empty_string_phone(self, mock_db, mock_push):
-        prev_doc = {"low_battery_alerted": False, "name": "Joyce", "phone": ""}
+        prev_doc = {"low_battery_alerted": False, "name": "Test Member", "phone": ""}
         _call(battery_level=0.10, prev_doc=prev_doc)
         doc = mock_db.alerts.insert_one.call_args[0][0]
         assert self._would_show_call_button(doc) is False
 
     def test_tel_url_construction_matches_phone(self, mock_db, mock_push):
         """The tel: URL the frontend will open must use the exact stored phone value."""
-        prev_doc = {"low_battery_alerted": False, "name": "Joyce", "phone": MEMBER_PHONE}
+        prev_doc = {"low_battery_alerted": False, "name": "Test Member", "phone": MEMBER_PHONE}
         _call(battery_level=0.10, prev_doc=prev_doc)
         doc = mock_db.alerts.insert_one.call_args[0][0]
         tel_url = f"tel:{doc['member_phone']}"

@@ -29,7 +29,7 @@ data that arrives via PUT /location — not sufficient on its own (see write-gua
 `_batt_incoming_ts = incoming_captured_at or server_now` — **unchanged from original**.
 
 A speculative change to `server_now` was proposed (theory: GPS clock lag causes write-guard
-false rejections) but reverted at Charles's request — no concrete log evidence of actual
+false rejections) but rejected for lack of concrete log evidence of actual
 rejections in production. If Railway logs ever show `battery_updated_at` NOT advancing on
 PUT /location payloads that carry valid battery data, that is the evidence needed to revisit
 using `server_now` here. Until then, leave the guard logic alone.
@@ -44,7 +44,7 @@ that check fires only on freshly confirmed low battery).
 ## What NOT to do
 
 Do not add `locationTemplate` to the SDK config. It was removed because any undefined
-template variable produces invalid JSON and silently drops the entire upload. PR #65
+template variable produces invalid JSON and silently drops the entire upload.
 triggered this and stopped all background uploads. See `location-template-architecture.md`.
 
 ## Root cause of the 19-hour battery disappearance bug
@@ -55,4 +55,4 @@ triggered this and stopped all background uploads. See `location-template-archit
    write-guard (GPS clock lag vs wall-clock PATCH timestamp)
 4. `battery_updated_at` stopped advancing → dashboard hid battery after 15-minute threshold
 
-All three layers were fixed simultaneously in PR #92.
+All three layers must stay aligned whenever battery handling changes.

@@ -1,8 +1,8 @@
-- [Kinnship engineering rules](kinnship-engineering-rules.md) — Charles's non-negotiable process rules, git workflow, and force-push policy for this project.
+- [Kinnship engineering rules](kinnship-engineering-rules.md) — non-negotiable evidence, PR, approval, and force-push rules for this project.
 - [EAS Update env var requirement](eas-update-env-vars.md) — EXPO_PUBLIC_* vars must be in the shell env for eas update; eas.json build env section does NOT apply. Missing var = "undefined/api" baseURL = Network Error on all devices.
 - [Notification explainability rule](notification-explainability-rule.md) — permanent rule: every notification must answer 5 questions (why sent, who, why visible, why then, why once); applies at PR review for all push-related files.
-- [GPS capture timestamp guard](location-timestamp-guard.md) — Build 60: atomic MongoDB $lt guard prevents SDK buffer-replay from overwriting current location; last_seen always written for Leonidas.
-- [Motion Timeline instrumentation](motion-timeline-instrumentation.md) — Build 64: onActivityChange listener + sdk_config_snapshot added; Motion Timeline section in Diagnostics.
+- [GPS capture timestamp guard](location-timestamp-guard.md) — atomic MongoDB $lt guard prevents SDK buffer replay from overwriting current location.
+- [Motion Timeline instrumentation](motion-timeline-instrumentation.md) — trace Android motion evidence through activity, recovery, GPS, and upload stages.
 - [Geocoding architecture decision](geocoding-architecture-decision.md) — backend geocoding LIVE in production (flag_enabled=True, dedicated Railway key); Stage 2 scope and logging quirk documented.
 - [Native module OTA rule](native-module-ota-rule.md) — top-level import of a package with native code in an OTA-only update crashes the bundle at module-eval time; Expo rollback does NOT save you.
 - [Replit yarn.lock proxy contamination](replit-yarn-proxy.md) — Replit env vars poison yarn.lock resolved: URLs; fix is `yarn build:android` (never raw `eas build`); scripts/normalize-lockfile.sh.
@@ -10,7 +10,7 @@
 - [locationTemplate architecture decision](location-template-architecture.md) — agreed post-beta plan: remove locationTemplate, consume SDK native payload; battery comes free; no template variables needed.
 - [PR verification rule](pr-verification-rule.md) — always curl-verify the PR URL returns 200 before reporting it; createPullRequest() success text is not enough.
 - [Battery subsystem architecture](battery-subsystem-architecture.md) — two-path (headless + WorkManager); type guard fix; never use typeof===boolean for SDK values; react-native-background-fetch chosen over expo-background-task (already native-linked).
-- [Git push in Replit](git-push-replit.md) — Replit's git credential helper times out; git push only works with GITHUB_PAT secret + x-access-token URL scheme; main branch is protected (no force-push).
+- [Git push in Replit](git-push-replit.md) — use the PAT when valid, otherwise the GitHub connector; never expose credentials or force-push without approval.
 - [GitHub connector source uploads](github-connector-source-uploads.md) — connector blob uploads may WAF-block embedded literal script tags; Base64 alone may not bypass inspection.
 - [Railway entrypoint parity](railway-entrypoint-parity.md) — root and backend Railway entrypoints can drift; security fixes must cover both until deployment is consolidated.
 - [Active Railway backend](active-railway-backend.md) — production serves the `backend/` tree; the root backend copy is stale and can mislead release reviews.

@@ -138,7 +138,7 @@ export default function MemberDetail() {
 
     // v1.2.7 — same freshness pattern as the Dashboard tab.  Until
     // this OTA the Member detail screen only reloaded on focus.  If
-    // Charles opened Joyce's detail and stayed there for an hour
+    // A caregiver opened a member's detail and stayed there for an hour
     // while she drove, MemberMap would render her cold-start
     // coordinates the whole time — no polling, no AppState refetch.
     // Three triggers, all gated to this screen being focused so we

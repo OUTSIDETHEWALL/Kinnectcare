@@ -2,7 +2,7 @@
  * v1.2.8 — Read-path render-trace.
  *
  * Purpose: prove which of these three is happening when Charles sees
- * Joyce stuck at home despite a healthy backend:
+ * A member stuck at home despite a healthy backend:
  *
  *   A) API returned fresh coords but the WebView still paints the
  *      old marker.  -> we'll see a `dashboard-fetch` or
