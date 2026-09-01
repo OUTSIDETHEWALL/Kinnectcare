@@ -885,10 +885,28 @@ export default function Dashboard() {
 
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Your Family</Text>
-          <TouchableOpacity testID="add-member-btn" onPress={() => router.push('/add-member')} style={styles.addBtn}>
+          <View style={styles.familyActions}>
+            <TouchableOpacity
+              testID="manage-family-btn"
+              onPress={() => router.push('/family-group')}
+              style={styles.addBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Manage family"
+            >
+              <Icon name="people" size={16} color={Colors.primary} />
+              <Text style={styles.addBtnText}>Manage</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="add-member-btn"
+              onPress={() => router.push('/add-member')}
+              style={styles.addBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Add family member"
+            >
               <Icon name="add" size={16} color={Colors.primary} />
               <Text style={styles.addBtnText}>Add</Text>
             </TouchableOpacity>
+          </View>
         </View>
 
         {seniors.length > 0 && <Text style={styles.subSection}>👴 Seniors</Text>}
@@ -1396,6 +1414,7 @@ const styles = StyleSheet.create({
   summaryDivider: { width: 1, height: 36, backgroundColor: Colors.border },
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginHorizontal: 24, marginTop: 28, marginBottom: 8 },
   sectionTitle: { fontSize: 20, fontWeight: '700', color: Colors.textPrimary },
+  familyActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   addBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: Colors.tertiary, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, gap: 4 },
   addBtnText: { color: Colors.primary, fontWeight: '700' },
   subSection: { fontSize: 13, fontWeight: '700', color: Colors.textTertiary, marginHorizontal: 24, marginTop: 14, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.6 },

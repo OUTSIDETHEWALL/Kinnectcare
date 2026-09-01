@@ -17,9 +17,12 @@ describe('family account removal flow', () => {
   });
 
   test('the family management screen uses the account membership endpoint', () => {
+    const dashboard = source('app/(tabs)/dashboard.tsx');
     const familyScreen = source('app/family-group.tsx');
     const apiSource = source('src/api.ts');
 
+    expect(dashboard).toContain("router.push('/family-group')");
+    expect(familyScreen).toContain('Remove from Family');
     expect(familyScreen).toContain('await removeFamilyMember(m.user_id);');
     expect(familyScreen).toContain("Alert.alert('Error'");
     expect(apiSource).toContain(
