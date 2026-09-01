@@ -412,8 +412,10 @@ export default function FamilyGroupScreen() {
                         onPress={() => confirmRemove(m)}
                         testID={`fg-remove-${m.user_id}`}
                         hitSlop={10}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Remove ${m.full_name} from Family`}
                       >
-                        <Text style={styles.removeTxt}>Remove</Text>
+                        <Text style={styles.removeTxt}>Remove from Family</Text>
                       </TouchableOpacity>
                     ) : null}
                   </View>
