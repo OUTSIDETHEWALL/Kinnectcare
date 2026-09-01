@@ -22,6 +22,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const KEY = '@kinnship/pending_invite_v1';
+const CONSUMED_KEY = '@kinnship/consumed_invites_v1';
 
 export type PendingInvite = {
   token: string;
@@ -35,6 +36,7 @@ const MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 export async function setPendingInvite(token: string): Promise<void> {
   const t = (token || '').trim().toUpperCase();
   if (!t) return;
+  if (await isInviteConsumed(t)) return;
   const payload: PendingInvite = { token: t, savedAt: new Date().toISOString() };
   try {
     await AsyncStorage.setItem(KEY, JSON.stringify(payload));
@@ -65,4 +67,33 @@ export async function clearPendingInvite(): Promise<void> {
   try {
     await AsyncStorage.removeItem(KEY);
   } catch (_e) { /* non-fatal */ }
+}
+
+/**
+ * Android may redeliver the original invite launch Intent after a reboot.
+ * Clearing the pending token alone cannot distinguish that replay from a
+ * new invite, so successful acceptance records the consumed token separately.
+ */
+export async function markInviteConsumed(token: string): Promise<void> {
+  const t = (token || '').trim().toUpperCase();
+  if (!t) return;
+  const raw = await AsyncStorage.getItem(CONSUMED_KEY);
+  const current: Record<string, number> = raw ? JSON.parse(raw) : {};
+  current[t] = Date.now();
+  const entries = Object.entries(current)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 50);
+  await AsyncStorage.setItem(CONSUMED_KEY, JSON.stringify(Object.fromEntries(entries)));
+}
+
+export async function isInviteConsumed(token: string): Promise<boolean> {
+  const t = (token || '').trim().toUpperCase();
+  if (!t) return false;
+  try {
+    const raw = await AsyncStorage.getItem(CONSUMED_KEY);
+    const current: Record<string, number> = raw ? JSON.parse(raw) : {};
+    return Number.isFinite(current[t]);
+  } catch (_e) {
+    return false;
+  }
 }

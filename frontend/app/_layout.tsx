@@ -30,7 +30,11 @@ import {
 } from '../src/disclaimerStore';
 import { logResumeDecision, isAlertDismissed } from '../src/resumeDiagnostics';
 import { setActiveEmergency } from '../src/activeEmergency';
-import { setPendingInvite, clearPendingInvite, getPendingInvite } from '../src/pendingInvite';
+import {
+  setPendingInvite,
+  getPendingInvite,
+  isInviteConsumed,
+} from '../src/pendingInvite';
 import { isPermissionsHandled } from '../src/permissionsStore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -220,6 +224,10 @@ function RootNav() {
     const consumeInviteUrl = async (url: string | null) => {
       const token = extractInviteToken(url);
       if (!token) return;
+      if (await isInviteConsumed(token)) {
+        console.info('[invite-accept] consumed_launch_ignored');
+        return;
+      }
       // Persist first — the safest thing we can do.  Everything below
       // is best-effort.
       await setPendingInvite(token);
