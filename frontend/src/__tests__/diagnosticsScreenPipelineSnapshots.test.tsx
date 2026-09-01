@@ -8,6 +8,24 @@
 
 const mockReadPipelineSnapshots = jest.fn<Promise<unknown[]>, []>();
 const mockRouter = { back: jest.fn(), push: jest.fn() };
+const appStateListeners: ((state: string) => void)[] = [];
+const focusHarness = {
+  latestCallback: null as null | (() => (() => void) | void),
+  cleanup: null as null | (() => void),
+  reset() {
+    this.latestCallback = null;
+    this.cleanup = null;
+    appStateListeners.length = 0;
+  },
+  blur() {
+    this.cleanup?.();
+    this.cleanup = null;
+  },
+  focus() {
+    const cleanup = this.latestCallback?.();
+    this.cleanup = cleanup ?? null;
+  },
+};
 
 jest.mock('react-native', () => {
   const React = require('react');
@@ -23,6 +41,18 @@ jest.mock('react-native', () => {
     ScrollView: wrap('ScrollView'),
     TouchableOpacity: wrap('TouchableOpacity'),
     ActivityIndicator: wrap('ActivityIndicator'),
+    AppState: {
+      currentState: 'active',
+      addEventListener: (event: string, callback: (state: string) => void) => {
+        if (event === 'change') appStateListeners.push(callback);
+        return {
+          remove: jest.fn(() => {
+            const index = appStateListeners.indexOf(callback);
+            if (index >= 0) appStateListeners.splice(index, 1);
+          }),
+        };
+      },
+    },
     StyleSheet: { create: (styles: any) => styles },
     Alert: { alert: jest.fn() },
     Platform: { OS: 'ios', Version: 'test', select: (values: any) => values.ios ?? values.default },
@@ -37,9 +67,23 @@ jest.mock('react-native-safe-area-context', () => {
   };
 });
 
-jest.mock('expo-router', () => ({
-  useRouter: () => mockRouter,
-}));
+jest.mock('expo-router', () => {
+  const React = require('react');
+  return {
+    useRouter: () => mockRouter,
+    useFocusEffect: (callback: () => (() => void) | void) => {
+      focusHarness.latestCallback = callback;
+      React.useEffect(() => {
+        const cleanup = callback();
+        focusHarness.cleanup = cleanup ?? null;
+        return () => {
+          cleanup?.();
+          focusHarness.cleanup = null;
+        };
+      }, [callback]);
+    },
+  };
+});
 jest.mock('expo-clipboard', () => ({ setStringAsync: jest.fn() }));
 jest.mock('expo-constants', () => ({
   __esModule: true,
@@ -67,7 +111,9 @@ jest.mock('../Icon', () => {
   return { Icon: (props: any) => React.createElement('Icon', props) };
 });
 jest.mock('../AuthContext', () => ({ useAuth: () => ({ user: null }) }));
-jest.mock('../api', () => ({ api: { get: jest.fn(async () => ({ data: { members: [] } })) } }));
+jest.mock('../api', () => ({
+  api: { get: jest.fn(async () => ({ data: { members: [] } })) },
+}));
 jest.mock('../store/memberStore', () => ({ getMyLastSeenMs: () => null }));
 jest.mock('../deviceComparisonRefresh', () => ({
   startDeviceComparisonRefresh: () => () => {},
@@ -134,6 +180,7 @@ jest.mock('../pipelineSnapshot', () => {
     normalizePipelineSnapshots: actual.normalizePipelineSnapshots,
   };
 });
+
 jest.mock('../diagnosticsStorageAudit', () => ({
   attachDiagnosticsStorageRecordContext: jest.fn(),
   auditDiagnosticsStorage: async () => ({
@@ -168,6 +215,10 @@ import TestRenderer, { act } from 'react-test-renderer';
 import DiagnosticsScreen from '../diagnosticsFull';
 import DiagnosticsRoute from '../../app/diagnostics';
 
+const mockApiGet = (jest.requireMock('../api') as {
+  api: { get: jest.Mock };
+}).api.get;
+
 async function mountDiagnostics() {
   let renderer: any;
   await act(async () => {
@@ -184,6 +235,7 @@ describe('Diagnostics stale-location snapshot boundary', () => {
   });
 
   afterEach(() => {
+    focusHarness.reset();
     jest.restoreAllMocks();
     jest.clearAllMocks();
   });
@@ -273,6 +325,39 @@ describe('Diagnostics stale-location snapshot boundary', () => {
       .join(' ');
     expect(text).toContain('UI');
     expect(text).toContain('6.7 mph');
+    await act(async () => renderer.unmount());
+  });
+  it('refetches Device Comparison when Diagnostics regains focus after backgrounding', async () => {
+    mockReadPipelineSnapshots.mockResolvedValueOnce([]);
+    const renderer = await mountDiagnostics();
+
+    // The default Device Comparison expansion is open, so the initial
+    // Diagnostics focus should fetch the family snapshot immediately.
+    expect(mockApiGet.mock.calls.filter(
+      ([path]) => path === '/diagnostics/family-snapshot',
+    )).toHaveLength(1);
+
+    // Simulate leaving and returning to the Diagnostics route.
+    focusHarness.blur();
+    await act(async () => {
+      focusHarness.focus();
+      await Promise.resolve();
+    });
+    expect(mockApiGet.mock.calls.filter(
+      ([path]) => path === '/diagnostics/family-snapshot',
+    )).toHaveLength(2);
+
+    // Simulate the route remaining mounted while the app backgrounds and
+    // returns to foreground. This must refresh without waiting 60 seconds.
+    await act(async () => {
+      appStateListeners.forEach((listener) => listener('background'));
+      appStateListeners.forEach((listener) => listener('active'));
+      await Promise.resolve();
+    });
+    expect(mockApiGet.mock.calls.filter(
+      ([path]) => path === '/diagnostics/family-snapshot',
+    )).toHaveLength(3);
+
     await act(async () => renderer.unmount());
   });
 });
