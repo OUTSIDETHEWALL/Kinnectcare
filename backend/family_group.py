@@ -481,13 +481,33 @@ async def create_group_for_user(db, user: dict) -> dict:
     # it before returning so callers that pass the dict straight into a
     # JSON response don't hit ObjectId-serialisation crashes.
     group.pop("_id", None)
-    await db.users.update_one(
+    update_result = await db.users.update_one(
         {"id": user["id"]},
         {"$set": {
             "family_group_id": group["id"],
             "family_group_role": "owner",
         }},
     )
+    if (
+        getattr(update_result, "matched_count", 0) != 1
+        or getattr(update_result, "modified_count", 0) != 1
+    ):
+        # Never leave an orphan solo group behind or report a successful
+        # family removal when the authoritative users row did not move.
+        try:
+            await db.family_groups.delete_one({"id": group["id"]})
+        except Exception:
+            logger.exception(
+                "Failed to clean up solo family group after user move failed: "
+                "user=%s group=%s",
+                user.get("id"),
+                group["id"],
+            )
+        raise RuntimeError(
+            f"Could not move user {user['id']} into solo family group"
+        )
+    user["family_group_id"] = group["id"]
+    user["family_group_role"] = "owner"
     return group
 
 
