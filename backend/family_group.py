@@ -177,9 +177,9 @@ async def resolve_invite_code(
     return group, None
 
 
-async def accept_invite(db, invite_id: str, accepted_by_user_id: str) -> None:
-    """Mark a pending invite as accepted. Idempotent."""
-    await db.family_invites.update_one(
+async def accept_invite(db, invite_id: str, accepted_by_user_id: str) -> dict:
+    """Mark a pending invite as accepted and verify the transition."""
+    result = await db.family_invites.update_one(
         {"id": invite_id, "status": "pending"},
         {"$set": {
             "status": "accepted",
@@ -187,6 +187,28 @@ async def accept_invite(db, invite_id: str, accepted_by_user_id: str) -> None:
             "accepted_at": datetime.now(timezone.utc),
         }},
     )
+    if result.modified_count == 1:
+        accepted = await db.family_invites.find_one({"id": invite_id}, {"_id": 0})
+        logger.info(
+            "[invite-accept] invite_marked_accepted invite=%s user=%s",
+            invite_id[:8],
+            accepted_by_user_id[:8],
+        )
+        return accepted or {}
+
+    accepted = await db.family_invites.find_one({"id": invite_id}, {"_id": 0})
+    if (
+        accepted
+        and accepted.get("status") == "accepted"
+        and accepted.get("accepted_by_user_id") == accepted_by_user_id
+    ):
+        logger.info(
+            "[invite-accept] invite_already_accepted invite=%s user=%s",
+            invite_id[:8],
+            accepted_by_user_id[:8],
+        )
+        return accepted
+    raise RuntimeError("Invite acceptance transition did not modify the pending invite")
 
 
 async def ensure_self_member_row(
@@ -691,6 +713,7 @@ def build_router(
             return {"valid": False, "reason": "Invalid code format"}
         group, invite = await resolve_invite_code(db, normalized)
         if not group:
+            logger.warning("[invite-accept] token_validation_failed")
             return {
                 "valid": False,
                 "reason": "Code not found, expired, or already used",
@@ -709,6 +732,11 @@ def build_router(
                     inviter_name = inviter.get("full_name")
             except Exception:
                 pass
+        logger.info(
+            "[invite-accept] token_validated invite=%s group=%s",
+            (invite.get("id", "")[:8] if invite else "family-code"),
+            group.get("id", "")[:8],
+        )
         return {
             "valid": True,
             "family_name": group.get("name") or "Family",
@@ -743,6 +771,10 @@ def build_router(
             target group so the family sees a merged dashboard immediately.
         """
         code = normalize_invite_code(data.invite_code)
+        logger.info(
+            "[invite-accept] user_authenticated user=%s",
+            current.get("id", "")[:8],
+        )
         # Accept BOTH the family-wide KINN- code AND a per-recipient
         # INV- token (issued via POST /family-group/invite).  The
         # resolver returns (group, invite_doc) — invite_doc is None
@@ -752,9 +784,50 @@ def build_router(
         # only checked db.family_groups.invite_code.
         target, accepted_invite = await resolve_invite_code(db, code)
         if not target:
+            prior = await db.family_invites.find_one(
+                {
+                    "token": code,
+                    "status": "accepted",
+                    "accepted_by_user_id": current["id"],
+                },
+                {"_id": 0},
+            )
+            if prior:
+                target = await get_group(db, prior["family_group_id"])
+                if target and current.get("family_group_id") == target["id"]:
+                    logger.info(
+                        "[invite-accept] invite_already_completed invite=%s user=%s",
+                        prior.get("id", "")[:8],
+                        current.get("id", "")[:8],
+                    )
+                    return {
+                        "ok": True,
+                        "already_member": True,
+                        "group": public_group(target),
+                    }
+            logger.warning(
+                "[invite-accept] invite_lookup_failed user=%s",
+                current.get("id", "")[:8],
+            )
             raise HTTPException(404, "Invite code not found")
+        logger.info(
+            "[invite-accept] invite_located invite=%s group=%s user=%s",
+            (accepted_invite.get("id", "")[:8] if accepted_invite else "family-code"),
+            target.get("id", "")[:8],
+            current.get("id", "")[:8],
+        )
         old_gid = current.get("family_group_id")
         if target["id"] == old_gid:
+            await ensure_self_member_row(
+                db, current, target["id"], accepted_invite, caller="join_already_member"
+            )
+            logger.info(
+                "[invite-accept] membership_refreshed user=%s group=%s",
+                current.get("id", "")[:8],
+                target.get("id", "")[:8],
+            )
+            if accepted_invite:
+                await accept_invite(db, accepted_invite["id"], current["id"])
             return {"ok": True, "already_member": True, "group": public_group(target)}
 
         # Owner of multi-user group can't leave
@@ -773,12 +846,25 @@ def build_router(
 
         # Move data to new group, update user, delete old solo group
         await transfer_data_to_group(db, current["id"], target["id"])
-        await db.users.update_one(
+        assignment = await db.users.update_one(
             {"id": current["id"]},
             {"$set": {
                 "family_group_id": target["id"],
                 "family_group_role": "member",
             }},
+        )
+        if assignment.matched_count != 1:
+            raise RuntimeError("Family assignment did not match the authenticated user")
+        assigned = await db.users.find_one(
+            {"id": current["id"], "family_group_id": target["id"]},
+            {"_id": 0, "id": 1},
+        )
+        if not assigned:
+            raise RuntimeError("Family assignment was not persisted")
+        logger.info(
+            "[invite-accept] family_group_updated user=%s group=%s",
+            current.get("id", "")[:8],
+            target.get("id", "")[:8],
         )
         # Build #59 hotfix — guarantee a self-member row exists for
         # the joiner in the target group.  Idempotent: if the joiner
@@ -789,14 +875,14 @@ def build_router(
         # sign-out / restart required — the client just re-fetches
         # /members and sees the new row).  See ensure_self_member_row
         # docstring for the full failure-mode analysis.
-        try:
-            await ensure_self_member_row(db, current, target["id"], accepted_invite, caller="join")
-        except Exception as e:
-            logger.error(
-                f"ensure_self_member_row (join path) FAILED — "
-                f"user={current.get('id','?')[:8]} group={target.get('id','')[:8]}: {e}",
-                exc_info=True,
-            )
+        await ensure_self_member_row(
+            db, current, target["id"], accepted_invite, caller="join"
+        )
+        logger.info(
+            "[invite-accept] membership_refreshed user=%s group=%s",
+            current.get("id", "")[:8],
+            target.get("id", "")[:8],
+        )
         # Cleanup old solo group if it has no users left
         if old_gid and old_gid != target["id"]:
             remaining = await db.users.count_documents({"family_group_id": old_gid})
@@ -849,10 +935,7 @@ def build_router(
         # Best-effort — never fail the join just because the
         # bookkeeping push misfires.
         if accepted_invite:
-            try:
-                await accept_invite(db, accepted_invite["id"], current["id"])
-            except Exception as e:
-                logger.warning(f"accept_invite bookkeeping failed: {e}")
+            await accept_invite(db, accepted_invite["id"], current["id"])
             inviter_id = inviter_id_for_exclusion
             if push_to_user is not None and inviter_id and inviter_id != current["id"]:
                 try:

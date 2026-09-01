@@ -77,7 +77,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 62, // Build 62 — New native baseline. expo-battery compiled into binary (runtime 1.3.0). Battery level + charging state reporting. Incorporates all OTA improvements since Build 61: family screen simplification, geocoder instrumentation, location refresh improvements, replay suppression, GPS path 2 recovery, diagnostics enhancements, low-battery push notification, member detail battery display.
+      versionCode: 63, // Build 63 — adds Google Play Install Referrer capture so fresh installs retain invitation tokens.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',

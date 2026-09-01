@@ -11,7 +11,7 @@
  *   • Deep link received while app was closed  (cold start)
  *   • Deep link received while app was in background  (warm start)
  *   • Deep link tapped BEFORE app was installed → Play Store →
- *     first launch (referrer path — future work)
+ *     first launch (captured from Google Play Install Referrer)
  *   • Manual code entry on /(auth)/join-family (still writes here
  *     so post-signup auto-join is uniform across every entry path)
  *

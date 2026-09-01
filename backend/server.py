@@ -1616,7 +1616,17 @@ async def verify_otp(data: OtpVerify):
         if invite_code:
             target_group, accepted_invite = await fg.resolve_invite_code(db, invite_code)
             if not target_group:
+                logger.warning("[invite-accept] invite_lookup_failed path=signup_new")
                 raise HTTPException(status_code=404, detail="Invite code not found")
+            logger.info(
+                "[invite-accept] invite_located path=signup_new invite=%s group=%s",
+                (
+                    accepted_invite.get("id", "")[:8]
+                    if accepted_invite
+                    else "family-code"
+                ),
+                target_group.get("id", "")[:8],
+            )
 
         user_id = str(uuid.uuid4())
         doc = {
@@ -1631,13 +1641,31 @@ async def verify_otp(data: OtpVerify):
             "created_at": datetime.now(timezone.utc),
         }
         await db.users.insert_one(doc)
+        if invite_code:
+            logger.info(
+                "[invite-accept] user_authenticated path=signup_new user=%s",
+                user_id[:8],
+            )
         if target_group:
-            await db.users.update_one(
+            assignment = await db.users.update_one(
                 {"id": user_id},
                 {"$set": {
                     "family_group_id": target_group["id"],
                     "family_group_role": "member",
                 }},
+            )
+            if assignment.matched_count != 1:
+                raise RuntimeError("Family assignment did not match the new user")
+            assigned = await db.users.find_one(
+                {"id": user_id, "family_group_id": target_group["id"]},
+                {"_id": 0, "id": 1},
+            )
+            if not assigned:
+                raise RuntimeError("Family assignment was not persisted")
+            logger.info(
+                "[invite-accept] family_group_updated path=signup_new user=%s group=%s",
+                user_id[:8],
+                target_group.get("id", "")[:8],
             )
             doc["family_group_id"] = target_group["id"]
             doc["family_group_role"] = "member"
@@ -1701,24 +1729,19 @@ async def verify_otp(data: OtpVerify):
             # the joiner would be invisible on both dashboards
             # after signup — the exact user-reported symptom that
             # motivated this hotfix.
-            try:
-                await fg.ensure_self_member_row(
-                    db, doc, target_group["id"], accepted_invite, caller="signup_invite"
-                )
-            except Exception as e:
-                logger.error(
-                    f"ensure_self_member_row (signup_invite) FAILED — "
-                    f"user={user_id[:8]} group={target_group.get('id', '')[:8]}: {e}",
-                    exc_info=True,
-                )
+            await fg.ensure_self_member_row(
+                db, doc, target_group["id"], accepted_invite, caller="signup_invite"
+            )
+            logger.info(
+                "[invite-accept] membership_refreshed path=signup_new user=%s group=%s",
+                user_id[:8],
+                target_group.get("id", "")[:8],
+            )
             # If they used a per-recipient INV- token, mark it accepted
             # and notify the inviter via push.  Best-effort — never fail
             # signup just because the bookkeeping push misfires.
             if accepted_invite:
-                try:
-                    await fg.accept_invite(db, accepted_invite["id"], user_id)
-                except Exception as e:
-                    logger.warning(f"accept_invite bookkeeping failed: {e}")
+                await fg.accept_invite(db, accepted_invite["id"], user_id)
                 inviter_id = accepted_invite.get("invited_by_user_id")
                 if inviter_id and inviter_id != user_id:
                     try:
@@ -1797,8 +1820,28 @@ async def verify_otp(data: OtpVerify):
     if purpose == "signup" and user and rec.get("invite_code"):
         try:
             _ei_code = rec["invite_code"]
+            logger.info(
+                "[invite-accept] user_authenticated path=signup_existing user=%s",
+                user.get("id", "")[:8],
+            )
             _ei_target, _ei_accepted = await fg.resolve_invite_code(db, _ei_code)
-            if _ei_target and _ei_target["id"] != user.get("family_group_id"):
+            if not _ei_target:
+                logger.warning(
+                    "[invite-accept] invite_lookup_failed path=signup_existing user=%s",
+                    user.get("id", "")[:8],
+                )
+                raise HTTPException(status_code=404, detail="Invite code not found")
+            logger.info(
+                "[invite-accept] invite_located path=signup_existing invite=%s group=%s user=%s",
+                (
+                    _ei_accepted.get("id", "")[:8]
+                    if _ei_accepted
+                    else "family-code"
+                ),
+                _ei_target.get("id", "")[:8],
+                user.get("id", "")[:8],
+            )
+            if _ei_target["id"] != user.get("family_group_id"):
                 _old_gid = user.get("family_group_id")
                 _can_join = True
                 # Owner of a populated group cannot silently leave it.
@@ -1818,12 +1861,31 @@ async def verify_otp(data: OtpVerify):
                             )
                 if _can_join:
                     await fg.transfer_data_to_group(db, user["id"], _ei_target["id"])
-                    await db.users.update_one(
+                    assignment = await db.users.update_one(
                         {"id": user["id"]},
                         {"$set": {
                             "family_group_id": _ei_target["id"],
                             "family_group_role": "member",
                         }},
+                    )
+                    if assignment.matched_count != 1:
+                        raise RuntimeError(
+                            "Family assignment did not match the existing user"
+                        )
+                    assigned = await db.users.find_one(
+                        {
+                            "id": user["id"],
+                            "family_group_id": _ei_target["id"],
+                        },
+                        {"_id": 0, "id": 1},
+                    )
+                    if not assigned:
+                        raise RuntimeError("Family assignment was not persisted")
+                    logger.info(
+                        "[invite-accept] family_group_updated path=signup_existing "
+                        "user=%s group=%s",
+                        user.get("id", "")[:8],
+                        _ei_target.get("id", "")[:8],
                     )
                     user = dict(user)
                     user["family_group_id"] = _ei_target["id"]
@@ -1835,24 +1897,17 @@ async def verify_otp(data: OtpVerify):
                         )
                         if _remaining == 0:
                             await db.family_groups.delete_one({"id": _old_gid})
-                    try:
-                        await fg.ensure_self_member_row(
-                            db, user, _ei_target["id"], _ei_accepted, caller="login_invite"
-                        )
-                    except Exception as _esm_err:
-                        logger.error(
-                            f"ensure_self_member_row (login_invite) FAILED — "
-                            f"user={user['id'][:8]} group={_ei_target.get('id','')[:8]}: "
-                            f"{_esm_err}",
-                            exc_info=True,
-                        )
+                    await fg.ensure_self_member_row(
+                        db, user, _ei_target["id"], _ei_accepted, caller="login_invite"
+                    )
+                    logger.info(
+                        "[invite-accept] membership_refreshed path=signup_existing "
+                        "user=%s group=%s",
+                        user.get("id", "")[:8],
+                        _ei_target.get("id", "")[:8],
+                    )
                     if _ei_accepted:
-                        try:
-                            await fg.accept_invite(db, _ei_accepted["id"], user["id"])
-                        except Exception as _ai_err:
-                            logger.warning(
-                                f"accept_invite bookkeeping (login+invite): {_ai_err}"
-                            )
+                        await fg.accept_invite(db, _ei_accepted["id"], user["id"])
                     logger.info(
                         f"verify-otp: existing user {user['id'][:8]} joined "
                         f"group {_ei_target['id'][:8]} via invite on login+signup path"
@@ -1863,6 +1918,12 @@ async def verify_otp(data: OtpVerify):
                 f"user={user.get('id','?')[:8]}: {_join_err}",
                 exc_info=True,
             )
+            if isinstance(_join_err, HTTPException):
+                raise
+            raise HTTPException(
+                status_code=500,
+                detail="Could not complete invitation acceptance",
+            ) from _join_err
 
     if not user:
         # purpose=login but the user doesn't exist (or signup race) —
@@ -5483,7 +5544,7 @@ app.include_router(api_router)
 # The invite token is embedded twice: once in the ``kinnship://`` URL for
 # the scheme handoff, and once in the Play Store ``?referrer=`` query so
 # the newly-installed app can pick it up via Google Play Install Referrer
-# on first launch (native module integration deferred to a follow-up).
+# on first launch through the app's Play Install Referrer integration.
 #
 # Why this lives INSIDE server.py rather than as a static file: it needs
 # to embed the token dynamically, and we don't want a second hosting
@@ -5513,8 +5574,7 @@ async def invite_landing_page(token: str):
         or "https://play.google.com/store/apps/details?id=app.kinnship.client"
     )
     # Play Store install-referrer carries the token so a fresh install
-    # can auto-resume the invite on first launch (native referrer
-    # capture wired up in a follow-up build).
+    # can auto-resume the invite on first launch.
     referrer = f"invite_token%3D{safe}"
     if "?" in play_store_url:
         play_store_url_with_referrer = f"{play_store_url}&referrer={referrer}"

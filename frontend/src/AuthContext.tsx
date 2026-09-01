@@ -9,6 +9,7 @@ import {
   wasFreshInstallThisLaunch,
   consumeFreshInstallFlag,
 } from './freshInstallGuard';
+import { captureInstallReferrerInvite } from './installReferrerInvite';
 
 const TOKEN_KEY = 'kc_token';
 // v1.2 beta — cache the user object alongside the token so we can
@@ -101,6 +102,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     (async () => {
+      await captureInstallReferrerInvite();
       // FRESH-INSTALL GUARD — clear any stale Keychain/SecureStore
       // entries that may have survived a previous app uninstall
       // (iOS Keychain entries persist by Apple design, and some
@@ -330,17 +332,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const pending = await getPendingInvite();
       if (pending?.token) {
         try {
-          await api.post('/family-group/join', { invite_code: pending.token });
-        } catch (_e) { /* 404 / already-member — harmless */ }
-        await clearPendingInvite();
-        // Re-fetch the user so RootNav sees the new family_group_id
-        // and the dashboard poll picks up the freshly-created
-        // self-member row from ensure_self_member_row.
-        try {
+          console.info('[invite-accept] pending_invite_found');
+          const joinRes = await api.post('/family-group/join', {
+            invite_code: pending.token,
+          });
+          console.info('[invite-accept] join_confirmed', {
+            alreadyMember: !!joinRes.data?.already_member,
+          });
           const meRes = await api.get('/auth/me');
+          const targetGroupId = joinRes.data?.group?.id;
+          if (targetGroupId && meRes.data?.family_group_id !== targetGroupId) {
+            throw new Error('Family assignment was not visible after invite acceptance');
+          }
+          console.info('[invite-accept] family_membership_refreshed');
           setUser(meRes.data);
           await writeUserCache(meRes.data);
-        } catch (_e) {}
+          await clearPendingInvite();
+          console.info('[invite-accept] pending_invite_cleared');
+        } catch (error: any) {
+          // Keep the token. A failed transition must remain inspectable and
+          // recoverable instead of being silently discarded.
+          console.error('[invite-accept] acceptance_failed', {
+            status: error?.response?.status ?? null,
+            message: error?.response?.data?.detail || error?.message || 'unknown',
+          });
+        }
       }
     } catch (_e) { /* pendingInvite module or storage failure — non-fatal */ }
   };
