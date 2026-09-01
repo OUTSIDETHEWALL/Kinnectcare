@@ -25,9 +25,10 @@ import React, {
 } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, ActivityIndicator, Platform,
+  AppState,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import Constants from 'expo-constants';
@@ -1256,13 +1257,43 @@ function DiagnosticsContent() {
       setFamilySnapshotLoading(false);
     }
   }, []);
+  const isDeviceComparisonExpanded = !!expanded['device-comparison'];
+
+  // Device Comparison must not rely solely on its 60-second interval for
+  // freshness. The interval can keep running while the app is backgrounded,
+  // but a screen that is revisited after a long pause still needs a fetch
+  // immediately on focus. The AppState listener covers the common case where
+  // Diagnostics remains mounted while the app leaves and re-enters foreground.
+  useFocusEffect(
+    useCallback(() => {
+      const refreshIfExpanded = () => {
+        if (isDeviceComparisonExpanded) {
+          void fetchFamilySnapshot().catch(() => {
+            // fetchFamilySnapshot records its own error state.
+          });
+        }
+      };
+
+      refreshIfExpanded();
+
+      let previousState = AppState.currentState;
+      const subscription = AppState.addEventListener('change', (nextState) => {
+        if (nextState === 'active' && previousState !== 'active') {
+          refreshIfExpanded();
+        }
+        previousState = nextState;
+      });
+
+      return () => subscription.remove();
+    }, [isDeviceComparisonExpanded, fetchFamilySnapshot]),
+  );
 
   // Device Comparison auto-refresh — must sit AFTER fetchFamilySnapshot is
   // declared; placing it before caused a ReferenceError at component init
   // (const is not hoisted) which blanked the entire Diagnostics screen.
   useEffect(
-    () => startDeviceComparisonRefresh(!!expanded['device-comparison'], fetchFamilySnapshot),
-    [expanded['device-comparison'], fetchFamilySnapshot],
+    () => startDeviceComparisonRefresh(isDeviceComparisonExpanded, fetchFamilySnapshot),
+    [isDeviceComparisonExpanded, fetchFamilySnapshot],
   );
 
   const buildPayload = useCallback(() => {
