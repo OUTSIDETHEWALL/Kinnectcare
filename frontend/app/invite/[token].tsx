@@ -23,7 +23,12 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Colors } from '../../src/theme';
 import { api, joinFamilyGroup } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
-import { setPendingInvite, clearPendingInvite } from '../../src/pendingInvite';
+import {
+  setPendingInvite,
+  clearPendingInvite,
+  isInviteConsumed,
+  markInviteConsumed,
+} from '../../src/pendingInvite';
 
 type VerifyResult = {
   valid: boolean;
@@ -46,6 +51,7 @@ export default function InviteAcceptScreen() {
   const [joinError, setJoinError] = useState<string | null>(null);
   const [joined, setJoined] = useState(false);
   const [alreadyMember, setAlreadyMember] = useState(false);
+  const [consumed, setConsumed] = useState(false);
 
   // Verify the token. Persist it first so auth flows can resume
   // the invite even if this screen is closed mid-flow.
@@ -56,6 +62,14 @@ export default function InviteAcceptScreen() {
       if (!token) {
         setVerify({ valid: false, reason: 'Missing invitation code.' });
         setVerifying(false);
+        return;
+      }
+      if (await isInviteConsumed(token)) {
+        if (!cancelled) {
+          console.info('[invite-accept] consumed_route_ignored');
+          setConsumed(true);
+          setVerifying(false);
+        }
         return;
       }
       try { await setPendingInvite(token); } catch (_e) {}
@@ -103,6 +117,7 @@ export default function InviteAcceptScreen() {
     setJoinError(null);
     try {
       const result = await joinFamilyGroup(token);
+      await markInviteConsumed(token);
       try { await clearPendingInvite(); } catch (_e) {}
       if (result.already_member) {
         setAlreadyMember(true);
@@ -121,6 +136,11 @@ export default function InviteAcceptScreen() {
     }
   };
 
+  useEffect(() => {
+    if (!consumed || isLoading) return;
+    router.replace(user ? '/(tabs)/dashboard' : '/');
+  }, [consumed, isLoading, router, user]);
+
   const onDecline = async () => {
     try { await clearPendingInvite(); } catch (_e) {}
     router.replace('/');
@@ -133,6 +153,17 @@ export default function InviteAcceptScreen() {
         <View style={styles.centerBox}>
           <ActivityIndicator size="large" color={Colors.primary} />
           <Text style={styles.loadingText}>Checking your invitation…</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (consumed) {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={styles.centerBox}>
+          <ActivityIndicator size="large" color={Colors.primary} />
+          <Text style={styles.loadingText}>Opening Kinnship…</Text>
         </View>
       </SafeAreaView>
     );

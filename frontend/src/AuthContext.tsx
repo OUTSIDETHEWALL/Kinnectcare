@@ -315,20 +315,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     //   • If the server already accepted the invite as part of
     //     verify-otp (invite_code was stashed on the OTP record),
     //     the /join call returns 200 already_member: true — harmless.
-    //   • If the token was already consumed or expired, we get 404
-    //     and silently clear.  User is still signed in; they can
-    //     enter another code via /(auth)/join-family later.
+    //   • If the token was already consumed by this user, /join returns
+    //     200 already_member and we record it as consumed locally.
     //   • If the user is joining a family they're already in
     //     (e.g. logging back in on a new device with a stale link),
     //     already_member: true — harmless.
     //
-    // We never surface a failure alert here — that would panic the
-    // user right after a successful sign-in, which is the worst
-    // possible time.  Instead the /(tabs)/dashboard will render as
-    // solo, the caregiver's Pending Invitation card stays orange,
-    // and the user can re-attempt via manual code if needed.
+    // Failed transitions retain the pending token and emit an explicit
+    // diagnostic instead of discarding the only recovery evidence.
     try {
-      const { getPendingInvite, clearPendingInvite } = await import('./pendingInvite');
+      const { getPendingInvite, clearPendingInvite, markInviteConsumed } = await import('./pendingInvite');
       const pending = await getPendingInvite();
       if (pending?.token) {
         try {
@@ -347,6 +343,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           console.info('[invite-accept] family_membership_refreshed');
           setUser(meRes.data);
           await writeUserCache(meRes.data);
+          await markInviteConsumed(pending.token);
           await clearPendingInvite();
           console.info('[invite-accept] pending_invite_cleared');
         } catch (error: any) {
