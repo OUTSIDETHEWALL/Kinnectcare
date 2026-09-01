@@ -253,29 +253,6 @@ export default function MemberDetail() {
     }
   };
 
-  const onDelete = () => {
-    Alert.alert('Remove member?', `Are you sure you want to remove ${member?.name}?`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Remove', style: 'destructive', onPress: async () => {
-          // Build #59 — immediate dashboard refresh after delete.
-          // Previously the dashboard waited up to a minute for the
-          // next /members poll to notice the deletion, so caregivers
-          // saw the removed row lingering.  Fix: drop the member
-          // from the canonical store client-side the moment the
-          // DELETE returns, so the dashboard renders the deletion
-          // on the very next paint (no round-trip wait).
-          try {
-            await api.delete(`/members/${id}`);
-          } catch (_e) {}
-          try {
-            // Local-side eviction from the canonical store.
-            if (id) memberStore.remove(String(id));
-          } catch (_e) {}
-          router.back();
-        } },
-    ]);
-  };
-
   if (loading && !member) {
     return (
       <SafeAreaView style={styles.safe}>
@@ -635,10 +612,6 @@ export default function MemberDetail() {
           ))}
         </View>
 
-        <TouchableOpacity testID="member-delete" onPress={onDelete} style={styles.deleteBtn}>
-          <Text style={{ fontSize: 14 }}>🗑</Text>
-          <Text style={styles.deleteText}>Remove member</Text>
-        </TouchableOpacity>
       </ScrollView>
 
       {/* Build XX — self-only check-in.  Show "Check In" only on the member's own device;
@@ -824,8 +797,6 @@ const styles = StyleSheet.create({
   editBtnSmall: { width: 28, height: 36, alignItems: 'center', justifyContent: 'center' },
   deleteBtnSmall: { width: 28, height: 36, alignItems: 'center', justifyContent: 'center' },
   emptyText: { color: Colors.textTertiary, fontSize: 13, fontStyle: 'italic', paddingVertical: 8 },
-  deleteBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 28, paddingVertical: 12 },
-  deleteText: { color: Colors.error, fontWeight: '700' },
   checkinBtn: {
     position: 'absolute', left: 24, right: 24,
     height: 60, backgroundColor: Colors.primary, borderRadius: 18,
