@@ -35,9 +35,17 @@ Always run from the `frontend/` directory.
 
 ### Release target rules
 
-- Routine beta releases target the main production path only: package `app.kinnship.client`, EAS profile/channel `production`, Android App Bundle, then Google Play Internal testing as a draft.
-- Never publish to `preview`, a test track, or another destination unless Charles explicitly requests that exact target.
- - Before building or publishing anything, verify the package, runtime, version code, EAS profile/channel, artifact type, and Google Play track/status. Production is the default; any preview, test, staging, or alternate channel requires Charles's explicit approval.
+- Production is the only default target for Kinnship. Every Android build and every OTA publish must target package `app.kinnship.client` with the EAS profile/channel `production`, unless Charles explicitly instructs otherwise in that conversation.
+- Do not use `preview`, staging, testing, alternate channels, alternate EAS profiles, or experimental release paths by default. If there is any uncertainty about the target, stop and ask before publishing anywhere.
+- The established Android release workflow is: build the production Android App Bundle, verify it completed successfully, provide the `.aab`, and let Charles manually upload it to Google Play Internal testing.
+- Do not introduce automatic Google Play submission, EAS Submit, Google Play service-account automation, CI/CD release pipelines, automatic Play uploads, or any new publishing process unless Charles explicitly requests it.
+- Before building or publishing anything, verify the package, runtime, version code, EAS profile/channel, artifact type, and Google Play track/status. Before announcing completion, verify the finished EAS build/update record reports the intended runtime, channel, distribution, and target.
+
+### Stability-first development rules
+
+- Do not introduce new release infrastructure, credentials, services, or automation while fixing application bugs.
+- If a code fix requires a workflow change, explain why first and wait for Charles's approval. Solving an application bug must not result in a new deployment process.
+- Kinnship is approaching beta, so stability is more important than engineering elegance. When multiple technically valid solutions exist, prefer the one that minimizes complexity, preserves existing workflows, and gets the application reliably into testers' hands.
 - Before announcing completion, verify the finished EAS build/update record reports the intended runtime, channel, distribution, and target.
 
 | Task | Command |
