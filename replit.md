@@ -33,6 +33,13 @@ Speculative fixes are not acceptable. "This should work" is not acceptable. If c
 
 Always run from the `frontend/` directory.
 
+### Release target rules
+
+- Routine beta releases target the main production path only: package `app.kinnship.client`, EAS profile/channel `production`, Android App Bundle, then Google Play Internal testing as a draft.
+- Never publish to `preview`, a test track, or another destination unless Charles explicitly requests that exact target.
+- Before publishing, verify the package, runtime, version code, EAS profile/channel, artifact type, and Google Play track/status.
+- Before announcing completion, verify the finished EAS build/update record reports the intended runtime, channel, distribution, and target.
+
 | Task | Command |
 |---|---|
 | Publish OTA update | `yarn ota:publish "Your message"` |
