@@ -37,7 +37,7 @@ Always run from the `frontend/` directory.
 
 - Routine beta releases target the main production path only: package `app.kinnship.client`, EAS profile/channel `production`, Android App Bundle, then Google Play Internal testing as a draft.
 - Never publish to `preview`, a test track, or another destination unless Charles explicitly requests that exact target.
-- Before publishing, verify the package, runtime, version code, EAS profile/channel, artifact type, and Google Play track/status.
+ - Before building or publishing anything, verify the package, runtime, version code, EAS profile/channel, artifact type, and Google Play track/status. Production is the default; any preview, test, staging, or alternate channel requires Charles's explicit approval.
 - Before announcing completion, verify the finished EAS build/update record reports the intended runtime, channel, distribution, and target.
 
 | Task | Command |

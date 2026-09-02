@@ -60,6 +60,11 @@ function RootNav() {
   // notification dialogs with emotional, family-focused context.
   const [permissionsChecked, setPermissionsChecked] = useState(false);
   const [needsPermissions, setNeedsPermissions] = useState(false);
+  // Cold-start deep links must be resolved before RootNav makes its first
+  // route decision. Otherwise the generic onboarding/disclaimer gates can
+  // navigate away while the invite token is still being persisted.
+  const [initialLinkChecked, setInitialLinkChecked] = useState(false);
+  const [coldStartInviteToken, setColdStartInviteToken] = useState<string | null>(null);
   const routeDecisionRef = useRef(0);
 
   const logRootDecision = (
@@ -254,7 +259,7 @@ function RootNav() {
   //   • kinnship://invite/INV-XXXXX?anything
   //   • kinnship:/invite/INV-XXXXX  (some Android intents drop a slash)
   //   • https://<host>/invite/INV-XXXXX  (Universal-link path)
-  const inviteRouteRef = useRef(false); // guard: avoid double-navigation on cold start
+  const lastRoutedInviteRef = useRef<string | null>(null);
   useEffect(() => {
     const extractInviteToken = (url: string | null): string | null => {
       if (!url) return null;
@@ -264,7 +269,7 @@ function RootNav() {
       return m ? m[1].toUpperCase() : null;
     };
 
-    const consumeInviteUrl = async (url: string | null) => {
+    const consumeInviteUrl = async (url: string | null, coldStart = false) => {
       const token = extractInviteToken(url);
       logStartupEvent({
         phase: 'deep_link_processing',
@@ -296,6 +301,7 @@ function RootNav() {
       // Persist first — the safest thing we can do.  Everything below
       // is best-effort.
       await setPendingInvite(token);
+      if (coldStart) setColdStartInviteToken(token);
       logStartupEvent({
         phase: 'deep_link_processing',
         event: 'pending_invite_saved',
@@ -309,20 +315,21 @@ function RootNav() {
       // the join for authenticated users and hands off to signup for
       // unauthenticated ones.  verifyOtp() auto-joins after the
       // account is created so the pending token is always consumed.
-      if (!inviteRouteRef.current) {
-        inviteRouteRef.current = true;
-        setTimeout(() => {
-          try {
-            logStartupEvent({
-              phase: 'root_navigation_decision',
-              event: 'invite_route_requested',
-              route: '/invite/[token]',
-              reason: 'unconsumed_deep_link',
-              outcome: 'navigate',
-            });
-            router.push(`/invite/${token}` as any);
-          } catch (_e) {}
-        }, 250);
+      // RootNav owns the cold-start route after all launch gates have
+      // settled. A timer here used to race disclaimer/onboarding navigation.
+      // Warm links arrive after RootNav is ready and can route immediately.
+      if (!coldStart && lastRoutedInviteRef.current !== token) {
+        lastRoutedInviteRef.current = token;
+        try {
+          logStartupEvent({
+            phase: 'root_navigation_decision',
+            event: 'invite_route_requested',
+            route: '/invite/[token]',
+            reason: 'warm_deep_link',
+            outcome: 'navigate',
+          });
+          router.push(`/invite/${token}` as any);
+        } catch (_e) {}
       }
     };
 
@@ -335,8 +342,13 @@ function RootNav() {
           event: 'initial_url_loaded',
           outcome: initial ? 'url_present' : 'no_url',
         });
-        if (initial) await consumeInviteUrl(initial);
+        if (initial) await consumeInviteUrl(initial, true);
       } catch (_e) { /* non-fatal */ }
+      finally {
+        // Even a malformed or unavailable initial URL must not leave the
+        // launch gate waiting forever.
+        setInitialLinkChecked(true);
+      }
     })();
 
     // 2) Warm start — user taps a link while the app is running.
@@ -346,13 +358,11 @@ function RootNav() {
     return () => {
       try { sub.remove(); } catch (_e) {}
     };
-    // We intentionally run this once at mount + when `user` transitions
-    // from null → set (so a pending invite persisted across sign-up
-    // gets auto-joined the moment the user logs in).  Router / api are
-    // stable references from expo-router / axios and don't need to
-    // trigger this.
+    // Initial URL processing is intentionally mount-only. AuthContext owns
+    // auto-joining a pending invite after OTP; replaying getInitialURL when
+    // `user` changes would re-run cold-start routing during sign-in.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
+  }, []);
 
   // ==========================================================================
 
@@ -1183,7 +1193,7 @@ function RootNav() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (loading || !onboardingChecked || !appLockChecked || !disclaimerChecked) {
+    if (loading || !initialLinkChecked || !onboardingChecked || !appLockChecked || !disclaimerChecked) {
       logRootDecision('startup_gates_pending', null, 'hold');
       return;
     }
@@ -1191,6 +1201,7 @@ function RootNav() {
     const isWelcome = !segments[0] || segments[0] === ('index' as any);
     const isOnboarding = segments[0] === 'onboarding';
     const isDisclaimer = segments[0] === 'disclaimer';
+    const isInviteRoute = segments[0] === 'invite';
     const isPublic =
       segments[0] === 'privacy-policy' || segments[0] === 'terms-of-service';
 
@@ -1231,10 +1242,13 @@ function RootNav() {
     // onboarding done silently and fall through so index.tsx can redirect to
     // the /invite/{token} screen.
     if (!user && needsOnboarding && !isOnboarding && !isPublic) {
+      let cancelled = false;
       (async () => {
         const stillNeeds = !(await isOnboardingDone());
+        if (cancelled) return;
         if (stillNeeds) {
           const pendingToken = await getPendingInvite();
+          if (cancelled) return;
           logStartupEvent({
             phase: 'pending_invite_load',
             event: 'pending_invite_load_completed',
@@ -1243,9 +1257,14 @@ function RootNav() {
           });
           if (pendingToken) {
             // Invited path — skip slides, mark done, let the welcome-screen
-            // pending-invite redirect take the user to /invite/{token}.
+            // pending-invite route take the user to /invite/{token}.
             await markOnboardingDone();
+            if (cancelled) return;
             setNeedsOnboarding(false);
+            if (pathname !== `/invite/${pendingToken.token}`) {
+              logRootDecision('pending_invite_ready', `/invite/${pendingToken.token}`, 'navigate');
+              router.replace(`/invite/${pendingToken.token}` as any);
+            }
           } else {
             logRootDecision('unauthenticated_onboarding_required', '/onboarding', 'navigate');
             router.replace('/onboarding');
@@ -1254,6 +1273,13 @@ function RootNav() {
           setNeedsOnboarding(false);
         }
       })();
+      return () => { cancelled = true; };
+    }
+    // A returning signed-out user can also cold-start from an invite after
+    // onboarding has already been completed on this installation.
+    if (!user && coldStartInviteToken && !isInviteRoute && !isPublic) {
+      logRootDecision('cold_start_invite_ready', `/invite/${coldStartInviteToken}`, 'navigate');
+      router.replace(`/invite/${coldStartInviteToken}` as any);
       return;
     }
     // DEFENSIVE: an unauthenticated user must NEVER be on a PIN
@@ -1274,7 +1300,7 @@ function RootNav() {
       router.replace('/');
       return;
     }
-    if (!user && !inAuthGroup && !isWelcome && !isOnboarding && !isPublic) {
+    if (!user && !inAuthGroup && !isWelcome && !isOnboarding && !isInviteRoute && !isPublic) {
       logRootDecision('unauthenticated_protected_route', '/', 'navigate');
       router.replace('/');
       return;
@@ -1332,7 +1358,7 @@ function RootNav() {
     // honoured once routing has settled.
     logRootDecision('all_navigation_gates_cleared', pathname || '/', 'ready');
     setAppReadyForDeepLink(true);
-  }, [user, loading, segments, onboardingChecked, needsOnboarding, appLockChecked, needsAppLockUnlock, disclaimerChecked, needsDisclaimer, permissionsChecked, needsPermissions]);
+  }, [user, loading, segments, initialLinkChecked, coldStartInviteToken, onboardingChecked, needsOnboarding, appLockChecked, needsAppLockUnlock, disclaimerChecked, needsDisclaimer, permissionsChecked, needsPermissions]);
 
   // Part 7 — Battery optimization exemption prompt (Android only, post-onboarding).
   // Fired here — after the user has seen the full onboarding/permissions flow —
@@ -1362,7 +1388,7 @@ function RootNav() {
     })();
   }, [user?.id, needsOnboarding, needsPermissions]);
 
-  if (loading || !onboardingChecked || !disclaimerChecked || !permissionsChecked || (user && !appLockChecked)) {
+  if (loading || !initialLinkChecked || !onboardingChecked || !disclaimerChecked || !permissionsChecked || (user && !appLockChecked)) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: Colors.background }}>
         <ActivityIndicator size="large" color={Colors.primary} />

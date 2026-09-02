@@ -324,7 +324,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       email: (email || '').trim().toLowerCase(),
       code: (code || '').trim(),
     });
-    const u: User = res.data.user;
+    let authenticatedUser: User = res.data.user;
 
     // FRESH-INSTALL PIN CLEANUP — if this launch was detected as a
     // fresh install (Keychain auth-token wiped by freshInstallGuard),
@@ -333,7 +333,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // PIN. Identical reasoning as the legacy password login path —
     // see comment block in v6.10 for the full backstory.
     if (wasFreshInstallThisLaunch()) {
-      try { await clearPin(u.id); } catch (_e) {}
+      try { await clearPin(authenticatedUser.id); } catch (_e) {}
       consumeFreshInstallFlag();
     }
 
@@ -344,26 +344,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // ask for the PIN again right after verifying ownership of the
     // email.
     try {
-      const has = await hasPinForUser(u.id);
-      if (has) markUnlocked(u.id);
+      const has = await hasPinForUser(authenticatedUser.id);
+      if (has) markUnlocked(authenticatedUser.id);
     } catch (_e) {}
 
     await saveToken(res.data.access_token);
-    setUser(u);
-    // Cache the fresh user object so a subsequent cold-start (e.g.
-    // device reboot, then notification tap) can rehydrate the
-    // session OFFLINE and fire the PIN gate without waiting on
-    // /auth/me.  Fixes "Notification → OTP instead of PIN".
-    await writeUserCache(u);
-
-    // Sync timezone if it doesn't match device tz
-    try {
-      const tz =
-        (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
-      if (tz && tz !== u.timezone) {
-        api.put('/auth/timezone', { timezone: tz }).catch(() => {});
-      }
-    } catch (_e) {}
 
     // Build #60 — auto-consume pending invite after successful auth.
     //
@@ -405,20 +390,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (pending?.token) {
         try {
           console.info('[invite-accept] pending_invite_found');
-          const joinRes = await api.post('/family-group/join', {
-            invite_code: pending.token,
-          });
-          console.info('[invite-accept] join_confirmed', {
-            alreadyMember: !!joinRes.data?.already_member,
-          });
-          const meRes = await api.get('/auth/me');
-          const targetGroupId = joinRes.data?.group?.id;
-          if (targetGroupId && meRes.data?.family_group_id !== targetGroupId) {
-            throw new Error('Family assignment was not visible after invite acceptance');
+          // The normal invite-signup path includes invite_code in the OTP
+          // record. The backend assigns the family and creates the member row
+          // before /verify-otp returns. Only legacy flows whose response does
+          // not already show member assignment need the idempotent join.
+          if (
+            authenticatedUser.family_group_role !== 'member'
+            || !authenticatedUser.family_group_id
+          ) {
+            const joinRes = await api.post('/family-group/join', {
+              invite_code: pending.token,
+            });
+            console.info('[invite-accept] join_confirmed', {
+              alreadyMember: !!joinRes.data?.already_member,
+            });
+            const meRes = await api.get('/auth/me');
+            const targetGroupId = joinRes.data?.group?.id;
+            if (targetGroupId && meRes.data?.family_group_id !== targetGroupId) {
+              throw new Error('Family assignment was not visible after invite acceptance');
+            }
+            authenticatedUser = meRes.data;
           }
           console.info('[invite-accept] family_membership_refreshed');
-          setUser(meRes.data);
-          await writeUserCache(meRes.data);
           await markInviteConsumed(pending.token);
           await clearPendingInvite();
           console.info('[invite-accept] pending_invite_cleared');
@@ -429,9 +422,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             status: error?.response?.status ?? null,
             message: error?.response?.data?.detail || error?.message || 'unknown',
           });
+          throw error;
         }
       }
-    } catch (_e) { /* pendingInvite module or storage failure — non-fatal */ }
+    } catch (error) {
+      // Do not publish the authenticated session to RootNav until the pending
+      // family transition has either been confirmed or explicitly failed.
+      throw error;
+    }
+
+    setUser(authenticatedUser);
+    // Cache the final user object only after invite membership is settled, so
+    // a reboot cannot hydrate an intermediate solo-family state.
+    await writeUserCache(authenticatedUser);
+
+    // Sync timezone if it doesn't match device tz.
+    try {
+      const tz =
+        (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
+      if (tz && tz !== authenticatedUser.timezone) {
+        api.put('/auth/timezone', { timezone: tz }).catch(() => {});
+      }
+    } catch (_e) {}
   };
 
   const logout = async () => {
