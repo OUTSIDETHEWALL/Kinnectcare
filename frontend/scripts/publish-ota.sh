@@ -3,8 +3,10 @@
 # publish-ota.sh — safe OTA publish with pre-flight verification
 #
 # Usage (from frontend/ directory):
-#   bash scripts/publish-ota.sh "Your update message here"
-#   yarn ota:publish "Your update message here"
+#   bash scripts/publish-ota.sh preview "Your update message here"
+#   bash scripts/publish-ota.sh production "Your update message here"
+#   bash scripts/publish-ota.sh "Your production update message here"  # legacy form
+#   yarn ota:publish preview "Your update message here"
 #
 # Process (in order, aborts on first failure):
 #   1. Verify .env.production exists and contains the backend URL
@@ -46,10 +48,20 @@ CACHE_DIR="${FRONTEND_DIR}/.metro-cache"
 ENV_FILE="${FRONTEND_DIR}/.env.production"
 EXPECTED_DOMAIN="kinnectcare-production.up.railway.app"
 
-# ── Require a message ─────────────────────────────────────────
-MESSAGE="${1:-}"
+# ── Resolve and validate channel/message ───────────────────────
+# The legacy one-argument form remains production for existing release
+# automation. New releases should name the audience explicitly so a preview
+# build cannot accidentally receive a production-only update (or vice versa).
+CHANNEL="${1:-}"
+if [[ "$CHANNEL" == "preview" || "$CHANNEL" == "production" ]]; then
+  MESSAGE="${2:-}"
+else
+  MESSAGE="$CHANNEL"
+  CHANNEL="production"
+fi
+
 if [[ -z "$MESSAGE" ]]; then
-  fail "Usage: $0 \"Your update message\"\n   A descriptive message is required."
+  MESSAGE="Publish ${CHANNEL} OTA"
 fi
 
 # ═════════════════════════════════════════════════════════════
@@ -205,7 +217,7 @@ fi
 hdr "Step 7 — Publish OTA"
 # ═════════════════════════════════════════════════════════════
 echo ""
-echo "  Channel : production"
+echo "  Channel : ${CHANNEL}"
 echo "  URL     : ${PARSED_URL}"
 echo "  Message : ${MESSAGE}"
 echo ""
@@ -232,7 +244,7 @@ echo ""
 EAS_JSON_FILE=/tmp/ota_publish_output.json
 cd "$FRONTEND_DIR"
 EAS_SKIP_AUTO_FINGERPRINT=1 npx eas update \
-  --channel production \
+  --channel "$CHANNEL" \
   --message "$MESSAGE" \
   --non-interactive \
   --json \
