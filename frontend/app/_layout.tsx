@@ -37,6 +37,7 @@ import {
 } from '../src/pendingInvite';
 import { isPermissionsHandled } from '../src/permissionsStore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { logStartupEvent } from '../src/startupDiagnostics';
 
 function RootNav() {
   const { user, loading } = useAuth();
@@ -59,6 +60,48 @@ function RootNav() {
   // notification dialogs with emotional, family-focused context.
   const [permissionsChecked, setPermissionsChecked] = useState(false);
   const [needsPermissions, setNeedsPermissions] = useState(false);
+  const routeDecisionRef = useRef(0);
+
+  const logRootDecision = (
+    reason: string,
+    toRoute: string | null,
+    outcome: 'navigate' | 'hold' | 'ready',
+  ) => {
+    logStartupEvent({
+      phase: 'root_navigation_decision',
+      event: 'root_navigation_evaluated',
+      route: toRoute,
+      reason,
+      outcome,
+      details: {
+        decision: ++routeDecisionRef.current,
+        currentRoute: pathname || '/',
+        authenticated: !!user,
+        authLoading: loading,
+        onboardingChecked,
+        needsOnboarding,
+        appLockChecked,
+        needsAppLockUnlock,
+        disclaimerChecked,
+        needsDisclaimer,
+        permissionsChecked,
+        needsPermissions,
+      },
+    });
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      logStartupEvent({
+        phase: 'final_route_committed',
+        event: 'route_stable_750ms',
+        route: pathname || '/',
+        outcome: user ? 'authenticated' : 'unauthenticated',
+        details: { authLoading: loading },
+      });
+    }, 750);
+    return () => clearTimeout(timer);
+  }, [pathname, user, loading]);
 
   useEffect(() => {
     // Cold-start load + subscribe-for-future-changes.  Runs ONCE on
@@ -223,14 +266,41 @@ function RootNav() {
 
     const consumeInviteUrl = async (url: string | null) => {
       const token = extractInviteToken(url);
+      logStartupEvent({
+        phase: 'deep_link_processing',
+        event: 'invite_url_parsed',
+        outcome: token ? 'invite_token_present' : 'no_invite_token',
+        details: { urlPresent: !!url },
+      });
       if (!token) return;
-      if (await isInviteConsumed(token)) {
+      logStartupEvent({
+        phase: 'consumed_token_check',
+        event: 'consumed_token_check_started',
+        reason: 'deep_link',
+      });
+      const consumed = await isInviteConsumed(token);
+      logStartupEvent({
+        phase: 'consumed_token_check',
+        event: 'consumed_token_check_completed',
+        outcome: consumed ? 'consumed' : 'not_consumed',
+      });
+      if (consumed) {
         console.info('[invite-accept] consumed_launch_ignored');
+        logStartupEvent({
+          phase: 'deep_link_processing',
+          event: 'invite_url_ignored',
+          reason: 'token_already_consumed',
+        });
         return;
       }
       // Persist first — the safest thing we can do.  Everything below
       // is best-effort.
       await setPendingInvite(token);
+      logStartupEvent({
+        phase: 'deep_link_processing',
+        event: 'pending_invite_saved',
+        outcome: 'invite_route_scheduled',
+      });
 
       // Zero-friction onboarding: never auto-join silently.
       // Route directly to /invite/{token} so the user always sees
@@ -242,7 +312,16 @@ function RootNav() {
       if (!inviteRouteRef.current) {
         inviteRouteRef.current = true;
         setTimeout(() => {
-          try { router.push(`/invite/${token}` as any); } catch (_e) {}
+          try {
+            logStartupEvent({
+              phase: 'root_navigation_decision',
+              event: 'invite_route_requested',
+              route: '/invite/[token]',
+              reason: 'unconsumed_deep_link',
+              outcome: 'navigate',
+            });
+            router.push(`/invite/${token}` as any);
+          } catch (_e) {}
         }, 250);
       }
     };
@@ -251,6 +330,11 @@ function RootNav() {
     (async () => {
       try {
         const initial = await Linking.getInitialURL();
+        logStartupEvent({
+          phase: 'deep_link_processing',
+          event: 'initial_url_loaded',
+          outcome: initial ? 'url_present' : 'no_url',
+        });
         if (initial) await consumeInviteUrl(initial);
       } catch (_e) { /* non-fatal */ }
     })();
@@ -1099,7 +1183,10 @@ function RootNav() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (loading || !onboardingChecked || !appLockChecked || !disclaimerChecked) return;
+    if (loading || !onboardingChecked || !appLockChecked || !disclaimerChecked) {
+      logRootDecision('startup_gates_pending', null, 'hold');
+      return;
+    }
     const inAuthGroup = segments[0] === '(auth)';
     const isWelcome = !segments[0] || segments[0] === ('index' as any);
     const isOnboarding = segments[0] === 'onboarding';
@@ -1113,6 +1200,7 @@ function RootNav() {
     // Once acknowledged (AsyncStorage flag), this branch never fires
     // again on this device.
     if (needsDisclaimer && !isDisclaimer && !isPublic) {
+      logRootDecision('disclaimer_required', '/disclaimer', 'navigate');
       router.replace('/disclaimer');
       return;
     }
@@ -1127,6 +1215,7 @@ function RootNav() {
     // setDisclaimerAck() flips needsDisclaimer to false, at which
     // point the gate falls through cleanly to onboarding/auth.
     if (isDisclaimer) {
+      logRootDecision('disclaimer_screen_active', null, 'ready');
       setAppReadyForDeepLink(true);
       return;
     }
@@ -1146,12 +1235,19 @@ function RootNav() {
         const stillNeeds = !(await isOnboardingDone());
         if (stillNeeds) {
           const pendingToken = await getPendingInvite();
+          logStartupEvent({
+            phase: 'pending_invite_load',
+            event: 'pending_invite_load_completed',
+            reason: 'onboarding_gate',
+            outcome: pendingToken ? 'pending_invite_present' : 'no_pending_invite',
+          });
           if (pendingToken) {
             // Invited path — skip slides, mark done, let the welcome-screen
             // pending-invite redirect take the user to /invite/{token}.
             await markOnboardingDone();
             setNeedsOnboarding(false);
           } else {
+            logRootDecision('unauthenticated_onboarding_required', '/onboarding', 'navigate');
             router.replace('/onboarding');
           }
         } else {
@@ -1174,10 +1270,12 @@ function RootNav() {
     // own identical guard, but doing it here too means we don't
     // depend on those screens having mounted yet.)
     if (!user && onPinScreen) {
+      logRootDecision('unauthenticated_on_pin_screen', '/', 'navigate');
       router.replace('/');
       return;
     }
     if (!user && !inAuthGroup && !isWelcome && !isOnboarding && !isPublic) {
+      logRootDecision('unauthenticated_protected_route', '/', 'navigate');
       router.replace('/');
       return;
     }
@@ -1191,6 +1289,7 @@ function RootNav() {
           hasPinForUser(user.id),
         ]);
         if (enabled && hasPin && !isUnlockedNow(user.id)) {
+          logRootDecision('app_lock_required', '/(auth)/pin-login', 'navigate');
           router.replace('/(auth)/pin-login');
         } else {
           setNeedsAppLockUnlock(false);
@@ -1209,6 +1308,7 @@ function RootNav() {
       (async () => {
         const handled = await isPermissionsHandled();
         if (!handled) {
+          logRootDecision('permissions_required', '/(auth)/permissions', 'navigate');
           router.replace('/(auth)/permissions');
         } else {
           setNeedsPermissions(false);
@@ -1220,6 +1320,7 @@ function RootNav() {
     if (user && !needsAppLockUnlock && !onPinScreen && !onPermissionsScreen && (inAuthGroup || isWelcome || isOnboarding)) {
       // Do not race a voluntary PIN setup/change screen. Otherwise an
       // authenticated session opens the app immediately by default.
+      logRootDecision('authenticated_start_route', '/(tabs)/dashboard', 'navigate');
       router.replace('/(tabs)/dashboard');
       return;
     }
@@ -1229,6 +1330,7 @@ function RootNav() {
     // states (welcome / onboarding / public) and authenticated states
     // where no further redirect is needed, so taps from any state are
     // honoured once routing has settled.
+    logRootDecision('all_navigation_gates_cleared', pathname || '/', 'ready');
     setAppReadyForDeepLink(true);
   }, [user, loading, segments, onboardingChecked, needsOnboarding, appLockChecked, needsAppLockUnlock, disclaimerChecked, needsDisclaimer, permissionsChecked, needsPermissions]);
 

@@ -37,6 +37,10 @@ import { getNotificationLog, clearNotificationLog } from '../src/notificationLog
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { readRouteLog, RouteDiagEntry } from '../src/routeDiagnostics';
+import {
+  readStartupDiagnostics,
+  StartupDiagnosticEntry,
+} from '../src/startupDiagnostics';
 import { readLocationRefreshLog, LocationRefreshEntry } from '../src/locationRefresh';
 import { readBgTaskLog, BgTaskLogEntry } from '../src/backgroundLocation';
 import {
@@ -780,6 +784,7 @@ function DiagnosticsContent() {
   const router = useRouter();
   const { user } = useAuth();
   const [routeLog, setRouteLog] = useState<RouteDiagEntry[]>([]);
+  const [startupLog, setStartupLog] = useState<StartupDiagnosticEntry[]>([]);
   const [authLog, setAuthLog] = useState<AuthClearEntry[]>([]);
   const [pushLog, setPushLog] = useState<PushRefreshEntry[]>([]);
   const [locLog, setLocLog] = useState<LocationRefreshEntry[]>([]);
@@ -1007,8 +1012,9 @@ function DiagnosticsContent() {
     await auditDiagnosticsStorage().catch((error) => {
       console.warn('[diagnostics-storage] pre-read audit failed', error);
     });
-    const [r, a, p, l, b, sr, eng, dl, cr, pl, ps, lsnap, llog, rs] = await Promise.all([
+    const [r, startup, a, p, l, b, sr, eng, dl, cr, pl, ps, lsnap, llog, rs] = await Promise.all([
       traceDiagnosticsStorageRead('@kinnship/route_diagnostics_v1', readRouteLog),
+      traceDiagnosticsStorageRead('@kinnship/startup_diagnostics_v1', readStartupDiagnostics),
       traceDiagnosticsStorageRead('kc_auth_clear_diag', readAuthClearLog),
       traceDiagnosticsStorageRead('kc_push_refresh_log', readPushRefreshLog),
       traceDiagnosticsStorageRead('kc_location_refresh_log', readLocationRefreshLog),
@@ -1024,6 +1030,7 @@ function DiagnosticsContent() {
       getRestrictionStatus(),
     ]);
     setRouteLog(traceDiagnosticsRecords('@kinnship/route_diagnostics_v1', r));
+    setStartupLog(traceDiagnosticsRecords('@kinnship/startup_diagnostics_v1', startup));
     setAuthLog(traceDiagnosticsRecords('kc_auth_clear_diag', a));
     setPushLog(traceDiagnosticsRecords('kc_push_refresh_log', p));
     setLocLog(traceDiagnosticsRecords('kc_location_refresh_log', l));
@@ -1328,6 +1335,7 @@ function DiagnosticsContent() {
       ota: otaInfo,
       user: user ? { id: user.id, email: user.email } : null,
       authClearLog: authLog,
+      startupLog,
       routeLog,
       pushRefreshLog: pushLog,
       locationRefreshLog: locLog,
@@ -1343,6 +1351,7 @@ function DiagnosticsContent() {
       serverState,
       counts: {
         authClear: authLog.length,
+        startup: startupLog.length,
         route: routeLog.length,
         pushRefresh: pushLog.length,
         locationRefresh: locLog.length,
@@ -1353,7 +1362,7 @@ function DiagnosticsContent() {
         staleLocationPipelineSnapshots: pipelineSnapshots.length,
       },
     };
-  }, [authLog, routeLog, pushLog, locLog, bgLog, renderLog, engineLog, engineState, engineAvailable, dashLoadLog, pipelineSnapshots, serverState, user]);
+  }, [authLog, startupLog, routeLog, pushLog, locLog, bgLog, renderLog, engineLog, engineState, engineAvailable, dashLoadLog, pipelineSnapshots, serverState, user]);
 
   const onCopy = async () => {
     try {
@@ -1362,7 +1371,7 @@ function DiagnosticsContent() {
       await Clipboard.setStringAsync(json);
       Alert.alert(
         'Copied',
-        `Diagnostic log copied (${authLog.length} auth, ${routeLog.length} route, ${pushLog.length} push, ${locLog.length} loc, ${bgLog.length} bg, ${renderLog.length} render entries).`,
+        `Diagnostic log copied (${startupLog.length} startup, ${authLog.length} auth, ${routeLog.length} route, ${pushLog.length} push, ${locLog.length} loc, ${bgLog.length} bg, ${renderLog.length} render entries).`,
       );
     } catch (e: any) {
       Alert.alert('Could not copy', e?.message || 'Try again.');

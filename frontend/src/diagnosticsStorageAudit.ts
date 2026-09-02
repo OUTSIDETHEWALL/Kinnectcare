@@ -17,6 +17,7 @@ export const DIAGNOSTICS_STORAGE_KEYS = [
   '@kinnship/diagnostics_expanded_v1',
   '@kinnship/notification_log_v1',
   '@kinnship/route_diagnostics_v1',
+  '@kinnship/startup_diagnostics_v1',
   'kc_location_refresh_log',
   'kc_bg_task_log',
   '@kinnship/battery_task_log_v1',
@@ -196,6 +197,18 @@ const STORAGE_DEFINITIONS: StorageDefinition[] = [
     ),
   },
   { key: '@kinnship/route_diagnostics_v1', shape: 'array', validateRecord: (r) => finiteNumber(r, 't') },
+  {
+    key: '@kinnship/startup_diagnostics_v1',
+    shape: 'array',
+    validateRecord: (r) => allValid(
+      finiteNumber(r, 't'),
+      finiteNumber(r, 'elapsedMs'),
+      finiteNumber(r, 'seq'),
+      requiredString(r, 'runId'),
+      requiredString(r, 'phase'),
+      requiredString(r, 'event'),
+    ),
+  },
   {
     key: 'kc_location_refresh_log',
     shape: 'array',
