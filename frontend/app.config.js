@@ -77,7 +77,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 63, // Build 63 — adds Google Play Install Referrer capture so fresh installs retain invitation tokens.
+      versionCode: 64, // Build 64 — production beta candidate containing the fresh-install invitation handoff.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',

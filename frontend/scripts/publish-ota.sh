@@ -3,10 +3,8 @@
 # publish-ota.sh — safe OTA publish with pre-flight verification
 #
 # Usage (from frontend/ directory):
-#   bash scripts/publish-ota.sh preview "Your update message here"
-#   bash scripts/publish-ota.sh production "Your update message here"
-#   bash scripts/publish-ota.sh "Your production update message here"  # legacy form
-#   yarn ota:publish preview "Your update message here"
+#   bash scripts/publish-ota.sh "Your production update message here"
+#   yarn ota:publish "Your production update message here"
 #
 # Process (in order, aborts on first failure):
 #   1. Verify .env.production exists and contains the backend URL
@@ -48,24 +46,13 @@ CACHE_DIR="${FRONTEND_DIR}/.metro-cache"
 ENV_FILE="${FRONTEND_DIR}/.env.production"
 EXPECTED_DOMAIN="kinnectcare-production.up.railway.app"
 
-# ── Resolve and validate channel/message ───────────────────────
-# The legacy one-argument form remains production for existing release
-# automation. New releases should name the audience explicitly so a preview
-# build cannot accidentally receive a production-only update (or vice versa).
-FIRST_ARG="${1:-}"
-if [[ "$FIRST_ARG" == "preview" || "$FIRST_ARG" == "production" ]]; then
-  CHANNEL="$FIRST_ARG"
-  MESSAGE="${2:-}"
-elif [[ "$#" -eq 1 && -n "$FIRST_ARG" ]]; then
-  # Backward-compatible form: one argument is the production message.
-  CHANNEL="production"
-  MESSAGE="$FIRST_ARG"
-else
-  fail "Usage: $0 <preview|production> \"Your update message\"\n   The channel must be preview or production.\n\n   Legacy form (production): $0 \"Your update message\""
-fi
-
-if [[ -z "$MESSAGE" ]]; then
-  MESSAGE="Publish ${CHANNEL} OTA"
+# This is intentionally production-only. Alternate channels require an
+# explicit, separate release decision and must not be reachable by changing a
+# routine beta-release argument.
+CHANNEL="production"
+MESSAGE="${1:-}"
+if [[ -z "$MESSAGE" || "$#" -ne 1 ]]; then
+  fail "Usage: $0 \"Your production update message\"\n   This release path publishes only to the production channel."
 fi
 
 # ═════════════════════════════════════════════════════════════
@@ -102,6 +89,24 @@ if [[ "$LOCAL_SHA" != "$REMOTE_SHA" ]]; then
   fail "Local main (${LOCAL_SHA:0:7}) is not up to date with origin/main (${REMOTE_SHA:0:7}).\n\n   Run: git pull origin main\n   Then verify the PR is already merged before retrying."
 fi
 ok "main is up to date with origin/main (${LOCAL_SHA:0:7})"
+
+# Check 4 — checked-in EAS production target must still be production
+EAS_CHANNEL=$(cd "$FRONTEND_DIR" && node -p "require('./eas.json').build.production.channel || ''")
+APP_PACKAGE=$(cd "$FRONTEND_DIR" && node -e "
+  const app = require('./app.config.js')({ config: {} }).expo;
+  process.stdout.write(app.android?.package || '');
+")
+EXPECTED_RUNTIME=$(cd "$FRONTEND_DIR" && node -e "
+  const app = require('./app.config.js')({ config: {} }).expo;
+  process.stdout.write(app.version || '');
+")
+if [[ "$EAS_CHANNEL" != "production" ]]; then
+  fail "Production profile targets EAS channel '${EAS_CHANNEL}', not 'production'."
+fi
+if [[ "$APP_PACKAGE" != "app.kinnship.client" ]]; then
+  fail "Unexpected Android package '${APP_PACKAGE}'. Expected app.kinnship.client."
+fi
+ok "Verified OTA target: app.kinnship.client → EAS production channel → runtime ${EXPECTED_RUNTIME}"
 
 # ═════════════════════════════════════════════════════════════
 hdr "Step 1 — .env.production file"
@@ -280,19 +285,33 @@ eval "$(node -e "
     const android = updates.find(u => u.platform === 'android') || {};
     const ios     = updates.find(u => u.platform === 'ios')     || {};
     const group   = android.group || ios.group || 'unknown';
+    const branches = [...new Set(updates.map(u => u.branch || 'unknown'))].join(',');
+    const runtimes = [...new Set(updates.map(u => u.runtimeVersion || 'unknown'))].join(',');
     console.log('GROUP_ID=\"'   + group                + '\"');
     console.log('ANDROID_ID=\"' + (android.id || 'unknown') + '\"');
     console.log('IOS_ID=\"'     + (ios.id     || 'unknown') + '\"');
+    console.log('PUBLISHED_BRANCHES=\"' + branches + '\"');
+    console.log('PUBLISHED_RUNTIMES=\"' + runtimes + '\"');
   } catch(e) {
     process.stderr.write('JSON parse failed: ' + e.message + '\n');
     console.log('GROUP_ID=\"unknown\"');
     console.log('ANDROID_ID=\"unknown\"');
     console.log('IOS_ID=\"unknown\"');
+    console.log('PUBLISHED_BRANCHES=\"unknown\"');
+    console.log('PUBLISHED_RUNTIMES=\"unknown\"');
   }
 ")"
 
+if [[ "$PUBLISHED_BRANCHES" != "production" ]]; then
+  fail "Post-publish verification failed: EAS reported branch '${PUBLISHED_BRANCHES}', expected 'production'."
+fi
+if [[ "$PUBLISHED_RUNTIMES" != "$EXPECTED_RUNTIME" ]]; then
+  fail "Post-publish verification failed: runtime '${PUBLISHED_RUNTIMES}', expected '${EXPECTED_RUNTIME}'."
+fi
+
 echo ""
 ok "OTA published"
+ok "Verified target: app.kinnship.client → production → runtime ${PUBLISHED_RUNTIMES}"
 echo ""
 echo -e "  ${CYAN}EAS Update Group ID${NC}  (engineering reference, not visible on device)"
 echo "  ${GROUP_ID}"

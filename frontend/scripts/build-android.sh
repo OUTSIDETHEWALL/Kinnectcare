@@ -15,9 +15,10 @@
 #      zero code change, always safe, always auditable.
 #   3. Verify working tree is clean
 #   4. Verify local main matches origin/main
-#   5. Verify EXPO_TOKEN is set
-#   6. Submit EAS Android production build (--no-wait)
-#   7. Print the EAS dashboard URL
+#   5. Verify the exact production/store/Play beta target
+#   6. Verify EXPO_TOKEN is set
+#   7. Submit EAS Android production build (--no-wait)
+#   8. Print the EAS dashboard URL
 #
 # Why --no-wait:
 #   Native builds take 15–30 min.  The script submits the job
@@ -137,7 +138,43 @@ fi
 ok "main is in sync with origin (${LOCAL_SHA:0:7})"
 
 # ═════════════════════════════════════════════════════════════
-hdr "Step 5 — EAS authentication"
+hdr "Step 5 — Production target verification"
+# ═════════════════════════════════════════════════════════════
+EAS_CHANNEL=$(cd "$FRONTEND_DIR" && node -p "require('./eas.json').build.production.channel || ''")
+ANDROID_BUILD_TYPE=$(cd "$FRONTEND_DIR" && node -p "require('./eas.json').build.production.android.buildType || ''")
+PLAY_TRACK=$(cd "$FRONTEND_DIR" && node -p "require('./eas.json').submit.production.android.track || ''")
+RELEASE_STATUS=$(cd "$FRONTEND_DIR" && node -p "require('./eas.json').submit.production.android.releaseStatus || ''")
+APP_PACKAGE=$(cd "$FRONTEND_DIR" && node -e "
+  const app = require('./app.config.js')({ config: {} }).expo;
+  process.stdout.write(app.android?.package || '');
+")
+APP_VERSION=$(cd "$FRONTEND_DIR" && node -e "
+  const app = require('./app.config.js')({ config: {} }).expo;
+  process.stdout.write(app.version || '');
+")
+VERSION_CODE=$(cd "$FRONTEND_DIR" && node -e "
+  const app = require('./app.config.js')({ config: {} }).expo;
+  process.stdout.write(String(app.android?.versionCode || ''));
+")
+
+[[ "$EAS_CHANNEL" == "production" ]] \
+  || fail "Production build profile targets channel '${EAS_CHANNEL}', expected 'production'."
+[[ "$ANDROID_BUILD_TYPE" == "app-bundle" ]] \
+  || fail "Production Android artifact is '${ANDROID_BUILD_TYPE}', expected Play-ready 'app-bundle'."
+[[ "$APP_PACKAGE" == "app.kinnship.client" ]] \
+  || fail "Android package is '${APP_PACKAGE}', expected 'app.kinnship.client'."
+[[ "$PLAY_TRACK" == "internal" ]] \
+  || fail "Google Play beta target is '${PLAY_TRACK}', expected 'internal'."
+[[ "$RELEASE_STATUS" == "draft" ]] \
+  || fail "Google Play release status is '${RELEASE_STATUS}', expected 'draft'."
+
+ok "Verified application: ${APP_PACKAGE}"
+ok "Verified runtime: ${APP_VERSION} (versionCode ${VERSION_CODE})"
+ok "Verified EAS target: production channel, Play-ready AAB"
+ok "Verified Google Play target: Internal testing, draft release"
+
+# ═════════════════════════════════════════════════════════════
+hdr "Step 6 — EAS authentication"
 # ═════════════════════════════════════════════════════════════
 if [[ -z "${EXPO_TOKEN:-}" ]]; then
   fail "EXPO_TOKEN is not set.\n\n   Add it to Replit Secrets, or generate one at:\n   https://expo.dev/accounts/finalcut/settings/access-tokens"
@@ -145,11 +182,17 @@ fi
 ok "EXPO_TOKEN present"
 
 # ═════════════════════════════════════════════════════════════
-hdr "Step 6 — Submit EAS Android build"
+hdr "Step 7 — Submit EAS Android build"
 # ═════════════════════════════════════════════════════════════
 echo ""
 echo "  Platform : Android"
 echo "  Profile  : production"
+echo "  Channel  : ${EAS_CHANNEL}"
+echo "  Package  : ${APP_PACKAGE}"
+echo "  Runtime  : ${APP_VERSION}"
+echo "  Build    : ${VERSION_CODE}"
+echo "  Artifact : Android App Bundle (.aab)"
+echo "  Play     : Internal testing (${RELEASE_STATUS})"
 echo "  Message  : ${MESSAGE}"
 echo ""
 warn "Submitting build — this may take 30–60 s to confirm..."
