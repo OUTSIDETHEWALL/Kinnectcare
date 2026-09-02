@@ -10,6 +10,7 @@ import {
   consumeFreshInstallFlag,
 } from './freshInstallGuard';
 import { captureInstallReferrerInvite } from './installReferrerInvite';
+import { logStartupEvent } from './startupDiagnostics';
 
 const TOKEN_KEY = 'kc_token';
 // v1.2 beta — cache the user object alongside the token so we can
@@ -102,7 +103,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     (async () => {
+      logStartupEvent({
+        phase: 'session_restore',
+        event: 'session_restore_started',
+      });
       await captureInstallReferrerInvite();
+      logStartupEvent({
+        phase: 'session_restore',
+        event: 'install_referrer_capture_completed',
+      });
       // FRESH-INSTALL GUARD — clear any stale Keychain/SecureStore
       // entries that may have survived a previous app uninstall
       // (iOS Keychain entries persist by Apple design, and some
@@ -110,11 +119,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         await maybeClearStaleSecureStoreOnFreshInstall();
       } catch (_e) {}
+      logStartupEvent({
+        phase: 'session_restore',
+        event: 'fresh_install_guard_completed',
+        details: { freshInstall: wasFreshInstallThisLaunch() },
+      });
       const token = await readToken();
+      logStartupEvent({
+        phase: 'session_restore',
+        event: 'token_read_completed',
+        outcome: token ? 'token_present' : 'token_missing',
+      });
       if (!token) {
         // No token at all — definitely not signed in.  Dismiss loading
         // immediately so the user reaches the welcome screen.
         setLoading(false);
+        logStartupEvent({
+          phase: 'session_restore',
+          event: 'session_restore_completed',
+          outcome: 'unauthenticated_no_token',
+        });
         return;
       }
       // We have a token.  From here we MUST NOT dismiss loading until
@@ -126,16 +150,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // through to the user — the exact bug the caregiver and member saw on
       // notification tap.
       const cachedUser = await readUserCache();
+      logStartupEvent({
+        phase: 'session_restore',
+        event: 'user_cache_read_completed',
+        outcome: cachedUser ? 'cache_hit' : 'cache_miss',
+      });
       if (cachedUser) {
         // OFFLINE-FIRST: cache hit → restore the session immediately
         // and dismiss loading.  /auth/me continues in the background.
         setUser(cachedUser);
         setLoading(false);
+        logStartupEvent({
+          phase: 'session_restore',
+          event: 'session_restored',
+          outcome: 'cached_user',
+        });
       }
       try {
         const res = await api.get('/auth/me');
         setUser(res.data);
         await writeUserCache(res.data);
+        logStartupEvent({
+          phase: 'session_restore',
+          event: 'auth_me_completed',
+          outcome: 'authenticated',
+        });
         try {
           const tz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
           if (tz && tz !== res.data.timezone) {
@@ -150,12 +189,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // read failure, Railway edge restart, etc.) must NOT
         // permanently log the user out.  Pause 2s and reissue.
         if (status === 401) {
+          logStartupEvent({
+            phase: 'session_restore',
+            event: 'auth_me_retry_started',
+            reason: 'first_401',
+          });
           try {
             await new Promise((r) => setTimeout(r, 2000));
             const res2 = await api.get('/auth/me');
             setUser(res2.data);
             await writeUserCache(res2.data);
             status = undefined; // recovered
+            logStartupEvent({
+              phase: 'session_restore',
+              event: 'auth_me_retry_completed',
+              outcome: 'authenticated',
+            });
           } catch (e2: any) {
             status = e2?.response?.status;
             // Capture body+url for the diag below, replace e for that
@@ -185,12 +234,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           await clearToken();
           await writeUserCache(null);
           setUser(null);
+          logStartupEvent({
+            phase: 'session_restore',
+            event: 'session_cleared',
+            outcome: 'two_consecutive_401s',
+          });
+        } else {
+          logStartupEvent({
+            phase: 'session_restore',
+            event: 'auth_me_failed',
+            outcome: cachedUser ? 'cached_user_retained' : 'no_cached_user',
+            details: { status: typeof status === 'number' ? status : null },
+          });
         }
         // else: keep token AND cached user. PIN gate handles UX.
       }
       // Catch-all flip in case the cache hit branch above didn't
       // already do it (cache miss + /auth/me success path lands here).
       setLoading(false);
+      logStartupEvent({
+        phase: 'session_restore',
+        event: 'session_restore_completed',
+        outcome: cachedUser ? 'loading_released_with_cached_user' : 'loading_released_after_network',
+      });
     })();
   }, []);
 
@@ -325,7 +391,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // diagnostic instead of discarding the only recovery evidence.
     try {
       const { getPendingInvite, clearPendingInvite, markInviteConsumed } = await import('./pendingInvite');
+      logStartupEvent({
+        phase: 'pending_invite_load',
+        event: 'pending_invite_load_started',
+        reason: 'otp_verified',
+      });
       const pending = await getPendingInvite();
+      logStartupEvent({
+        phase: 'pending_invite_load',
+        event: 'pending_invite_load_completed',
+        outcome: pending?.token ? 'pending_invite_present' : 'no_pending_invite',
+      });
       if (pending?.token) {
         try {
           console.info('[invite-accept] pending_invite_found');
