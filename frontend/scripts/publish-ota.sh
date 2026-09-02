@@ -52,12 +52,16 @@ EXPECTED_DOMAIN="kinnectcare-production.up.railway.app"
 # The legacy one-argument form remains production for existing release
 # automation. New releases should name the audience explicitly so a preview
 # build cannot accidentally receive a production-only update (or vice versa).
-CHANNEL="${1:-}"
-if [[ "$CHANNEL" == "preview" || "$CHANNEL" == "production" ]]; then
+FIRST_ARG="${1:-}"
+if [[ "$FIRST_ARG" == "preview" || "$FIRST_ARG" == "production" ]]; then
+  CHANNEL="$FIRST_ARG"
   MESSAGE="${2:-}"
-else
-  MESSAGE="$CHANNEL"
+elif [[ "$#" -eq 1 && -n "$FIRST_ARG" ]]; then
+  # Backward-compatible form: one argument is the production message.
   CHANNEL="production"
+  MESSAGE="$FIRST_ARG"
+else
+  fail "Usage: $0 <preview|production> \"Your update message\"\n   The channel must be preview or production.\n\n   Legacy form (production): $0 \"Your update message\""
 fi
 
 if [[ -z "$MESSAGE" ]]; then
