@@ -1,6 +1,8 @@
 import { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ImageBackground, Image } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ImageBackground, Image, Platform } from 'react-native';
 import { useRouter } from 'expo-router';
+import * as Device from 'expo-device';
+import * as Updates from 'expo-updates';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -8,6 +10,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 export default function Welcome() {
   const router = useRouter();
   const [pressedButton, setPressedButton] = useState<'create-family' | 'sign-in' | null>(null);
+  const isEmbeddedBundle = Updates.isEmbeddedLaunch === true || !Updates.updateId;
+  const bundleLabel = isEmbeddedBundle ? 'EMBEDDED BUILD 64' : 'OTA ACTIVE';
+  const updateLabel = Updates.updateId ? Updates.updateId.slice(0, 8) : 'NO OTA ID';
+  const channelLabel = Updates.channel ?? 'NO CHANNEL';
+  const runtimeLabel = Updates.runtimeVersion ?? 'UNKNOWN RUNTIME';
+  const deviceLabel = Platform.OS === 'android'
+    ? `Android ${Platform.Version} • ${Device.manufacturer ?? 'Unknown maker'} ${Device.modelName ?? 'Unknown model'}`
+    : `${Platform.OS} • ${Device.manufacturer ?? 'Unknown maker'} ${Device.modelName ?? 'Unknown model'}`;
 
   const handlePressIn = (button: 'create-family' | 'sign-in') => {
     console.info('[welcome-touch]', button, 'onPressIn');
@@ -27,8 +37,12 @@ export default function Welcome() {
     >
       <View style={styles.overlay} />
       <View pointerEvents="none" style={styles.bundleMarker}>
-        <Text style={styles.bundleMarkerTitle}>PROBE 129</Text>
-        <Text style={styles.bundleMarkerSubtitle}>OTA 01a073b5</Text>
+        <Text style={styles.bundleMarkerTitle}>BUNDLE CHECK</Text>
+        <Text style={styles.bundleMarkerStatus}>{bundleLabel}</Text>
+        <Text style={styles.bundleMarkerSubtitle}>
+          {updateLabel} • {channelLabel} • {runtimeLabel}
+        </Text>
+        <Text style={styles.bundleMarkerDevice}>{deviceLabel}</Text>
       </View>
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <View style={styles.top}>
@@ -155,8 +169,23 @@ const styles = StyleSheet.create({
   bundleMarkerSubtitle: {
     marginTop: 2,
     color: '#FFFFFF',
-    fontSize: 18,
+    fontSize: 14,
     fontWeight: '800',
+    textAlign: 'center',
+  },
+  bundleMarkerStatus: {
+    marginTop: 2,
+    color: '#FEF08A',
+    fontSize: 19,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  bundleMarkerDevice: {
+    marginTop: 4,
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   container: { flex: 1, paddingHorizontal: 28, justifyContent: 'space-between' },
   top: { alignItems: 'center', marginTop: 24 },

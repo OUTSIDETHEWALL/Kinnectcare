@@ -30,8 +30,16 @@ describe('Welcome Sign In navigation contract', () => {
   it('shows an unmistakable non-interactive production bundle marker', () => {
     const welcome = source('app/index.tsx');
 
-    expect(welcome).toContain('PROBE 129');
-    expect(welcome).toContain('OTA 01a073b5');
+    expect(welcome).toContain('BUNDLE CHECK');
+    expect(welcome).toContain('EMBEDDED BUILD 64');
+    expect(welcome).toContain('OTA ACTIVE');
+    expect(welcome).toContain('Updates.isEmbeddedLaunch');
+    expect(welcome).toContain('Updates.updateId');
+    expect(welcome).toContain('Updates.channel');
+    expect(welcome).toContain('Updates.runtimeVersion');
+    expect(welcome).toContain('Device.manufacturer');
+    expect(welcome).toContain('Device.modelName');
+    expect(welcome).toContain('Platform.Version');
     expect(welcome).toContain('pointerEvents="none"');
     expect(welcome).toContain('styles.bundleMarker');
   });

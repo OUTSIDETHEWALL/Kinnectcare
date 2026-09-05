@@ -22,3 +22,4 @@
 - [Expo Router lazy isolation](expo-router-lazy-isolation.md) — a lazy diagnostic target must live outside app/ or route discovery can initialize it before the user presses its button.
 - [EAS Node 20 dependency constraint](eas-node20-dependency-constraint.md) — Expo SDK 54 Android builds use Node 20; Babel 8 fails during dependency installation.
 - [Android invite Intent replay](android-invite-intent-replay.md) — accepted invite URLs can be redelivered after reboot; consumed-token suppression is separate from clearing pending state.
+- [Verify bundle identity first](verify-bundle-identity-first.md) — when device behavior contradicts an OTA change, prove embedded-vs-OTA runtime identity before debugging further.
