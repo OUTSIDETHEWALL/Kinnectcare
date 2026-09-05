@@ -27,6 +27,15 @@ describe('Welcome Sign In navigation contract', () => {
     expect(welcome).toContain('styles.pressProbe');
   });
 
+  it('shows an unmistakable non-interactive production bundle marker', () => {
+    const welcome = source('app/index.tsx');
+
+    expect(welcome).toContain('PROBE 129');
+    expect(welcome).toContain('OTA 01a073b5');
+    expect(welcome).toContain('pointerEvents="none"');
+    expect(welcome).toContain('styles.bundleMarker');
+  });
+
   it('does not redirect an active auth route back to onboarding', () => {
     const rootLayout = source('app/_layout.tsx');
 
