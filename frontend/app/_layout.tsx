@@ -1241,7 +1241,11 @@ function RootNav() {
     // already provided the human context that onboarding would give.  Mark
     // onboarding done silently and fall through so index.tsx can redirect to
     // the /invite/{token} screen.
-    if (!user && needsOnboarding && !isOnboarding && !isPublic) {
+    // Auth routes must remain stable once the user explicitly chooses Sign In
+    // or Create Account. Without this exemption, pushing /(auth)/login while
+    // needsOnboarding is true immediately replaces Login with /onboarding,
+    // producing a visible horizontal push/replace loop.
+    if (!user && needsOnboarding && !inAuthGroup && !isOnboarding && !isPublic) {
       let cancelled = false;
       (async () => {
         const stillNeeds = !(await isOnboardingDone());
@@ -1277,7 +1281,10 @@ function RootNav() {
     }
     // A returning signed-out user can also cold-start from an invite after
     // onboarding has already been completed on this installation.
-    if (!user && coldStartInviteToken && !isInviteRoute && !isPublic) {
+    // Once an invited user deliberately enters Sign In / OTP, keep that auth
+    // route stable. The pending token remains persisted for verifyOtp(), so
+    // redirecting back to the invite card only interrupts authentication.
+    if (!user && coldStartInviteToken && !inAuthGroup && !isInviteRoute && !isPublic) {
       logRootDecision('cold_start_invite_ready', `/invite/${coldStartInviteToken}`, 'navigate');
       router.replace(`/invite/${coldStartInviteToken}` as any);
       return;
