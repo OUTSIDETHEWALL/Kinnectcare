@@ -15,6 +15,18 @@ describe('Welcome Sign In navigation contract', () => {
     expect(welcome).toContain("router.push('/(auth)/login')");
   });
 
+  it('visibly instruments both Welcome buttons at every press phase', () => {
+    const welcome = source('app/index.tsx');
+
+    for (const button of ['create-family', 'sign-in']) {
+      expect(welcome).toContain(`handlePressIn('${button}')`);
+      expect(welcome).toContain(`handlePressOut('${button}')`);
+      expect(welcome).toContain(`'${button}', 'onPress'`);
+    }
+    expect(welcome).toContain("'PRESSED'");
+    expect(welcome).toContain('styles.pressProbe');
+  });
+
   it('does not redirect an active auth route back to onboarding', () => {
     const rootLayout = source('app/_layout.tsx');
 
