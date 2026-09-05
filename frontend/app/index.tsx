@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ImageBackground, Image } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Icon } from '../src/Icon';
@@ -6,6 +7,17 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 export default function Welcome() {
   const router = useRouter();
+  const [pressedButton, setPressedButton] = useState<'create-family' | 'sign-in' | null>(null);
+
+  const handlePressIn = (button: 'create-family' | 'sign-in') => {
+    console.info('[welcome-touch]', button, 'onPressIn');
+    setPressedButton(button);
+  };
+
+  const handlePressOut = (button: 'create-family' | 'sign-in') => {
+    console.info('[welcome-touch]', button, 'onPressOut');
+    setPressedButton((current) => current === button ? null : current);
+  };
 
   return (
     <ImageBackground
@@ -36,21 +48,54 @@ export default function Welcome() {
         <View style={styles.bottom}>
           <TouchableOpacity
             testID="welcome-create-family-btn"
-            style={styles.cta}
+            style={[
+              styles.cta,
+              pressedButton === 'create-family' && styles.pressProbe,
+            ]}
             activeOpacity={0.85}
-            onPress={() => router.push('/(auth)/signup')}
+            onPressIn={() => handlePressIn('create-family')}
+            onPress={() => {
+              console.info('[welcome-touch]', 'create-family', 'onPress');
+              router.push('/(auth)/signup');
+            }}
+            onPressOut={() => handlePressOut('create-family')}
           >
-            <Icon name="add-circle-outline" size={20} color={Colors.surface} />
-            <Text style={styles.ctaText}>Create a New Family</Text>
+            <Icon
+              name="add-circle-outline"
+              size={20}
+              color={Colors.surface}
+            />
+            <Text style={styles.ctaText}>
+              {pressedButton === 'create-family' ? 'PRESSED' : 'Create a New Family'}
+            </Text>
           </TouchableOpacity>
           <TouchableOpacity
             testID="welcome-login-link"
-            onPress={() => router.push('/(auth)/login')}
-            style={styles.ctaSecondary}
+            onPressIn={() => handlePressIn('sign-in')}
+            onPress={() => {
+              console.info('[welcome-touch]', 'sign-in', 'onPress');
+              router.push('/(auth)/login');
+            }}
+            onPressOut={() => handlePressOut('sign-in')}
+            style={[
+              styles.ctaSecondary,
+              pressedButton === 'sign-in' && styles.pressProbe,
+            ]}
             activeOpacity={0.85}
           >
-            <Icon name="log-in-outline" size={20} color={Colors.primary} />
-            <Text style={styles.ctaSecondaryText}>Sign In</Text>
+            <Icon
+              name="log-in-outline"
+              size={20}
+              color={pressedButton === 'sign-in' ? Colors.surface : Colors.primary}
+            />
+            <Text
+              style={[
+                styles.ctaSecondaryText,
+                pressedButton === 'sign-in' && styles.pressProbeText,
+              ]}
+            >
+              {pressedButton === 'sign-in' ? 'PRESSED' : 'Sign In'}
+            </Text>
           </TouchableOpacity>
           <TouchableOpacity
             testID="welcome-join-family-btn"
@@ -119,6 +164,11 @@ const styles = StyleSheet.create({
     boxShadow: '0px 8px 14px rgba(27,94,53,0.25)', elevation: 6,
   },
   ctaText: { color: Colors.surface, fontSize: 18, fontWeight: '700' },
+  pressProbe: {
+    backgroundColor: '#C2410C',
+    borderColor: '#C2410C',
+  },
+  pressProbeText: { color: Colors.surface },
   ctaSecondary: {
     marginTop: 12,
     height: 60, backgroundColor: Colors.surface, borderRadius: 18,
