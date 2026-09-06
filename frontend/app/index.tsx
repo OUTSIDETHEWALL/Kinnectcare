@@ -26,10 +26,6 @@ export default function Welcome() {
       imageStyle={{ opacity: 0.5 }}
     >
       <View style={styles.overlay} />
-      <View pointerEvents="none" style={styles.bundleMarker}>
-        <Text style={styles.bundleMarkerTitle}>PROBE 129</Text>
-        <Text style={styles.bundleMarkerSubtitle}>OTA 01a073b5</Text>
-      </View>
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <View style={styles.top}>
           <View style={styles.logoFrame}>
@@ -131,33 +127,6 @@ function FeatureItem({ icon, label }: { icon: string; label: string }) {
 const styles = StyleSheet.create({
   bg: { flex: 1, backgroundColor: Colors.background },
   overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(249,245,240,0.82)' },
-  bundleMarker: {
-    position: 'absolute',
-    top: 52,
-    left: 18,
-    right: 18,
-    zIndex: 9999,
-    elevation: 99,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 14,
-    backgroundColor: '#C2410C',
-    alignItems: 'center',
-    borderWidth: 3,
-    borderColor: '#7C2D12',
-  },
-  bundleMarkerTitle: {
-    color: '#FFFFFF',
-    fontSize: 24,
-    fontWeight: '900',
-    letterSpacing: 1.5,
-  },
-  bundleMarkerSubtitle: {
-    marginTop: 2,
-    color: '#FFFFFF',
-    fontSize: 18,
-    fontWeight: '800',
-  },
   container: { flex: 1, paddingHorizontal: 28, justifyContent: 'space-between' },
   top: { alignItems: 'center', marginTop: 24 },
   // Dark-green frame that visually extends the PNG's box upward, giving the
