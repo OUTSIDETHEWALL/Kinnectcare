@@ -10,6 +10,7 @@ import { Colors } from '../../src/theme';
 import { api } from '../../src/api';
 import { TimePicker12 } from '../../src/TimePicker12';
 import { isValidHHMM } from '../../src/TimeSlotsEditor';
+import { useFamilyGroupRole } from '../../src/useFamilyGroupRole';
 
 // "Quick picks" still exist so seniors with limited dexterity can one-tap a
 // common routine name + suggested time.  The visible TIME row has switched
@@ -28,6 +29,7 @@ const PRESETS: { label: string; emoji: string; suggested: string }[] = [
 export default function AddRoutine() {
   const router = useRouter();
   const { memberId } = useLocalSearchParams<{ memberId: string }>();
+  const familyRole = useFamilyGroupRole();
   const [title, setTitle] = useState('');
   const [time, setTime] = useState('10:00');
   const [loading, setLoading] = useState(false);
@@ -38,6 +40,7 @@ export default function AddRoutine() {
   };
 
   const onSubmit = async () => {
+    if (!familyRole.isOwner) return;
     if (!title.trim()) { Alert.alert('Missing', 'Enter a routine name.'); return; }
     if (!isValidHHMM(time)) {
       Alert.alert('Invalid time', `"${time}" is not a valid time. Tap the time field to choose one.`);
@@ -70,7 +73,15 @@ export default function AddRoutine() {
           <View style={{ width: 44 }} />
         </View>
 
-        <ScrollView contentContainerStyle={{ padding: 24 }} keyboardShouldPersistTaps="handled">
+        {familyRole.loading ? (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }} testID="add-routine-role-loading">
+            <ActivityIndicator color={Colors.primary} />
+          </View>
+        ) : !familyRole.isOwner ? (
+          <View style={{ padding: 24 }} testID="add-routine-access-denied">
+            <Text style={styles.subhelp}>Only family owners can add routines.</Text>
+          </View>
+        ) : <ScrollView contentContainerStyle={{ padding: 24 }} keyboardShouldPersistTaps="handled">
           <Text style={styles.label}>Quick picks</Text>
           <View style={styles.presetGrid}>
             {PRESETS.map(p => (
@@ -122,7 +133,7 @@ export default function AddRoutine() {
           >
             {loading ? <ActivityIndicator color={Colors.surface} /> : <Text style={styles.ctaText}>Add Routine</Text>}
           </TouchableOpacity>
-        </ScrollView>
+        </ScrollView>}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );

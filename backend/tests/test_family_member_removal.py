@@ -131,8 +131,12 @@ class FakeDatabase:
         return getattr(self, name)
 
 
-def _endpoint(router, path: str):
-    return next(route.endpoint for route in router.routes if route.path == path)
+def _endpoint(router, path: str, method: str | None = None):
+    return next(
+        route.endpoint
+        for route in router.routes
+        if route.path == path and (method is None or method in route.methods)
+    )
 
 
 def test_remove_account_then_reinvite_same_email():
@@ -192,3 +196,32 @@ def test_solo_group_creation_fails_if_user_was_not_moved():
         ))
 
     assert len(database.family_groups.documents) == original_group_count
+
+
+def test_family_administration_ignores_stale_user_role():
+    """Invite, rename, and removal use family_groups.owner_user_id, not role."""
+    database = FakeDatabase()
+    stale_member = dict(database.users.documents[1])
+    stale_member["family_group_role"] = "owner"
+    router = fg.build_router(database, lambda: stale_member)
+    rename = _endpoint(router, "/family-group", "PUT")
+    remove_member = _endpoint(router, "/family-group/remove-member")
+    send_invite = _endpoint(router, "/family-group/invite")
+
+    async def scenario():
+        operations = (
+            lambda: rename(fg.FamilyGroupRename(name="Hijacked"), current=stale_member),
+            lambda: remove_member(
+                fg.FamilyGroupMemberRemove(user_id=OWNER_ID), current=stale_member
+            ),
+            lambda: send_invite(
+                fg.FamilyInviteCreate(name="New Person", email="new@example.com"),
+                current=stale_member,
+            ),
+        )
+        for operation in operations:
+            with pytest.raises(HTTPException) as denied:
+                await operation()
+            assert denied.value.status_code == 403
+
+    asyncio.run(scenario())

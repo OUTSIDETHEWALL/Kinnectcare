@@ -672,6 +672,58 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(securit
     return user
 
 
+async def require_family_owner(current: dict) -> dict:
+    """Authorize family administration against the group source of truth."""
+    group = await db.family_groups.find_one(
+        {
+            "id": current.get("family_group_id"),
+            "owner_user_id": current.get("id"),
+        },
+        {"_id": 0},
+    )
+    if not group:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the family group owner can manage reminders",
+        )
+    return group
+
+
+async def require_reminder_self_target(reminder: dict, current: dict) -> None:
+    """Ensure completion is performed by the user represented by its target."""
+    target = await db.members.find_one(
+        {
+            "id": reminder.get("member_id"),
+            "family_group_id": current.get("family_group_id"),
+        },
+        {"_id": 0, "user_id": 1},
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Reminder target not found")
+    if target.get("user_id") != current.get("id"):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only mark reminders assigned to your own member record",
+        )
+
+
+async def require_member_owner_or_self(member_id: str, current: dict) -> dict:
+    """Authorize a member mutation after resolving its in-family target."""
+    member = await db.members.find_one(
+        {
+            "id": member_id,
+            "family_group_id": current.get("family_group_id"),
+        },
+        {"_id": 0},
+    )
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if member.get("user_id") == current.get("id"):
+        return member
+    await require_family_owner(current)
+    return member
+
+
 # ========== Time / TZ helpers ==========
 def user_tz(user: dict) -> ZoneInfo:
     tz = user.get("timezone") or "UTC"
@@ -2478,6 +2530,7 @@ async def list_members(current=Depends(get_current_user)):
 
 @api_router.post("/members", response_model=FamilyMember)
 async def create_member(data: FamilyMemberCreate, current=Depends(get_current_user)):
+    await require_family_owner(current)
     # Enforce family-group-aware member limit (group is paid if ANY user is paid).
     limit = await billing.get_member_limit_for_group(db, current)
     if limit != float("inf"):
@@ -2511,6 +2564,7 @@ async def create_member(data: FamilyMemberCreate, current=Depends(get_current_us
 @api_router.put("/members/{member_id}", response_model=FamilyMember)
 async def update_member(member_id: str, data: FamilyMemberUpdate, current=Depends(get_current_user)):
     """Generic member profile update (name, phone, emergency contact, etc.)."""
+    await require_member_owner_or_self(member_id, current)
     payload = data.model_dump(exclude_unset=True)
     # Normalize emergency contact phone to E.164 if present.
     if "emergency_contact_phone" in payload:
@@ -2548,9 +2602,10 @@ async def update_member(member_id: str, data: FamilyMemberUpdate, current=Depend
         payload["checkin_interval_started_at"] = None
     if not payload:
         # Nothing to update — return existing doc.
-        doc = await db.members.find_one({"id": member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
-        if not doc:
-            raise HTTPException(status_code=404, detail="Member not found")
+        doc = await db.members.find_one(
+            {"id": member_id, "family_group_id": current["family_group_id"]},
+            {"_id": 0},
+        )
         return FamilyMember(**doc)
     payload["last_seen"] = datetime.now(timezone.utc)
     r = await db.members.update_one(
@@ -2559,7 +2614,10 @@ async def update_member(member_id: str, data: FamilyMemberUpdate, current=Depend
     )
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
-    doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+    doc = await db.members.find_one(
+        {"id": member_id, "family_group_id": current["family_group_id"]},
+        {"_id": 0},
+    )
     return FamilyMember(**doc)
 
 
@@ -2631,6 +2689,7 @@ async def delete_member(member_id: str, current=Depends(get_current_user)):
     All scoped to the caller's family_group_id so a user can never
     accidentally (or deliberately) wipe another family's data.
     """
+    await require_family_owner(current)
     fgid = current["family_group_id"]
     r = await db.members.delete_one({"id": member_id, "family_group_id": fgid})
     if r.deleted_count == 0:
@@ -3481,6 +3540,7 @@ async def update_checkin_settings(member_id: str, data: CheckinSettings, current
 
     The two modes are mutually exclusive — setting one implicitly clears the other.
     """
+    await require_member_owner_or_self(member_id, current)
     fixed = data.daily_checkin_time
     interval = data.checkin_interval_hours
 
@@ -3511,7 +3571,10 @@ async def update_checkin_settings(member_id: str, data: CheckinSettings, current
     )
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
-    doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+    doc = await db.members.find_one(
+        {"id": member_id, "family_group_id": current["family_group_id"]},
+        {"_id": 0},
+    )
     return FamilyMember(**doc)
 
 
@@ -3643,6 +3706,7 @@ async def list_member_reminders(member_id: str, current=Depends(get_current_user
 
 @api_router.post("/reminders", response_model=Reminder)
 async def create_reminder(data: ReminderCreate, current=Depends(get_current_user)):
+    await require_family_owner(current)
     member = await db.members.find_one({"id": data.member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
@@ -3665,6 +3729,7 @@ async def create_reminder(data: ReminderCreate, current=Depends(get_current_user
 
 @api_router.put("/reminders/{reminder_id}", response_model=Reminder)
 async def update_reminder(reminder_id: str, data: ReminderUpdate, current=Depends(get_current_user)):
+    await require_family_owner(current)
     rem = await db.reminders.find_one({"id": reminder_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not rem:
         raise HTTPException(status_code=404, detail="Reminder not found")
@@ -3681,8 +3746,14 @@ async def update_reminder(reminder_id: str, data: ReminderUpdate, current=Depend
         update["time"] = data.times[0].time if data.times else ""
 
     if update:
-        await db.reminders.update_one({"id": reminder_id}, {"$set": update})
-    doc = await db.reminders.find_one({"id": reminder_id}, {"_id": 0})
+        await db.reminders.update_one(
+            {"id": reminder_id, "family_group_id": current["family_group_id"]},
+            {"$set": update},
+        )
+    doc = await db.reminders.find_one(
+        {"id": reminder_id, "family_group_id": current["family_group_id"]},
+        {"_id": 0},
+    )
     return Reminder.model_validate(doc)
 
 
@@ -3693,10 +3764,11 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
     rem = await db.reminders.find_one({"id": reminder_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not rem:
         raise HTTPException(status_code=404, detail="Reminder not found")
+    await require_reminder_self_target(rem, current)
     now = datetime.now(timezone.utc)
     today = local_today_str(current)
     await db.reminders.update_one(
-        {"id": reminder_id},
+        {"id": reminder_id, "family_group_id": current["family_group_id"]},
         {"$set": {
             "status": body.status,
             "taken": body.status == "taken",
@@ -3748,9 +3820,10 @@ async def toggle_reminder(reminder_id: str, current=Depends(get_current_user)):
     rem = await db.reminders.find_one({"id": reminder_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
     if not rem:
         raise HTTPException(status_code=404, detail="Reminder not found")
+    await require_reminder_self_target(rem, current)
     new_taken = not rem.get("taken", False)
     await db.reminders.update_one(
-        {"id": reminder_id},
+        {"id": reminder_id, "family_group_id": current["family_group_id"]},
         {"$set": {"taken": new_taken, "status": "taken" if new_taken else "pending",
                   "last_marked_at": datetime.now(timezone.utc),
                   "last_marked_date": local_today_str(current)}}
@@ -3760,6 +3833,7 @@ async def toggle_reminder(reminder_id: str, current=Depends(get_current_user)):
 
 @api_router.delete("/reminders/{reminder_id}")
 async def delete_reminder(reminder_id: str, current=Depends(get_current_user)):
+    await require_family_owner(current)
     r = await db.reminders.delete_one({"id": reminder_id, "family_group_id": current["family_group_id"]})
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Reminder not found")

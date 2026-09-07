@@ -539,6 +539,22 @@ async def get_group(db, group_id: Optional[str]) -> Optional[dict]:
     return await db.family_groups.find_one({"id": group_id}, {"_id": 0})
 
 
+async def require_group_owner(db, current: dict) -> dict:
+    """Return the caller's group only when its authoritative owner matches.
+
+    ``users.family_group_role`` is a convenience/cache field and can be stale
+    after membership changes.  Administrative permissions must always derive
+    from ``family_groups.owner_user_id``.
+    """
+    gid = await ensure_family_group(db, current)
+    group = await get_group(db, gid)
+    if not group:
+        raise HTTPException(404, "Family group not found")
+    if group.get("owner_user_id") != current.get("id"):
+        raise HTTPException(403, "Only the group owner can perform this action")
+    return group
+
+
 async def get_group_by_code(db, code: str) -> Optional[dict]:
     code = normalize_invite_code(code)
     if not code:
@@ -671,12 +687,8 @@ def build_router(
         data: FamilyGroupRename,
         current=Depends(get_current_user),
     ):
-        gid = await ensure_family_group(db, current)
-        group = await get_group(db, gid)
-        if not group:
-            raise HTTPException(404, "Family group not found")
-        if group.get("owner_user_id") != current["id"]:
-            raise HTTPException(403, "Only the group owner can rename the family")
+        group = await require_group_owner(db, current)
+        gid = group["id"]
         new_name = (data.name or "").strip()
         if not new_name or len(new_name) > 80:
             raise HTTPException(400, "Name must be 1-80 characters")
@@ -989,12 +1001,8 @@ def build_router(
         data: FamilyGroupMemberRemove,
         current=Depends(get_current_user),
     ):
-        gid = await ensure_family_group(db, current)
-        group = await get_group(db, gid)
-        if not group:
-            raise HTTPException(404, "Family group not found")
-        if group.get("owner_user_id") != current["id"]:
-            raise HTTPException(403, "Only the group owner can remove members")
+        group = await require_group_owner(db, current)
+        gid = group["id"]
         if data.user_id == current["id"]:
             raise HTTPException(400, "Cannot remove yourself; use leave instead")
         target_user = await db.users.find_one(
@@ -1015,16 +1023,10 @@ def build_router(
     ):
         """Email a single-use invite token to a prospective family member.
 
-        Any group member (owner or member) can send invites — staying
-        consistent with how /family-group/regenerate-code is owner-only
-        but viewing+sharing the wall code is open to all.  Keep this
-        open so e.g. a sibling caregiver can invite their parent without
-        needing the household owner's account.
+        Only the authoritative family-group owner can create invitations.
         """
-        gid = await ensure_family_group(db, current)
-        group = await get_group(db, gid)
-        if not group:
-            raise HTTPException(404, "Family group not found")
+        group = await require_group_owner(db, current)
+        gid = group["id"]
 
         name = (data.name or "").strip()
         email = (data.email or "").strip().lower()
@@ -1175,7 +1177,8 @@ def build_router(
         not ``accept_invite``.  All current join paths call both in
         sequence; new ghost invites are no longer created.
         """
-        gid = await ensure_family_group(db, current)
+        group = await require_group_owner(db, current)
+        gid = group["id"]
         cursor = db.family_invites.find(
             {"family_group_id": gid}, {"_id": 0}
         ).sort("created_at", -1)
@@ -1214,7 +1217,8 @@ def build_router(
     ):
         """Revoke a still-pending invite. No-op if already
         accepted/expired/revoked."""
-        gid = await ensure_family_group(db, current)
+        group = await require_group_owner(db, current)
+        gid = group["id"]
         inv = await db.family_invites.find_one(
             {"id": invite_id, "family_group_id": gid}, {"_id": 0}
         )
