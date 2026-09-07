@@ -112,6 +112,7 @@ module.exports = ({ config }) => ({
     plugins: [
       'expo-router',
       './plugins/withAndroidTelQueries',
+      './plugins/withAndroidStartupRecorder',
       './plugins/withIosWelfareCheckAction',
       // ----- Transistor Software react-native-background-geolocation -----
       // Order matters: the Transistor plugin must come BEFORE expo-location

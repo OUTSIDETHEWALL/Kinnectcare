@@ -38,6 +38,10 @@ import {
 import { isPermissionsHandled } from '../src/permissionsStore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { logStartupEvent } from '../src/startupDiagnostics';
+import { recordNativeStartupCheckpoint } from '../src/nativeStartupRecorder';
+
+// This is the first executed JS-side checkpoint in the root bundle.
+recordNativeStartupCheckpoint('js_runtime_initialized');
 
 function RootNav() {
   const { user, loading } = useAuth();
@@ -66,6 +70,7 @@ function RootNav() {
   const [initialLinkChecked, setInitialLinkChecked] = useState(false);
   const [coldStartInviteToken, setColdStartInviteToken] = useState<string | null>(null);
   const routeDecisionRef = useRef(0);
+  const rootMountedRecordedRef = useRef(false);
 
   const logRootDecision = (
     reason: string,
@@ -94,6 +99,20 @@ function RootNav() {
       },
     });
   };
+
+  useEffect(() => {
+    if (!rootMountedRecordedRef.current) {
+      rootMountedRecordedRef.current = true;
+      recordNativeStartupCheckpoint('root_coordinator_mounted');
+    }
+  }, []);
+
+  useEffect(() => {
+    // Expo Router exposes pathname observation, not NavigationContainer readiness.
+    recordNativeStartupCheckpoint('expo_router_pathname_observed', {
+      pathnameObserved: !!pathname,
+    });
+  }, [pathname]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -271,13 +290,21 @@ function RootNav() {
 
     const consumeInviteUrl = async (url: string | null, coldStart = false) => {
       const token = extractInviteToken(url);
+      recordNativeStartupCheckpoint('deep_link_detected', {
+        coldStart,
+        urlPresent: !!url,
+      });
+      recordNativeStartupCheckpoint('invite_parsed', { invitePresent: !!token });
       logStartupEvent({
         phase: 'deep_link_processing',
         event: 'invite_url_parsed',
         outcome: token ? 'invite_token_present' : 'no_invite_token',
         details: { urlPresent: !!url },
       });
-      if (!token) return;
+      if (!token) {
+        recordNativeStartupCheckpoint('invite_processed', { accepted: false, invitePresent: false });
+        return;
+      }
       logStartupEvent({
         phase: 'consumed_token_check',
         event: 'consumed_token_check_started',
@@ -290,6 +317,7 @@ function RootNav() {
         outcome: consumed ? 'consumed' : 'not_consumed',
       });
       if (consumed) {
+        recordNativeStartupCheckpoint('invite_processed', { accepted: false, alreadyConsumed: true });
         console.info('[invite-accept] consumed_launch_ignored');
         logStartupEvent({
           phase: 'deep_link_processing',
@@ -300,13 +328,19 @@ function RootNav() {
       }
       // Persist first — the safest thing we can do.  Everything below
       // is best-effort.
-      await setPendingInvite(token);
+      try {
+        await setPendingInvite(token);
+      } catch (error) {
+        recordNativeStartupCheckpoint('invite_processed', { accepted: false, persistenceFailed: true });
+        throw error;
+      }
       if (coldStart) setColdStartInviteToken(token);
       logStartupEvent({
         phase: 'deep_link_processing',
         event: 'pending_invite_saved',
         outcome: 'invite_route_scheduled',
       });
+      recordNativeStartupCheckpoint('invite_processed', { accepted: true, coldStart });
 
       // Zero-friction onboarding: never auto-join silently.
       // Route directly to /invite/{token} so the user always sees
@@ -559,7 +593,11 @@ function RootNav() {
     // silently dropped when the app was killed or the user was
     // logged out, because the channels were only created
     // post-authentication.
-    setupNotificationsForOS().catch(() => {});
+    recordNativeStartupCheckpoint('notification_initialization_started');
+    void setupNotificationsForOS().then(
+      () => { recordNativeStartupCheckpoint('notification_initialization_completed'); },
+      () => { recordNativeStartupCheckpoint('notification_initialization_failed'); },
+    );
   }, []);
 
   useEffect(() => {

@@ -1,13 +1,33 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ImageBackground, Image } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { recordNativeStartupCheckpoint } from '../src/nativeStartupRecorder';
+
+let firstWelcomeButtonPressRecorded = false;
 
 export default function Welcome() {
   const router = useRouter();
   const [pressedButton, setPressedButton] = useState<'create-family' | 'sign-in' | null>(null);
+  const welcomeLayoutRecordedRef = useRef(false);
+
+  useEffect(() => {
+    recordNativeStartupCheckpoint('welcome_render_committed');
+  }, []);
+
+  const onWelcomeLayout = () => {
+    if (welcomeLayoutRecordedRef.current) return;
+    welcomeLayoutRecordedRef.current = true;
+    recordNativeStartupCheckpoint('welcome_interactive');
+  };
+
+  const recordFirstButtonPress = () => {
+    if (firstWelcomeButtonPressRecorded) return;
+    firstWelcomeButtonPressRecorded = true;
+    recordNativeStartupCheckpoint('welcome_first_button_press_received');
+  };
 
   const handlePressIn = (button: 'create-family' | 'sign-in') => {
     console.info('[welcome-touch]', button, 'onPressIn');
@@ -24,6 +44,7 @@ export default function Welcome() {
       source={{ uri: 'https://images.unsplash.com/photo-1770520214803-9af048351642?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxNzV8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGdyZWVuJTIwYW5kJTIwd2hpdGUlMjBmbHVpZCUyMGJhY2tncm91bmR8ZW58MHx8fHwxNzc4NTQxNjg1fDA&ixlib=rb-4.1.0&q=85' }}
       style={styles.bg}
       imageStyle={{ opacity: 0.5 }}
+      onLayout={onWelcomeLayout}
     >
       <View style={styles.overlay} />
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
@@ -55,6 +76,7 @@ export default function Welcome() {
             activeOpacity={0.85}
             onPressIn={() => handlePressIn('create-family')}
             onPress={() => {
+              recordFirstButtonPress();
               console.info('[welcome-touch]', 'create-family', 'onPress');
               router.push('/(auth)/signup');
             }}
@@ -73,7 +95,9 @@ export default function Welcome() {
             testID="welcome-login-link"
             onPressIn={() => handlePressIn('sign-in')}
             onPress={() => {
+              recordFirstButtonPress();
               console.info('[welcome-touch]', 'sign-in', 'onPress');
+              recordNativeStartupCheckpoint('welcome_login_navigation_requested');
               router.push('/(auth)/login');
             }}
             onPressOut={() => handlePressOut('sign-in')}
