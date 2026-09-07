@@ -11,7 +11,7 @@ import {
   Share,
   Platform,
 } from 'react-native';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
@@ -49,6 +49,9 @@ export default function FamilyGroupScreen() {
   const [joinOpen, setJoinOpen] = useState(false);
   const [joinCode, setJoinCode] = useState('');
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
+  const [leaveError, setLeaveError] = useState<string | null>(null);
+  const leaveInFlightRef = useRef(false);
 
   // Per-recipient email invites
   const [invites, setInvites] = useState<FamilyInvite[]>([]);
@@ -247,7 +250,7 @@ export default function FamilyGroupScreen() {
     }
   };
 
-  const confirmLeave = () => {
+  const openLeaveConfirmation = () => {
     if (isOwner && (data?.member_count || 0) > 1) {
       Alert.alert(
         'You\'re the owner',
@@ -255,30 +258,27 @@ export default function FamilyGroupScreen() {
       );
       return;
     }
-    Alert.alert(
-      'Leave family?',
-      'You will be moved to a brand-new family group with your own data. You can be invited back any time.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Leave',
-          style: 'destructive',
-          onPress: async () => {
-            setBusy(true);
-            try {
-              await leaveFamilyGroup();
-              await refreshUser?.();
-              await load();
-              await refreshMyMemberId();
-            } catch (e: any) {
-              Alert.alert('Error', e?.response?.data?.detail || 'Failed to leave');
-            } finally {
-              setBusy(false);
-            }
-          },
-        },
-      ],
-    );
+    setLeaveError(null);
+    setLeaveConfirmOpen(true);
+  };
+
+  const performLeave = async () => {
+    if (leaveInFlightRef.current) return;
+    leaveInFlightRef.current = true;
+    setBusy(true);
+    setLeaveError(null);
+    try {
+      await leaveFamilyGroup();
+      await refreshUser?.();
+      await load();
+      await refreshMyMemberId();
+      setLeaveConfirmOpen(false);
+    } catch (e: any) {
+      setLeaveError(e?.response?.data?.detail || 'Failed to leave this family.');
+    } finally {
+      leaveInFlightRef.current = false;
+      setBusy(false);
+    }
   };
 
   const confirmRemove = (m: { user_id: string; full_name: string }) => {
@@ -424,6 +424,25 @@ export default function FamilyGroupScreen() {
             })}
           </View>
 
+          {/* This action always affects the signed-in account, never a member row above. */}
+          <View style={styles.card} testID="fg-membership-section">
+            <Text style={styles.sectionLabel}>YOUR MEMBERSHIP</Text>
+            <Text style={styles.sectionHelp}>
+              You are signed in as {user?.full_name || 'this account'}. Leaving affects your
+              membership, not another person shown in the member list.
+            </Text>
+            <TouchableOpacity
+              style={styles.actionSecondary}
+              onPress={openLeaveConfirmation}
+              testID="fg-leave"
+              disabled={busy}
+              accessibilityRole="button"
+              accessibilityLabel="Leave this family as the signed-in user"
+            >
+              <Text style={styles.actionSecondaryTxt}>↩ Leave this family</Text>
+            </TouchableOpacity>
+          </View>
+
           {/* Email invitations (per-recipient) */}
           <View style={styles.card}>
             <Text style={styles.sectionLabel}>INVITE BY EMAIL</Text>
@@ -494,13 +513,6 @@ export default function FamilyGroupScreen() {
               <Text style={styles.actionPrimaryTxt}>🤝 Join a different family</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity
-              style={styles.actionSecondary}
-              onPress={confirmLeave}
-              testID="fg-leave"
-            >
-              <Text style={styles.actionSecondaryTxt}>↩ Leave this family</Text>
-            </TouchableOpacity>
           </View>
 
           <Text style={styles.footnote}>
@@ -592,6 +604,64 @@ export default function FamilyGroupScreen() {
                 testID="fg-join-submit"
               >
                 <Text style={styles.modalBtnPrimaryTxt}>{busy ? 'Joining…' : 'Join'}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Leave-family confirmation — the API is unreachable until this
+          destructive button is pressed. Native Alert is not the safety gate. */}
+      <Modal
+        visible={leaveConfirmOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => !busy && setLeaveConfirmOpen(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View
+            style={styles.modalCard}
+            testID="fg-leave-confirm-modal"
+            accessibilityViewIsModal
+            accessibilityRole="alert"
+            accessibilityLabel="Leave Family confirmation"
+          >
+            <Text style={styles.modalTitle}>Leave Family?</Text>
+            <Text style={styles.modalBody}>Are you sure you want to leave this family?</Text>
+            <View style={styles.consequenceList}>
+              <Text style={styles.consequenceItem}>• You will leave this family.</Text>
+              <Text style={styles.consequenceItem}>
+                • You will become the owner of a new one-person family.
+              </Text>
+              <Text style={styles.consequenceItem}>
+                • Members of your current family will no longer see you.
+              </Text>
+              <Text style={styles.consequenceItem}>• You can be invited back later.</Text>
+            </View>
+            {leaveError ? <Text style={styles.errorTxt}>{leaveError}</Text> : null}
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalBtnCancel]}
+                onPress={() => setLeaveConfirmOpen(false)}
+                disabled={busy}
+                testID="fg-leave-cancel"
+                accessibilityRole="button"
+                accessibilityLabel="Cancel leaving this family"
+              >
+                <Text style={styles.modalBtnCancelTxt}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalBtnDestructive]}
+                onPress={performLeave}
+                disabled={busy}
+                testID="fg-leave-confirm"
+                accessibilityRole="button"
+                accessibilityLabel="Confirm leaving this family"
+                accessibilityHint="Moves your account into a new one-person family"
+              >
+                <Text style={styles.modalBtnPrimaryTxt}>
+                  {busy ? 'Leaving…' : 'Leave Family'}
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -793,6 +863,14 @@ const styles = StyleSheet.create({
   modalCard: { backgroundColor: Colors.surface, borderRadius: 16, padding: 20, width: '100%', maxWidth: 360 },
   modalTitle: { fontSize: 18, fontWeight: '700', color: Colors.textPrimary, marginBottom: 8 },
   modalBody: { fontSize: 13, color: Colors.textSecondary, marginBottom: 12, lineHeight: 19 },
+  consequenceList: {
+    backgroundColor: Colors.errorBg,
+    borderRadius: 10,
+    padding: 12,
+    gap: 8,
+    marginBottom: 4,
+  },
+  consequenceItem: { fontSize: 13, color: Colors.textPrimary, lineHeight: 19 },
   input: {
     backgroundColor: Colors.background,
     borderRadius: 10,
@@ -809,5 +887,6 @@ const styles = StyleSheet.create({
   modalBtnCancel: { backgroundColor: Colors.background, borderWidth: 1, borderColor: Colors.border },
   modalBtnCancelTxt: { color: Colors.textPrimary, fontWeight: '600' },
   modalBtnPrimary: { backgroundColor: Colors.primary },
+  modalBtnDestructive: { backgroundColor: Colors.error },
   modalBtnPrimaryTxt: { color: Colors.surface, fontWeight: '700' },
 });
