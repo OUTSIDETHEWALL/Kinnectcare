@@ -88,12 +88,16 @@ describe('withAndroidStartupRecorder', () => {
     const fs = require('fs');
     const path = require('path');
     const moduleRoot = path.join(__dirname, '../../modules/startup-diagnostics');
+    const moduleGradle = fs.readFileSync(path.join(moduleRoot, 'android/build.gradle'), 'utf8');
     const source = fs.readFileSync(
       path.join(moduleRoot, 'android/src/main/java/expo/modules/startupdiagnostics/StartupDiagnosticsModule.kt'),
       'utf8',
     );
     const config = JSON.parse(fs.readFileSync(path.join(moduleRoot, 'expo-module.config.json'), 'utf8'));
 
+    expect(moduleGradle).toContain("version = '1.0.0'");
+    expect(moduleGradle).toContain('versionCode 1');
+    expect(moduleGradle).toContain("versionName '1.0.0'");
     expect(source).toContain('class StartupDiagnosticsModule : Module()');
     expect(source.match(/Function\("/g)).toHaveLength(3);
     expect(source).not.toContain('AsyncFunction');
