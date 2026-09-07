@@ -77,7 +77,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 64, // Build 64 — production beta candidate containing the fresh-install invitation handoff.
+      versionCode: 65, // Build 65 — diagnostic startup recorder for the fresh-install invitation freeze.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
