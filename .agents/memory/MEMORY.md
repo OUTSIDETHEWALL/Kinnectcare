@@ -24,3 +24,4 @@
 - [Android invite Intent replay](android-invite-intent-replay.md) — accepted invite URLs can be redelivered after reboot; consumed-token suppression is separate from clearing pending state.
 - [Bound optional Android startup services](android-optional-startup-services.md) — Play/OEM callbacks may never arrive; optional native services must not indefinitely gate interactive startup.
 - [Destructive family action confirmations](destructive-family-confirmations.md) — family membership mutations need an in-app consequence summary and explicit destructive confirmation.
+- [Transport-independent upload evidence](transport-independent-upload-evidence.md) — every accepted location upload must update one cross-runtime Diagnostics success record.

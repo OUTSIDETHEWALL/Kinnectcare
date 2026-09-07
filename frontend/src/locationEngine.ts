@@ -66,6 +66,11 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
 import { ensureBackgroundLocationDisclosure } from './backgroundLocationDisclosure';
+import {
+  LOCATION_UPLOAD_SUCCESS_KEY,
+  getLocationUploadSuccessTs,
+  recordLocationUploadSuccess,
+} from './locationUploadSuccess';
 
 // Lazy require so this module is safe to import on web (where the
 // native module is absent).
@@ -110,7 +115,7 @@ const PTS_KEYS = {
   headless_heartbeat: `${PTS_PREFIX}hl_hb`,     // HeadlessTask — heartbeat ok
   headless_battery:   `${PTS_PREFIX}hl_bat`,    // HeadlessTask — battery PATCH sent
   http_attempt:       `${PTS_PREFIX}http_att`,  // onHttp — any call
-  http_success:       `${PTS_PREFIX}http_ok`,   // onHttp — 200/201 success
+  http_success:       LOCATION_UPLOAD_SUCCESS_KEY, // any server-accepted location upload
   listeners_attached: `${PTS_PREFIX}attached`,  // attachSdkListeners completed
 } as const;
 
@@ -191,18 +196,16 @@ export type PipelineTimestamps = { [K in PtsKey]: number | null };
  *  the main JS runtime was alive at upload time.
  */
 export async function getLastHttpSuccessTs(): Promise<number | null> {
-  try {
-    const raw = await AsyncStorage.getItem(PTS_KEYS.http_success);
-    return raw ? Number(raw) : null;
-  } catch {
-    return null;
-  }
+  return getLocationUploadSuccessTs();
 }
 
 /** Read all pipeline timestamps from AsyncStorage.  Safe to call from anywhere. */
 export async function getPipelineTimestamps(): Promise<PipelineTimestamps> {
   const pairs = await Promise.all(
     (Object.entries(PTS_KEYS) as [PtsKey, string][]).map(async ([stage, key]) => {
+      if (stage === 'http_success') {
+        return [stage, await getLocationUploadSuccessTs()] as [PtsKey, number | null];
+      }
       try {
         const raw = await AsyncStorage.getItem(key);
         return [stage, raw ? Number(raw) : null] as [PtsKey, number | null];
@@ -487,9 +490,7 @@ function registerHeadlessTaskOnce(): void {
         // If the 50-entry buffer fills with failure entries, computeHealthItems()
         // can still find evidence that uploads are working by reading this key
         // directly (via getLastHttpSuccessTs / getPipelineTimestamps).
-        if (success) {
-          recordPipelineTs('http_success');
-        }
+        if (success) await recordLocationUploadSuccess();
 
         // Upsert into memberStore when the upload succeeded and we have
         // a parseable response body — keeps the local store consistent
@@ -1119,6 +1120,7 @@ function attachSdkListeners(lib: any): void {
       recordPipelineTs('http_attempt');
       if (evt?.success === true) {
         void incrementHttpCounter(HTTP_OK_COUNT_KEY);
+        void recordLocationUploadSuccess();
       } else {
         void incrementHttpCounter(HTTP_FAIL_COUNT_KEY);
       }
@@ -1144,8 +1146,7 @@ function attachSdkListeners(lib: any): void {
           // and upsert into the canonical store.  Best-effort —
           // any parse failure simply skips the upsert and the
           // next /members poll picks up the change instead.
-          if (evt?.success === true && (evt?.status === 200 || evt?.status === 201) && rt.length < 16_000) {
-            recordPipelineTs('http_success');
+          if (evt?.success === true && rt.length < 16_000) {
             try {
               const obj = JSON.parse(rt);
               if (obj && typeof obj === 'object' && obj.id) {
