@@ -78,7 +78,7 @@ jest.mock('../theme', () => ({
 jest.mock('../legal', () => ({ APP_NAME: 'Kinnship' }));
 jest.mock('../AuthContext', () => ({
   useAuth: () => ({
-    user: { id: 'joyce-user', full_name: 'Joyce', email: 'joyce@example.test' },
+    user: { id: 'member-user', full_name: 'Member User', email: 'member@example.test' },
     refreshUser: (...args: any[]) => mockRefreshUser(...args),
   }),
 }));
@@ -110,15 +110,15 @@ const familyResponse = {
   member_count: 2,
   members: [
     {
-      user_id: 'joyce-user',
-      full_name: 'Joyce',
-      email: 'joyce@example.test',
+      user_id: 'member-user',
+      full_name: 'Member User',
+      email: 'member@example.test',
       role: 'member',
     },
     {
-      user_id: 'charles-user',
-      full_name: 'Charles',
-      email: 'charles@example.test',
+      user_id: 'owner-user',
+      full_name: 'Owner User',
+      email: 'owner@example.test',
       role: 'owner',
     },
   ],
@@ -131,9 +131,9 @@ function findByTestID(root: ReturnType<typeof create>['root'], testID: string) {
   )[0] ?? null;
 }
 
-async function renderScreen() {
-  mockGetFamilyGroup.mockResolvedValue(familyResponse);
-  mockFetchAll.mockResolvedValue([{ id: 'joyce-member', user_id: 'joyce-user' }]);
+async function renderScreen(response = familyResponse) {
+  mockGetFamilyGroup.mockResolvedValue(response);
+  mockFetchAll.mockResolvedValue([{ id: 'member-record', user_id: 'member-user' }]);
   mockRefreshUser.mockResolvedValue(undefined);
   mockSetMyMemberId.mockResolvedValue(undefined);
 
@@ -191,5 +191,34 @@ describe('Leave Family confirmation', () => {
 
     expect(mockLeaveFamilyGroup).toHaveBeenCalledTimes(1);
     expect(findByTestID(renderer.root, 'fg-leave-confirm-modal')).toBeNull();
+  });
+
+  test('members do not render owner invite or removal controls', async () => {
+    const renderer = await renderScreen();
+
+    expect(findByTestID(renderer.root, 'fg-invite-code-section')).toBeNull();
+    expect(findByTestID(renderer.root, 'fg-email-invites')).toBeNull();
+    expect(findByTestID(renderer.root, 'fg-rename')).toBeNull();
+    expect(findByTestID(renderer.root, 'fg-remove-member-user')).toBeNull();
+    expect(findByTestID(renderer.root, 'fg-leave')).not.toBeNull();
+  });
+
+  test('owners render family administration controls', async () => {
+    const renderer = await renderScreen({
+      ...familyResponse,
+      my_role: 'owner' as const,
+      members: [
+        { ...familyResponse.members[0], role: 'owner' as const },
+        { ...familyResponse.members[1], role: 'member' as const },
+      ],
+    });
+
+    expect(findByTestID(renderer.root, 'fg-invite-code-section')).not.toBeNull();
+    expect(findByTestID(renderer.root, 'fg-copy-code')).not.toBeNull();
+    expect(findByTestID(renderer.root, 'fg-share-code')).not.toBeNull();
+    expect(findByTestID(renderer.root, 'fg-regen-code')).not.toBeNull();
+    expect(findByTestID(renderer.root, 'fg-email-invites')).not.toBeNull();
+    expect(findByTestID(renderer.root, 'fg-rename')).not.toBeNull();
+    expect(findByTestID(renderer.root, 'fg-remove-owner-user')).not.toBeNull();
   });
 });

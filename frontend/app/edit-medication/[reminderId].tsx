@@ -9,10 +9,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
 import { api, TimeSlot, Reminder } from '../../src/api';
 import { TimeSlotsEditor, isValidHHMM } from '../../src/TimeSlotsEditor';
+import { useFamilyGroupRole } from '../../src/useFamilyGroupRole';
 
 export default function EditMedication() {
   const router = useRouter();
   const { reminderId } = useLocalSearchParams<{ reminderId: string }>();
+  const familyRole = useFamilyGroupRole();
   const [name, setName] = useState('');
   const [dosage, setDosage] = useState('');
   const [slots, setSlots] = useState<TimeSlot[]>([]);
@@ -47,6 +49,7 @@ export default function EditMedication() {
   }, [reminderId]);
 
   const onSubmit = async () => {
+    if (!familyRole.isOwner) return;
     if (!name.trim()) { Alert.alert('Missing', 'Enter a name.'); return; }
     if (slots.length === 0) { Alert.alert('Missing', 'Add at least one time.'); return; }
     for (const s of slots) {
@@ -75,6 +78,33 @@ export default function EditMedication() {
       <SafeAreaView style={styles.safe}>
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
           <ActivityIndicator color={Colors.primary} size="large" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (familyRole.loading) {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }} testID="edit-med-role-loading">
+          <ActivityIndicator color={Colors.primary} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!familyRole.isOwner) {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={styles.header}>
+          <TouchableOpacity testID="edit-med-close" onPress={() => router.back()} style={styles.iconBtn}>
+            <Icon name="close" size={26} color={Colors.textPrimary} />
+          </TouchableOpacity>
+          <Text style={styles.title}>Edit</Text>
+          <View style={{ width: 44 }} />
+        </View>
+        <View style={{ padding: 24 }} testID="edit-med-access-denied">
+          <Text style={styles.subhelp}>Only family owners can edit medications and routines.</Text>
         </View>
       </SafeAreaView>
     );

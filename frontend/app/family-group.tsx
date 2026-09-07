@@ -76,7 +76,11 @@ export default function FamilyGroupScreen() {
       setError(null);
       const r = await getFamilyGroup();
       setData(r);
-      loadInvites();
+      if (r.my_role === 'owner') {
+        loadInvites();
+      } else {
+        setInvites([]);
+      }
     } catch (e: any) {
       setError(e?.response?.data?.detail || e?.message || 'Failed to load family');
     } finally {
@@ -90,6 +94,7 @@ export default function FamilyGroupScreen() {
   const isOwner = myRole === 'owner';
 
   const onCopyCode = async () => {
+    if (!isOwner) return;
     if (!data?.group?.invite_code) return;
     try {
       await Clipboard.setStringAsync(data.group.invite_code);
@@ -100,6 +105,7 @@ export default function FamilyGroupScreen() {
   };
 
   const onShareCode = async () => {
+    if (!isOwner) return;
     if (!data?.group?.invite_code) return;
     const msg = `Join my family on ${APP_NAME}! Use invite code: ${data.group.invite_code}`;
     try {
@@ -110,6 +116,7 @@ export default function FamilyGroupScreen() {
   };
 
   const onSendInvite = async () => {
+    if (!isOwner) return;
     const name = inviteName.trim();
     const email = inviteEmail.trim().toLowerCase();
     if (!name) { setInviteError('Please enter their name.'); return; }
@@ -141,6 +148,7 @@ export default function FamilyGroupScreen() {
   };
 
   const onRevokeInvite = (inv: FamilyInvite) => {
+    if (!isOwner) return;
     Alert.alert(
       'Revoke invite?',
       `Revoke the invite for ${inv.invitee_name} (${inv.invitee_email})?\n\nThey won't be able to use the code anymore.`,
@@ -189,11 +197,13 @@ export default function FamilyGroupScreen() {
   };
 
   const openRename = () => {
+    if (!isOwner) return;
     setRenameValue(data?.group?.name || '');
     setRenameOpen(true);
   };
 
   const submitRename = async () => {
+    if (!isOwner) return;
     const v = renameValue.trim();
     if (!v) {
       Alert.alert('Name required', 'Please enter a name.');
@@ -282,6 +292,7 @@ export default function FamilyGroupScreen() {
   };
 
   const confirmRemove = (m: { user_id: string; full_name: string }) => {
+    if (!isOwner) return;
     Alert.alert(
       `Remove ${m.full_name}?`,
       'They will be moved to a new family group of their own. Their access to this family ends immediately.',
@@ -351,26 +362,26 @@ export default function FamilyGroupScreen() {
             </Text>
           </View>
 
-          {/* Invite code card */}
-          <View style={styles.card}>
-            <Text style={styles.sectionLabel}>INVITE CODE</Text>
-            <Text style={styles.sectionHelp}>
-              Share this code with family. Anyone who signs up with it will join this family and see the
-              same dashboard, alerts, and SOS notifications.
-            </Text>
-            <View style={styles.codeBox} testID="fg-code-box">
-              <Text style={styles.codeText} testID="fg-invite-code" selectable>
-                {data?.group?.invite_code || '—'}
+          {/* Invite codes create family access, so they are owner-only. */}
+          {isOwner ? (
+            <View style={styles.card} testID="fg-invite-code-section">
+              <Text style={styles.sectionLabel}>INVITE CODE</Text>
+              <Text style={styles.sectionHelp}>
+                Share this code with family. Anyone who signs up with it will join this family and see the
+                same dashboard, alerts, and SOS notifications.
               </Text>
-            </View>
-            <View style={styles.codeBtnRow}>
-              <TouchableOpacity style={styles.codeBtn} onPress={onCopyCode} testID="fg-copy-code">
-                <Text style={styles.codeBtnTxt}>📋 Copy</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.codeBtn} onPress={onShareCode} testID="fg-share-code">
-                <Text style={styles.codeBtnTxt}>↗ Share</Text>
-              </TouchableOpacity>
-              {isOwner ? (
+              <View style={styles.codeBox} testID="fg-code-box">
+                <Text style={styles.codeText} testID="fg-invite-code" selectable>
+                  {data?.group?.invite_code || '—'}
+                </Text>
+              </View>
+              <View style={styles.codeBtnRow}>
+                <TouchableOpacity style={styles.codeBtn} onPress={onCopyCode} testID="fg-copy-code">
+                  <Text style={styles.codeBtnTxt}>📋 Copy</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.codeBtn} onPress={onShareCode} testID="fg-share-code">
+                  <Text style={styles.codeBtnTxt}>↗ Share</Text>
+                </TouchableOpacity>
                 <TouchableOpacity
                   style={[styles.codeBtn, styles.codeBtnRegen]}
                   onPress={onRegenerate}
@@ -379,9 +390,9 @@ export default function FamilyGroupScreen() {
                 >
                   <Text style={[styles.codeBtnTxt, { color: Colors.error }]}>↻ Regenerate</Text>
                 </TouchableOpacity>
-              ) : null}
+              </View>
             </View>
-          </View>
+          ) : null}
 
           {/* Members list */}
           <View style={styles.card}>
@@ -443,8 +454,8 @@ export default function FamilyGroupScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Email invitations (per-recipient) */}
-          <View style={styles.card}>
+          {/* Email invitations (per-recipient) are family administration. */}
+          {isOwner ? <View style={styles.card} testID="fg-email-invites">
             <Text style={styles.sectionLabel}>INVITE BY EMAIL</Text>
             <Text style={styles.sectionHelp}>
               Send a unique invite code by email. They&apos;ll join your family
@@ -497,7 +508,7 @@ export default function FamilyGroupScreen() {
                   ))}
               </>
             ) : null}
-          </View>
+          </View> : null}
 
           {/* Actions */}
           <View style={styles.card}>
@@ -525,7 +536,7 @@ export default function FamilyGroupScreen() {
 
       {/* Rename modal */}
       <Modal
-        visible={renameOpen}
+        visible={isOwner && renameOpen}
         transparent
         animationType="fade"
         onRequestClose={() => setRenameOpen(false)}
@@ -670,7 +681,7 @@ export default function FamilyGroupScreen() {
 
       {/* Invite by email modal */}
       <Modal
-        visible={inviteOpen}
+        visible={isOwner && inviteOpen}
         animationType="fade"
         transparent
         onRequestClose={() => setInviteOpen(false)}

@@ -12,6 +12,7 @@ import { logScreenRender } from '../../src/screenRenderLog';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, Reminder } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
+import { useFamilyGroupRole } from '../../src/useFamilyGroupRole';
 import MemberMap from '../../src/MemberMap';
 // TrackingStatusPill removed — Build XX family screen simplification.
 import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone, formatTimeAgo, formatTimezone, formatPhone } from '../../src/timeFormat';
@@ -35,6 +36,7 @@ export default function MemberDetail() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
+  const familyRole = useFamilyGroupRole();
   const insets = useSafeAreaInsets();
   // Build 47 — Member detail no longer owns a local `member` state
   // object.  It reads from the canonical store via useMember(id) so
@@ -168,6 +170,7 @@ export default function MemberDetail() {
   };
 
   const markReminder = async (rid: string, status: 'taken' | 'missed') => {
+    if (!familyRole.isResolved || member?.user_id !== user?.id) return;
     try {
       await api.post(`/reminders/${rid}/mark`, { status });
       load();
@@ -177,6 +180,7 @@ export default function MemberDetail() {
   };
 
   const deleteReminder = (rid: string, title: string) => {
+    if (!familyRole.isOwner) return;
     Alert.alert('Remove?', `Remove "${title}"?`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Remove', style: 'destructive', onPress: async () => {
@@ -215,6 +219,7 @@ export default function MemberDetail() {
   const [checkinDraftTime, setCheckinDraftTime] = useState<string>('08:00');
 
   const saveFixedCheckin = async (hhmm: string) => {
+    if (!familyRole.isResolved || (!familyRole.isOwner && member?.user_id !== user?.id)) return;
     try {
       const r = await api.put(`/members/${id}/checkin-settings`, {
         daily_checkin_time: hhmm,
@@ -229,6 +234,7 @@ export default function MemberDetail() {
     }
   };
   const saveIntervalCheckin = async (hours: number) => {
+    if (!familyRole.isResolved || (!familyRole.isOwner && member?.user_id !== user?.id)) return;
     try {
       const r = await api.put(`/members/${id}/checkin-settings`, {
         daily_checkin_time: null,
@@ -241,6 +247,7 @@ export default function MemberDetail() {
     }
   };
   const disableCheckin = async () => {
+    if (!familyRole.isResolved || (!familyRole.isOwner && member?.user_id !== user?.id)) return;
     try {
       const r = await api.put(`/members/${id}/checkin-settings`, {
         daily_checkin_time: null,
@@ -309,6 +316,13 @@ export default function MemberDetail() {
   // TypeScript narrowing: all null/error paths have returned above
   if (!member) return null;
 
+  // Member profile roles (for example "senior") are not permissions. The
+  // family endpoint is authoritative; while it loads, mutation controls fail
+  // closed rather than trusting a cached AuthContext user.
+  const isOwner = familyRole.isOwner;
+  const isOwnMemberRecord = member.user_id === user?.id;
+  const canManageReminders = isOwner;
+  const canManageCheckin = familyRole.isResolved && (isOwner || isOwnMemberRecord);
   const initials = member.name.split(' ').map(s => s[0]).slice(0, 2).join('').toUpperCase();
   const hasCoords = member.latitude != null && member.longitude != null;
   const coordsLabel = hasCoords
@@ -503,9 +517,11 @@ export default function MemberDetail() {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Daily Check-in</Text>
-            <TouchableOpacity testID="checkin-settings-toggle" onPress={() => setShowCheckinSettings(v => !v)}>
-              <Text style={styles.linkText}>{showCheckinSettings ? 'Done' : 'Edit'}</Text>
-            </TouchableOpacity>
+            {canManageCheckin ? (
+              <TouchableOpacity testID="checkin-settings-toggle" onPress={() => setShowCheckinSettings(v => !v)}>
+                <Text style={styles.linkText}>{showCheckinSettings ? 'Done' : 'Edit'}</Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
           <View style={styles.settingCard}>
             <Text style={styles.settingLabel}>Expected check-in · {formatTimezone(getDeviceTimezone())}</Text>
@@ -574,18 +590,18 @@ export default function MemberDetail() {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>💊 Medications ({medsTaken}/{meds.length})</Text>
-            <TouchableOpacity
+            {canManageReminders ? <TouchableOpacity
               testID="add-medication-btn"
               onPress={() => router.push(`/add-medication/${id}`)}
               style={styles.addBtnSmall}
             >
               <Text style={styles.addBtnSmallText}>➕ Add</Text>
-            </TouchableOpacity>
+            </TouchableOpacity> : null}
           </View>
           {meds.length === 0 ? (
-            <Text style={styles.emptyText}>No medications yet. Tap Add to create one.</Text>
+            <Text style={styles.emptyText}>No medications yet.{canManageReminders ? ' Tap Add to create one.' : ''}</Text>
           ) : meds.map(r => (
-            <ReminderRow key={r.id} reminder={r} onMark={markReminder} onDelete={deleteReminder} onEdit={(rid) => router.push(`/edit-medication/${rid}`)} />
+            <ReminderRow key={r.id} reminder={r} canMark={isOwnMemberRecord} canManage={canManageReminders} onMark={markReminder} onDelete={deleteReminder} onEdit={(rid) => router.push(`/edit-medication/${rid}`)} />
           ))}
 
           {history && history.totals && history.totals.logged > 0 && (
@@ -597,18 +613,18 @@ export default function MemberDetail() {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>🌿 Daily Routine ({routinesDone}/{routines.length})</Text>
-            <TouchableOpacity
+            {canManageReminders ? <TouchableOpacity
               testID="add-routine-btn"
               onPress={() => router.push(`/add-routine/${id}`)}
               style={styles.addBtnSmall}
             >
               <Text style={styles.addBtnSmallText}>➕ Add</Text>
-            </TouchableOpacity>
+            </TouchableOpacity> : null}
           </View>
           {routines.length === 0 ? (
-            <Text style={styles.emptyText}>No routine items yet. Tap Add to create one.</Text>
+            <Text style={styles.emptyText}>No routine items yet.{canManageReminders ? ' Tap Add to create one.' : ''}</Text>
           ) : routines.map(r => (
-            <ReminderRow key={r.id} reminder={r} onMark={markReminder} onDelete={deleteReminder} onEdit={(rid) => router.push(`/edit-medication/${rid}`)} />
+            <ReminderRow key={r.id} reminder={r} canMark={isOwnMemberRecord} canManage={canManageReminders} onMark={markReminder} onDelete={deleteReminder} onEdit={(rid) => router.push(`/edit-medication/${rid}`)} />
           ))}
         </View>
 
@@ -616,12 +632,12 @@ export default function MemberDetail() {
 
       {/* Build XX — self-only check-in.  Show "Check In" only on the member's own device;
           everyone else sees "Are You OK?" which sends a request instead of a direct check-in. */}
-      {member.user_id === user?.id ? (
+       {familyRole.isResolved && member.user_id === user?.id ? (
         <TouchableOpacity testID="member-checkin" onPress={checkIn} activeOpacity={0.85} style={[styles.checkinBtn, { bottom: insets.bottom + 16 }]}>
           <Text style={styles.checkinEmoji}>✅</Text>
           <Text style={styles.checkinText}>Check In</Text>
         </TouchableOpacity>
-      ) : (
+       ) : familyRole.isResolved ? (
         <TouchableOpacity
           testID="member-are-you-ok"
           onPress={sendAreYouOk}
@@ -632,13 +648,15 @@ export default function MemberDetail() {
           <Text style={styles.checkinEmoji}>{sendingRequest ? '⏳' : '❓'}</Text>
           <Text style={styles.checkinText}>{sendingRequest ? 'Sending…' : `Are You OK?`}</Text>
         </TouchableOpacity>
-      )}
+       ) : null}
     </SafeAreaView>
   );
 }
 
-function ReminderRow({ reminder, onMark, onDelete, onEdit }: {
+function ReminderRow({ reminder, canMark, canManage, onMark, onDelete, onEdit }: {
   reminder: Reminder;
+  canMark: boolean;
+  canManage: boolean;
   onMark: (id: string, s: 'taken' | 'missed') => void;
   onDelete: (id: string, title: string) => void;
   onEdit: (id: string) => void;
@@ -661,34 +679,34 @@ function ReminderRow({ reminder, onMark, onDelete, onEdit }: {
         {isMissed && <Text style={styles.missedTag}>⚠ Missed — family alerted</Text>}
       </View>
       <View style={styles.reminderActions}>
-        <TouchableOpacity
+        {canMark ? <TouchableOpacity
           testID={`mark-taken-${reminder.id}`}
           onPress={() => onMark(reminder.id, 'taken')}
           style={[styles.markBtn, isTaken && styles.markBtnTakenActive]}
         >
           <Text style={[styles.markBtnText, isTaken && { color: Colors.surface }]}>✅</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
+        </TouchableOpacity> : null}
+        {canMark ? <TouchableOpacity
           testID={`mark-missed-${reminder.id}`}
           onPress={() => onMark(reminder.id, 'missed')}
           style={[styles.markBtn, isMissed && styles.markBtnMissedActive]}
         >
           <Text style={[styles.markBtnText, isMissed && { color: Colors.surface }]}>✕</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
+        </TouchableOpacity> : null}
+        {canManage ? <TouchableOpacity
           testID={`edit-reminder-${reminder.id}`}
           onPress={() => onEdit(reminder.id)}
           style={styles.editBtnSmall}
         >
           <Text style={{ fontSize: 14, color: Colors.primary }}>✏️</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
+        </TouchableOpacity> : null}
+        {canManage ? <TouchableOpacity
           testID={`delete-reminder-${reminder.id}`}
           onPress={() => onDelete(reminder.id, reminder.title)}
           style={styles.deleteBtnSmall}
         >
           <Text style={{ fontSize: 14, color: Colors.textTertiary }}>🗑</Text>
-        </TouchableOpacity>
+        </TouchableOpacity> : null}
       </View>
     </View>
   );

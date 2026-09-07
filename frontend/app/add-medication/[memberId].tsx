@@ -9,16 +9,19 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
 import { api, TimeSlot } from '../../src/api';
 import { TimeSlotsEditor, isValidHHMM } from '../../src/TimeSlotsEditor';
+import { useFamilyGroupRole } from '../../src/useFamilyGroupRole';
 
 export default function AddMedication() {
   const router = useRouter();
   const { memberId } = useLocalSearchParams<{ memberId: string }>();
+  const familyRole = useFamilyGroupRole();
   const [name, setName] = useState('');
   const [dosage, setDosage] = useState('');
   const [slots, setSlots] = useState<TimeSlot[]>([{ time: '08:00', label: 'Morning' }]);
   const [loading, setLoading] = useState(false);
 
   const onSubmit = async () => {
+    if (!familyRole.isOwner) return;
     if (!name.trim()) { Alert.alert('Missing', 'Enter medication name.'); return; }
     if (slots.length === 0) { Alert.alert('Missing', 'Add at least one reminder time.'); return; }
     for (const s of slots) {
@@ -55,7 +58,15 @@ export default function AddMedication() {
           <View style={{ width: 44 }} />
         </View>
 
-        <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 48 }} keyboardShouldPersistTaps="handled">
+        {familyRole.loading ? (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }} testID="add-med-role-loading">
+            <ActivityIndicator color={Colors.primary} />
+          </View>
+        ) : !familyRole.isOwner ? (
+          <View style={{ padding: 24 }} testID="add-med-access-denied">
+            <Text style={styles.subhelp}>Only family owners can add medications.</Text>
+          </View>
+        ) : <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 48 }} keyboardShouldPersistTaps="handled">
           <Text style={styles.label}>Medication name</Text>
           <TextInput
             testID="med-name"
@@ -89,7 +100,7 @@ export default function AddMedication() {
           >
             {loading ? <ActivityIndicator color={Colors.surface} /> : <Text style={styles.ctaText}>Add Medication</Text>}
           </TouchableOpacity>
-        </ScrollView>
+        </ScrollView>}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
