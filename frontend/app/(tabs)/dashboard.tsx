@@ -38,6 +38,7 @@ import { useActiveEmergency } from '../../src/activeEmergency';
 import { getBatteryDisplay } from '../../src/batteryStatus';
 import { confirmPendingInviteCancellation } from '../../src/pendingInviteCancellation';
 import { stampMembersResponse } from '../../src/pipelineSnapshot';
+import { recordLocationUploadSuccess } from '../../src/locationUploadSuccess';
 // TrackingStatusPill removed — Build XX family screen simplification.
 import Svg, { Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
@@ -520,6 +521,7 @@ export default function Dashboard() {
                 longitude: pos.coords.longitude,
               };
               const resp = await api.put(`/members/${memberId}/location`, body);
+              await recordLocationUploadSuccess();
               // Build 48 — upsert canonical post-write doc into store so
               // Dashboard and Member screen see the fresh timestamp
               // without waiting for the 60 s /members poll.
@@ -593,6 +595,7 @@ export default function Dashboard() {
         // canonical store so the senior's own Dashboard re-renders
         // with the fresh timestamp instantly.
         const resp = await api.put(`/members/${me.id}/location`, body).catch(() => null);
+        if (resp) await recordLocationUploadSuccess();
         if (resp && (resp as any).data?.id) {
           try { memberStore.upsertOne((resp as any).data); } catch (_e) {}
         }

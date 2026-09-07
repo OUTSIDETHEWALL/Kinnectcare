@@ -29,6 +29,7 @@ import { Platform } from 'react-native';
 import { api } from './api';
 import * as memberStore from './store/memberStore';
 import { ensureBackgroundLocationDisclosure } from './backgroundLocationDisclosure';
+import { recordLocationUploadSuccess } from './locationUploadSuccess';
 
 export const BG_LOCATION_TASK = 'kinnship/background-location-v1';
 export const SOS_ACTIVE_KEY = '@kinnship/sos_active_v1';
@@ -353,6 +354,7 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
     if (bgBatteryLevel !== null) bgPayload.battery_level = bgBatteryLevel;
     if (bgIsCharging !== null) bgPayload.is_charging = bgIsCharging;
     const resp = await api.put(`/members/${memberId}/location`, bgPayload);
+    await recordLocationUploadSuccess();
     // v1.2.6: capture the backend's post-write view of the row to
     // detect partial / wrong-doc writes from the OS-task context.
     const rd: any = resp?.data || {};

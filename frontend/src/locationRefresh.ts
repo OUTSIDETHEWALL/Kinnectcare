@@ -45,6 +45,7 @@ import { Platform } from 'react-native';
 import { api } from './api';
 import * as memberStore from './store/memberStore';
 import * as Battery from 'expo-battery';
+import { recordLocationUploadSuccess } from './locationUploadSuccess';
 
 const MY_MEMBER_ID_KEY = 'kc_my_member_id_v1';
 // v1.2.5 diagnostic: stash the user_id alongside the member_id so
@@ -623,6 +624,7 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
       if (batteryLevel !== null) body.battery_level = batteryLevel;
       if (isCharging !== null) body.is_charging = isCharging;
       const resp = await api.put(`/members/${memberId}/location`, body);
+      await recordLocationUploadSuccess();
       // v1.2.6: capture the backend's post-write view of the row so we
       // can detect partial / wrong-doc writes.  PUT response body is
       // the FamilyMember model — see server.py:1670.
