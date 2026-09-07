@@ -24,8 +24,8 @@ function injectMainApplication(contents) {
   return insertInFunction(
     contents,
     'override fun onCreate()',
-    `\n    // ${MARKER}: truthful boundary before Application superclass initialization.\n    ${RECORDER}.startNewRun(this)\n    ${RECORDER}.record("native_application_on_create_started", null)\n`,
-    `\n    // ${MARKER}: this method has completed its generated Application initialization.\n    ${RECORDER}.record("native_application_on_create_completed", null)\n  `,
+    `\n    // ${MARKER}: truthful boundary before Application superclass initialization.\n    ${RECORDER}.startNewRun(this)\n    ${RECORDER}.record(this, "native_application_on_create_started", null)\n`,
+    `\n    // ${MARKER}: this method has completed its generated Application initialization.\n    ${RECORDER}.record(this, "native_application_on_create_completed", null)\n  `,
   );
 }
 
@@ -34,14 +34,14 @@ function injectMainActivity(contents) {
   const next = insertInFunction(
     contents,
     'override fun onCreate(',
-    `\n    // ${MARKER}: Activity callback entered; this does not claim splash or React readiness.\n    ${RECORDER}.record("native_activity_on_create_started", null)\n`,
-    `\n    ${RECORDER}.record("native_activity_on_create_completed", null)\n  `,
+    `\n    // ${MARKER}: Activity callback entered; this does not claim splash or React readiness.\n    ${RECORDER}.record(this, "native_activity_on_create_started", null)\n`,
+    `\n    ${RECORDER}.record(this, "native_activity_on_create_completed", null)\n  `,
   );
   if (next === contents) return contents;
   const classEnd = next.lastIndexOf('}');
   return `${next.slice(0, classEnd)}
   override fun onWindowFocusChanged(hasFocus: Boolean) {
-    ${RECORDER}.record("native_activity_window_focus_changed", "{\\"hasWindowFocus\\":" + hasFocus + "}")
+    ${RECORDER}.record(this, "native_activity_window_focus_changed", "{\\"hasWindowFocus\\":" + hasFocus + "}")
     super.onWindowFocusChanged(hasFocus)
   }
 ${next.slice(classEnd)}`;

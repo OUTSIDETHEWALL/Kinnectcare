@@ -62,6 +62,12 @@ describe('withAndroidStartupRecorder', () => {
     expect(once).not.toContain('StartupDiagnosticsPackage');
     expect(once.match(/native_application_on_create_started/g)).toHaveLength(1);
     expect(once.match(/native_application_on_create_completed/g)).toHaveLength(1);
+    expect(once).toContain(
+      'StartupDiagnosticsRecorder.record(this, "native_application_on_create_started", null)',
+    );
+    expect(once).toContain(
+      'StartupDiagnosticsRecorder.record(this, "native_application_on_create_completed", null)',
+    );
     expect(once).toContain('PackageList(this).packages.apply');
     expect(once.indexOf('native_application_on_create_started'))
       .toBeLessThan(once.indexOf('super.onCreate()'));
@@ -78,6 +84,15 @@ describe('withAndroidStartupRecorder', () => {
     expect(once.match(/native_activity_on_create_completed/g)).toHaveLength(1);
     expect(once.match(/override fun onWindowFocusChanged/g)).toHaveLength(1);
     expect(once.match(/native_activity_window_focus_changed/g)).toHaveLength(1);
+    expect(once).toContain(
+      'StartupDiagnosticsRecorder.record(this, "native_activity_on_create_started", null)',
+    );
+    expect(once).toContain(
+      'StartupDiagnosticsRecorder.record(this, "native_activity_on_create_completed", null)',
+    );
+    expect(once).toContain(
+      'StartupDiagnosticsRecorder.record(this, "native_activity_window_focus_changed"',
+    );
     expect(once.indexOf('native_activity_on_create_started'))
       .toBeLessThan(once.indexOf('SplashScreenManager.registerOnActivity(this)'));
     expect(once.indexOf('native_activity_on_create_completed'))
