@@ -41,6 +41,10 @@ import {
   readStartupDiagnostics,
   StartupDiagnosticEntry,
 } from '../src/startupDiagnostics';
+import {
+  NativeStartupSnapshot,
+  readNativeStartupCheckpoints,
+} from '../src/nativeStartupRecorder';
 import { readLocationRefreshLog, LocationRefreshEntry } from '../src/locationRefresh';
 import { readBgTaskLog, BgTaskLogEntry } from '../src/backgroundLocation';
 import {
@@ -132,6 +136,17 @@ const AUTH_CLEAR_KEY = 'kc_auth_clear_diag';
 const PUSH_REFRESH_KEY = 'kc_push_refresh_log';
 const EXPANSION_STATE_KEY = '@kinnship/diagnostics_expanded_v1';
 const DIAGNOSTICS_CRASH_DEBUG_ENABLED = typeof __DEV__ !== 'undefined' && __DEV__;
+
+// Export/copy is intentionally stricter than native storage. Metadata is not
+// needed to diagnose checkpoint ordering and must never leave the device.
+function nativeStartupCheckpointsForCopy(snapshot: NativeStartupSnapshot) {
+  const omitMetadata = ({ metadata: _metadata, ...checkpoint }: NativeStartupSnapshot['records'][number]) =>
+    checkpoint;
+  return {
+    records: snapshot.records.map(omitMetadata),
+    ...(snapshot.latest ? { latest: omitMetadata(snapshot.latest) } : {}),
+  };
+}
 
 function diagnosticsRuntimeIdentity() {
   return {
@@ -785,6 +800,7 @@ function DiagnosticsContent() {
   const { user } = useAuth();
   const [routeLog, setRouteLog] = useState<RouteDiagEntry[]>([]);
   const [startupLog, setStartupLog] = useState<StartupDiagnosticEntry[]>([]);
+  const [nativeStartup, setNativeStartup] = useState<NativeStartupSnapshot>({ records: [] });
   const [authLog, setAuthLog] = useState<AuthClearEntry[]>([]);
   const [pushLog, setPushLog] = useState<PushRefreshEntry[]>([]);
   const [locLog, setLocLog] = useState<LocationRefreshEntry[]>([]);
@@ -1006,6 +1022,10 @@ function DiagnosticsContent() {
 
   const reload = useCallback(async () => {
     setLoading(true);
+    // Native startup evidence is synchronous and isolated from the existing
+    // asynchronous readers: an unavailable bridge must never blank or delay
+    // the rest of Diagnostics.
+    const nativeStartupSnapshot = readNativeStartupCheckpoints();
     // Raw, sequential, per-key inspection runs before any legacy reader can
     // swallow a parse error or normalize the value. The safe report remains
     // available from Me even if this route later fails during render.
@@ -1031,6 +1051,7 @@ function DiagnosticsContent() {
     ]);
     setRouteLog(traceDiagnosticsRecords('@kinnship/route_diagnostics_v1', r));
     setStartupLog(traceDiagnosticsRecords('@kinnship/startup_diagnostics_v1', startup));
+    setNativeStartup(nativeStartupSnapshot);
     setAuthLog(traceDiagnosticsRecords('kc_auth_clear_diag', a));
     setPushLog(traceDiagnosticsRecords('kc_push_refresh_log', p));
     setLocLog(traceDiagnosticsRecords('kc_location_refresh_log', l));
@@ -1336,6 +1357,7 @@ function DiagnosticsContent() {
       user: user ? { id: user.id, email: user.email } : null,
       authClearLog: authLog,
       startupLog,
+      nativeStartupCheckpoints: nativeStartupCheckpointsForCopy(nativeStartup),
       routeLog,
       pushRefreshLog: pushLog,
       locationRefreshLog: locLog,
@@ -1352,6 +1374,7 @@ function DiagnosticsContent() {
       counts: {
         authClear: authLog.length,
         startup: startupLog.length,
+        nativeStartup: nativeStartup.records.length,
         route: routeLog.length,
         pushRefresh: pushLog.length,
         locationRefresh: locLog.length,
@@ -1362,7 +1385,7 @@ function DiagnosticsContent() {
         staleLocationPipelineSnapshots: pipelineSnapshots.length,
       },
     };
-  }, [authLog, startupLog, routeLog, pushLog, locLog, bgLog, renderLog, engineLog, engineState, engineAvailable, dashLoadLog, pipelineSnapshots, serverState, user]);
+  }, [authLog, startupLog, nativeStartup, routeLog, pushLog, locLog, bgLog, renderLog, engineLog, engineState, engineAvailable, dashLoadLog, pipelineSnapshots, serverState, user]);
 
   const onCopy = async () => {
     try {
@@ -1371,7 +1394,7 @@ function DiagnosticsContent() {
       await Clipboard.setStringAsync(json);
       Alert.alert(
         'Copied',
-        `Diagnostic log copied (${startupLog.length} startup, ${authLog.length} auth, ${routeLog.length} route, ${pushLog.length} push, ${locLog.length} loc, ${bgLog.length} bg, ${renderLog.length} render entries).`,
+        `Diagnostic log copied (${nativeStartup.records.length} native startup, ${startupLog.length} startup, ${authLog.length} auth, ${routeLog.length} route, ${pushLog.length} push, ${locLog.length} loc, ${bgLog.length} bg, ${renderLog.length} render entries).`,
       );
     } catch (e: any) {
       Alert.alert('Could not copy', e?.message || 'Try again.');
@@ -1667,6 +1690,33 @@ function DiagnosticsContent() {
           Beta diagnostics. If support asks, tap <Text style={styles.bold}>Copy Log</Text> and
           paste into your reply. No personal data leaves your phone until you paste.
         </Text>
+
+        <CollapsibleSection
+          id="native-startup"
+          title="Native Startup Checkpoints"
+          expanded={!!expanded['native-startup']}
+          onToggle={toggleSection}
+          hint="Native-recorded startup timing. Metadata is intentionally limited to non-sensitive boolean/outcome signals."
+          testID="diagnostics-native-startup"
+        >
+          {nativeStartup.records.length === 0 ? (
+            <Text testID="diagnostics-native-startup-unavailable" style={styles.entryLine}>
+              Native startup checkpoints unavailable or no records were retained.
+            </Text>
+          ) : (
+            <>
+              <Text style={styles.entryLine}>
+                Latest: #{nativeStartup.latest?.sequence ?? nativeStartup.records[nativeStartup.records.length - 1].sequence}{' '}
+                {nativeStartup.latest?.event ?? nativeStartup.records[nativeStartup.records.length - 1].event}
+              </Text>
+              {nativeStartup.records.map((record) => (
+                <Text key={`${record.runId}-${record.sequence}`} selectable style={styles.entryLine}>
+                  #{record.sequence} · {record.runId} · {record.event} · {new Date(record.wallClockMs).toISOString()}
+                </Text>
+              ))}
+            </>
+          )}
+        </CollapsibleSection>
 
         {/* =====================================================
             Task 9 — Plain-English Health Check panel.

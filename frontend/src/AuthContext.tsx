@@ -11,6 +11,7 @@ import {
 } from './freshInstallGuard';
 import { captureInstallReferrerInvite } from './installReferrerInvite';
 import { logStartupEvent } from './startupDiagnostics';
+import { recordNativeStartupCheckpoint } from './nativeStartupRecorder';
 
 const TOKEN_KEY = 'kc_token';
 // v1.2 beta — cache the user object alongside the token so we can
@@ -103,6 +104,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     (async () => {
+      recordNativeStartupCheckpoint('auth_restore_started');
+      let authRestoreTerminal: 'auth_restore_completed' | 'auth_restore_failed' = 'auth_restore_failed';
+      let restoredUser = false;
+      try {
       logStartupEvent({
         phase: 'session_restore',
         event: 'session_restore_started',
@@ -134,6 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // No token at all — definitely not signed in.  Dismiss loading
         // immediately so the user reaches the welcome screen.
         setLoading(false);
+        authRestoreTerminal = 'auth_restore_completed';
         logStartupEvent({
           phase: 'session_restore',
           event: 'session_restore_completed',
@@ -160,15 +166,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // and dismiss loading.  /auth/me continues in the background.
         setUser(cachedUser);
         setLoading(false);
+        restoredUser = true;
         logStartupEvent({
           phase: 'session_restore',
           event: 'session_restored',
           outcome: 'cached_user',
         });
       }
+      let authRestoreFailed = false;
       try {
         const res = await api.get('/auth/me');
         setUser(res.data);
+        restoredUser = true;
         await writeUserCache(res.data);
         logStartupEvent({
           phase: 'session_restore',
@@ -184,6 +193,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
         } catch (_e) {}
       } catch (e: any) {
+        authRestoreFailed = true;
         let status = e?.response?.status;
         // RETRY-ONCE on 401: a single transient 401 (Mongo brief
         // read failure, Railway edge restart, etc.) must NOT
@@ -198,8 +208,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             await new Promise((r) => setTimeout(r, 2000));
             const res2 = await api.get('/auth/me');
             setUser(res2.data);
+            restoredUser = true;
             await writeUserCache(res2.data);
             status = undefined; // recovered
+            authRestoreFailed = false;
             logStartupEvent({
               phase: 'session_restore',
               event: 'auth_me_retry_completed',
@@ -234,6 +246,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           await clearToken();
           await writeUserCache(null);
           setUser(null);
+          restoredUser = false;
           logStartupEvent({
             phase: 'session_restore',
             event: 'session_cleared',
@@ -252,11 +265,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Catch-all flip in case the cache hit branch above didn't
       // already do it (cache miss + /auth/me success path lands here).
       setLoading(false);
+      authRestoreTerminal = authRestoreFailed && !restoredUser
+        ? 'auth_restore_failed'
+        : 'auth_restore_completed';
       logStartupEvent({
         phase: 'session_restore',
         event: 'session_restore_completed',
         outcome: cachedUser ? 'loading_released_with_cached_user' : 'loading_released_after_network',
       });
+      } finally {
+        // This finally observes every existing return/throw path without
+        // changing any auth decision, retry, or loading behavior.
+        recordNativeStartupCheckpoint(authRestoreTerminal, { authenticated: restoredUser });
+      }
     })();
   }, []);
 

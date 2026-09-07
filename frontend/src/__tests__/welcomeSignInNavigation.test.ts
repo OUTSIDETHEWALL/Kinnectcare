@@ -27,6 +27,25 @@ describe('Welcome Sign In navigation contract', () => {
     expect(welcome).toContain('styles.pressProbe');
   });
 
+  it('records truthful Welcome milestones without changing destination routes', () => {
+    const welcome = source('app/index.tsx');
+
+    expect(welcome).toContain("recordNativeStartupCheckpoint('welcome_render_committed')");
+    expect(welcome).toContain("recordNativeStartupCheckpoint('welcome_interactive')");
+    expect(welcome).toContain("recordNativeStartupCheckpoint('welcome_first_button_press_received')");
+    expect(welcome).toContain("recordNativeStartupCheckpoint('welcome_login_navigation_requested')");
+    expect(welcome).toContain("router.push('/(auth)/signup')");
+    expect(welcome).toContain("router.push('/(auth)/login')");
+    expect(welcome).toContain("router.push('/(auth)/join-family')");
+  });
+
+  it('uses post-layout rather than a timer for the interactive milestone', () => {
+    const welcome = source('app/index.tsx');
+
+    expect(welcome).toContain('onLayout={onWelcomeLayout}');
+    expect(welcome).not.toContain('setTimeout');
+  });
+
   it('does not redirect an active auth route back to onboarding', () => {
     const rootLayout = source('app/_layout.tsx');
 

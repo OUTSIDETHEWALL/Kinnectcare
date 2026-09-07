@@ -25,3 +25,4 @@
 - [Bound optional Android startup services](android-optional-startup-services.md) — Play/OEM callbacks may never arrive; optional native services must not indefinitely gate interactive startup.
 - [Destructive family action confirmations](destructive-family-confirmations.md) — family membership mutations need an in-app consequence summary and explicit destructive confirmation.
 - [Transport-independent upload evidence](transport-independent-upload-evidence.md) — every accepted location upload must update one cross-runtime Diagnostics success record.
+- [New-architecture startup recorder](new-architecture-startup-recorder.md) — durable synchronous JS checkpoints must use an Expo local module, not a legacy blocking NativeModules bridge.
