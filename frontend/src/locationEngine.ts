@@ -349,6 +349,7 @@ function registerHeadlessTaskOnce(): void {
                     headers: {
                       'Content-Type': 'application/json',
                       'Authorization': `Bearer ${jwt}`,
+                      'X-Kinnship-Presence-Source': 'battery-task',
                     },
                     body: JSON.stringify({
                       battery_level: battLevel,
@@ -880,7 +881,9 @@ export async function pushBatteryUpdate(source: string = 'unknown'): Promise<voi
     const url = `/members/${cachedConfig.memberId}/battery`;
     void logEvent('battery_patch_sent', { url, level, isCharging, ts });
 
-    const resp = await api.patch(url, body);
+    const resp = await api.patch(url, body, {
+      headers: { 'X-Kinnship-Presence-Source': 'battery-event' },
+    });
     const httpStatus: number = resp?.status ?? 0;
     const hasId = !!(resp?.data?.id);
 
@@ -955,6 +958,7 @@ async function pushDeviceSnapshotToBackend(
   pts: PipelineTimestamps,
   now: number,
   sdkSt: any,
+  presenceSource: 'device-snapshot' | 'sdk-heartbeat' = 'device-snapshot',
 ): Promise<void> {
   if (!cachedConfig) return;
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -985,7 +989,9 @@ async function pushDeviceSnapshotToBackend(
   // Throws on network/auth/server error — callers decide whether to swallow
   // (heartbeat path: best-effort fire-and-forget) or propagate
   // (triggerDeviceSnapshotNow: diagnostic path that must report real failures).
-  await api.put(`/members/${cachedConfig.memberId}/device-snapshot`, body);
+  await api.put(`/members/${cachedConfig.memberId}/device-snapshot`, body, {
+    headers: { 'X-Kinnship-Presence-Source': presenceSource },
+  });
 }
 
 function attachBatteryListeners(): void {
@@ -1252,7 +1258,7 @@ function attachSdkListeners(lib: any): void {
           // Best-effort: swallow network/server errors here so a transient
           // backend hiccup never disturbs the heartbeat pipeline.
           try {
-            await pushDeviceSnapshotToBackend(pts, now, sdkSt);
+            await pushDeviceSnapshotToBackend(pts, now, sdkSt, 'sdk-heartbeat');
           } catch (_e) {
             void logEvent('device_snapshot_push_error', { error: String((_e as any)?.message || _e) });
           }
@@ -1409,6 +1415,7 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
     // and new clients can coexist during the OTA rollout window.
     headers: {
       'Content-Type': 'application/json',
+      'X-Kinnship-Presence-Source': 'location-upload',
     },
     authorization: {
       strategy: 'JWT',

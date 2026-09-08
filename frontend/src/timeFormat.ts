@@ -157,6 +157,22 @@ export function formatRelativeLocal(iso?: string | null): string {
 }
 
 /**
+ * Choose the timestamp used for caregiver-facing "Updated" labels.
+ * Invalid server values are ignored rather than being passed into display
+ * formatters, which keeps a malformed presence timestamp from hiding a valid
+ * location timestamp.
+ */
+export function selectPresenceTimestamp(
+  member?: { device_presence_at?: string | null; last_seen?: string | null } | null,
+): string | null {
+  const valid = (value?: string | null): value is string =>
+    typeof value === 'string' && value.trim() !== '' && !Number.isNaN(new Date(value).getTime());
+  if (valid(member?.device_presence_at)) return member.device_presence_at;
+  if (valid(member?.last_seen)) return member.last_seen;
+  return null;
+}
+
+/**
  * Format a timestamp (ISO string OR epoch ms) as a compact "time ago" label.
  * Tuned for the dashboard location freshness indicator — we want the most
  * frequent values ("just now", "30 s ago", "2 min ago") to read at a glance

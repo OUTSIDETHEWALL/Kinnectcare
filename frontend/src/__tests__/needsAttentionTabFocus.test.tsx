@@ -245,7 +245,10 @@ jest.mock('../theme', () => ({
 }));
 
 jest.mock('../locationRefresh',      () => ({ formatLastSeenAge: () => '2m ago' }));
-jest.mock('../timeFormat',           () => ({ formatTimeAgo: () => '2m ago' }));
+jest.mock('../timeFormat',           () => ({
+  ...jest.requireActual('../timeFormat'),
+  formatTimeAgo: () => '2m ago',
+}));
 jest.mock('../screenRenderLog',      () => ({ logScreenRender: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../cardRenderLog',        () => ({ logCardRender:   jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../refreshPipelineLog',   () => ({ logPipelineEvent: jest.fn() }));

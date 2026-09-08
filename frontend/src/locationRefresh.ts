@@ -623,7 +623,7 @@ export async function refreshLocationIfStale(reason: string): Promise<void> {
       const body: any = { latitude: lat, longitude: lon };
       if (batteryLevel !== null) body.battery_level = batteryLevel;
       if (isCharging !== null) body.is_charging = isCharging;
-      const resp = await api.put(`/members/${memberId}/location`, body);
+    const resp = await api.put(`/members/${memberId}/location`, body);
       await recordLocationUploadSuccess();
       // v1.2.6: capture the backend's post-write view of the row so we
       // can detect partial / wrong-doc writes.  PUT response body is

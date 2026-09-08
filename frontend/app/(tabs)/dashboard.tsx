@@ -19,7 +19,7 @@ import {
   subscribeRefreshing,
   STALE_THRESHOLD_MS,
 } from '../../src/locationRefreshState';
-import { formatTimeAgo } from '../../src/timeFormat';
+import { formatTimeAgo, selectPresenceTimestamp } from '../../src/timeFormat';
 import { logScreenRender } from '../../src/screenRenderLog';
 import {
   startLoad as dashStartLoad,
@@ -1175,6 +1175,7 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn, onWelfareCheck,
   useEffect(() => subscribeRefreshing(member.id, setRefreshing), [member.id]);
   const seenMs = member.last_seen ? new Date(member.last_seen).getTime() : 0;
   const ageLabel = seenMs ? formatTimeAgo(seenMs) : '';
+  const presenceTimestamp = selectPresenceTimestamp(member);
 
   // v1.2.0 (44) — log every render with the exact prop value the card
   // received and the ageLabel it rendered.  Fire-and-forget; the helper
@@ -1228,9 +1229,9 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn, onWelfareCheck,
             <>
               <Text style={styles.memberMetaLastKnown}>📍 Last known location</Text>
               <Text style={styles.memberMeta}>{member.location_name || 'Unknown'}</Text>
-              {member.last_seen ? (
+              {presenceTimestamp ? (
                 <Text style={styles.memberMetaFreshness}>
-                  Updated {formatLastSeenAge(member.last_seen)}
+                  Updated {formatLastSeenAge(presenceTimestamp)}
                 </Text>
               ) : null}
             </>

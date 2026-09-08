@@ -15,7 +15,7 @@ import { useAuth } from '../../src/AuthContext';
 import { useFamilyGroupRole } from '../../src/useFamilyGroupRole';
 import MemberMap from '../../src/MemberMap';
 // TrackingStatusPill removed — Build XX family screen simplification.
-import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone, formatTimeAgo, formatTimezone, formatPhone } from '../../src/timeFormat';
+import { formatTime12, formatRelativeLocal, formatShortDate, getDeviceTimezone, formatTimeAgo, formatTimezone, formatPhone, selectPresenceTimestamp } from '../../src/timeFormat';
 import { TimePicker12 } from '../../src/TimePicker12';
 import {
   requestRefresh as requestMemberRefresh,
@@ -329,6 +329,7 @@ export default function MemberDetail() {
     ? `${member.latitude!.toFixed(4)}°, ${member.longitude!.toFixed(4)}°`
     : 'Not available yet';
   const dot = member.status === 'healthy' ? '🟢' : member.status === 'warning' ? '🟡' : '🔴';
+  const presenceTimestamp = selectPresenceTimestamp(member);
 
   const meds = reminders.filter(r => r.category === 'medication');
   const routines = reminders.filter(r => r.category === 'routine');
@@ -412,9 +413,9 @@ export default function MemberDetail() {
                   <View style={{ flex: 1, marginLeft: 14 }}>
                     <Text style={styles.locLastKnown}>Last known location</Text>
                     <Text style={styles.locName}>{member.location_name || 'Unknown location'}</Text>
-                    {member.last_seen ? (
+                    {presenceTimestamp ? (
                       <Text style={styles.locFreshness}>
-                        Updated {formatLastSeenAge(member.last_seen)}
+                        Updated {formatLastSeenAge(presenceTimestamp)}
                       </Text>
                     ) : null}
                   </View>

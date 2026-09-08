@@ -70,7 +70,7 @@ def test_headless_patch_without_client_timestamp_advances_battery_timestamp():
     ])
     database.members.update_one = AsyncMock()
 
-    current = {"id": OWNER_ID, "family_group_id": FAMILY_GROUP_ID}
+    current = {"id": "test-member-user", "family_group_id": FAMILY_GROUP_ID}
     with patch.object(server, "db", database), patch.object(
         server, "check_low_battery", AsyncMock(return_value={})
     ):
@@ -82,7 +82,12 @@ def test_headless_patch_without_client_timestamp_advances_battery_timestamp():
             )
         )
 
-    update = database.members.update_one.call_args.args[1]["$set"]
+    battery_call = next(
+        call
+        for call in database.members.update_one.call_args_list
+        if "battery_updated_at" in call.args[1]["$set"]
+    )
+    update = battery_call.args[1]["$set"]
     assert update["battery_level"] == 0.82
     assert update["is_charging"] is False
     assert update["battery_updated_at"] >= before
@@ -99,9 +104,12 @@ def test_old_replay_cannot_hide_newer_stationary_battery_state():
         battery_updated_at=stored_at,
     )
     database = MagicMock()
-    database.members.find_one = AsyncMock(return_value=copy.deepcopy(member))
+    database.members.find_one = AsyncMock(side_effect=[
+        copy.deepcopy(member),
+        copy.deepcopy(member),
+    ])
     database.members.update_one = AsyncMock()
-    current = {"id": OWNER_ID, "family_group_id": FAMILY_GROUP_ID}
+    current = {"id": "test-member-user", "family_group_id": FAMILY_GROUP_ID}
 
     with patch.object(server, "db", database), patch.object(
         server, "check_low_battery", AsyncMock()
@@ -118,7 +126,12 @@ def test_old_replay_cannot_hide_newer_stationary_battery_state():
             )
         )
 
-    database.members.update_one.assert_not_called()
+    battery_calls = [
+        call
+        for call in database.members.update_one.call_args_list
+        if "battery_updated_at" in call.args[1]["$set"]
+    ]
+    assert battery_calls == []
     assert result.battery_level == 0.82
     assert result.is_charging is True
     assert result.battery_updated_at == stored_at
