@@ -1,6 +1,6 @@
 import axios from 'axios';
 import * as SecureStore from 'expo-secure-store';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
@@ -103,9 +103,36 @@ export const api = axios.create({
   timeout: 45000,
 });
 
+/**
+ * Mark authenticated foreground API activity as device presence.  This is
+ * deliberately synchronous and side-effect free: the request interceptor must
+ * never create a second request (or recurse through axios) merely to report
+ * presence.
+ */
+export function addForegroundPresenceHeader<T extends { headers?: any }>(
+  config: T,
+  token: string | null,
+  appState: string | null = AppState?.currentState ?? null,
+): T {
+  if (!token || appState !== 'active') return config;
+  config.headers = config.headers ?? {};
+  config.headers['X-Kinnship-Presence-Source'] =
+    config.headers['X-Kinnship-Presence-Source'] ?? 'foreground-api';
+  return config;
+}
+
 api.interceptors.request.use(async (config) => {
   const token = await getToken();
-  if (token) config.headers.Authorization = `Bearer ${token}`;
+  if (token) {
+    config.headers = config.headers ?? {};
+    config.headers.Authorization = `Bearer ${token}`;
+    addForegroundPresenceHeader(config, token);
+  } else if (config.headers) {
+    // Explicit telemetry callers always have their own JWT gate.  Remove a
+    // caller-supplied presence marker here too if that gate has not yielded a
+    // token, so unauthenticated requests never report device presence.
+    delete config.headers['X-Kinnship-Presence-Source'];
+  }
   return config;
 });
 
@@ -222,6 +249,8 @@ export type Member = {
   role: 'family' | 'senior';
   status: 'healthy' | 'warning' | 'critical';
   last_seen: string;
+  /** Latest authenticated activity reported by this member's device. */
+  device_presence_at?: string | null;
   location_name?: string;
   latitude?: number;
   longitude?: number;

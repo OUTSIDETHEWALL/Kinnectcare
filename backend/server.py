@@ -95,6 +95,25 @@ app = FastAPI(title="Kinnship API")
 api_router = APIRouter(prefix="/api")
 
 
+@app.middleware("http")
+async def stamp_foreground_api_presence(request: Request, call_next):
+    """Piggyback presence on an already-successful active-app API request."""
+    response = await call_next(request)
+    if (
+        request.headers.get("X-Kinnship-Presence-Source") == "foreground-api"
+        and 200 <= response.status_code < 400
+    ):
+        current = getattr(request.state, "current_user", None)
+        if current:
+            try:
+                await stamp_device_presence(current, "foreground-api")
+            except Exception:
+                # Presence is observational and must never turn a completed
+                # API request into an error.
+                logger.warning("device_presence failed after foreground API request", exc_info=True)
+    return response
+
+
 # ========== Static: App Store screenshots ==========
 # Serves /api/screenshots/<file> for App Store / pitch-deck delivery.
 SCREENSHOTS_DIR = "/app/frontend/screenshots"
@@ -326,8 +345,11 @@ class FamilyMember(BaseModel):
     # Used as the write-guard key so replay uploads can't overwrite
     # a more recent plug/unplug event from the dedicated PATCH endpoint.
     battery_updated_at: Optional[datetime] = None
+    # Server-observed device activity.  Optional so member rows created before
+    # device presence was introduced continue to deserialize unchanged.
+    device_presence_at: Optional[datetime] = None
 
-    @field_serializer("last_seen", "created_at", "checkin_interval_started_at", "captured_at", "battery_updated_at", when_used='json')
+    @field_serializer("last_seen", "created_at", "checkin_interval_started_at", "captured_at", "battery_updated_at", "device_presence_at", when_used='json')
     def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
         return _to_utc_iso(v)
 
@@ -656,7 +678,10 @@ def create_access_token(user_id: str) -> str:
     return jwt.encode({"sub": user_id, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
 
 
-async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+async def get_current_user(
+    request: Request,
+    creds: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
     try:
         payload = jwt.decode(creds.credentials, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("sub")
@@ -669,7 +694,48 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=401, detail="User not found")
     # Ensure user has a family_group_id (lazy-creates for legacy users)
     await fg.ensure_family_group(db, user)
+    # Presence middleware deliberately reads this only after the dependency
+    # has fully authenticated the request and its family setup has succeeded.
+    request.state.current_user = user
     return user
+
+
+_DEVICE_PRESENCE_DEDUP_WINDOW = timedelta(minutes=5)
+
+
+async def stamp_device_presence(current: dict, source: str) -> Optional[datetime]:
+    """Atomically record active device use for the caller's linked self row.
+
+    This intentionally has no member_id argument: callers cannot choose a
+    relative's row.  The conditional Mongo filter both preserves legacy rows
+    that lack the field and deduplicates concurrent activity within five
+    minutes without a read-then-write race.
+    """
+    user_id = current.get("id")
+    family_group_id = current.get("family_group_id")
+    if not user_id or not family_group_id:
+        return None
+
+    now = datetime.now(timezone.utc)
+    result = await db.members.update_one(
+        {
+            "family_group_id": family_group_id,
+            "user_id": user_id,
+            "$or": [
+                {"device_presence_at": {"$exists": False}},
+                {"device_presence_at": None},
+                {"device_presence_at": {"$lt": now - _DEVICE_PRESENCE_DEDUP_WINDOW}},
+            ],
+        },
+        {"$set": {"device_presence_at": now}},
+    )
+    if result.modified_count:
+        logger.debug(
+            "device_presence stamped user=%s family=%s source=%s",
+            user_id, family_group_id, source,
+        )
+        return now
+    return None
 
 
 async def require_family_owner(current: dict) -> dict:
@@ -2413,7 +2479,7 @@ async def delete_account(
 
 # ========== Members ==========
 @api_router.get("/members", response_model=List[FamilyMember])
-async def list_members(current=Depends(get_current_user)):
+async def list_members(current=Depends(get_current_user), request: Request = None):
     docs = await db.members.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).to_list(1000)
     members_response_at = datetime.now(timezone.utc).isoformat()
     for d in docs:
@@ -2525,6 +2591,24 @@ async def list_members(current=Depends(get_current_user)):
                         f"lazy_geocode: member={d.get('id')} "
                         f"lat={lat} lon={lon} raised {_lge!r}"
                     )
+    # Normally foreground presence is stamped by middleware after the response.
+    # For this read, apply it after the list work but before serialization so a
+    # monitored user's own dashboard immediately sees its new timestamp.  The
+    # helper can only target current.id, so viewing relatives never marks them
+    # active.  Middleware's later call is an atomic five-minute no-op.
+    if (
+        request is not None
+        and request.headers.get("X-Kinnship-Presence-Source") == "foreground-api"
+    ):
+        try:
+            stamped_at = await stamp_device_presence(current, "foreground-api")
+            if stamped_at is not None:
+                for d in docs:
+                    if d.get("user_id") == current.get("id"):
+                        d["device_presence_at"] = stamped_at
+                        break
+        except Exception:
+            logger.warning("device_presence failed during members response", exc_info=True)
     return [FamilyMember(**d) for d in docs]
 
 
@@ -2974,7 +3058,13 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 f"[privacy] Suppressed location upload from user={current['id']} "
                 f"member={member_id} — sharing preference is OFF."
             )
-            # Return the current member row without any coordinate write.
+            # Presence is independent from location sharing: the app did
+            # successfully contact us, but no GPS/location field is changed.
+            try:
+                await stamp_device_presence(current, "location-upload")
+            except Exception:
+                logger.warning("device_presence failed after privacy-suppressed location upload", exc_info=True)
+            # Re-read after the best-effort stamp so the response includes it.
             doc = await db.members.find_one({"id": member_id}, {"_id": 0})
             return FamilyMember(**doc) if doc else FamilyMember(
                 id=member_id, owner_id=current["id"], name="", age=0,
@@ -3375,6 +3465,19 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         _trace_record_gps(member_id, data.latitude, data.longitude)
     except Exception as _e:
         pass
+    # Location may still be owner-assisted for the existing correction flow,
+    # but only a device uploading for its own linked member establishes device
+    # presence.  Presence telemetry must never affect the location response.
+    if is_self:
+        try:
+            await stamp_device_presence(current, "location-upload")
+        except Exception:
+            logger.warning("device_presence failed after location upload", exc_info=True)
+        # Do not serialize the pre-stamp snapshot: callers should observe a
+        # successful presence write in this same location response.
+        refreshed_doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+        if refreshed_doc:
+            doc = refreshed_doc
     return FamilyMember(**doc)
 
 
@@ -3417,6 +3520,11 @@ async def patch_member_battery(
     )
     if not member_doc:
         raise HTTPException(status_code=404, detail="Member not found")
+    if member_doc.get("user_id") != current.get("id"):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only update battery telemetry for your own member.",
+        )
 
     server_now  = datetime.now(timezone.utc)
     incoming_ts = data.battery_updated_at or server_now
@@ -3431,7 +3539,14 @@ async def patch_member_battery(
             f"battery-patch: member={member_id} skipped — "
             f"incoming {incoming_ts.isoformat()} <= stored {stored_ts.isoformat()}"
         )
-        return FamilyMember(**member_doc)
+        try:
+            await stamp_device_presence(current, "battery-patch")
+        except Exception:
+            logger.warning("device_presence failed after battery patch", exc_info=True)
+        doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Member not found after update")
+        return FamilyMember(**doc)
 
     update: Dict[str, Any] = {"battery_updated_at": incoming_ts}
     if data.battery_level is not None and data.battery_level >= 0:
@@ -3441,10 +3556,21 @@ async def patch_member_battery(
 
     if len(update) == 1:
         # Only the timestamp — nothing substantive to write.
-        return FamilyMember(**member_doc)
+        try:
+            await stamp_device_presence(current, "battery-patch")
+        except Exception:
+            logger.warning("device_presence failed after battery patch", exc_info=True)
+        doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Member not found after update")
+        return FamilyMember(**doc)
 
     await db.members.update_one(
-        {"id": member_id, "family_group_id": current["family_group_id"]},
+        {
+            "id": member_id,
+            "family_group_id": current["family_group_id"],
+            "user_id": current["id"],
+        },
         {"$set": update},
     )
     logger.info(
@@ -3471,10 +3597,20 @@ async def patch_member_battery(
         )
         if _batt_update:
             await db.members.update_one(
-                {"id": member_id, "family_group_id": current["family_group_id"]},
+                {
+                    "id": member_id,
+                    "family_group_id": current["family_group_id"],
+                    "user_id": current["id"],
+                },
                 {"$set": _batt_update},
             )
 
+    try:
+        await stamp_device_presence(current, "battery-patch")
+    except Exception:
+        logger.warning("device_presence failed after battery patch", exc_info=True)
+    # Read only after the best-effort stamp so this successful response is not
+    # one request behind the server-authoritative presence timestamp.
     doc = await db.members.find_one({"id": member_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Member not found after update")
@@ -5264,19 +5400,24 @@ async def put_device_snapshot(
     the family-snapshot endpoint can surface it alongside last_seen /
     is_moving / battery for cross-device comparison in Diagnostics.
 
-    Unauthenticated writes are rejected; the member must belong to the
-    caller's family group.  Any member of the family group may write their
-    own snapshot.
+    Unauthenticated writes are rejected; only the caller's linked member row
+    may receive a device snapshot.  A caregiver cannot submit telemetry for
+    another person's phone.
 
     Returns 204 No Content — the client doesn't need a response body here.
     """
     group_id = current.get("family_group_id")
     member_doc = await db.members.find_one(
         {"id": member_id, "family_group_id": group_id},
-        {"_id": 0, "id": 1},
+        {"_id": 0, "id": 1, "user_id": 1},
     )
     if not member_doc:
         raise HTTPException(status_code=404, detail="Member not found")
+    if member_doc.get("user_id") != current.get("id"):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only update your own device snapshot.",
+        )
 
     # Store the entire payload verbatim under `device_snapshot` — no field-
     # level merge needed because the client always sends the full snapshot.
@@ -5286,9 +5427,17 @@ async def put_device_snapshot(
     snapshot["stored_at"] = datetime.now(timezone.utc).isoformat()
 
     await db.members.update_one(
-        {"id": member_id, "family_group_id": group_id},
+        {
+            "id": member_id,
+            "family_group_id": group_id,
+            "user_id": current["id"],
+        },
         {"$set": {"device_snapshot": snapshot}},
     )
+    try:
+        await stamp_device_presence(current, "device-snapshot")
+    except Exception:
+        logger.warning("device_presence failed after device snapshot", exc_info=True)
 
 
 @api_router.get("/health")

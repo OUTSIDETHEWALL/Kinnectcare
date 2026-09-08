@@ -180,6 +180,7 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${jwt}`,
+          'X-Kinnship-Presence-Source': 'battery-task',
         },
         body: JSON.stringify({
           battery_level: level,
