@@ -2,7 +2,7 @@
  * batteryTask.ts — Independent battery refresh subsystem (Build XX).
  *
  * Provides a periodic WorkManager (Android) / BGTaskScheduler (iOS) background
- * task that fires roughly every 4 hours and PATCHes /battery regardless of
+ * task that targets a 30-minute cadence and PATCHes /battery regardless of
  * whether the device has moved or the Transistor SDK is active.
  *
  * Architecture:
@@ -37,8 +37,14 @@ function getBackgroundFetch(): BackgroundFetchModule | null {
 /** BackgroundFetch task identifier — must be unique within the app. */
 const BATTERY_TASK_ID = 'com.kinnship.battery-refresh';
 
-/** Desired interval between battery refreshes, in minutes (~4 hours). */
-const BATTERY_TASK_INTERVAL_MINUTES = 240;
+/**
+ * Desired interval between battery refreshes.
+ *
+ * WorkManager is inexact and Android may defer work in Doze or under OEM
+ * restrictions. A 30-minute target leaves enough scheduling slack to keep
+ * presence below one hour whenever Android permits background execution.
+ */
+export const BATTERY_TASK_INTERVAL_MINUTES = 30;
 
 /** AsyncStorage key for the per-task rolling log. */
 const BATTERY_TASK_LOG_KEY = '@kinnship/battery_task_log_v1';
@@ -193,6 +199,10 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
         setTimeout(() => rej(new Error('background-battery-patch-timeout')), 10_000),
       ),
     ]);
+
+    if (resp.status < 200 || resp.status >= 300) {
+      throw new Error(`background-battery-http-${resp.status}`);
+    }
 
     await appendLog('background_battery_ok', {
       levelPct: Math.round(level * 100),
