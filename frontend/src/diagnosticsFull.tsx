@@ -3536,7 +3536,7 @@ function DiagnosticsContent() {
           count={batteryTaskLog.length || null}
           hint={
             'Two independent paths update battery: (A) Transistor SDK headless heartbeat — fires when the ' +
-            'location engine is active; (B) WorkManager periodic task — fires every ~4 h regardless of movement. ' +
+            'location engine is active; (B) WorkManager periodic task — targets every 30 min regardless of movement. ' +
             'Both PATCH the same /battery endpoint; the backend write-guard keeps the most recent reading.'
           }
           expanded={!!expanded['battery-system']}
@@ -3678,12 +3678,12 @@ function DiagnosticsContent() {
           {/* ── Path B: WorkManager periodic task log ────────────── */}
           <View style={[styles.card, { marginTop: 8 }]}>
             <Text style={styles.subSectionLabel}>
-              {'Path B — WorkManager (~4 h)  '}
+              {'Path B — WorkManager (30 min target)  '}
               <Text style={styles.muted}>{`${batteryTaskLog.length} entries`}</Text>
             </Text>
             {batteryTaskLog.length === 0 ? (
               <Text style={styles.muted}>
-                No background task executions recorded yet. The first fire will appear here after ~4 hours (or sooner if the OS scheduler runs a maintenance window).
+                No background task executions recorded yet. Android schedules this inexactly; the first permitted maintenance window should populate it.
               </Text>
             ) : (
               [...batteryTaskLog].reverse().slice(0, 10).map((entry, i) => renderDiagnosticsStorageRecord(entry, () => {

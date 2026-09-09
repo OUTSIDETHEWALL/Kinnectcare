@@ -260,6 +260,92 @@ export function isListenersAttached(): boolean {
 //      and persisted natively) PUTs it to our backend.
 //   4. SDK releases GPS and the device returns to sleep.
 let headlessRegistered = false;
+
+/**
+ * Send a presence-only battery refresh from an SDK heartbeat snapshot.
+ *
+ * HeartbeatEvent.location is the SDK's last-known location and includes the
+ * native battery snapshot without engaging location services. Keeping this
+ * PATCH outside getCurrentPosition means presence freshness is not coupled to
+ * GPS availability, timeout, or permission state.
+ */
+async function patchHeadlessHeartbeatPresence(lib: any, event: any): Promise<boolean> {
+  const heartbeatLocation = event?.params?.location ?? event?.location;
+  const battLevel: number | undefined = heartbeatLocation?.battery?.level;
+  const battChargingRaw = heartbeatLocation?.battery?.is_charging;
+  const battCharging: boolean | null =
+    battChargingRaw != null ? Boolean(battChargingRaw) : null;
+
+  if (
+    typeof battLevel !== 'number' ||
+    !isFinite(battLevel) ||
+    battLevel < 0 ||
+    battCharging === null
+  ) {
+    await logEvent('headless_battery_patch_skipped', {
+      reason: 'heartbeat_missing_battery_values',
+      battLevel: battLevel ?? null,
+      battCharging,
+    });
+    return false;
+  }
+
+  try {
+    const sdkState = await lib.getState();
+    const locationUrl: string = sdkState?.url ?? '';
+    const jwt: string = sdkState?.authorization?.accessToken ?? '';
+    const memberMatch = locationUrl.match(/\/members\/([^/]+)\/location/);
+    const memberId = memberMatch?.[1] ?? '';
+    const baseUrl = locationUrl.split('/api/members/')[0] ?? '';
+    if (!memberId || !jwt || !baseUrl) {
+      await logEvent('headless_battery_patch_skipped', {
+        reason: 'missing_member_id_or_jwt',
+        hasMemberId: !!memberId,
+        hasJwt: !!jwt,
+        hasBaseUrl: !!baseUrl,
+      });
+      return false;
+    }
+
+    const response = await Promise.race([
+      fetch(`${baseUrl}/api/members/${memberId}/battery`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${jwt}`,
+          'X-Kinnship-Presence-Source': 'battery-task',
+        },
+        body: JSON.stringify({
+          battery_level: battLevel,
+          is_charging: battCharging,
+          battery_updated_at: new Date().toISOString(),
+        }),
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('headless-battery-patch-timeout')), 6000),
+      ),
+    ]);
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`headless-battery-http-${response.status}`);
+    }
+
+    recordPipelineTs('headless_battery');
+    await logEvent('headless_battery_patch_ok', {
+      battLevel,
+      battCharging,
+      trigger: 'heartbeat-snapshot',
+      httpStatus: response.status,
+    });
+    return true;
+  } catch (error: any) {
+    await logEvent('headless_battery_patch_error', {
+      error: String(error?.message || error),
+      trigger: 'heartbeat-snapshot',
+    });
+    return false;
+  }
+}
+
 function registerHeadlessTaskOnce(): void {
   if (Platform.OS === 'web') return;
   if (headlessRegistered) return;
@@ -286,6 +372,11 @@ function registerHeadlessTaskOnce(): void {
       await logEvent('headless_task_invoked', { eventName: name ?? 'unknown' });
 
       if (name === 'heartbeat') {
+        // Presence-first: the heartbeat already carries a last-known location
+        // with a native battery snapshot. PATCH it before any GPS work so a
+        // slow or failed getCurrentPosition cannot suppress device presence.
+        const presencePatched = await patchHeadlessHeartbeatPresence(lib, event);
+
         // Force a fresh GPS fix; SDK persists and uploads via native
         // HTTP transport.  No-op if permission was revoked at the OS
         // level since we last started.
@@ -298,94 +389,15 @@ function registerHeadlessTaskOnce(): void {
           });
           recordPipelineTs('headless_heartbeat');
           await logEvent('headless_heartbeat_ok');
-
-          // ── Headless battery PATCH ──────────────────────────────────────
-          //
-          // The Transistor SDK's native location upload includes battery data
-          // (battery.level / battery.is_charging) and the backend extracts it
-          // via LocationUpdate._normalize_payload().  However, that path has
-          // historically been unreliable: if the JS runtime died while alive
-          // (leaving battery_updated_at anchored to a wall-clock PATCH
-          // timestamp), subsequent native uploads with GPS-clock captured_at
-          // timestamps could fail the write guard.
-          //
-          // This explicit PATCH is a fully independent battery update path
-          // that runs from the headless context using:
-          //   • Battery values from the SDK's native reading in the position
-          //     result — no expo-battery bridge, no foreground-only API.
-          //   • JWT + upload URL from the SDK's persisted SQLite config via
-          //     lib.getState() — no shared memory with the main app needed.
-          //
-          // Result: battery_updated_at advances every ~60 s even when the
-          // main JS runtime has been killed by Android, preventing the
-          // caregiver's battery row from going stale during long stationary
-          // periods (the original 19-hour disappearance bug).
-          try {
-            const battLevel: number | undefined = pos?.battery?.level;
-            // Part 1 fix — SDK may return is_charging as 0/1 (integer) on some
-            // Android devices rather than true/false (boolean).  The previous
-            // `typeof battCharging === 'boolean'` guard silently skipped the
-            // PATCH in those cases.  Coerce to boolean here; null means absent.
-            const battChargingRaw = pos?.battery?.is_charging;
-            const battCharging: boolean | null =
-              battChargingRaw != null ? Boolean(battChargingRaw) : null;
-            if (
-              typeof battLevel === 'number' && battLevel >= 0 &&
-              battCharging !== null
-            ) {
-              const sdkState = await lib.getState();
-              const locationUrl: string = sdkState?.url ?? '';
-              const jwt: string = sdkState?.authorization?.accessToken ?? '';
-              // URL shape: https://HOST/api/members/MEMBER_ID/location
-              const memberMatch = locationUrl.match(/\/members\/([^/]+)\/location/);
-              const memberId = memberMatch?.[1] ?? '';
-              const baseUrl = locationUrl.split('/api/members/')[0] ?? '';
-              if (memberId && jwt && baseUrl) {
-                const ts = new Date().toISOString();
-                const battUrl = `${baseUrl}/api/members/${memberId}/battery`;
-                await Promise.race([
-                  fetch(battUrl, {
-                    method: 'PATCH',
-                    headers: {
-                      'Content-Type': 'application/json',
-                      'Authorization': `Bearer ${jwt}`,
-                      'X-Kinnship-Presence-Source': 'battery-task',
-                    },
-                    body: JSON.stringify({
-                      battery_level: battLevel,
-                      is_charging: battCharging,
-                      battery_updated_at: ts,
-                    }),
-                  }),
-                  // Safety timeout — never block the headless engine queue
-                  // for more than 6 s waiting for a slow network response.
-                  new Promise<never>((_, rej) =>
-                    setTimeout(() => rej(new Error('headless-battery-patch-timeout')), 6000),
-                  ),
-                ]);
-                recordPipelineTs('headless_battery');
-                await logEvent('headless_battery_patch_ok', { battLevel, battCharging });
-              } else {
-                await logEvent('headless_battery_patch_skipped', {
-                  reason: 'missing_member_id_or_jwt',
-                  hasMemberId: !!memberId,
-                  hasJwt: !!jwt,
-                  hasBaseUrl: !!baseUrl,
-                });
-              }
-            } else {
-              await logEvent('headless_battery_patch_skipped', {
-                reason: 'invalid_battery_values',
-                battLevel: battLevel ?? null,
-                battCharging: battCharging ?? null,
-              });
-            }
-          } catch (battE: any) {
-            await logEvent('headless_battery_patch_error', {
-              error: String(battE?.message || battE),
+          // Compatibility fallback for older SDK heartbeat payloads that omit
+          // HeartbeatEvent.location. Newer payloads already patched presence
+          // before this GPS request; older payloads retain the previous
+          // position-result battery behavior.
+          if (!presencePatched) {
+            await patchHeadlessHeartbeatPresence(lib, {
+              params: { location: pos },
             });
           }
-          // ── End headless battery PATCH ──────────────────────────────────
         } catch (e: any) {
           await logEvent('headless_heartbeat_error', {
             error: String(e?.message || e),

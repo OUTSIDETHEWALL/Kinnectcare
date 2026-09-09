@@ -1189,7 +1189,7 @@ function RootNav() {
         // with the location engine; tears down on sign-out via the
         // cleanup block below.  No-op if already active.
         try { leonidas.start(); } catch (_e) {}
-        // Battery subsystem — independent 4-hour refresh via WorkManager
+        // Battery subsystem — independent 30-minute target via WorkManager
         // (Android) / BGTaskScheduler (iOS).  Runs even when the device
         // hasn't moved and the Transistor SDK is idle.
         configureBatteryTask().catch(() => {});
