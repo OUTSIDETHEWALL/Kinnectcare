@@ -153,26 +153,40 @@ async def _log_alert(
     title: str,
     message: str,
     now_utc: datetime,
+    reminder_id: Optional[str] = None,
+    medication_name: Optional[str] = None,
+    dosage: Optional[str] = None,
+    scheduled_time: Optional[str] = None,
+    missed_at: Optional[datetime] = None,
+    missed_local_date: Optional[str] = None,
 ) -> None:
     """Insert an alert row so the Alerts tab shows complete history."""
     if not family_group_id:
         return
     try:
-        await db.alerts.insert_one(
-            {
-                "id": str(uuid4()),
-                "owner_id": owner_id or "",
-                "family_group_id": family_group_id,
-                "member_id": member_id,
-                "member_name": member_name,
-                "type": a_type,
-                "severity": severity,
-                "title": title,
-                "message": message,
-                "acknowledged": False,
-                "created_at": now_utc,
-            }
-        )
+        doc = {
+            "id": str(uuid4()),
+            "owner_id": owner_id or "",
+            "family_group_id": family_group_id,
+            "member_id": member_id,
+            "member_name": member_name,
+            "type": a_type,
+            "severity": severity,
+            "title": title,
+            "message": message,
+            "acknowledged": False,
+            "created_at": now_utc,
+        }
+        if missed_at is not None:
+            doc.update({
+                "reminder_id": reminder_id,
+                "medication_name": medication_name,
+                "dosage": dosage,
+                "scheduled_time": scheduled_time,
+                "missed_at": missed_at,
+                "missed_local_date": missed_local_date,
+            })
+        await db.alerts.insert_one(doc)
     except Exception as e:
         logger.warning(f"alert insert failed: {e}")
 
@@ -419,6 +433,12 @@ async def process_pending_notifications(
                         title=title,
                         message=body,
                         now_utc=now_utc,
+                        reminder_id=rem["id"],
+                        medication_name=rem.get("title"),
+                        dosage=rem.get("dosage"),
+                        scheduled_time=slot_time,
+                        missed_at=now_utc,
+                        missed_local_date=local_date,
                     )
                     counters["fired_family_alert"] += 1
 

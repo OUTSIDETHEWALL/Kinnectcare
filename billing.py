@@ -2,7 +2,7 @@
 
 Plans:
   - free: up to FREE_MEMBER_LIMIT family members (default 2).
-  - family_plan: $9.99/mo (configurable), unlimited members + premium features.
+  - family_plan: $11.99/mo (configurable), unlimited members + premium features.
 
 The price is auto-created on first use if STRIPE_PRICE_ID is not set in env.
 The resolved price id is cached in the `billing_config` Mongo collection so subsequent
@@ -32,7 +32,7 @@ import stripe
 logger = logging.getLogger(__name__)
 
 FREE_LIMIT_DEFAULT = int(os.getenv("FREE_MEMBER_LIMIT", "2"))
-PAID_AMOUNT_CENTS = int(os.getenv("PAID_PLAN_AMOUNT_CENTS", "999"))
+PAID_AMOUNT_CENTS = int(os.getenv("PAID_PLAN_AMOUNT_CENTS", "1199"))
 PAID_INTERVAL = os.getenv("PAID_PLAN_INTERVAL", "month")
 PAID_PRODUCT_NAME = os.getenv("PAID_PLAN_PRODUCT_NAME", "Kinnship Family Plan")
 PAID_CURRENCY = os.getenv("PAID_PLAN_CURRENCY", "usd")

@@ -1142,7 +1142,7 @@ export default function MeScreen() {
           {billing?.plan !== 'family_plan' ? (
             <>
               <Text style={styles.planPitch}>
-                Unlock unlimited family members, weekly compliance charts, and priority SOS push from $9.99/month — or save 17% with the annual plan.
+                Unlock unlimited family members, weekly compliance charts, and priority SOS push from $11.99/month — or save 31% with the annual plan.
               </Text>
               <TouchableOpacity
                 testID="me-view-plans"

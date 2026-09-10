@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
   RefreshControl, ActivityIndicator, Animated, Pressable, Platform,
-  AppState, Alert,
+  AppState, Alert, Modal,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
@@ -10,7 +10,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
-import { api, Member, MemberSummary, getBillingStatus, BillingStatus, FamilyInvite, listFamilyInvites, revokeFamilyInvite, Alert as ApiAlert } from '../../src/api';
+import { api, Member, MemberSummary, MissedMedicationDetail, DashboardSummary, getBillingStatus, BillingStatus, FamilyInvite, listFamilyInvites, revokeFamilyInvite, Alert as ApiAlert } from '../../src/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { formatLastSeenAge } from '../../src/locationRefresh';
 import {
@@ -19,7 +19,7 @@ import {
   subscribeRefreshing,
   STALE_THRESHOLD_MS,
 } from '../../src/locationRefreshState';
-import { formatTimeAgo, selectPresenceTimestamp } from '../../src/timeFormat';
+import { formatRelativeLocal, formatTimeAgo, selectPresenceTimestamp } from '../../src/timeFormat';
 import { logScreenRender } from '../../src/screenRenderLog';
 import {
   startLoad as dashStartLoad,
@@ -64,6 +64,18 @@ function buildStaticMapUrl(lat: number, lon: number): string {
     `&key=${_STATIC_MAPS_KEY}`
   );
 }
+
+function formatScheduledMedicationTime(value: string): string {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value);
+  if (!match) return value;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59) return value;
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  const displayHour = hour % 12 || 12;
+  return `${displayHour}:${String(minute).padStart(2, '0')} ${suffix}`;
+}
+
 const SOS_RING_SIZE = 170; // FAB (114) + 28 px visible ring gap each side — stays visible under a thumb
 const SOS_RING_RADIUS = 81; // (SOS_RING_SIZE / 2) - (strokeWidth / 2) = 85 - 4
 const SOS_CIRCUMFERENCE = 2 * Math.PI * SOS_RING_RADIUS; // ≈ 508.9
@@ -82,6 +94,8 @@ export default function Dashboard() {
   // favour of the canonical store.
   const members = memberStore.useAllMembers();
   const [summary, setSummary] = useState<MemberSummary[]>([]);
+  const [missedMedicationDetails, setMissedMedicationDetails] = useState<MissedMedicationDetail[]>([]);
+  const [showMissedMedications, setShowMissedMedications] = useState(false);
   const [billing, setBilling] = useState<BillingStatus | null>(null);
   // Build #59 — pending invitations surfaced on the dashboard so a
   // caregiver can see who they've invited but who hasn't accepted
@@ -242,7 +256,7 @@ export default function Dashboard() {
         // independent state.
         const [m, s, b, ar] = await Promise.all([
           api.get('/members'),
-          api.get('/summary'),
+          api.get<DashboardSummary>('/summary'),
           getBillingStatus().catch(() => null),
           // Fetch alerts in the same parallel burst so Needs Attention and
           // Missed Meds counts are always consistent with the Alerts tab.
@@ -343,6 +357,7 @@ export default function Dashboard() {
         );
         memberStore.upsertMany(receivedMembers);
         setSummary(s.data.members || []);
+        setMissedMedicationDetails(s.data.missed_medication_details || []);
         // Only update activeAlerts when the fetch actually succeeded (ar !== null).
         // When /alerts fails, ar is null and we preserve the previous state
         // (either the in-memory value from the last successful fetch, or the
@@ -726,12 +741,6 @@ export default function Dashboard() {
   const family = members.filter(m => m.role === 'family');
   const sumOf = (id: string) => summary.find(s => s.member_id === id);
 
-  // Active medication alerts — unacknowledged alerts of type 'medication'.
-  // These persist across day rollovers, unlike summary.medication_missed which
-  // resets to 0 when reset_daily_reminder_statuses() runs at midnight.
-  // Using both sources (max of the two) ensures the tile count never drops to
-  // 0 while the Alerts tab still shows an active escalation.
-  const activeMedAlerts = activeAlerts.filter(a => a.type === 'medication');
   // Unresolved low_battery alerts — used as a fallback signal in Needs Attention
   // so the count stays non-zero even when member.battery_level has gone stale or
   // risen into the hysteresis band (15% trigger / 25% clear).  Filtering by
@@ -740,8 +749,7 @@ export default function Dashboard() {
   const activeBattAlerts = activeAlerts.filter(
     a => a.type === 'low_battery' && !a.resolved,
   );
-  const summaryMedMissed = summary.reduce((a, s) => a + s.medication_missed, 0);
-  const totalMedMissed = Math.max(summaryMedMissed, activeMedAlerts.length);
+  const totalMedMissed = missedMedicationDetails.length;
 
   // Needs Attention — live count of currently active issues.
   // Resolves automatically as conditions clear; no manual acknowledgement required.
@@ -788,15 +796,11 @@ export default function Dashboard() {
     if (_m.role !== 'senior') continue;
     const _s = sumOf(_m.id);
     if (!_s) continue;
-    // Missed medications — use the max of current reminder status and active
-    // unacknowledged medication alerts so the count stays accurate across day
-    // rollovers (reminder.status resets to 'pending' at midnight; the alert
-    // record remains unacknowledged until a family admin clears it).
-    const _memberMedAlerts = activeMedAlerts.filter(a => a.member_id === _m.id);
-    const _effectiveMissed = Math.max(
-      _s.medication_missed,
-      _memberMedAlerts.length,
-    );
+    // Missed medication details come from durable active alert occurrences in
+    // /summary, so this count and the detail modal cannot disagree.
+    const _effectiveMissed = missedMedicationDetails.filter(
+      detail => detail.member_id === _m.id,
+    ).length;
     if (_effectiveMissed > 0) {
       needsAttentionCount += _effectiveMissed;
       needsAttentionSeverity = _bumpSeverity(needsAttentionSeverity, 'medium');
@@ -880,10 +884,18 @@ export default function Dashboard() {
             <Text style={styles.summaryLbl}>Needs Attention</Text>
           </View>
           <View style={styles.summaryDivider} />
-          <View style={styles.summaryItem}>
-            <Text style={[styles.summaryNum, totalMedMissed > 0 && { color: Colors.warning }]}>{totalMedMissed}</Text>
-            <Text style={styles.summaryLbl}>Missed meds</Text>
-          </View>
+          <TouchableOpacity
+            testID="dashboard-missed-meds"
+            style={[styles.summaryItem, totalMedMissed > 0 && styles.summaryItemAlert]}
+            disabled={totalMedMissed === 0}
+            onPress={() => setShowMissedMedications(true)}
+            activeOpacity={0.75}
+            accessibilityRole={totalMedMissed > 0 ? 'button' : undefined}
+            accessibilityLabel={`${totalMedMissed} missed medications`}
+          >
+            <Text style={[styles.summaryNum, totalMedMissed > 0 && styles.summaryMissedText]}>{totalMedMissed}</Text>
+            <Text style={[styles.summaryLbl, totalMedMissed > 0 && styles.summaryMissedText]}>Missed meds</Text>
+          </TouchableOpacity>
         </View>
 
         <View style={styles.sectionHeader}>
@@ -993,7 +1005,7 @@ export default function Dashboard() {
             <View style={styles.upgradeTextBlock}>
               <Text style={styles.upgradeTitle} numberOfLines={2}>Upgrade to Family Plan</Text>
               <Text style={styles.upgradeSub} numberOfLines={2}>
-                Add unlimited members for <Text style={styles.upgradePrice}>$9.99/mo</Text>
+                Add unlimited members for <Text style={styles.upgradePrice}>$11.99/mo</Text>
               </Text>
               {typeof billing.members_remaining === 'number' && billing.member_limit !== null ? (
                 <Text style={styles.upgradeUsage} numberOfLines={1}>
@@ -1009,6 +1021,82 @@ export default function Dashboard() {
           </TouchableOpacity>
         )}
       </ScrollView>
+
+      <Modal
+        visible={showMissedMedications && totalMedMissed > 0}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowMissedMedications(false)}
+      >
+        <View style={styles.missedModalBackdrop}>
+          <View
+            style={styles.missedModalCard}
+            testID="missed-medications-modal"
+            accessibilityViewIsModal
+          >
+            <View style={styles.missedModalHeader}>
+              <Text style={styles.missedModalTitle}>Missed Medications</Text>
+              <TouchableOpacity
+                testID="missed-medications-close"
+                onPress={() => setShowMissedMedications(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close missed medications"
+                style={styles.missedModalClose}
+              >
+                <Icon name="close" size={22} color={Colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.missedModalList}>
+              {missedMedicationDetails.map((detail, index) => {
+                const medicationLine = detail.medication_name
+                  ? `${detail.medication_name}${detail.dosage ? ` — ${detail.dosage}` : ''}`
+                  : null;
+                return (
+                  <View
+                    key={detail.alert_id || `${detail.member_id}-${index}`}
+                    style={[
+                      styles.missedMedicationRow,
+                      index > 0 && styles.missedMedicationRowBorder,
+                    ]}
+                    testID={`missed-medication-${index}`}
+                  >
+                    <Text style={styles.missedMemberName}>{detail.member_name}</Text>
+                    {medicationLine ? (
+                      <Text style={styles.missedMedicationName}>{medicationLine}</Text>
+                    ) : (
+                      <Text style={styles.missedMedicationFallback}>
+                        {detail.description || 'Medication details unavailable.'}
+                      </Text>
+                    )}
+                    {detail.scheduled_time ? (
+                      <Text style={styles.missedMedicationMeta}>
+                        Scheduled: {formatScheduledMedicationTime(detail.scheduled_time)}
+                      </Text>
+                    ) : null}
+                    {detail.missed_at ? (
+                      <Text style={styles.missedMedicationMeta}>
+                        Missed: {formatRelativeLocal(detail.missed_at)}
+                      </Text>
+                    ) : detail.missed_local_date ? (
+                      <Text style={styles.missedMedicationMeta}>
+                        Missed: {detail.missed_local_date}
+                      </Text>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </ScrollView>
+            <TouchableOpacity
+              testID="missed-medications-done"
+              onPress={() => setShowMissedMedications(false)}
+              style={styles.missedModalDone}
+              accessibilityRole="button"
+            >
+              <Text style={styles.missedModalDoneText}>Done</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* 3-2-1 countdown overlay — absolute-positioned (NOT a RN Modal)
           so there is no competing Android window when the dialer fires.
@@ -1413,9 +1501,61 @@ const styles = StyleSheet.create({
     boxShadow: '0px 4px 12px rgba(27,94,53,0.06)', elevation: 2,
   },
   summaryItem: { flex: 1, alignItems: 'center', justifyContent: 'flex-start' },
+  summaryItemAlert: {
+    backgroundColor: Colors.errorBg || '#FEE2E2',
+    borderRadius: 12,
+    marginVertical: -8,
+    paddingVertical: 8,
+  },
   summaryNum: { fontSize: 24, fontWeight: '800', color: Colors.primary },
   summaryLbl: { fontSize: 11, color: Colors.textTertiary, marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'center' },
+  summaryMissedText: { color: Colors.error },
   summaryDivider: { width: 1, height: 36, backgroundColor: Colors.border },
+  missedModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'flex-end',
+  },
+  missedModalCard: {
+    backgroundColor: Colors.surface,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 20,
+    paddingTop: 18,
+    paddingBottom: 28,
+    maxHeight: '78%',
+  },
+  missedModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  missedModalTitle: { fontSize: 20, fontWeight: '800', color: Colors.textPrimary },
+  missedModalClose: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.background,
+  },
+  missedModalList: { flexGrow: 0 },
+  missedMedicationRow: { paddingVertical: 14 },
+  missedMedicationRowBorder: { borderTopWidth: 1, borderTopColor: Colors.border },
+  missedMemberName: { fontSize: 16, fontWeight: '800', color: Colors.textPrimary },
+  missedMedicationName: { fontSize: 15, fontWeight: '700', color: Colors.error, marginTop: 4 },
+  missedMedicationFallback: { fontSize: 14, color: Colors.textSecondary, marginTop: 4, lineHeight: 20 },
+  missedMedicationMeta: { fontSize: 13, color: Colors.textSecondary, marginTop: 4 },
+  missedModalDone: {
+    minHeight: 48,
+    borderRadius: 12,
+    backgroundColor: Colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
+  },
+  missedModalDoneText: { color: Colors.surface, fontSize: 15, fontWeight: '800' },
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginHorizontal: 24, marginTop: 28, marginBottom: 8 },
   sectionTitle: { fontSize: 20, fontWeight: '700', color: Colors.textPrimary },
   familyActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },

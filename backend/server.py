@@ -3926,12 +3926,28 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
     })
 
     if body.status == "missed":
-        recent = await db.alerts.find_one({
+        recent_query = {
             "family_group_id": current["family_group_id"], "member_id": rem["member_id"],
-            "type": rem.get("category", "medication"),
             "created_at": {"$gte": now - timedelta(hours=1)},
-            "title": {"$regex": rem["title"]},
-        })
+        }
+        if rem.get("category", "medication") == "medication":
+            # A normal T+0 dose reminder also has type="medication". Match only
+            # a manual miss or a scheduler escalation for this reminder so a
+            # due reminder cannot suppress it and one dose cannot create both.
+            recent_query["$or"] = [
+                {
+                    "type": "medication",
+                    "title": f"Medication missed: {rem['title']}",
+                },
+                {
+                    "type": "medication_escalation",
+                    "reminder_id": reminder_id,
+                },
+            ]
+        else:
+            recent_query["type"] = rem.get("category")
+            recent_query["title"] = {"$regex": rem["title"]}
+        recent = await db.alerts.find_one(recent_query)
         if not recent:
             atype = "medication" if rem.get("category") == "medication" else "routine"
             label = "Medication" if atype == "medication" else "Routine"
@@ -3941,7 +3957,30 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
                 title=f"{label} missed: {rem['title']}",
                 message=f"{rem['member_name']} missed {rem['title']}" + (f" ({rem.get('dosage')})" if rem.get('dosage') else "") + ".",
             )
-            await db.alerts.insert_one(a.model_dump())
+            alert_doc = a.model_dump()
+            if atype == "medication":
+                configured_times = [
+                    slot.get("time")
+                    for slot in (rem.get("times") or [])
+                    if isinstance(slot, dict) and slot.get("time")
+                ]
+                # A mark request identifies the reminder, not a specific slot.
+                # Store a scheduled time only when there is exactly one possible
+                # occurrence; guessing among multiple slots would be misleading.
+                scheduled_time = (
+                    configured_times[0]
+                    if len(configured_times) == 1
+                    else (rem.get("time") if not configured_times else None)
+                )
+                alert_doc.update({
+                    "reminder_id": reminder_id,
+                    "medication_name": rem.get("title"),
+                    "dosage": rem.get("dosage"),
+                    "scheduled_time": scheduled_time or None,
+                    "missed_at": now,
+                    "missed_local_date": today,
+                })
+            await db.alerts.insert_one(alert_doc)
             await push_to_family_group(
                 current["family_group_id"],
                 f"💊 {rem['member_name']} missed {rem['title']}",
@@ -4792,6 +4831,85 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
 
 
 # ========== Dashboard summary ==========
+def build_missed_medication_details(alerts: list[dict]) -> list[dict]:
+    """Return display-safe details from durable active medication alerts.
+
+    Older alerts are retained as occurrences but their missing medication
+    metadata remains null. Their original description is returned verbatim
+    rather than reconstructing potentially incorrect details.
+    """
+    missed_alerts = []
+    for alert in alerts:
+        alert_type = alert.get("type")
+        title = str(alert.get("title") or "")
+        is_missed_occurrence = (
+            alert_type == "medication_escalation"
+            or (
+                alert_type == "medication"
+                and (
+                    alert.get("missed_at") is not None
+                    or title.startswith("Medication missed:")
+                )
+            )
+        )
+        if not is_missed_occurrence:
+            continue
+        missed_alerts.append(alert)
+
+    # A dose can be represented by both a scheduler escalation and a manual
+    # missed mark. Collapse only records with the same durable occurrence
+    # identity. Separate slots remain separate because scheduled_time differs.
+    precise_groups = {
+        (alert.get("reminder_id"), alert.get("missed_local_date"))
+        for alert in missed_alerts
+        if (
+            alert.get("reminder_id")
+            and alert.get("missed_local_date")
+            and alert.get("scheduled_time")
+        )
+    }
+    seen_occurrences = set()
+    details = []
+    for alert in missed_alerts:
+        reminder_id = alert.get("reminder_id")
+        local_date = alert.get("missed_local_date")
+        scheduled_time = alert.get("scheduled_time")
+        group_key = (reminder_id, local_date)
+        if (
+            reminder_id
+            and local_date
+            and not scheduled_time
+            and group_key in precise_groups
+        ):
+            # The manual API does not identify a slot for multi-time reminders.
+            # Prefer the scheduler's precise occurrence instead of double-counting.
+            continue
+        occurrence_key = (
+            ("dose", reminder_id, local_date, scheduled_time)
+            if reminder_id and local_date and scheduled_time
+            else ("alert", alert.get("id"))
+        )
+        if occurrence_key in seen_occurrences:
+            continue
+        seen_occurrences.add(occurrence_key)
+        missed_at = alert.get("missed_at") or alert.get("created_at")
+        if isinstance(missed_at, datetime):
+            missed_at = _to_utc_iso(missed_at)
+        details.append({
+            "alert_id": alert.get("id"),
+            "member_id": alert.get("member_id"),
+            "member_name": alert.get("member_name") or "Family member",
+            "reminder_id": alert.get("reminder_id"),
+            "medication_name": alert.get("medication_name"),
+            "dosage": alert.get("dosage"),
+            "scheduled_time": alert.get("scheduled_time"),
+            "missed_at": missed_at,
+            "missed_local_date": alert.get("missed_local_date"),
+            "description": alert.get("message") or alert.get("title"),
+        })
+    return details
+
+
 @api_router.get("/summary")
 async def dashboard_summary(current=Depends(get_current_user)):
     await reset_daily_reminder_statuses(current["family_group_id"], current)
@@ -4812,6 +4930,16 @@ async def dashboard_summary(current=Depends(get_current_user)):
         {"family_group_id": current["family_group_id"], "category": "medication", "marked_at": {"$gte": week_start_utc}},
         {"_id": 0},
     ).to_list(5000)
+    active_medication_alerts = await db.alerts.find(
+        {
+            "family_group_id": current["family_group_id"],
+            "type": {"$in": ["medication", "medication_escalation"]},
+            "acknowledged": {"$ne": True},
+            "resolved": {"$ne": True},
+        },
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(2000)
+    missed_medication_details = build_missed_medication_details(active_medication_alerts)
 
     summary = []
     for m in members:
@@ -4819,7 +4947,10 @@ async def dashboard_summary(current=Depends(get_current_user)):
         m_meds = [r for r in rems if r["member_id"] == mid and r.get("category", "medication") == "medication"]
         m_routines = [r for r in rems if r["member_id"] == mid and r.get("category") == "routine"]
         med_taken = sum(1 for r in m_meds if r.get("status") == "taken")
-        med_missed = sum(1 for r in m_meds if r.get("status") == "missed")
+        med_missed = sum(
+            1 for detail in missed_medication_details
+            if detail["member_id"] == mid
+        )
         routine_done = sum(1 for r in m_routines if r.get("status") == "taken")
         last_ci = next((c for c in cis if c["member_id"] == mid), None)
         # weekly compliance for this member
@@ -4838,7 +4969,12 @@ async def dashboard_summary(current=Depends(get_current_user)):
             "weekly_compliance_percent": wk_compliance,
             "weekly_logged": wk_total,
         })
-    return {"members": summary, "timezone": current.get("timezone") or "UTC"}
+    return {
+        "members": summary,
+        "timezone": current.get("timezone") or "UTC",
+        "missed_medications": len(missed_medication_details),
+        "missed_medication_details": missed_medication_details,
+    }
 
 
 @api_router.get("/")

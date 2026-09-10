@@ -103,18 +103,18 @@ export default function UpgradeScreen() {
   // the upgrade CTAs are NEVER missing (the actual price is also re-validated
   // server-side at checkout). Keep these in sync with backend billing.py.
   const FALLBACK_MONTHLY: PaidPlan = {
-    interval: 'month', label: 'Monthly', amount_cents: 999,
+    interval: 'month', label: 'Monthly', amount_cents: 1199,
     currency: 'usd', product_name: 'Kinnship Family Plan',
     is_recommended: false, savings_cents: 0,
   };
   const FALLBACK_ANNUAL: PaidPlan = {
     interval: 'year', label: 'Annual', amount_cents: 9999,
     currency: 'usd', product_name: 'Kinnship Family Plan',
-    is_recommended: true, savings_cents: 1989,
+    is_recommended: true, savings_cents: 4389,
   };
   const monthly = findPlan(status, 'month') || FALLBACK_MONTHLY;
   const annual = findPlan(status, 'year') || FALLBACK_ANNUAL;
-  const savings = (status?.annual_savings_cents || annual?.savings_cents || 1989);
+  const savings = (status?.annual_savings_cents || annual?.savings_cents || 4389);
   const savingsLabel = savings > 0 ? `Save ${formatPrice(savings)}` : null;
 
   return (

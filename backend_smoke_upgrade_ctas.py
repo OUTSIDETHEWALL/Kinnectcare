@@ -53,7 +53,7 @@ if r.status_code == 200:
     else:
         check("billing.members_remaining is null when paid", mr is None, f"mr={mr}")
     pp = b.get("paid_plan") or {}
-    check("paid_plan.amount_cents == 999", pp.get("amount_cents") == 999, f"got={pp.get('amount_cents')}")
+    check("paid_plan.amount_cents == 1199", pp.get("amount_cents") == 1199, f"got={pp.get('amount_cents')}")
     check("paid_plan.currency == 'usd'", pp.get("currency") == "usd", f"got={pp.get('currency')}")
     check("paid_plan.interval == 'month'", pp.get("interval") == "month", f"got={pp.get('interval')}")
     check("paid_plan.product_name non-empty", bool(pp.get("product_name")), f"got={pp.get('product_name')}")

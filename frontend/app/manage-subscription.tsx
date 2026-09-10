@@ -158,7 +158,7 @@ export default function ManageSubscription() {
         {/* Fetch-error banner — visible at top whenever the most recent
             /billing/status call failed. CRITICAL: do NOT fall back to
             "Free Plan" rendering — that wrongly suggests the user is
-            unsubscribed when their card is being charged $9.99/mo.
+            unsubscribed when their card is being charged $11.99/mo.
             Instead, surface the error explicitly and let them retry. */}
         {fetchError && (
           <View testID="subscription-fetch-error" style={styles.errorCard}>

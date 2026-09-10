@@ -26,3 +26,4 @@
 - [Destructive family action confirmations](destructive-family-confirmations.md) — family membership mutations need an in-app consequence summary and explicit destructive confirmation.
 - [Transport-independent upload evidence](transport-independent-upload-evidence.md) — every accepted location upload must update one cross-runtime Diagnostics success record.
 - [New-architecture startup recorder](new-architecture-startup-recorder.md) — durable synchronous JS checkpoints must use an Expo local module, not a legacy blocking NativeModules bridge.
+- [Missed medication occurrence source](missed-medication-occurrence-source.md) — dashboard missed counts and details come from durable active missed-alert occurrences, never reminder status.

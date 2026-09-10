@@ -393,6 +393,26 @@ export type MemberSummary = {
   weekly_logged?: number;
 };
 
+export type MissedMedicationDetail = {
+  alert_id: string;
+  member_id: string;
+  member_name: string;
+  reminder_id?: string | null;
+  medication_name?: string | null;
+  dosage?: string | null;
+  scheduled_time?: string | null;
+  missed_at?: string | null;
+  missed_local_date?: string | null;
+  description?: string | null;
+};
+
+export type DashboardSummary = {
+  members: MemberSummary[];
+  timezone: string;
+  missed_medications: number;
+  missed_medication_details: MissedMedicationDetail[];
+};
+
 export type PaidPlan = {
   interval: 'month' | 'year';
   label: string;
