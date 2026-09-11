@@ -2460,15 +2460,16 @@ async def billing_checkout_session(payload: CheckoutRequest, current=Depends(get
 async def billing_webhook(request: Request):
     """Stripe webhook handler. Verifies signature when STRIPE_WEBHOOK_SECRET is set."""
     if not billing.is_configured():
-        return {"status": "ignored", "reason": "not configured"}
+        raise HTTPException(status_code=503, detail="Billing is not configured")
     payload = await request.body()
     sig = request.headers.get("stripe-signature")
     secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+    if not secret:
+        raise HTTPException(
+            status_code=503, detail="Webhook signing secret is not configured"
+        )
     try:
-        if secret:
-            event = stripe.Webhook.construct_event(payload, sig, secret)
-        else:
-            event = json.loads(payload)
+        event = stripe.Webhook.construct_event(payload, sig, secret)
     except ValueError as e:
         logger.error(f"webhook invalid payload: {e}")
         raise HTTPException(status_code=400, detail="Invalid payload")
@@ -2498,7 +2499,9 @@ async def billing_webhook(request: Request):
                     obj = dict(obj)
                 except Exception:
                     logger.error("webhook obj could not be normalized to dict")
-                    return {"status": "error", "message": "unrecognized payload shape"}
+                    raise HTTPException(
+                        status_code=500, detail="Webhook processing failed"
+                    )
     logger.info(f"stripe webhook: {etype}")
     try:
         if etype == "checkout.session.completed":
@@ -2507,34 +2510,55 @@ async def billing_webhook(request: Request):
             meta = obj.get("metadata") or {}
             # Prefer new key, fall back to legacy for older sessions.
             user_id = meta.get("kinnship_user_id") or meta.get("kinnect_user_id")
-            if subscription_id and customer_id:
-                sub = stripe.Subscription.retrieve(subscription_id)
-                # Resolve user_id from customer if metadata missing
-                if not user_id:
-                    u = await db.users.find_one(
-                        {"subscription.stripe_customer_id": customer_id}, {"_id": 0, "id": 1}
-                    )
-                    user_id = u and u.get("id")
-                if user_id:
-                    await billing.apply_subscription_to_user(db, user_id, customer_id, sub)
+            if not subscription_id or not customer_id:
+                raise RuntimeError("checkout session is missing subscription or customer")
+            sub = stripe.Subscription.retrieve(subscription_id)
+            # Resolve user_id from customer if metadata missing
+            if not user_id:
+                u = await db.users.find_one(
+                    {"subscription.stripe_customer_id": customer_id}, {"_id": 0, "id": 1}
+                )
+                user_id = u and u.get("id")
+            if not user_id:
+                raise RuntimeError("checkout session could not be matched to a user")
+            await billing.apply_subscription_to_user(db, user_id, customer_id, sub)
         elif etype in ("customer.subscription.updated", "customer.subscription.created"):
-            customer_id = obj.get("customer")
-            meta = obj.get("metadata") or {}
+            subscription_id = obj.get("id")
+            if not subscription_id:
+                raise RuntimeError("subscription event is missing subscription id")
+            # Stripe does not guarantee webhook delivery order. Always reconcile
+            # against the current subscription so a delayed `incomplete` event
+            # cannot overwrite an already-active Family Plan entitlement.
+            current_sub = stripe.Subscription.retrieve(subscription_id)
+            if isinstance(current_sub, dict):
+                current_obj = current_sub
+            else:
+                try:
+                    current_obj = current_sub.to_dict()
+                except Exception:
+                    current_obj = current_sub._to_dict_recursive()
+            customer_id = current_obj.get("customer")
+            meta = current_obj.get("metadata") or {}
             user_id = meta.get("kinnship_user_id") or meta.get("kinnect_user_id")
             if not user_id and customer_id:
                 u = await db.users.find_one(
                     {"subscription.stripe_customer_id": customer_id}, {"_id": 0, "id": 1}
                 )
                 user_id = u and u.get("id")
-            if user_id and customer_id:
-                await billing.apply_subscription_to_user(db, user_id, customer_id, obj)
+            if not user_id or not customer_id:
+                raise RuntimeError("subscription could not be matched to a user")
+            await billing.apply_subscription_to_user(
+                db, user_id, customer_id, current_obj
+            )
         elif etype == "customer.subscription.deleted":
             customer_id = obj.get("customer")
             if customer_id:
                 await billing.revert_user_to_free_by_customer(db, customer_id)
     except Exception as e:
         logger.exception(f"webhook handler failed: {e}")
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(
+            status_code=500, detail="Webhook processing failed"
+        ) from e
     return {"status": "ok"}
 
 

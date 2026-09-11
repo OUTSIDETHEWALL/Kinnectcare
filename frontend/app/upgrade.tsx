@@ -72,8 +72,7 @@ export default function UpgradeScreen() {
     if (submitting) return;
     setSubmitting(interval);
     try {
-      const base = process.env.EXPO_PUBLIC_BACKEND_URL || '';
-      const returnUrl = `${base}/upgrade`;
+      const returnUrl = 'kinnship://upgrade';
       const { checkout_url } = await createCheckoutSession(returnUrl, interval);
       if (!checkout_url) throw new Error('No checkout URL returned');
       if (Platform.OS === 'web') {
