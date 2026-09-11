@@ -288,7 +288,13 @@ def _extract_interval_from_subscription(sub_obj: dict) -> Optional[str]:
 
 async def apply_subscription_to_user(db, user_id: str, customer_id: str, subscription) -> None:
     """Persist subscription state on the user document."""
-    sub_obj = subscription if isinstance(subscription, dict) else subscription.to_dict_recursive()
+    if isinstance(subscription, dict):
+        sub_obj = subscription
+    else:
+        try:
+            sub_obj = subscription.to_dict()
+        except Exception:
+            sub_obj = subscription._to_dict_recursive()
     interval = _extract_interval_from_subscription(sub_obj)
     update = {
         "subscription.plan": "family_plan" if sub_obj.get("status") in (
@@ -308,11 +314,13 @@ async def apply_subscription_to_user(db, user_id: str, customer_id: str, subscri
         update["subscription.current_period_start"] = cps
     if cpe:
         update["subscription.current_period_end"] = cpe
-    await db.users.update_one({"id": user_id}, {"$set": update})
+    result = await db.users.update_one({"id": user_id}, {"$set": update})
+    if result.matched_count != 1:
+        raise RuntimeError("Stripe subscription could not be matched to a Kinnship user")
 
 
 async def revert_user_to_free_by_customer(db, customer_id: str) -> None:
-    await db.users.update_one(
+    result = await db.users.update_one(
         {"subscription.stripe_customer_id": customer_id},
         {"$set": {
             "subscription.plan": "free",
@@ -321,6 +329,8 @@ async def revert_user_to_free_by_customer(db, customer_id: str) -> None:
             "subscription.updated_at": datetime.now(timezone.utc),
         }},
     )
+    if result.matched_count != 1:
+        raise RuntimeError("Stripe customer could not be matched to a Kinnship user")
 
 
 async def cancel_subscription_at_period_end(db, user_doc: dict) -> dict:
