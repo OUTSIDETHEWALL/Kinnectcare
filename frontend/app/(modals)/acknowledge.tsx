@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator,
   Alert as RNAlert, Platform,
@@ -8,6 +8,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Notifications from 'expo-notifications';
 import { Colors } from '../../src/theme';
 import { api } from '../../src/api';
+import { acknowledgeMedicationOccurrence } from '../../src/medicationAcknowledgment';
 
 /**
  * Full-screen acknowledge panel for elderly users.
@@ -36,6 +37,12 @@ export default function NotificationActionScreen() {
     dosage?: string;
     member_name?: string;
     stage?: string;
+    alert_id?: string;
+    member_id?: string;
+    slot_time?: string;
+    local_date?: string;
+    occurrence_id?: string;
+    notification_id?: string;
   }>();
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
@@ -58,48 +65,36 @@ export default function NotificationActionScreen() {
           ? `${params.dosage}\n\nTap ACKNOWLEDGE below once you've taken it.`
           : 'Tap ACKNOWLEDGE below once you\'ve taken it.');
 
-  // When the user lands on this screen via notification tap, also
-  // dismiss any sticky/active notifications for the SAME reminder
-  // so the tray doesn't keep nagging them while they're actively
-  // dealing with it. (Not strictly needed for the loop fix — the
-  // consumedNotificationIds dedupe in push.ts handles that — but
-  // good UX hygiene either way.)
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const presented = await Notifications.getPresentedNotificationsAsync();
-        if (cancelled) return;
-        for (const n of presented) {
-          const nData: any = n.request?.content?.data || {};
-          if (
-            params.reminder_id &&
-            nData.reminder_id === params.reminder_id
-          ) {
-            try {
-              await Notifications.dismissNotificationAsync(n.request.identifier);
-            } catch (_e) {}
-          }
-        }
-      } catch (_e) {}
-    })();
-    return () => { cancelled = true; };
-  }, [params.reminder_id]);
-
   const acknowledge = async () => {
     if (loading) return;
     setLoading(true);
     try {
-      if (params.reminder_id) {
-        await api.post(`/reminders/${params.reminder_id}/mark`, {
-          status: 'taken',
+      if (isFamilyAlert) {
+        // A caregiver checking on someone is not authorized to use the
+        // senior-only medication-taken endpoint.
+        if (!params.alert_id) {
+          throw new Error('This caregiver alert has no alert identity');
+        }
+        await api.post(`/alerts/${params.alert_id}/ack`);
+        if (params.notification_id) {
+          await Notifications.dismissNotificationAsync(params.notification_id);
+        }
+      } else if (params.reminder_id) {
+        const persisted = await acknowledgeMedicationOccurrence({
+          type: isRoutine ? 'routine' : 'medication',
+          reminder_id: params.reminder_id,
+          member_id: params.member_id,
+          slot_time: params.slot_time,
+          local_date: params.local_date,
+          occurrence_id: params.occurrence_id,
+          notification_id: params.notification_id,
         });
+        if (!persisted) {
+          throw new Error('Medication acknowledgment remains pending');
+        }
+      } else {
+        throw new Error('This acknowledgment has no reminder identity');
       }
-      // Also clear ALL presented notifications so the sticky
-      // follow-up doesn't keep haunting the tray after acknowledge.
-      try {
-        await Notifications.dismissAllNotificationsAsync();
-      } catch (_e) {}
       setDone(true);
       setTimeout(() => router.replace('/(tabs)/dashboard'), 1200);
     } catch (e: any) {
@@ -112,11 +107,6 @@ export default function NotificationActionScreen() {
       setLoading(false);
     }
   };
-
-  // Auto-close after acknowledgement for a moment to show success.
-  useEffect(() => {
-    // empty
-  }, []);
 
   const headerEmoji = isFamilyAlert
     ? '⚠️'

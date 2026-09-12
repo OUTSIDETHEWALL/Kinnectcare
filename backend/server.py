@@ -434,6 +434,14 @@ class ReminderUpdate(BaseModel):
 
 class ReminderMark(BaseModel):
     status: str
+    # Medication actions identify one scheduled occurrence, rather than the
+    # reminder template (which may have several doses per day).  These remain
+    # optional for compatibility with older clients and single-slot
+    # reminders; new action payloads should send all three values.
+    member_id: Optional[str] = None
+    slot_time: Optional[str] = None
+    local_date: Optional[str] = None
+    occurrence_id: Optional[str] = None
 
 
 class Alert(BaseModel):
@@ -2787,6 +2795,7 @@ async def delete_member(member_id: str, current=Depends(get_current_user)):
         ("alerts",               {"family_group_id": fgid, "member_id": member_id}),
         ("medication_logs",      {"family_group_id": fgid, "member_id": member_id}),
         ("med_notifications",    {"family_group_id": fgid, "member_id": member_id}),
+        ("medication_occurrences", {"member_id": member_id}),
     ):
         try:
             res = await db[coll].delete_many(query)
@@ -3893,6 +3902,211 @@ async def update_reminder(reminder_id: str, data: ReminderUpdate, current=Depend
     return Reminder.model_validate(doc)
 
 
+def _reminder_slot_times(rem: dict) -> list[str]:
+    configured = [
+        slot.get("time")
+        for slot in (rem.get("times") or [])
+        if isinstance(slot, dict) and slot.get("time")
+    ]
+    if not configured and rem.get("time"):
+        configured = [rem["time"]]
+    return configured
+
+
+async def _legacy_mark_occurrence(
+    rem: dict, current: dict, now_utc: datetime
+) -> Optional[dict]:
+    """Resolve a legacy action to its most recent local scheduled occurrence.
+
+    Native action payloads now carry identity.  Older payloads do not, so
+    never use the short T+0/T+15 windows to decide whether they are valid:
+    a delayed tap still means the most recent configured dose.  If today's
+    slots have not happened yet, the correct deterministic occurrence is the
+    last configured slot from yesterday.
+    """
+    configured = _reminder_slot_times(rem)
+    if not configured:
+        return None
+    users = getattr(db, "users", None)
+    owner = (
+        await users.find_one(
+            {"id": rem.get("owner_id") or current.get("id")},
+            {"_id": 0, "timezone": 1},
+        )
+        if users is not None
+        else None
+    )
+    tz_name = (owner or {}).get("timezone") or current.get("timezone") or "UTC"
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+    now_local = now_utc.astimezone(tz)
+    candidates: list[tuple[datetime, str, str]] = []
+    for slot_time in configured:
+        parsed = parse_hhmm(slot_time)
+        if parsed is None:
+            continue
+        today_slot = now_local.replace(
+            hour=parsed // 60,
+            minute=parsed % 60,
+            second=0,
+            microsecond=0,
+        )
+        slot_local = (
+            today_slot
+            if today_slot <= now_local
+            else today_slot - timedelta(days=1)
+        )
+        candidates.append((slot_local, slot_time, slot_local.date().isoformat()))
+    if not candidates:
+        return None
+    slot_local, slot_time, local_date = max(candidates, key=lambda item: item[0])
+    return {
+        "occurrence_id": med_scheduler.build_occurrence_id(
+            rem["id"], rem["member_id"], slot_time, local_date
+        ),
+        "reminder_id": rem["id"],
+        "member_id": rem["member_id"],
+        "slot_time": slot_time,
+        "local_date": local_date,
+    }
+
+
+async def _resolve_mark_occurrence(
+    rem: dict, body: ReminderMark, current: dict, now_utc: datetime
+) -> Optional[dict]:
+    """Validate and canonicalize the occurrence carried by a medication action."""
+    slot_time = body.slot_time
+    local_date = body.local_date
+    configured = _reminder_slot_times(rem)
+    if body.member_id and body.member_id != rem.get("member_id"):
+        raise HTTPException(status_code=400, detail="member_id does not match the reminder target")
+
+    # An old TOOK_IT/DONE action has no occurrence fields. Resolve it using
+    # the deterministic most-recent local slot; it must not expire merely
+    # because the scheduler's short delivery window has elapsed.
+    if slot_time is None and body.status == "taken":
+        if body.occurrence_id or body.local_date:
+            raise HTTPException(
+                status_code=400,
+                detail="slot_time is required when occurrence identity is supplied",
+            )
+        return await _legacy_mark_occurrence(rem, current, now_utc)
+    if local_date is None and slot_time is not None:
+        users = getattr(db, "users", None)
+        owner = (
+            await users.find_one(
+                {"id": rem.get("owner_id") or current.get("id")},
+                {"_id": 0, "timezone": 1},
+            )
+            if users is not None
+            else None
+        )
+        tz_name = (owner or {}).get("timezone") or current.get("timezone") or "UTC"
+        try:
+            local_date = now_utc.astimezone(ZoneInfo(tz_name)).date().isoformat()
+        except ZoneInfoNotFoundError:
+            local_date = now_utc.astimezone(ZoneInfo("UTC")).date().isoformat()
+    if slot_time is None and local_date is None and not body.occurrence_id:
+        return None
+    if not slot_time or not local_date:
+        raise HTTPException(
+            status_code=400,
+            detail="slot_time and local_date are required for an occurrence mark",
+        )
+    if slot_time not in configured:
+        raise HTTPException(status_code=400, detail="slot_time is not configured for this reminder")
+    try:
+        datetime.fromisoformat(local_date)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="local_date must be YYYY-MM-DD")
+    if len(local_date) != 10:
+        raise HTTPException(status_code=400, detail="local_date must be YYYY-MM-DD")
+    occurrence_id = med_scheduler.build_occurrence_id(
+        rem["id"], rem["member_id"], slot_time, local_date
+    )
+    if body.occurrence_id and body.occurrence_id != occurrence_id:
+        raise HTTPException(status_code=400, detail="occurrence_id does not match the occurrence fields")
+    return {
+        "occurrence_id": occurrence_id,
+        "reminder_id": rem["id"],
+        "member_id": rem["member_id"],
+        "slot_time": slot_time,
+        "local_date": local_date,
+    }
+
+
+async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> str:
+    """Claim an exact occurrence for acknowledgment.
+
+    Mongo's conditional update is the occurrence-level mutex shared with the
+    scheduler.  ``duplicate`` means a retry of an already persisted mark;
+    ``blocked`` means the scheduler is currently sending the T+15 escalation.
+    """
+    collection = getattr(db, "medication_occurrences", None)
+    if collection is None:
+        return "unavailable"
+
+    oid = occurrence["occurrence_id"]
+    try:
+        await collection.insert_one({
+            **occurrence,
+            "acknowledged": False,
+            "family_claimed": False,
+        })
+    except DuplicateKeyError:
+        pass
+
+    result = await collection.update_one(
+        {
+            "occurrence_id": oid,
+            "family_claimed": {"$ne": True},
+        },
+        {"$set": {"acknowledged": True, "acknowledged_at": now}},
+    )
+    if getattr(result, "matched_count", 0):
+        return "claimed"
+
+    state = await collection.find_one({"occurrence_id": oid}, {"_id": 0})
+    if state and state.get("family_claimed"):
+        return "blocked"
+    if state and state.get("acknowledged"):
+        return "duplicate"
+    # A concurrent update may have won between our conditional update and
+    # read.  Treat that as a retry rather than creating a second mark.
+    return "blocked"
+
+
+async def _persist_taken_medication_log(rem: dict, current: dict, occurrence: dict, now: datetime) -> None:
+    """Insert one taken log, relying on the unique occurrence index for races."""
+    doc = {
+        "id": str(uuid.uuid4()),
+        "family_group_id": current["family_group_id"],
+        "reminder_id": rem["id"],
+        "member_id": rem["member_id"],
+        "category": rem.get("category", "medication"),
+        "title": rem["title"],
+        "status": "taken",
+        "marked_at": now,
+        "local_date": occurrence["local_date"],
+        "slot_time": occurrence["slot_time"],
+        "occurrence_id": occurrence["occurrence_id"],
+    }
+    existing = await db.medication_logs.find_one(
+        {"occurrence_id": occurrence["occurrence_id"], "status": "taken"},
+        {"_id": 0},
+    )
+    if existing:
+        return
+    try:
+        await db.medication_logs.insert_one(doc)
+    except DuplicateKeyError:
+        # Another delivery won the unique occurrence insert.  This is a
+        # successful idempotent retry, not an endpoint failure.
+        return
+
+
 @api_router.post("/reminders/{reminder_id}/mark")
 async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(get_current_user)):
     if body.status not in ("taken", "missed", "pending"):
@@ -3902,7 +4116,32 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
         raise HTTPException(status_code=404, detail="Reminder not found")
     await require_reminder_self_target(rem, current)
     now = datetime.now(timezone.utc)
-    today = local_today_str(current)
+    occurrence = await _resolve_mark_occurrence(rem, body, current, now)
+    today = (occurrence or {}).get("local_date") or local_today_str(current)
+    if body.status == "taken" and occurrence is None and _reminder_slot_times(rem):
+        raise HTTPException(
+            status_code=400,
+            detail="An active medication occurrence could not be determined; retry with slot_time and local_date",
+        )
+    if occurrence and not _med_scheduler_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="Medication acknowledgment safety indexes are not ready; retry shortly",
+            headers={"Retry-After": "5"},
+        )
+
+    # A T+15 scan and this endpoint use the same durable occurrence row.
+    # Losing the claim means the request arrived while escalation was being
+    # sent; do not report a successful taken mark alongside that escalation.
+    ack_state = "unavailable"
+    if body.status == "taken":
+        ack_state = await _claim_medication_acknowledgment(occurrence, now)
+        if ack_state == "blocked":
+            raise HTTPException(
+                status_code=409,
+                detail="Medication escalation is already being sent for this occurrence",
+            )
+
     await db.reminders.update_one(
         {"id": reminder_id, "family_group_id": current["family_group_id"]},
         {"$set": {
@@ -3912,18 +4151,26 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
             "last_marked_date": today,
         }}
     )
-    # Log every mark for medication history
-    await db.medication_logs.insert_one({
-        "id": str(uuid.uuid4()),
-        "family_group_id": current["family_group_id"],
-        "reminder_id": reminder_id,
-        "member_id": rem["member_id"],
-        "category": rem.get("category", "medication"),
-        "title": rem["title"],
-        "status": body.status,
-        "marked_at": now,
-        "local_date": today,
-    })
+    # Log every mark for medication history.  Taken occurrence rows are
+    # unique; repeated Android delivery therefore remains one logical mark.
+    if body.status == "taken" and occurrence:
+        await _persist_taken_medication_log(rem, current, occurrence, now)
+    else:
+        await db.medication_logs.insert_one({
+            "id": str(uuid.uuid4()),
+            "family_group_id": current["family_group_id"],
+            "reminder_id": reminder_id,
+            "member_id": rem["member_id"],
+            "category": rem.get("category", "medication"),
+            "title": rem["title"],
+            "status": body.status,
+            "marked_at": now,
+            "local_date": today,
+            **({
+                "slot_time": occurrence["slot_time"],
+                "occurrence_id": occurrence["occurrence_id"],
+            } if occurrence else {}),
+        })
 
     if body.status == "missed":
         recent_query = {
@@ -3964,10 +4211,10 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
                     for slot in (rem.get("times") or [])
                     if isinstance(slot, dict) and slot.get("time")
                 ]
-                # A mark request identifies the reminder, not a specific slot.
-                # Store a scheduled time only when there is exactly one possible
-                # occurrence; guessing among multiple slots would be misleading.
-                scheduled_time = (
+                # Exact occurrence metadata is carried through to the
+                # dashboard.  Legacy marks retain the old single-slot
+                # fallback but never guess among multiple configured slots.
+                scheduled_time = (occurrence or {}).get("slot_time") or (
                     configured_times[0]
                     if len(configured_times) == 1
                     else (rem.get("time") if not configured_times else None)
@@ -3980,12 +4227,19 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
                     "missed_at": now,
                     "missed_local_date": today,
                 })
+                if occurrence:
+                    alert_doc["occurrence_id"] = occurrence["occurrence_id"]
             await db.alerts.insert_one(alert_doc)
             await push_to_family_group(
                 current["family_group_id"],
                 f"💊 {rem['member_name']} missed {rem['title']}",
                 a.message,
-                {"type": atype, "member_id": rem["member_id"], "reminder_id": reminder_id},
+                {
+                    "type": atype,
+                    "member_id": rem["member_id"],
+                    "reminder_id": reminder_id,
+                    **({"occurrence_id": occurrence["occurrence_id"]} if occurrence else {}),
+                },
             )
     return {"ok": True, "status": body.status}
 
@@ -4022,10 +4276,23 @@ async def delete_reminder(reminder_id: str, current=Depends(get_current_user)):
         "reminder_id": reminder_id,
         "family_group_id": current["family_group_id"],
     })
+    occurrence_cleanup = 0
+    occurrence_collection = getattr(db, "medication_occurrences", None)
+    if occurrence_collection is not None:
+        occurrence_cleanup = (
+            await occurrence_collection.delete_many({
+                "reminder_id": reminder_id,
+            })
+        ).deleted_count
     logger.info(
-        f"[reminder] deleted {reminder_id}; cleaned {n.deleted_count} med_notifications row(s)"
+        f"[reminder] deleted {reminder_id}; cleaned {n.deleted_count} "
+        f"med_notifications and {occurrence_cleanup} occurrence row(s)"
     )
-    return {"ok": True, "med_notifications_deleted": n.deleted_count}
+    return {
+        "ok": True,
+        "med_notifications_deleted": n.deleted_count,
+        "medication_occurrences_deleted": occurrence_cleanup,
+    }
 
 
 # ========== Medication history / weekly compliance ==========
@@ -5614,6 +5881,7 @@ async def health():
 # ========== Medication scheduler (self-alerts + family escalation) ==========
 # Single shared scheduler instance; started on app.startup, stopped on shutdown.
 _med_scheduler: Optional[med_scheduler.MedicationScheduler] = None
+_med_scheduler_ready = False
 
 
 @api_router.post("/medications/_tick")
@@ -5624,6 +5892,11 @@ async def medications_tick(current=Depends(get_current_user)):
     worker tick. Returns the counters from `process_pending_notifications`.
     Auth-required so it can't be hit anonymously.
     """
+    if not _med_scheduler_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="Medication scheduler is unavailable because its safety indexes are not ready",
+        )
     counters = await med_scheduler.process_pending_notifications(
         db,
         push_to_user=push_to_user,
@@ -6155,7 +6428,8 @@ async def _migrate_family_groups():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    global _med_scheduler
+    global _med_scheduler, _med_scheduler_ready
+    _med_scheduler_ready = False
     if _med_scheduler:
         try:
             await _med_scheduler.stop()
@@ -6167,11 +6441,17 @@ async def shutdown_db_client():
 @app.on_event("startup")
 async def _start_med_scheduler():
     """Start the medication-escalation background worker and ensure indexes."""
-    global _med_scheduler
+    global _med_scheduler, _med_scheduler_ready
+    _med_scheduler_ready = False
+    _med_scheduler = None
     try:
         await med_scheduler.ensure_indexes(db)
     except Exception as e:
-        logger.warning(f"med_scheduler index ensure skipped: {e}")
+        # These indexes are correctness prerequisites for occurrence-level
+        # idempotency and the T+15 race guard.  Fail closed: never start a
+        # race-unsafe escalation worker.
+        logger.error(f"med_scheduler safety indexes unavailable; worker disabled: {e}")
+        return
     try:
         _med_scheduler = med_scheduler.MedicationScheduler(
             db,
@@ -6179,8 +6459,10 @@ async def _start_med_scheduler():
             push_to_family_group=push_to_family_group,
         )
         _med_scheduler.start()
+        _med_scheduler_ready = True
         logger.info("Medication scheduler started.")
     except Exception as e:
+        _med_scheduler = None
         logger.warning(f"Medication scheduler failed to start: {e}")
 
 
