@@ -498,6 +498,11 @@ function RootNav() {
             dosage: data?.dosage || '',
             member_name: data?.member_name || '',
             stage: stage || '',
+            member_id: data?.member_id || '',
+            slot_time: data?.slot_time || '',
+            local_date: data?.local_date || data?.occurrence_date || '',
+            occurrence_id: data?.occurrence_id || '',
+            notification_id: data?.notification_id || '',
           },
         } as any);
       } catch (_e) {
@@ -517,6 +522,12 @@ function RootNav() {
             title: data?.title || '',
             member_name: data?.member_name || '',
             stage: 'family_alert',
+            alert_id: data?.alert_id || '',
+            member_id: data?.member_id || '',
+            slot_time: data?.slot_time || '',
+            local_date: data?.local_date || data?.occurrence_date || '',
+            occurrence_id: data?.occurrence_id || '',
+            notification_id: data?.notification_id || '',
           },
         } as any);
       } catch (_e) {

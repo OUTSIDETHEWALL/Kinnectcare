@@ -5,6 +5,10 @@ import * as Device from 'expo-device';
 import Constants from 'expo-constants';
 import { AppState, Platform } from 'react-native';
 import { api, migrateTokenForBackgroundActions } from './api';
+import {
+  handleMedicationAction,
+  replayPendingMedicationAcknowledgments,
+} from './medicationAcknowledgment';
 
 // Hardcoded fallback in case Constants.expoConfig is unavailable (this happens
 // in some standalone build configurations). Keep in sync with app.json →
@@ -43,9 +47,15 @@ if (Platform.OS !== 'web') {
   });
   if (!TaskManager.isTaskDefined(WELFARE_CHECK_TASK)) {
     TaskManager.defineTask(WELFARE_CHECK_TASK, async ({ data }: any) => {
+      // Expo has delivered both a direct NotificationResponse and a wrapped
+      // { response } shape across SDK/OEM combinations.  Keep welfare and
+      // medication actions in this one registered task, while sharing only
+      // medication persistence with the live listener.
       const response = data?.actionIdentifier ? data : data?.response;
       if (response?.actionIdentifier === 'IM_OK') {
         await handleWelfareCheckAction(response);
+      } else {
+        await handleMedicationAction(data);
       }
     });
   }
@@ -315,7 +325,10 @@ async function ensureNotificationCategories() {
         identifier: 'TOOK_IT',
         buttonTitle: '✅  TOOK IT',
         options: {
-          opensAppToForeground: false,  // Mark taken silently — no UI interrupt
+          // The headless task normally handles this silently.  Foregrounding
+          // is the reliable fallback on Android versions/OEMs that do not
+          // launch the task, and is preferable to losing an acknowledgment.
+          opensAppToForeground: true,
         },
       },
       {
@@ -331,7 +344,7 @@ async function ensureNotificationCategories() {
         identifier: 'DONE',
         buttonTitle: '✅  DONE',
         options: {
-          opensAppToForeground: false,
+          opensAppToForeground: true,
         },
       },
     ]);
@@ -568,6 +581,7 @@ export async function registerForPushNotifications(): Promise<string | null> {
       await api.post('/auth/push-token', { token, platform: Platform.OS });
       setStatus({ state: 'registered', token });
       lastPushTokenSyncAt = Date.now();
+      await replayPendingMedicationAcknowledgments();
       return token;
     } catch (e: any) {
       setStatus({ state: 'api_error', error: e?.message || String(e) });
@@ -876,6 +890,10 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
     // Register the live alert callback so the pending-deep-link queue
     // can fire it whenever RootNav signals app-ready.
     liveOnAlert = onAlert || null;
+    // Auth may have completed before this hook mounts (including a cold
+    // start).  Replay durable action records whenever the authenticated
+    // runtime is available; failures stay queued.
+    replayPendingMedicationAcknowledgments().catch(() => {});
     // CONDITIONAL RETRY (v1.2-hotfix3): only attempt a flush at mount
     // if there is ACTUAL pending data AND the app is already ready.
     // The previous unconditional tryFlush() at every effect re-run
@@ -945,7 +963,7 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
           const data: any = cold.notification?.request?.content?.data || {};
           if (data && data.type) {
             markNotificationConsumed(reqId);
-            enqueueDeepLink(data);
+            enqueueDeepLink({ ...data, notification_id: reqId });
           }
         }
       } catch (_e) {}
@@ -1092,16 +1110,10 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
 
       // Action button taps — silent mark-taken / snooze.
       if (actionId === 'TOOK_IT' || actionId === 'DONE') {
-        markNotificationConsumed(reqId);
-        const rid = data.reminder_id;
-        if (rid) {
-          try {
-            await api.post(`/reminders/${rid}/mark`, { status: 'taken' });
-            try {
-              await Notifications.dismissNotificationAsync(reqId);
-            } catch (_e) {}
-          } catch (_e) {}
-        }
+        // Do not consume an action until the shared handler confirms backend
+        // persistence.  A failed request remains durably pending for retry.
+        const succeeded = await handleMedicationAction(r);
+        if (succeeded) markNotificationConsumed(reqId);
         return;
       }
       if (actionId === 'SNOOZE_10') {
@@ -1140,7 +1152,7 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
       // loops back" bug — see the consumedNotificationIds doc-block
       // for the full backstory.
       markNotificationConsumed(reqId);
-      enqueueDeepLink(data);
+      enqueueDeepLink({ ...data, notification_id: reqId });
     });
     return () => {
       recv.remove();

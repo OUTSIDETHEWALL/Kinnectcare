@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from pymongo.errors import DuplicateKeyError
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,27 @@ STAGE_MAX_STALE_MIN: Dict[str, int] = {
     STAGE_FAMILY: 75,
 }
 
+
+def build_occurrence_id(
+    reminder_id: str, member_id: str, slot_time: str, local_date: str
+) -> str:
+    """Return the stable identity for one scheduled medication occurrence.
+
+    Keep the source fields on persisted documents as well as this digest.  The
+    length-prefixed form is compact, deterministic, and shared with the
+    mobile retry queue (which must be able to derive the same value without a
+    cryptographic library).
+    """
+    return "|".join(
+        f"{len(part)}:{part}"
+        for part in (
+            str(reminder_id),
+            str(member_id),
+            str(slot_time),
+            str(local_date),
+        )
+    )
+
 # Worker cadence (seconds). Reduced from 30 → 15 to halve the worst-case
 # delivery delay for medication reminders (Bug 4 — 5-7min lag complaint).
 WORKER_INTERVAL_SECONDS = 15
@@ -62,6 +84,12 @@ WORKER_INTERVAL_SECONDS = 15
 # (e.g. server restart with reminders 6+ hours old).  Per-stage cutoffs are
 # checked FIRST and are stricter, so this only catches edge cases.
 MAX_STALE_MINUTES = 90
+
+# A worker crash can leave an occurrence claimed before its alert is durable.
+# Claims older than this are safe to retry; a live scan always finalizes much
+# sooner than this window.
+OCCURRENCE_CLAIM_STALE_MINUTES = 5
+FAMILY_RECOVERY_HORIZON_MINUTES = 90
 
 
 # ---------- Helpers ----------
@@ -84,32 +112,205 @@ def _parse_hhmm(s: str) -> Optional[int]:
 
 
 async def ensure_indexes(db) -> None:
-    """Create the unique indexes used to make stage firing idempotent."""
-    try:
-        await db.med_notifications.create_index(
-            [
-                ("reminder_id", 1),
-                ("slot_time", 1),
-                ("local_date", 1),
-                ("stage", 1),
-            ],
-            unique=True,
-            name="uniq_reminder_slot_date_stage",
-        )
-    except Exception as e:
-        logger.warning(f"med_notifications index ensure skipped: {e}")
+    """Create the unique indexes required before the worker may run.
+
+    These are correctness prerequisites, not optional performance indexes:
+    swallowing a failure here would allow two scheduler workers to escalate
+    one occurrence.  Let the startup caller fail closed.
+    """
+    await db.med_notifications.create_index(
+        [
+            ("reminder_id", 1),
+            ("slot_time", 1),
+            ("local_date", 1),
+            ("stage", 1),
+        ],
+        unique=True,
+        name="uniq_reminder_slot_date_stage",
+    )
+    # Only taken rows participate in this uniqueness constraint.  Legacy
+    # marks and rows without occurrence identity remain readable.
+    await db.medication_logs.create_index(
+        [("occurrence_id", 1)],
+        unique=True,
+        partialFilterExpression={"status": "taken", "occurrence_id": {"$exists": True}},
+        name="uniq_taken_medication_occurrence",
+    )
+    await db.medication_occurrences.create_index(
+        [("occurrence_id", 1)],
+        unique=True,
+        name="uniq_medication_occurrence_state",
+    )
+    # A retry after an ambiguous alert write must discover the same durable
+    # escalation instead of creating another Missed Med row.
+    await db.alerts.create_index(
+        [("occurrence_id", 1)],
+        unique=True,
+        partialFilterExpression={
+            "type": "medication_escalation",
+            "occurrence_id": {"$exists": True},
+        },
+        name="uniq_medication_escalation_occurrence",
+    )
 
 
-async def _has_taken_log_after(db, reminder_id: str, slot_utc: datetime) -> bool:
-    """Return True iff the medication was marked taken for this dose window."""
+async def _has_taken_log_after(
+    db,
+    reminder_id: str,
+    member_id: str,
+    slot_time: str,
+    local_date: str,
+) -> bool:
+    """Return True iff this exact medication occurrence was marked taken."""
+    occurrence_id = build_occurrence_id(
+        reminder_id, member_id, slot_time, local_date
+    )
     doc = await db.medication_logs.find_one(
         {
-            "reminder_id": reminder_id,
+            "occurrence_id": occurrence_id,
             "status": "taken",
-            "marked_at": {"$gte": slot_utc},
         }
     )
     return doc is not None
+
+
+async def _ensure_occurrence_state(
+    db,
+    *,
+    occurrence_id: str,
+    reminder_id: str,
+    member_id: str,
+    slot_time: str,
+    local_date: str,
+) -> bool:
+    """Create the small durable coordination row used by the race guard."""
+    collection = getattr(db, "medication_occurrences", None)
+    if collection is None:
+        return False
+    try:
+        await collection.insert_one(
+            {
+                "occurrence_id": occurrence_id,
+                "reminder_id": reminder_id,
+                "member_id": member_id,
+                "slot_time": slot_time,
+                "local_date": local_date,
+                "acknowledged": False,
+                "family_claimed": False,
+            }
+        )
+    except DuplicateKeyError:
+        # The other side of the race created the state first.  The following
+        # atomic update decides who owns the occurrence.
+        pass
+    return True
+
+
+async def _claim_occurrence_for_family(
+    db,
+    *,
+    occurrence_id: str,
+    reminder_id: str,
+    member_id: str,
+    slot_time: str,
+    local_date: str,
+    now_utc: datetime,
+) -> Optional[str]:
+    """Atomically claim an occurrence before starting family escalation.
+
+    The acknowledgment endpoint uses the inverse conditional update.  Thus
+    exactly one side wins the boundary: a successful acknowledgment or the
+    family-stage claim.  A claim remains ``sending`` until the push and alert
+    row have been attempted, so an in-flight acknowledgment cannot be
+    reported as taken alongside that escalation.
+    """
+    if not await _ensure_occurrence_state(
+        db,
+        occurrence_id=occurrence_id,
+        reminder_id=reminder_id,
+        member_id=member_id,
+        slot_time=slot_time,
+        local_date=local_date,
+    ):
+        return None
+    collection = db.medication_occurrences
+    claim_token = str(uuid4())
+    result = await collection.update_one(
+        {
+            "occurrence_id": occurrence_id,
+            "acknowledged": {"$ne": True},
+            "family_claimed": {"$ne": True},
+        },
+        {
+            "$set": {
+                "family_claimed": True,
+                "family_claimed_at": now_utc,
+                "family_state": "sending",
+                "family_claim_token": claim_token,
+                "family_recovery_deadline_at": now_utc + timedelta(
+                    minutes=FAMILY_RECOVERY_HORIZON_MINUTES
+                ),
+            }
+        },
+    )
+    if getattr(result, "matched_count", 0):
+        return claim_token
+    # Transfer ownership atomically.  family_claimed stays true throughout,
+    # so the acknowledgment conditional can never win this handoff.
+    stale_query = {
+        "occurrence_id": occurrence_id,
+        "acknowledged": {"$ne": True},
+        "family_claimed": True,
+        "family_state": "sending",
+        "family_claimed_at": {
+            "$lt": now_utc - timedelta(minutes=OCCURRENCE_CLAIM_STALE_MINUTES)
+        },
+        "family_recovery_deadline_at": {"$gt": now_utc},
+    }
+    result = await collection.update_one(
+        stale_query,
+        {
+            "$set": {
+                "family_claim_token": claim_token,
+                "family_claimed_at": now_utc,
+            }
+        },
+    )
+    if not getattr(result, "matched_count", 0):
+        # Rows created before deadlines were added get one deadline at the
+        # moment they are first recovered.  Existing absolute deadlines are
+        # never moved by a takeover.
+        stale_query.pop("family_recovery_deadline_at")
+        stale_query["family_recovery_deadline_at"] = {"$exists": False}
+        result = await collection.update_one(
+            stale_query,
+            {
+                "$set": {
+                    "family_claim_token": claim_token,
+                    "family_claimed_at": now_utc,
+                    "family_recovery_deadline_at": now_utc + timedelta(
+                        minutes=FAMILY_RECOVERY_HORIZON_MINUTES
+                    ),
+                }
+            },
+        )
+    return claim_token if getattr(result, "matched_count", 0) else None
+
+
+async def _finish_occurrence_family_claim(
+    db, occurrence_id: str, now_utc: datetime, claim_token: Optional[str] = None
+) -> None:
+    collection = getattr(db, "medication_occurrences", None)
+    if collection is None:
+        return
+    await collection.update_one(
+        {
+            "occurrence_id": occurrence_id,
+            "family_state": "sending",
+            **({"family_claim_token": claim_token} if claim_token else {}),
+        },
+        {"$set": {"family_state": "sent", "escalation_sent_at": now_utc}},
+    )
 
 
 async def _try_record_stage(
@@ -122,23 +323,117 @@ async def _try_record_stage(
     local_date: str,
     stage: str,
     now_utc: datetime,
+    claim_token: Optional[str] = None,
 ) -> bool:
-    """Atomically reserve a stage. Returns True if we won the race."""
+    """Reserve or reclaim a delivery stage without duplicating a push."""
+    row = {
+        "reminder_id": reminder_id,
+        "family_group_id": family_group_id,
+        "member_id": member_id,
+        "slot_time": slot_time,
+        "local_date": local_date,
+        "stage": stage,
+        "fired_at": now_utc,
+    }
+    if stage == STAGE_FAMILY:
+        row.update({
+            "delivery_state": "sending",
+            "delivery_claimed_at": now_utc,
+            "delivery_recovery_deadline_at": now_utc + timedelta(
+                minutes=FAMILY_RECOVERY_HORIZON_MINUTES
+            ),
+            "family_claim_token": claim_token,
+        })
     try:
-        await db.med_notifications.insert_one(
-            {
-                "reminder_id": reminder_id,
-                "family_group_id": family_group_id,
-                "member_id": member_id,
-                "slot_time": slot_time,
-                "local_date": local_date,
-                "stage": stage,
-                "fired_at": now_utc,
-            }
-        )
+        await db.med_notifications.insert_one(row)
         return True
-    except Exception:
-        return False
+    except DuplicateKeyError:
+        if stage != STAGE_FAMILY:
+            return False
+        query = {
+            "reminder_id": reminder_id,
+            "member_id": member_id,
+            "slot_time": slot_time,
+            "local_date": local_date,
+            "stage": stage,
+        }
+        existing = await db.med_notifications.find_one(query, {"_id": 0})
+        if not existing or existing.get("delivery_state") == "sent":
+            return False
+        if existing.get("delivery_attempted_at"):
+            return False
+        claimed_at = existing.get("delivery_claimed_at") or existing.get("fired_at")
+        if not claimed_at or claimed_at >= now_utc - timedelta(
+            minutes=OCCURRENCE_CLAIM_STALE_MINUTES
+        ):
+            return False
+        result = await db.med_notifications.update_one(
+            {
+                **query,
+                "delivery_state": "sending",
+                "delivery_attempted_at": {"$exists": False},
+                "delivery_claimed_at": claimed_at,
+            },
+            {
+                "$set": {
+                    "delivery_claimed_at": now_utc,
+                    "family_claim_token": claim_token,
+                }
+            },
+        )
+        return bool(getattr(result, "matched_count", 0))
+
+
+async def _mark_stage_attempted(
+    db,
+    *,
+    reminder_id: str,
+    member_id: str,
+    slot_time: str,
+    local_date: str,
+    stage: str,
+    claim_token: Optional[str],
+    now_utc: datetime,
+) -> bool:
+    """Record the push attempt before calling the non-transactional push API."""
+    result = await db.med_notifications.update_one(
+        {
+            "reminder_id": reminder_id,
+            "member_id": member_id,
+            "slot_time": slot_time,
+            "local_date": local_date,
+            "stage": stage,
+            "delivery_state": "sending",
+            "delivery_attempted_at": {"$exists": False},
+            **({"family_claim_token": claim_token} if claim_token else {}),
+        },
+        {"$set": {"delivery_attempted_at": now_utc}},
+    )
+    return bool(getattr(result, "matched_count", 0))
+
+
+async def _finish_family_stage(
+    db,
+    *,
+    reminder_id: str,
+    member_id: str,
+    slot_time: str,
+    local_date: str,
+    claim_token: Optional[str],
+    now_utc: datetime,
+) -> None:
+    await db.med_notifications.update_one(
+        {
+            "reminder_id": reminder_id,
+            "member_id": member_id,
+            "slot_time": slot_time,
+            "local_date": local_date,
+            "stage": STAGE_FAMILY,
+            "delivery_state": "sending",
+            **({"family_claim_token": claim_token} if claim_token else {}),
+        },
+        {"$set": {"delivery_state": "sent", "delivery_sent_at": now_utc}},
+    )
 
 
 async def _log_alert(
@@ -159,13 +454,16 @@ async def _log_alert(
     scheduled_time: Optional[str] = None,
     missed_at: Optional[datetime] = None,
     missed_local_date: Optional[str] = None,
+    occurrence_id: Optional[str] = None,
+    alert_id: Optional[str] = None,
+    raise_on_error: bool = False,
 ) -> None:
     """Insert an alert row so the Alerts tab shows complete history."""
     if not family_group_id:
         return
     try:
         doc = {
-            "id": str(uuid4()),
+            "id": alert_id or str(uuid4()),
             "owner_id": owner_id or "",
             "family_group_id": family_group_id,
             "member_id": member_id,
@@ -186,9 +484,87 @@ async def _log_alert(
                 "missed_at": missed_at,
                 "missed_local_date": missed_local_date,
             })
+        if occurrence_id:
+            doc["occurrence_id"] = occurrence_id
         await db.alerts.insert_one(doc)
     except Exception as e:
+        if raise_on_error:
+            raise
         logger.warning(f"alert insert failed: {e}")
+
+
+def build_medication_escalation_alert_id(occurrence_id: str) -> str:
+    """Return a deterministic alert ID for one medication occurrence."""
+    return f"medication-escalation:{occurrence_id}"
+
+
+async def _ensure_medication_escalation_alert(
+    db,
+    *,
+    alert_id: str,
+    owner_id: Optional[str],
+    family_group_id: str,
+    member_id: str,
+    member_name: str,
+    title: str,
+    message: str,
+    now_utc: datetime,
+    reminder_id: str,
+    medication_name: Optional[str],
+    dosage: Optional[str],
+    scheduled_time: str,
+    local_date: str,
+    occurrence_id: str,
+) -> str:
+    """Durably get-or-create the exact escalation alert.
+
+    The partial unique occurrence index makes retries converge.  If an insert
+    raises after Mongo may have committed it, the follow-up read recognizes
+    that same row; no cleanup race or second Missed Med row is needed.
+    """
+    query = {
+        "type": "medication_escalation",
+        "occurrence_id": occurrence_id,
+    }
+    existing = await db.alerts.find_one(query, {"_id": 0})
+    if existing:
+        return existing.get("id") or alert_id
+    doc = {
+        "id": alert_id,
+        "owner_id": owner_id or "",
+        "family_group_id": family_group_id,
+        "member_id": member_id,
+        "member_name": member_name,
+        "type": "medication_escalation",
+        "severity": "critical",
+        "title": title,
+        "message": message,
+        "acknowledged": False,
+        "created_at": now_utc,
+        "reminder_id": reminder_id,
+        "medication_name": medication_name,
+        "dosage": dosage,
+        "scheduled_time": scheduled_time,
+        "missed_at": now_utc,
+        "missed_local_date": local_date,
+        "occurrence_id": occurrence_id,
+    }
+    try:
+        await db.alerts.insert_one(doc)
+        return alert_id
+    except DuplicateKeyError:
+        existing = await db.alerts.find_one(query, {"_id": 0})
+        if existing:
+            return existing.get("id") or alert_id
+        raise
+    except Exception:
+        # A network/driver error can be ambiguous.  Read once before
+        # propagating; if the row exists, it is the committed idempotent
+        # result and the caller may safely continue to stage/push it.
+        existing = await db.alerts.find_one(query, {"_id": 0})
+        if existing:
+            return existing.get("id") or alert_id
+        raise
 
 
 def _resolve_slot(now_local: datetime, slot_time: str) -> Optional[Dict[str, Any]]:
@@ -211,6 +587,215 @@ def _resolve_slot(now_local: datetime, slot_time: str) -> Optional[Dict[str, Any
         "local_date": slot_local.date().isoformat(),
         "delta_min": (now_utc - slot_utc).total_seconds() / 60.0,
     }
+
+
+async def _recover_stale_family_deliveries(
+    db,
+    reminders: List[dict],
+    *,
+    push_to_family_group: Callable[..., Awaitable[int]],
+    now_utc: datetime,
+    counters: Dict[str, int],
+) -> None:
+    """Retry pre-push crashes without reopening the acknowledgment race."""
+    reminders_by_id = {rem.get("id"): rem for rem in reminders}
+    contexts: Dict[str, dict] = {}
+    stage_cursor = db.med_notifications.find(
+        {
+            "stage": STAGE_FAMILY,
+            "delivery_state": "sending",
+        },
+        {"_id": 0},
+    )
+    for stage in await stage_cursor.to_list(20000):
+        occurrence_id = build_occurrence_id(
+            stage["reminder_id"],
+            stage["member_id"],
+            stage["slot_time"],
+            stage["local_date"],
+        )
+        contexts[occurrence_id] = stage
+    state_cursor = db.medication_occurrences.find(
+        {
+            "family_claimed": True,
+            "family_state": "sending",
+            "family_claimed_at": {"$exists": True},
+        },
+        {"_id": 0},
+    )
+    for state in await state_cursor.to_list(20000):
+        contexts.setdefault(state["occurrence_id"], state)
+
+    for occurrence_id, context in contexts.items():
+        if context.get("delivery_attempted_at"):
+            state = await db.medication_occurrences.find_one(
+                {"occurrence_id": occurrence_id}, {"_id": 0}
+            )
+            await _finish_family_stage(
+                db,
+                reminder_id=context["reminder_id"],
+                member_id=context["member_id"],
+                slot_time=context["slot_time"],
+                local_date=context["local_date"],
+                claim_token=context.get("family_claim_token"),
+                now_utc=now_utc,
+            )
+            if state and state.get("family_state") == "sending":
+                await _finish_occurrence_family_claim(
+                    db,
+                    occurrence_id,
+                    now_utc,
+                    state.get("family_claim_token"),
+                )
+            continue
+        claimed_at = (
+            context.get("delivery_claimed_at")
+            or context.get("family_claimed_at")
+        )
+        if not claimed_at or claimed_at >= now_utc - timedelta(
+            minutes=OCCURRENCE_CLAIM_STALE_MINUTES
+        ):
+            continue
+        deadline = (
+            context.get("delivery_recovery_deadline_at")
+            or context.get("family_recovery_deadline_at")
+        )
+        if deadline and now_utc > deadline:
+            alert = await db.alerts.find_one(
+                {
+                    "type": "medication_escalation",
+                    "occurrence_id": occurrence_id,
+                },
+                {"_id": 0},
+            )
+            if alert:
+                # An alert is durable escalation state.  Without an attempted
+                # stage it remains eligible for a later bounded recovery pass;
+                # never release its family exclusivity as an ordinary timeout.
+                continue
+            await db.medication_occurrences.update_one(
+                {
+                    "occurrence_id": occurrence_id,
+                    "family_claimed": True,
+                    "family_state": "sending",
+                },
+                {"$set": {"family_claimed": False, "family_state": "expired"}},
+            )
+            continue
+        reminder_id = context.get("reminder_id")
+        rem = reminders_by_id.get(reminder_id)
+        if not rem:
+            continue
+        member_id = context.get("member_id") or rem.get("member_id")
+        member = await db.members.find_one(
+            {"id": member_id},
+            {"_id": 0, "owner_id": 1, "family_group_id": 1, "name": 1},
+        )
+        if not member:
+            continue
+        family_group_id = rem.get("family_group_id") or member.get("family_group_id")
+        if not family_group_id:
+            continue
+        slot_time = context["slot_time"]
+        local_date = context["local_date"]
+        if await _has_taken_log_after(
+            db, rem["id"], member_id, slot_time, local_date
+        ):
+            continue
+        claim_token = await _claim_occurrence_for_family(
+            db,
+            occurrence_id=occurrence_id,
+            reminder_id=rem["id"],
+            member_id=member_id,
+            slot_time=slot_time,
+            local_date=local_date,
+            now_utc=now_utc,
+        )
+        if not claim_token:
+            continue
+        member_name = member.get("name") or rem.get("member_name") or "your loved one"
+        title = f"💊 KINNSHIP ALERT: {member_name} hasn't taken {rem['title']}"
+        body = (
+            f"{member_name} hasn't confirmed their {rem['title']} after 15 min. "
+            "Please check on them."
+        )
+        alert_id = build_medication_escalation_alert_id(occurrence_id)
+        await _ensure_medication_escalation_alert(
+            db,
+            alert_id=alert_id,
+            owner_id=rem.get("owner_id") or member.get("owner_id"),
+            family_group_id=family_group_id,
+            member_id=member_id,
+            member_name=member_name,
+            title=title,
+            message=body,
+            now_utc=now_utc,
+            reminder_id=rem["id"],
+            medication_name=rem.get("title"),
+            dosage=rem.get("dosage"),
+            scheduled_time=slot_time,
+            local_date=local_date,
+            occurrence_id=occurrence_id,
+        )
+        won = await _try_record_stage(
+            db,
+            reminder_id=rem["id"],
+            family_group_id=family_group_id,
+            member_id=member_id,
+            slot_time=slot_time,
+            local_date=local_date,
+            stage=STAGE_FAMILY,
+            now_utc=now_utc,
+            claim_token=claim_token,
+        )
+        if not won or not await _mark_stage_attempted(
+            db,
+            reminder_id=rem["id"],
+            member_id=member_id,
+            slot_time=slot_time,
+            local_date=local_date,
+            stage=STAGE_FAMILY,
+            claim_token=claim_token,
+            now_utc=now_utc,
+        ):
+            continue
+        try:
+            await push_to_family_group(
+                family_group_id,
+                title,
+                body,
+                {
+                    "type": "medication",
+                    "subtype": "family_alert",
+                    "reminder_id": rem["id"],
+                    "member_id": member_id,
+                    "member_name": member_name,
+                    "stage": STAGE_FAMILY,
+                    "slot_time": slot_time,
+                    "local_date": local_date,
+                    "occurrence_id": occurrence_id,
+                    "alert_id": alert_id,
+                    "title": rem.get("title"),
+                    "dosage": rem.get("dosage"),
+                    "channelId": "meds_v2",
+                },
+                exclude_user_id=None,
+            )
+        except Exception as e:
+            logger.warning(f"recovered family_alert push failed: {e}")
+        await _finish_family_stage(
+            db,
+            reminder_id=rem["id"],
+            member_id=member_id,
+            slot_time=slot_time,
+            local_date=local_date,
+            claim_token=claim_token,
+            now_utc=now_utc,
+        )
+        await _finish_occurrence_family_claim(
+            db, occurrence_id, now_utc, claim_token
+        )
+        counters["fired_family_alert"] += 1
 
 
 # ---------- Core scan ----------
@@ -236,6 +821,13 @@ async def process_pending_notifications(
         {"category": {"$in": ["medication", "routine"]}}, {"_id": 0}
     )
     reminders = await cursor.to_list(20000)
+    await _recover_stale_family_deliveries(
+        db,
+        reminders,
+        push_to_family_group=push_to_family_group,
+        now_utc=now_utc,
+        counters=counters,
+    )
 
     for rem in reminders:
         times = rem.get("times") or []
@@ -280,6 +872,9 @@ async def process_pending_notifications(
             delta_min = resolved["delta_min"]
             slot_utc = resolved["slot_utc"]
             local_date = resolved["local_date"]
+            occurrence_id = build_occurrence_id(
+                rem["id"], member_id, slot_time, local_date
+            )
 
             # Skip future slots and stale slots.
             if delta_min < 0:
@@ -290,7 +885,9 @@ async def process_pending_notifications(
             # If the medication was logged as taken since the slot fired,
             # suppress all subsequent stages.
             if not is_routine:
-                already_taken = await _has_taken_log_after(db, rem["id"], slot_utc)
+                already_taken = await _has_taken_log_after(
+                    db, rem["id"], member_id, slot_time, local_date
+                )
                 if already_taken:
                     counters["skipped_taken"] += 1
                     continue
@@ -348,6 +945,8 @@ async def process_pending_notifications(
                                 "member_name": member_name,
                                 "stage": STAGE_DUE,
                                 "slot_time": slot_time,
+                                "local_date": local_date,
+                                "occurrence_id": occurrence_id,
                                 "title": rem.get("title"),
                                 "dosage": rem.get("dosage"),
                                 "categoryIdentifier": cat_id,
@@ -385,6 +984,47 @@ async def process_pending_notifications(
             # lands a bit late or the server briefly stalled.
             if (delta_min >= STAGE_OFFSETS_MIN[STAGE_FAMILY]
                     and delta_min <= STAGE_MAX_STALE_MIN[STAGE_FAMILY]):
+                # Claim the exact occurrence before reserving/sending the
+                # escalation.  The acknowledgment endpoint performs the
+                # competing conditional update, which closes the T+15 race.
+                claim_token = await _claim_occurrence_for_family(
+                    db,
+                    occurrence_id=occurrence_id,
+                    reminder_id=rem["id"],
+                    member_id=member_id,
+                    slot_time=slot_time,
+                    local_date=local_date,
+                    now_utc=now_utc,
+                )
+                if not claim_token:
+                    counters["skipped_taken"] += 1
+                    continue
+                title = f"💊 KINNSHIP ALERT: {member_name} hasn't taken {rem['title']}"
+                body = (
+                    f"{member_name} hasn't confirmed their {rem['title']} after 15 min. "
+                    "Please check on them."
+                )
+                alert_id = build_medication_escalation_alert_id(occurrence_id)
+                # Alert durability precedes stage reservation and push.  If
+                # the driver reports an ambiguous insert, this helper reads
+                # back the unique occurrence row and reuses its exact ID.
+                await _ensure_medication_escalation_alert(
+                    db,
+                    alert_id=alert_id,
+                    owner_id=rem.get("owner_id"),
+                    family_group_id=family_group_id,
+                    member_id=member_id,
+                    member_name=member_name,
+                    title=title,
+                    message=body,
+                    now_utc=now_utc,
+                    reminder_id=rem["id"],
+                    medication_name=rem.get("title"),
+                    dosage=rem.get("dosage"),
+                    scheduled_time=slot_time,
+                    local_date=local_date,
+                    occurrence_id=occurrence_id,
+                )
                 won = await _try_record_stage(
                     db,
                     reminder_id=rem["id"],
@@ -394,13 +1034,20 @@ async def process_pending_notifications(
                     local_date=local_date,
                     stage=STAGE_FAMILY,
                     now_utc=now_utc,
+                    claim_token=claim_token,
                 )
                 if won:
-                    title = f"💊 KINNSHIP ALERT: {member_name} hasn't taken {rem['title']}"
-                    body = (
-                        f"{member_name} hasn't confirmed their {rem['title']} after 15 min. "
-                        "Please check on them."
-                    )
+                    if not await _mark_stage_attempted(
+                        db,
+                        reminder_id=rem["id"],
+                        member_id=member_id,
+                        slot_time=slot_time,
+                        local_date=local_date,
+                        stage=STAGE_FAMILY,
+                        claim_token=claim_token,
+                        now_utc=now_utc,
+                    ):
+                        continue
                     try:
                         await push_to_family_group(
                             family_group_id,
@@ -414,6 +1061,9 @@ async def process_pending_notifications(
                                 "member_name": member_name,
                                 "stage": STAGE_FAMILY,
                                 "slot_time": slot_time,
+                                "local_date": local_date,
+                                "occurrence_id": occurrence_id,
+                                "alert_id": alert_id,
                                 "title": rem.get("title"),
                                 "dosage": rem.get("dosage"),
                                 "channelId": "meds_v2",
@@ -422,25 +1072,25 @@ async def process_pending_notifications(
                         )
                     except Exception as e:
                         logger.warning(f"family_alert push failed: {e}")
-                    await _log_alert(
-                        db,
-                        owner_id=rem.get("owner_id"),
-                        family_group_id=family_group_id,
-                        member_id=member_id,
-                        member_name=member_name,
-                        a_type="medication_escalation",
-                        severity="critical",
-                        title=title,
-                        message=body,
-                        now_utc=now_utc,
-                        reminder_id=rem["id"],
-                        medication_name=rem.get("title"),
-                        dosage=rem.get("dosage"),
-                        scheduled_time=slot_time,
-                        missed_at=now_utc,
-                        missed_local_date=local_date,
-                    )
                     counters["fired_family_alert"] += 1
+                    await _finish_family_stage(
+                        db,
+                        reminder_id=rem["id"],
+                        member_id=member_id,
+                        slot_time=slot_time,
+                        local_date=local_date,
+                        claim_token=claim_token,
+                        now_utc=now_utc,
+                    )
+                    await _finish_occurrence_family_claim(
+                        db, occurrence_id, now_utc, claim_token
+                    )
+                else:
+                    # Another worker owns the unique stage row and is
+                    # responsible for the already-durable alert/push.
+                    await _finish_occurrence_family_claim(
+                        db, occurrence_id, now_utc, claim_token
+                    )
 
     return counters
 
