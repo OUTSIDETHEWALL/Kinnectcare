@@ -3,11 +3,14 @@
  *
  * Provides a periodic WorkManager (Android) / BGTaskScheduler (iOS) background
  * task that targets a 30-minute cadence and PATCHes /battery regardless of
- * whether the device has moved or the Transistor SDK is active.
+ * whether the device has moved or the Transistor SDK heartbeat is firing.
+ * On Android, the same existing WorkManager wake also requests one bounded,
+ * persisted Transistor position so stationary devices retain a low-frequency
+ * server-visible location/presence path when OEMs defer native heartbeats.
  *
  * Architecture:
  *   Movement → BackgroundGeolocation → battery PATCH   (existing path, unchanged)
- *   Timer    → BackgroundFetch task  → battery PATCH   (this file — new path)
+ *   Timer    → BackgroundFetch task  → battery PATCH + one persisted position
  *
  * Both paths call the same PATCH /members/{id}/battery endpoint.  The backend
  * write-guard (incoming_ts > stored_ts) ensures the most recent reading wins.
@@ -68,28 +71,39 @@ export interface BatteryTaskLogEntry {
     | 'background_battery_ok'
     | 'background_battery_skipped'
     | 'background_battery_error'
-    | 'background_battery_timeout';
+    | 'background_battery_timeout'
+    | 'background_location_persisted'
+    | 'background_location_skipped'
+    | 'background_location_error';
   detail?: Record<string, unknown>;
 }
 
 // ── Log helpers ───────────────────────────────────────────────────────────────
 
-async function appendLog(
+let logWriteQueue: Promise<void> = Promise.resolve();
+
+function appendLog(
   event: BatteryTaskLogEntry['event'],
   detail?: Record<string, unknown>,
+  shouldWrite: () => boolean = () => true,
 ): Promise<void> {
-  try {
-    const raw = await AsyncStorage.getItem(BATTERY_TASK_LOG_KEY);
-    const log: BatteryTaskLogEntry[] = raw ? (JSON.parse(raw) as BatteryTaskLogEntry[]) : [];
-    const seq = (log[log.length - 1]?.seq ?? 0) + 1;
-    log.push({ seq, at: Date.now(), event, detail });
-    if (log.length > BATTERY_TASK_LOG_MAX) {
-      log.splice(0, log.length - BATTERY_TASK_LOG_MAX);
+  const write = logWriteQueue.then(async () => {
+    if (!shouldWrite()) return;
+    try {
+      const raw = await AsyncStorage.getItem(BATTERY_TASK_LOG_KEY);
+      const log: BatteryTaskLogEntry[] = raw ? (JSON.parse(raw) as BatteryTaskLogEntry[]) : [];
+      const seq = (log[log.length - 1]?.seq ?? 0) + 1;
+      log.push({ seq, at: Date.now(), event, detail });
+      if (log.length > BATTERY_TASK_LOG_MAX) {
+        log.splice(0, log.length - BATTERY_TASK_LOG_MAX);
+      }
+      await AsyncStorage.setItem(BATTERY_TASK_LOG_KEY, JSON.stringify(log));
+    } catch {
+      // Non-fatal — never block the background task for logging failures.
     }
-    await AsyncStorage.setItem(BATTERY_TASK_LOG_KEY, JSON.stringify(log));
-  } catch {
-    // Non-fatal — never block the background task for logging failures.
-  }
+  });
+  logWriteQueue = write.catch(() => {});
+  return write;
 }
 
 /** Return all stored battery task log entries, oldest-first. */
@@ -113,16 +127,164 @@ export async function clearBatteryTaskLog(): Promise<void> {
 
 // ── Core task logic ───────────────────────────────────────────────────────────
 
+type TaskExecution = {
+  taskId: string;
+  generation: number;
+  finished: boolean;
+  timedOut: boolean;
+};
+
+let nextTaskGeneration = 0;
+const activeTaskExecutions = new Map<string, TaskExecution>();
+
+function beginTask(taskId: string): TaskExecution {
+  const execution: TaskExecution = {
+    taskId,
+    generation: ++nextTaskGeneration,
+    finished: false,
+    timedOut: false,
+  };
+  activeTaskExecutions.set(taskId, execution);
+  return execution;
+}
+
+function isActiveExecution(execution: TaskExecution): boolean {
+  return activeTaskExecutions.get(execution.taskId) === execution
+    && !execution.finished
+    && !execution.timedOut;
+}
+
+function appendExecutionLog(
+  execution: TaskExecution,
+  event: BatteryTaskLogEntry['event'],
+  detail?: Record<string, unknown>,
+): Promise<void> {
+  return appendLog(event, detail, () => isActiveExecution(execution));
+}
+
+function finishExecutionOnce(
+  backgroundFetch: BackgroundFetchModule,
+  execution: TaskExecution,
+): void {
+  if (execution.finished) return;
+  execution.finished = true;
+  if (activeTaskExecutions.get(execution.taskId) === execution) {
+    backgroundFetch.finish(execution.taskId);
+  }
+}
+
 /**
  * Read battery from expo-battery, obtain JWT from the Transistor SDK's
- * persisted SQLite state, and PATCH /battery.  Called both from the
- * foreground/background handler and the headless (app-terminated) handler.
+ * persisted SQLite state, and PATCH /battery. On Android, also request one
+ * persisted position through the existing WorkManager wake. Called both from
+ * the foreground/background handler and the headless (app-terminated) handler.
  */
 async function executeBatteryRefresh(taskId: string): Promise<void> {
   const backgroundFetch = getBackgroundFetch();
   if (!backgroundFetch) return;
 
-  await appendLog('background_battery_task_start', { taskId });
+  const execution = beginTask(taskId);
+  await appendExecutionLog(execution, 'background_battery_task_start', {
+    taskId,
+    generation: execution.generation,
+  });
+
+  type BackgroundGeolocationModule = {
+    getState: () => Promise<{
+      enabled?: boolean;
+      url?: string;
+      authorization?: { accessToken?: string };
+    }>;
+    getCurrentPosition: (options: {
+      samples: number;
+      persist: boolean;
+      timeout: number;
+      extras: { source: string };
+    }) => Promise<{ timestamp?: string; coords?: { accuracy?: number } }>;
+  };
+
+  let BGL: BackgroundGeolocationModule | null = null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    BGL = require('react-native-background-geolocation').default as BackgroundGeolocationModule;
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e.message : String(e);
+    await appendExecutionLog(execution, 'background_battery_error', {
+      error: `background-geolocation-unavailable:${err}`,
+      taskId,
+      generation: execution.generation,
+    });
+    if (Platform.OS === 'android') {
+      await appendExecutionLog(execution, 'background_location_skipped', {
+        reason: 'background_geolocation_unavailable',
+        taskId,
+        generation: execution.generation,
+      });
+    }
+    finishExecutionOnce(backgroundFetch, execution);
+    return;
+  }
+
+  let sdkState: Awaited<ReturnType<BackgroundGeolocationModule['getState']>> | null = null;
+  try {
+    sdkState = await BGL.getState();
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e.message : String(e);
+    await appendExecutionLog(execution, 'background_battery_error', {
+      error: `background-geolocation-state:${err}`,
+      taskId,
+      generation: execution.generation,
+    });
+  }
+
+  type LocationOutcome = {
+    event: 'background_location_persisted' | 'background_location_skipped' | 'background_location_error';
+    detail: Record<string, unknown>;
+  };
+
+  // Start the bounded position request alongside the battery network work, but
+  // return its outcome instead of logging concurrently. AsyncStorage logging is
+  // read-modify-write and must remain serialized to avoid losing either result.
+  const stationaryLocationRefresh: Promise<LocationOutcome | null> = Platform.OS !== 'android'
+    ? Promise.resolve(null)
+    : sdkState?.enabled !== true
+      ? Promise.resolve({
+          event: 'background_location_skipped',
+          detail: {
+            taskId,
+            generation: execution.generation,
+            reason: sdkState ? 'tracking_disabled' : 'state_unavailable',
+          },
+        })
+      : (async () => {
+          try {
+            const position = await BGL.getCurrentPosition({
+              samples: 1,
+              persist: true,
+              timeout: 20,
+              extras: { source: 'workmanager-stationary-refresh' },
+            });
+            return {
+              event: 'background_location_persisted',
+              detail: {
+                taskId,
+                generation: execution.generation,
+                capturedAt: position?.timestamp ?? null,
+                accuracy: typeof position?.coords?.accuracy === 'number'
+                  ? Math.round(position.coords.accuracy)
+                  : null,
+                persisted: true,
+                uploadConfirmation: 'awaiting-native-http',
+              },
+            };
+          } catch (e: unknown) {
+            const err = e instanceof Error ? e.message : String(e);
+            return {
+              event: 'background_location_error',
+              detail: { taskId, generation: execution.generation, error: err },
+            };
+          }
+        })();
 
   try {
     // Step 1 — Read battery state via expo-battery one-shot APIs.
@@ -136,85 +298,97 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
       typeof rawLevel === 'number' && isFinite(rawLevel) && rawLevel >= 0;
 
     if (!validLevel) {
-      await appendLog('background_battery_skipped', {
+      await appendExecutionLog(execution, 'background_battery_skipped', {
         reason: 'invalid_battery_level',
         rawLevel,
+        taskId,
+        generation: execution.generation,
       });
-      backgroundFetch.finish(taskId);
-      return;
+    } else {
+      const level = rawLevel;
+      const isCharging: boolean =
+        rawState === BatteryModule.BatteryState.CHARGING ||
+        rawState === BatteryModule.BatteryState.FULL;
+
+      // Step 2 — Obtain member ID, JWT, and API base URL from the Transistor
+      // SDK's persisted SQLite state. No shared main-runtime memory is needed.
+      const locationUrl: string = sdkState?.url ?? '';
+      const jwt: string = sdkState?.authorization?.accessToken ?? '';
+      const memberMatch = locationUrl.match(/\/members\/([^/]+)\/location/);
+      const memberId = memberMatch?.[1] ?? '';
+      const baseUrl = locationUrl.split('/api/members/')[0] ?? '';
+
+      if (!memberId || !jwt || !baseUrl) {
+        await appendExecutionLog(execution, 'background_battery_skipped', {
+          reason: 'missing_member_id_or_jwt',
+          hasMemberId: !!memberId,
+          hasJwt: !!jwt,
+          hasBaseUrl: !!baseUrl,
+          taskId,
+          generation: execution.generation,
+        });
+      } else {
+        // Step 3 — PATCH /api/members/{id}/battery.
+        const ts = new Date().toISOString();
+        const battUrl = `${baseUrl}/api/members/${memberId}/battery`;
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+        try {
+          const resp = await Promise.race([
+            fetch(battUrl, {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${jwt}`,
+                'X-Kinnship-Presence-Source': 'battery-task',
+              },
+              body: JSON.stringify({
+                battery_level: level,
+                is_charging: isCharging,
+                battery_updated_at: ts,
+              }),
+            }),
+            new Promise<never>((_, rej) => {
+              timeoutHandle = setTimeout(
+                () => rej(new Error('background-battery-patch-timeout')),
+                8_000,
+              );
+            }),
+          ]);
+
+          if (resp.status < 200 || resp.status >= 300) {
+            throw new Error(`background-battery-http-${resp.status}`);
+          }
+
+          await appendExecutionLog(execution, 'background_battery_ok', {
+            levelPct: Math.round(level * 100),
+            isCharging,
+            httpStatus: resp.status,
+            taskId,
+            generation: execution.generation,
+          });
+        } finally {
+          if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+        }
+      }
     }
-
-    const level = rawLevel;
-    const isCharging: boolean =
-      rawState === BatteryModule.BatteryState.CHARGING ||
-      rawState === BatteryModule.BatteryState.FULL;
-
-    // Step 2 — Obtain member ID, JWT, and API base URL from the Transistor
-    // SDK's persisted SQLite state.  No shared memory with the main JS runtime
-    // is needed — the SDK stores this natively and BackgroundGeolocation.getState()
-    // is callable from any JS context including a terminated-app headless task.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const BGL = require('react-native-background-geolocation').default as {
-      getState: () => Promise<{ url?: string; authorization?: { accessToken?: string } }>;
-    };
-
-    const sdkState = await BGL.getState();
-    const locationUrl: string = sdkState?.url ?? '';
-    const jwt: string = sdkState?.authorization?.accessToken ?? '';
-    const memberMatch = locationUrl.match(/\/members\/([^/]+)\/location/);
-    const memberId = memberMatch?.[1] ?? '';
-    const baseUrl = locationUrl.split('/api/members/')[0] ?? '';
-
-    if (!memberId || !jwt || !baseUrl) {
-      await appendLog('background_battery_skipped', {
-        reason: 'missing_member_id_or_jwt',
-        hasMemberId: !!memberId,
-        hasJwt: !!jwt,
-        hasBaseUrl: !!baseUrl,
-      });
-      backgroundFetch.finish(taskId);
-      return;
-    }
-
-    // Step 3 — PATCH /api/members/{id}/battery.
-    const ts = new Date().toISOString();
-    const battUrl = `${baseUrl}/api/members/${memberId}/battery`;
-
-    const resp = await Promise.race([
-      fetch(battUrl, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${jwt}`,
-          'X-Kinnship-Presence-Source': 'battery-task',
-        },
-        body: JSON.stringify({
-          battery_level: level,
-          is_charging: isCharging,
-          battery_updated_at: ts,
-        }),
-      }),
-      // Safety timeout — OS gives us limited CPU budget; don't burn it waiting.
-      new Promise<never>((_, rej) =>
-        setTimeout(() => rej(new Error('background-battery-patch-timeout')), 10_000),
-      ),
-    ]);
-
-    if (resp.status < 200 || resp.status >= 300) {
-      throw new Error(`background-battery-http-${resp.status}`);
-    }
-
-    await appendLog('background_battery_ok', {
-      levelPct: Math.round(level * 100),
-      isCharging,
-      httpStatus: resp.status,
-    });
   } catch (e: unknown) {
     const err = e instanceof Error ? e.message : String(e);
-    await appendLog('background_battery_error', { error: err });
+    await appendExecutionLog(execution, 'background_battery_error', {
+      error: err,
+      taskId,
+      generation: execution.generation,
+    });
   }
 
-  backgroundFetch.finish(taskId);
+  // Persisted means the SDK accepted the fix into its native queue. Actual
+  // server acceptance remains proven by the existing native HTTP callback.
+  const locationOutcome = await stationaryLocationRefresh;
+  if (locationOutcome) {
+    await appendExecutionLog(execution, locationOutcome.event, locationOutcome.detail);
+  }
+
+  finishExecutionOnce(backgroundFetch, execution);
 }
 
 // ── Headless task registration (Android) ──────────────────────────────────────
@@ -271,8 +445,14 @@ export async function configureBatteryTask(
       },
       // Timeout handler — OS is revoking the CPU budget
       async (taskId: string) => {
+        const execution = activeTaskExecutions.get(taskId);
+        if (execution && !execution.finished) {
+          execution.timedOut = true;
+          finishExecutionOnce(backgroundFetch, execution);
+        } else if (!execution) {
+          backgroundFetch.finish(taskId);
+        }
         await appendLog('background_battery_timeout', { taskId });
-        backgroundFetch.finish(taskId);
       },
     );
 

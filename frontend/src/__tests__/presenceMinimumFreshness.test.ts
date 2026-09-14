@@ -99,6 +99,10 @@ describe('minimum device-presence freshness', () => {
     const mockStorage = storageMock();
     const mockFinish = jest.fn();
     const fetchMock = jest.fn().mockResolvedValue({ ok: false, status: 401 });
+    const mockGetCurrentPosition = jest.fn().mockResolvedValue({
+      timestamp: '2026-09-14T19:14:13.577Z',
+      coords: { accuracy: 10 },
+    });
     (global as any).fetch = fetchMock;
 
     jest.isolateModules(() => {
@@ -112,9 +116,11 @@ describe('minimum device-presence freshness', () => {
       jest.mock('react-native-background-geolocation', () => ({
         default: {
           getState: jest.fn().mockResolvedValue({
+            enabled: true,
             url: 'https://api.example/api/members/member-1/location',
             authorization: { accessToken: 'test-jwt' },
           }),
+          getCurrentPosition: mockGetCurrentPosition,
         },
       }));
       jest.mock('react-native-background-fetch', () => ({
@@ -143,9 +149,245 @@ describe('minimum device-presence freshness', () => {
     expect(log).toEqual(expect.arrayContaining([
       expect.objectContaining({
         event: 'background_battery_error',
-        detail: { error: 'background-battery-http-401' },
+        detail: expect.objectContaining({ error: 'background-battery-http-401' }),
+      }),
+      expect.objectContaining({
+        event: 'background_location_persisted',
+        detail: expect.objectContaining({ persisted: true }),
       }),
     ]));
+    expect(mockGetCurrentPosition).toHaveBeenCalledWith({
+      samples: 1,
+      persist: true,
+      timeout: 20,
+      extras: { source: 'workmanager-stationary-refresh' },
+    });
     expect(mockFinish).toHaveBeenCalledWith('presence-refresh');
+  });
+
+  it('still requests a persisted stationary position when battery auth state is missing', async () => {
+    let mockConfiguredHandler: ((taskId: string) => Promise<void>) | undefined;
+    const mockStorage = storageMock();
+    const mockFinish = jest.fn();
+    const mockGetCurrentPosition = jest.fn().mockResolvedValue({
+      timestamp: '2026-09-14T19:14:13.577Z',
+      coords: { accuracy: 18.6 },
+    });
+
+    jest.isolateModules(() => {
+      jest.mock('react-native', () => ({ Platform: { OS: 'android' } }));
+      jest.mock('@react-native-async-storage/async-storage', () => mockStorage.api);
+      jest.mock('expo-battery', () => ({
+        BatteryState: { CHARGING: 2, FULL: 5 },
+        getBatteryLevelAsync: jest.fn().mockResolvedValue(0.6),
+        getBatteryStateAsync: jest.fn().mockResolvedValue(1),
+      }));
+      jest.mock('react-native-background-geolocation', () => ({
+        default: {
+          getState: jest.fn().mockResolvedValue({
+            enabled: true,
+            url: '',
+            authorization: {},
+          }),
+          getCurrentPosition: mockGetCurrentPosition,
+        },
+      }));
+      jest.mock('react-native-background-fetch', () => ({
+        default: {
+          NETWORK_TYPE_ANY: 0,
+          registerHeadlessTask: jest.fn(),
+          finish: mockFinish,
+          configure: jest.fn((_options, handler) => {
+            mockConfiguredHandler = handler;
+            return Promise.resolve(2);
+          }),
+        },
+      }));
+
+      const task = require('../batteryTask');
+      void task.configureBatteryTask();
+    });
+
+    await Promise.resolve();
+    await mockConfiguredHandler!('stationary-refresh');
+
+    expect(mockGetCurrentPosition).toHaveBeenCalledWith(expect.objectContaining({
+      persist: true,
+      extras: { source: 'workmanager-stationary-refresh' },
+    }));
+    const log = JSON.parse(mockStorage.data.get(BATTERY_LOG_KEY) ?? '[]');
+    expect(log).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'background_battery_skipped',
+        detail: expect.objectContaining({ reason: 'missing_member_id_or_jwt' }),
+      }),
+      expect.objectContaining({
+        event: 'background_location_persisted',
+        detail: expect.objectContaining({ accuracy: 19, persisted: true }),
+      }),
+    ]));
+    expect(mockFinish).toHaveBeenCalledTimes(1);
+    expect(mockFinish).toHaveBeenCalledWith('stationary-refresh');
+  });
+
+  it('does not request a position when location tracking is disabled', async () => {
+    let mockConfiguredHandler: ((taskId: string) => Promise<void>) | undefined;
+    const mockStorage = storageMock();
+    const mockFinish = jest.fn();
+    const mockGetCurrentPosition = jest.fn();
+    (global as any).fetch = jest.fn().mockResolvedValue({ status: 200 });
+
+    jest.isolateModules(() => {
+      jest.mock('react-native', () => ({ Platform: { OS: 'android' } }));
+      jest.mock('@react-native-async-storage/async-storage', () => mockStorage.api);
+      jest.mock('expo-battery', () => ({
+        BatteryState: { CHARGING: 2, FULL: 5 },
+        getBatteryLevelAsync: jest.fn().mockResolvedValue(0.6),
+        getBatteryStateAsync: jest.fn().mockResolvedValue(1),
+      }));
+      jest.mock('react-native-background-geolocation', () => ({
+        default: {
+          getState: jest.fn().mockResolvedValue({
+            enabled: false,
+            url: 'https://api.example/api/members/member-1/location',
+            authorization: { accessToken: 'test-jwt' },
+          }),
+          getCurrentPosition: mockGetCurrentPosition,
+        },
+      }));
+      jest.mock('react-native-background-fetch', () => ({
+        default: {
+          NETWORK_TYPE_ANY: 0,
+          registerHeadlessTask: jest.fn(),
+          finish: mockFinish,
+          configure: jest.fn((_options, handler) => {
+            mockConfiguredHandler = handler;
+            return Promise.resolve(2);
+          }),
+        },
+      }));
+
+      const task = require('../batteryTask');
+      void task.configureBatteryTask();
+    });
+
+    await Promise.resolve();
+    await mockConfiguredHandler!('tracking-disabled');
+
+    expect(mockGetCurrentPosition).not.toHaveBeenCalled();
+    const log = JSON.parse(mockStorage.data.get(BATTERY_LOG_KEY) ?? '[]');
+    expect(log).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'background_location_skipped',
+        detail: expect.objectContaining({
+          taskId: 'tracking-disabled',
+          reason: 'tracking_disabled',
+        }),
+      }),
+    ]));
+    expect(mockFinish).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a timed-out execution from finishing or logging into the next run with the same task ID', async () => {
+    let mockConfiguredHandler: ((taskId: string) => Promise<void>) | undefined;
+    let mockTimeoutHandler: ((taskId: string) => Promise<void>) | undefined;
+    const locationResolvers: ((value: {
+      timestamp: string;
+      coords: { accuracy: number };
+    }) => void)[] = [];
+    const mockStorage = storageMock();
+    const mockFinish = jest.fn();
+    const mockGetCurrentPosition = jest.fn(() => new Promise((resolve) => {
+      locationResolvers.push(resolve);
+    }));
+    (global as any).fetch = jest.fn().mockResolvedValue({ status: 200 });
+
+    jest.isolateModules(() => {
+      jest.mock('react-native', () => ({ Platform: { OS: 'android' } }));
+      jest.mock('@react-native-async-storage/async-storage', () => mockStorage.api);
+      jest.mock('expo-battery', () => ({
+        BatteryState: { CHARGING: 2, FULL: 5 },
+        getBatteryLevelAsync: jest.fn().mockResolvedValue(0.6),
+        getBatteryStateAsync: jest.fn().mockResolvedValue(1),
+      }));
+      jest.mock('react-native-background-geolocation', () => ({
+        default: {
+          getState: jest.fn().mockResolvedValue({
+            enabled: true,
+            url: 'https://api.example/api/members/member-1/location',
+            authorization: { accessToken: 'test-jwt' },
+          }),
+          getCurrentPosition: mockGetCurrentPosition,
+        },
+      }));
+      jest.mock('react-native-background-fetch', () => ({
+        default: {
+          NETWORK_TYPE_ANY: 0,
+          registerHeadlessTask: jest.fn(),
+          finish: mockFinish,
+          configure: jest.fn((_options, handler, timeoutHandler) => {
+            mockConfiguredHandler = handler;
+            mockTimeoutHandler = timeoutHandler;
+            return Promise.resolve(2);
+          }),
+        },
+      }));
+
+      const task = require('../batteryTask');
+      void task.configureBatteryTask();
+    });
+
+    await Promise.resolve();
+    const firstExecution = mockConfiguredHandler!('reused-task-id');
+    for (let i = 0; i < 5 && !mockGetCurrentPosition.mock.calls.length; i += 1) {
+      await Promise.resolve();
+    }
+    await mockTimeoutHandler!('reused-task-id');
+    expect(mockFinish).toHaveBeenCalledTimes(1);
+
+    const secondExecution = mockConfiguredHandler!('reused-task-id');
+    for (let i = 0; i < 5 && mockGetCurrentPosition.mock.calls.length < 2; i += 1) {
+      await Promise.resolve();
+    }
+
+    locationResolvers[0]({
+      timestamp: '2026-09-14T19:14:13.000Z',
+      coords: { accuracy: 11 },
+    });
+    await firstExecution;
+
+    expect(mockFinish).toHaveBeenCalledTimes(1);
+
+    locationResolvers[1]({
+      timestamp: '2026-09-14T19:14:45.000Z',
+      coords: { accuracy: 9 },
+    });
+    await secondExecution;
+
+    expect(mockFinish).toHaveBeenCalledTimes(2);
+    expect(mockFinish).toHaveBeenNthCalledWith(1, 'reused-task-id');
+    expect(mockFinish).toHaveBeenNthCalledWith(2, 'reused-task-id');
+    const log = JSON.parse(mockStorage.data.get(BATTERY_LOG_KEY) ?? '[]');
+    expect(log).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'background_battery_timeout',
+        detail: { taskId: 'reused-task-id' },
+      }),
+      expect.objectContaining({
+        event: 'background_location_persisted',
+        detail: expect.objectContaining({
+          taskId: 'reused-task-id',
+          capturedAt: '2026-09-14T19:14:45.000Z',
+        }),
+      }),
+    ]));
+    expect(log).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'background_location_persisted',
+        detail: expect.objectContaining({
+          capturedAt: '2026-09-14T19:14:13.000Z',
+        }),
+      }),
+    ]));
   });
 });
