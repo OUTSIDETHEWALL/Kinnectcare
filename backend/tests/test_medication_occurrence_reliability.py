@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import med_scheduler  # noqa: E402
 import server  # noqa: E402
+from expo_push import _collapse_id  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 from pymongo.errors import DuplicateKeyError  # noqa: E402
 
@@ -79,6 +80,13 @@ class Collection:
             for old in self.rows
         ):
             raise DuplicateKeyError("duplicate occurrence")
+        if any(
+            row.get("terminal_occurrence_key")
+            and old.get("terminal_occurrence_key")
+            == row.get("terminal_occurrence_key")
+            for old in self.rows
+        ):
+            raise DuplicateKeyError("duplicate terminal occurrence")
         self.rows.append(dict(row))
         return SimpleNamespace(inserted_id=row.get("id"))
 
@@ -550,6 +558,43 @@ def test_medication_unique_indexes_are_startup_prerequisites():
     asyncio.run(scenario())
 
 
+def test_terminal_index_setup_ignores_legacy_duplicate_missed_rows():
+    class IndexRecorder(Collection):
+        def __init__(self, rows=()):
+            super().__init__(rows)
+            self.indexes = []
+
+        async def create_index(self, keys, **kwargs):
+            self.indexes.append((keys, kwargs))
+            return kwargs.get("name")
+
+    class IndexDB:
+        def __init__(self):
+            self.med_notifications = IndexRecorder()
+            self.medication_logs = IndexRecorder([
+                {"occurrence_id": _occurrence(), "status": "missed"},
+                {"occurrence_id": _occurrence(), "status": "missed"},
+            ])
+            self.medication_occurrences = IndexRecorder()
+            self.alerts = IndexRecorder()
+
+    async def scenario():
+        db = IndexDB()
+        await med_scheduler.ensure_indexes(db)
+        names = [kwargs["name"] for _, kwargs in db.medication_logs.indexes]
+        assert names == [
+            "uniq_taken_medication_occurrence",
+            "uniq_medication_terminal_occurrence",
+        ]
+        terminal = db.medication_logs.indexes[1]
+        assert terminal[0] == [("terminal_occurrence_key", 1)]
+        assert terminal[1]["partialFilterExpression"] == {
+            "terminal_occurrence_key": {"$exists": True}
+        }
+
+    asyncio.run(scenario())
+
+
 def test_startup_resets_readiness_and_does_not_start_without_indexes(monkeypatch):
     async def scenario():
         async def fail_indexes(_db):
@@ -798,3 +843,453 @@ def test_ignored_occurrence_still_escalates_once():
         )
 
     asyncio.run(scenario())
+
+
+def test_repeated_concurrent_t0_delivery_records_one_self_stage():
+    async def scenario():
+        db = DB([{
+            "id": "r1", "owner_id": "owner", "family_group_id": "g1",
+            "member_id": "m1", "member_name": "Joyce", "category": "medication",
+            "title": "Aspirin", "times": [{"time": "14:00"}],
+        }])
+        db.members.rows.append({
+            "id": "m1", "owner_id": "owner", "family_group_id": "g1",
+            "user_id": "senior", "name": "Joyce",
+        })
+        db.users.rows.append({"id": "owner", "timezone": "UTC"})
+        pushes = []
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def self_push(*args):
+            pushes.append(args)
+            if len(pushes) == 1:
+                entered.set()
+                await release.wait()
+            return 1
+
+        async def family_push(*args, **kwargs):
+            return 1
+
+        now = datetime(2026, 9, 12, 14, 0, tzinfo=timezone.utc)
+        first = asyncio.create_task(med_scheduler.process_pending_notifications(
+            db,
+            push_to_user=self_push,
+            push_to_family_group=family_push,
+            now_utc=now,
+        ))
+        await entered.wait()
+        competitors = [
+            asyncio.create_task(med_scheduler.process_pending_notifications(
+                db,
+                push_to_user=self_push,
+                push_to_family_group=family_push,
+                now_utc=now,
+            ))
+            for _ in range(2)
+        ]
+        await asyncio.gather(*competitors)
+        release.set()
+        await first
+        assert len(pushes) == 1
+        assert len([
+            row for row in db.med_notifications.rows
+            if row["stage"] == med_scheduler.STAGE_DUE
+        ]) == 1
+
+    asyncio.run(scenario())
+
+
+def test_repeated_concurrent_t15_delivery_records_one_family_push():
+    async def scenario():
+        db = DB([{
+            "id": "r1", "owner_id": "owner", "family_group_id": "g1",
+            "member_id": "m1", "member_name": "Joyce", "category": "medication",
+            "title": "Aspirin", "times": [{"time": "14:00"}],
+        }])
+        db.members.rows.append({
+            "id": "m1", "owner_id": "owner", "family_group_id": "g1",
+            "user_id": "senior", "name": "Joyce",
+        })
+        db.users.rows.append({"id": "owner", "timezone": "UTC"})
+        pushes = []
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def self_push(*args):
+            return 1
+
+        async def family_push(*args, **kwargs):
+            pushes.append(args)
+            if len(pushes) == 1:
+                entered.set()
+                await release.wait()
+            return 1
+
+        now = datetime(2026, 9, 12, 14, 15, tzinfo=timezone.utc)
+        first = asyncio.create_task(med_scheduler.process_pending_notifications(
+            db,
+            push_to_user=self_push,
+            push_to_family_group=family_push,
+            now_utc=now,
+        ))
+        await entered.wait()
+        competitors = [
+            asyncio.create_task(med_scheduler.process_pending_notifications(
+                db,
+                push_to_user=self_push,
+                push_to_family_group=family_push,
+                now_utc=now,
+            ))
+            for _ in range(2)
+        ]
+        await asyncio.gather(*competitors)
+        release.set()
+        await first
+        assert len(pushes) == 1
+        assert len([
+            row for row in db.alerts.rows
+            if row["type"] == "medication_escalation"
+        ]) == 1
+
+    asyncio.run(scenario())
+
+
+def test_exact_manual_miss_retries_create_one_escalation_and_push(monkeypatch):
+    async def scenario():
+        db = DB()
+        db.reminders.rows.append({
+            "id": "r1", "owner_id": "owner", "family_group_id": "g1",
+            "member_id": "m1", "member_name": "Joyce", "category": "medication",
+            "title": "Aspirin", "dosage": "81 mg",
+            "times": [{"time": "14:00"}],
+        })
+        db.members.rows.append({
+            "id": "m1", "owner_id": "owner", "family_group_id": "g1",
+            "user_id": "senior", "name": "Joyce",
+        })
+        monkeypatch.setattr(server, "db", db)
+        monkeypatch.setattr(server, "_med_scheduler_ready", True)
+        pushes = []
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def family_push(*args, **kwargs):
+            pushes.append(args)
+            if len(pushes) == 1:
+                entered.set()
+                await release.wait()
+            return 1
+
+        monkeypatch.setattr(server, "push_to_family_group", family_push)
+        body = server.ReminderMark(
+            status="missed",
+            slot_time="14:00",
+            local_date="2026-09-12",
+            occurrence_id=_occurrence(),
+        )
+        current = {"id": "senior", "family_group_id": "g1", "timezone": "UTC"}
+        first = asyncio.create_task(server.mark_reminder("r1", body, current))
+        await entered.wait()
+        competitors = [
+            asyncio.create_task(server.mark_reminder("r1", body, current))
+            for _ in range(2)
+        ]
+        await asyncio.gather(*competitors)
+        release.set()
+        await first
+        alerts = [
+            row for row in db.alerts.rows
+            if row["type"] == "medication_escalation"
+        ]
+        assert len(alerts) == 1
+        assert len(pushes) == 1
+        assert alerts[0]["occurrence_id"] == _occurrence()
+        assert alerts[0]["medication_name"] == "Aspirin"
+        assert alerts[0]["dosage"] == "81 mg"
+        assert alerts[0]["scheduled_time"] == "14:00"
+        assert alerts[0]["missed_local_date"] == "2026-09-12"
+        assert len([
+            row for row in db.medication_logs.rows
+            if row.get("status") == "missed"
+        ]) == 1
+        assert len([
+            row for row in db.med_notifications.rows
+            if row.get("stage") == med_scheduler.STAGE_FAMILY
+        ]) == 1
+        reminder = await db.reminders.find_one({"id": "r1"})
+        assert reminder["status"] == "missed"
+        assert reminder["taken"] is False
+
+    asyncio.run(scenario())
+
+
+def test_acknowledged_then_manual_missed_is_rejected_without_mutation(monkeypatch):
+    async def scenario():
+        db = DB()
+        db.reminders.rows.append({
+            "id": "r1", "owner_id": "owner", "family_group_id": "g1",
+            "member_id": "m1", "member_name": "Joyce", "category": "medication",
+            "title": "Aspirin", "times": [{"time": "14:00"}],
+            "status": "pending", "taken": False,
+        })
+        db.members.rows.append({
+            "id": "m1", "owner_id": "owner", "family_group_id": "g1",
+            "user_id": "senior", "name": "Joyce",
+        })
+        monkeypatch.setattr(server, "db", db)
+        monkeypatch.setattr(server, "_med_scheduler_ready", True)
+        pushes = []
+
+        async def family_push(*args, **kwargs):
+            pushes.append(args)
+            return 1
+
+        monkeypatch.setattr(server, "push_to_family_group", family_push)
+        current = {"id": "senior", "family_group_id": "g1", "timezone": "UTC"}
+        taken = server.ReminderMark(
+            status="taken", slot_time="14:00", local_date="2026-09-12",
+            occurrence_id=_occurrence(),
+        )
+        missed = server.ReminderMark(
+            status="missed", slot_time="14:00", local_date="2026-09-12",
+            occurrence_id=_occurrence(),
+        )
+        await server.mark_reminder("r1", taken, current)
+        with pytest.raises(HTTPException) as rejected:
+            await server.mark_reminder("r1", missed, current)
+        assert rejected.value.status_code == 409
+        assert "already acknowledged" in rejected.value.detail
+        reminder = await db.reminders.find_one({"id": "r1"})
+        assert reminder["status"] == "taken"
+        assert reminder["taken"] is True
+        assert [row["status"] for row in db.medication_logs.rows] == ["taken"]
+        assert db.alerts.rows == []
+        assert pushes == []
+
+    asyncio.run(scenario())
+
+
+def test_taken_log_blocks_manual_miss_even_without_occurrence_state(monkeypatch):
+    async def scenario():
+        db = DB()
+        db.reminders.rows.append({
+            "id": "r1", "owner_id": "owner", "family_group_id": "g1",
+            "member_id": "m1", "member_name": "Joyce", "category": "medication",
+            "title": "Aspirin", "times": [{"time": "14:00"}],
+            "status": "pending", "taken": False,
+        })
+        db.members.rows.append({
+            "id": "m1", "owner_id": "owner", "family_group_id": "g1",
+            "user_id": "senior", "name": "Joyce",
+        })
+        db.medication_logs.rows.append({
+            "occurrence_id": _occurrence(), "status": "taken",
+        })
+        monkeypatch.setattr(server, "db", db)
+        monkeypatch.setattr(server, "_med_scheduler_ready", True)
+        with pytest.raises(HTTPException) as rejected:
+            await server.mark_reminder(
+                "r1",
+                server.ReminderMark(
+                    status="missed", slot_time="14:00",
+                    local_date="2026-09-12", occurrence_id=_occurrence(),
+                ),
+                {"id": "senior", "family_group_id": "g1", "timezone": "UTC"},
+            )
+        assert rejected.value.status_code == 409
+        assert len(db.medication_occurrences.rows) == 0
+        assert len(db.medication_logs.rows) == 1
+        reminder = await db.reminders.find_one({"id": "r1"})
+        assert reminder["status"] == "pending"
+
+    asyncio.run(scenario())
+
+
+def test_legacy_missed_log_blocks_taken_without_taken_mutation(monkeypatch):
+    async def scenario():
+        db = DB()
+        db.reminders.rows.append({
+            "id": "r1", "owner_id": "owner", "family_group_id": "g1",
+            "member_id": "m1", "member_name": "Joyce", "category": "medication",
+            "title": "Aspirin", "times": [{"time": "14:00"}],
+            "status": "pending", "taken": False,
+        })
+        db.members.rows.append({
+            "id": "m1", "owner_id": "owner", "family_group_id": "g1",
+            "user_id": "senior", "name": "Joyce",
+        })
+        # Legacy missed rows predate terminal_occurrence_key.
+        db.medication_logs.rows.append({
+            "occurrence_id": _occurrence(), "status": "missed",
+        })
+        monkeypatch.setattr(server, "db", db)
+        monkeypatch.setattr(server, "_med_scheduler_ready", True)
+        with pytest.raises(HTTPException) as rejected:
+            await server.mark_reminder(
+                "r1",
+                server.ReminderMark(
+                    status="taken", slot_time="14:00",
+                    local_date="2026-09-12", occurrence_id=_occurrence(),
+                ),
+                {"id": "senior", "family_group_id": "g1", "timezone": "UTC"},
+            )
+        assert rejected.value.status_code == 409
+        assert len(db.medication_logs.rows) == 1
+        assert db.medication_logs.rows[0]["status"] == "missed"
+        assert db.medication_occurrences.rows == []
+        reminder = await db.reminders.find_one({"id": "r1"})
+        assert reminder["status"] == "pending"
+        assert reminder["taken"] is False
+
+    asyncio.run(scenario())
+
+
+def test_manual_miss_replay_repairs_after_post_arbitration_write_failure(monkeypatch):
+    async def scenario():
+        db = DB()
+        db.reminders.rows.append({
+            "id": "r1", "owner_id": "owner", "family_group_id": "g1",
+            "member_id": "m1", "member_name": "Joyce", "category": "medication",
+            "title": "Aspirin", "dosage": "81 mg",
+            "times": [{"time": "14:00"}],
+            "status": "pending", "taken": False,
+        })
+        db.members.rows.append({
+            "id": "m1", "owner_id": "owner", "family_group_id": "g1",
+            "user_id": "senior", "name": "Joyce",
+        })
+        monkeypatch.setattr(server, "db", db)
+        monkeypatch.setattr(server, "_med_scheduler_ready", True)
+        pushes = []
+
+        async def family_push(*args, **kwargs):
+            pushes.append(args)
+            return 1
+
+        monkeypatch.setattr(server, "push_to_family_group", family_push)
+        original_update = db.reminders.update_one
+        failed = True
+
+        async def fail_first_update(query, update, **kwargs):
+            nonlocal failed
+            if failed:
+                failed = False
+                raise RuntimeError("simulated post-arbitration crash")
+            return await original_update(query, update, **kwargs)
+
+        db.reminders.update_one = fail_first_update
+        body = server.ReminderMark(
+            status="missed", slot_time="14:00", local_date="2026-09-12",
+            occurrence_id=_occurrence(),
+        )
+        current = {"id": "senior", "family_group_id": "g1", "timezone": "UTC"}
+        with pytest.raises(RuntimeError, match="post-arbitration"):
+            await server.mark_reminder("r1", body, current)
+        state = await db.medication_occurrences.find_one(
+            {"occurrence_id": _occurrence()}
+        )
+        assert state["family_purpose"] == "manual_miss"
+        assert state["family_state"] == "sending"
+        assert db.medication_logs.rows == []
+        assert db.alerts.rows == []
+        assert db.med_notifications.rows == []
+
+        db.reminders.update_one = original_update
+        await server.mark_reminder("r1", body, current)
+        assert len([
+            row for row in db.medication_logs.rows
+            if row.get("status") == "missed"
+        ]) == 1
+        assert len([
+            row for row in db.alerts.rows
+            if row.get("type") == "medication_escalation"
+        ]) == 1
+        assert len([
+            row for row in db.med_notifications.rows
+            if row.get("stage") == med_scheduler.STAGE_FAMILY
+        ]) == 1
+        assert len(pushes) == 1
+        reminder = await db.reminders.find_one({"id": "r1"})
+        assert reminder["status"] == "missed"
+
+    asyncio.run(scenario())
+
+
+def test_scheduler_escalation_then_manual_miss_converges_without_second_push(
+    monkeypatch,
+):
+    async def scenario():
+        db = DB([{
+            "id": "r1", "owner_id": "owner", "family_group_id": "g1",
+            "member_id": "m1", "member_name": "Joyce", "category": "medication",
+            "title": "Aspirin", "dosage": "81 mg",
+            "times": [{"time": "14:00"}],
+            "status": "pending", "taken": False,
+        }])
+        db.members.rows.append({
+            "id": "m1", "owner_id": "owner", "family_group_id": "g1",
+            "user_id": "senior", "name": "Joyce",
+        })
+        db.users.rows.append({"id": "owner", "timezone": "UTC"})
+        pushes = []
+
+        async def family_push(*args, **kwargs):
+            pushes.append(args)
+            return 1
+
+        await med_scheduler.process_pending_notifications(
+            db,
+            push_to_user=lambda *args: asyncio.sleep(0),
+            push_to_family_group=family_push,
+            now_utc=datetime(2026, 9, 12, 14, 15, tzinfo=timezone.utc),
+        )
+        monkeypatch.setattr(server, "db", db)
+        monkeypatch.setattr(server, "_med_scheduler_ready", True)
+        monkeypatch.setattr(server, "push_to_family_group", family_push)
+        await server.mark_reminder(
+            "r1",
+            server.ReminderMark(
+                status="missed", slot_time="14:00", local_date="2026-09-12",
+                occurrence_id=_occurrence(),
+            ),
+            {"id": "senior", "family_group_id": "g1", "timezone": "UTC"},
+        )
+        assert len(pushes) == 1
+        assert len([
+            row for row in db.alerts.rows
+            if row.get("type") == "medication_escalation"
+        ]) == 1
+        assert len([
+            row for row in db.med_notifications.rows
+            if row.get("stage") == med_scheduler.STAGE_FAMILY
+        ]) == 1
+        assert len([
+            row for row in db.medication_logs.rows
+            if row.get("status") == "missed"
+        ]) == 1
+        reminder = await db.reminders.find_one({"id": "r1"})
+        assert reminder["status"] == "missed"
+        assert reminder["taken"] is False
+
+    asyncio.run(scenario())
+
+
+def test_collapse_ids_are_occurrence_scoped_and_bounded():
+    base = {
+        "type": "medication",
+        "reminder_id": "r" * 500,
+        "stage": "due",
+        "slot_time": "14:00",
+        "local_date": "2026-09-12",
+    }
+    same = _collapse_id(dict(base))
+    other_slot = _collapse_id({**base, "slot_time": "20:00"})
+    other_day = _collapse_id({**base, "local_date": "2026-09-13"})
+    routine = _collapse_id({**base, "type": "routine"})
+    assert same == _collapse_id(dict(base))
+    assert same != other_slot
+    assert same != other_day
+    assert routine != same
+    assert same is not None and len(same) <= 64
+    assert _collapse_id({k: v for k, v in base.items() if k != "local_date"}) is None

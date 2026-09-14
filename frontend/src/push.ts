@@ -597,48 +597,107 @@ export async function registerForPushNotifications(): Promise<string | null> {
 //
 // Bug 1 (v6.5): notifications were stacking — every fire created a NEW
 // row in the tray instead of replacing the prior one for the same
-// reminder. We now derive a STABLE identifier per reminder+stage and pass
-// it as the local notification `identifier`. Android replaces any prior
-// notification with the same identifier so the user sees a single,
-// latest row per reminder.
+// reminder. Local re-presentation is only used for SOS/missed-checkin.
+// Medication and routine pushes are already presented by Android, so they
+// must not be dismissed and presented a second time by this module.
 //
-// Identifier scheme (Option B per user spec):
-//   medication self-due  → 'med_<reminder_id>_due'
-//   medication family    → 'med_<reminder_id>_family'
-//   medication refill    → 'med_<reminder_id>_refill'
-//   routine due          → 'rt_<reminder_id>_due'
+// Identifier scheme:
+//   medication self-due  → 'med_<reminder_id>_due_<occurrence>'
+//   medication family    → 'med_<reminder_id>_family_<occurrence>'
+//   medication refill    → 'med_<reminder_id>_refill_<occurrence>'
+//   routine due          → 'rt_<reminder_id>_due_<occurrence>'
 //   sos                  → 'sos_<alert_id>'    (per-alert is OK; SOSs are rare)
 //   missed_checkin       → 'miss_<member_id>'  (per-member; auto-dedupes)
-function stableNotificationId(data: any): string | null {
+//
+// An occurrence is preferably identified by the backend occurrence_id. Older
+// payloads use slot_time + local_date (or their scheduled/occurrence aliases).
+// Keeping the date and slot in the ID is important: two doses on one day and
+// doses on adjacent days must not replace one another.
+function nonEmptyNotificationPart(value: any): string | undefined {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return undefined;
+}
+
+export function notificationOccurrenceKey(data: any): string | null {
+  const occurrenceId = nonEmptyNotificationPart(data?.occurrence_id);
+  if (occurrenceId) return `occ_${encodeURIComponent(occurrenceId)}`;
+
+  const slotTime = nonEmptyNotificationPart(data?.slot_time)
+    || nonEmptyNotificationPart(data?.scheduled_time);
+  const localDate = nonEmptyNotificationPart(data?.local_date)
+    || nonEmptyNotificationPart(data?.occurrence_date);
+  if (!slotTime || !localDate) return null;
+  return `date_${encodeURIComponent(localDate)}_slot_${encodeURIComponent(slotTime)}`;
+}
+
+export function stableNotificationId(data: any): string | null {
   const t = data?.type;
   const sub = data?.subtype;
   const stage = data?.stage;
-  const rid = data?.reminder_id;
-  const aid = data?.alert_id;
-  const mid = data?.member_id;
+  const rid = nonEmptyNotificationPart(data?.reminder_id);
+  const aid = nonEmptyNotificationPart(data?.alert_id);
+  const mid = nonEmptyNotificationPart(data?.member_id);
   if (t === 'medication' && rid) {
-    if (stage === 'refill' || sub === 'refill') return `med_${rid}_refill`;
-    if (stage === 'family_alert' || sub === 'family_alert') return `med_${rid}_family`;
-    return `med_${rid}_due`;
+    const stageId = stage === 'refill' || sub === 'refill'
+      ? 'refill'
+      : stage === 'family_alert' || sub === 'family_alert'
+        ? 'family'
+        : 'due';
+    const occurrence = notificationOccurrenceKey(data);
+    if (!occurrence) return null;
+    return `med_${encodeURIComponent(rid)}_${stageId}_${occurrence}`;
   }
-  if (t === 'routine' && rid) return `rt_${rid}_due`;
-  if (t === 'sos' && aid) return `sos_${aid}`;
-  if (t === 'missed_checkin' && mid) return `miss_${mid}`;
+  if (t === 'routine' && rid) {
+    const occurrence = notificationOccurrenceKey(data);
+    if (!occurrence) return null;
+    return `rt_${encodeURIComponent(rid)}_due_${occurrence}`;
+  }
+  if (t === 'sos' && aid) return `sos_${encodeURIComponent(aid)}`;
+  if (t === 'missed_checkin' && mid) return `miss_${encodeURIComponent(mid)}`;
   return null;
 }
 
-async function rePresentSticky(n: Notifications.Notification) {
+/**
+ * Android automatically presents remote medication/routine notifications.
+ * Only these two notification types need this local sticky fallback.
+ */
+export function shouldRePresentLocally(data: any): boolean {
+  return data?.type === 'sos' || data?.type === 'missed_checkin';
+}
+
+/**
+ * Return the identifier used for a ten-minute medication snooze.
+ *
+ * This deliberately derives from the occurrence ID rather than the
+ * notification request ID. Replayed action responses therefore address the
+ * same scheduled notification and replace it instead of adding another row.
+ */
+export function snoozeNotificationId(data: any, originalNotificationId?: string): string {
+  const stableId = stableNotificationId(data);
+  if (stableId) return `${stableId}_snooze10`;
+
+  // A legacy payload may omit reminder metadata. The request ID is still
+  // stable across replayed responses and is safer than scheduling without an
+  // identifier (which always creates a new notification).
+  const fallback = nonEmptyNotificationPart(originalNotificationId)
+    || nonEmptyNotificationPart(data?.reminder_id)
+    || 'unknown';
+  return `snooze_${encodeURIComponent(fallback)}_10`;
+}
+
+export async function rePresentSticky(n: Notifications.Notification) {
   if (Platform.OS !== 'android') return;
   const content = n.request.content;
   const data: any = content.data || {};
   const t = data.type;
-  if (!t || !['medication', 'routine', 'sos', 'missed_checkin'].includes(t)) return;
-  // Note: missed_checkin is now included so the stable ID `miss_<member_id>`
-  // is applied — only ONE tray entry per member, each new push replaces the
-  // prior one instead of stacking.
+  if (!t || !shouldRePresentLocally(data)) return;
+  // Medication and routine pushes intentionally return above. Android has
+  // already presented those remote notifications; dismissing and scheduling
+  // another one here would create a second presentation path.
 
   // ============================================================
-  //  CRITICAL: ONLY re-present when the app is in FOREGROUND.
+  //  CRITICAL: ONLY re-present SOS/missed-checkin in FOREGROUND.
   // ============================================================
   //
   // `addNotificationReceivedListener` fires when a notification is
@@ -651,17 +710,13 @@ async function rePresentSticky(n: Notifications.Notification) {
   // get QUEUED in the JS event loop — they do not execute until the OS
   // wakes JS back up (which only happens when the user re-opens the app).
   //
-  // Result: the OS-displayed notification gets immediately removed by the
-  // dismiss call (which IS synchronous to the OS via the native bridge),
-  // BUT the replacement schedule is held until JS resumes.  The user sees
-  // NOTHING in the tray, even though the push arrived.  Then when they
-  // open the app, every queued scheduleNotificationAsync from every
-  // missed push fires at once → "notifications flood in after login".
+  // Result for the local sticky fallback: the OS-displayed notification gets
+  // immediately removed by the dismiss call (which IS synchronous to the OS
+  // via the native bridge), BUT the replacement schedule is held until JS
+  // resumes. The user sees NOTHING in the tray, even though the push arrived.
   //
-  // SOS doesn't hit this because caregivers/recipients are typically
-  // already in-app when an SOS arrives.  Meds/check-ins/family alerts
-  // fire on autonomous schedules and overwhelmingly arrive when the app
-  // is backgrounded — exactly the broken case.
+  // Remote medication/routine notifications do not use this path at all.
+  // Their OS presentation is already the sole presentation path.
   //
   // Fix: skip rePresentSticky unless the app is truly foreground-active.
   // In background, we trust the OS-displayed notification (delivered
@@ -1118,9 +1173,10 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
       }
       if (actionId === 'SNOOZE_10') {
         markNotificationConsumed(reqId);
-        const rid = data.reminder_id;
+        const snoozeId = snoozeNotificationId(data, reqId);
         try {
           await Notifications.scheduleNotificationAsync({
+            identifier: snoozeId,
             content: {
               title: r.notification.request.content.title || '💊 Medication reminder',
               body: r.notification.request.content.body || 'Tap "TOOK IT" to confirm.',
