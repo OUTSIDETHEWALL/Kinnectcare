@@ -1362,6 +1362,7 @@ function DiagnosticsContent() {
       pushRefreshLog: pushLog,
       locationRefreshLog: locLog,
       backgroundLocationTaskLog: bgLog,
+      batteryTaskLog,
       screenRenderLog: renderLog,
       locationEngine: {
         available: engineAvailable,
@@ -1379,13 +1380,14 @@ function DiagnosticsContent() {
         pushRefresh: pushLog.length,
         locationRefresh: locLog.length,
         bgTask: bgLog.length,
+        batteryTask: batteryTaskLog.length,
         screenRender: renderLog.length,
         engineLog: engineLog.length,
         dashboardLoad: dashLoadLog.length,
         staleLocationPipelineSnapshots: pipelineSnapshots.length,
       },
     };
-  }, [authLog, startupLog, nativeStartup, routeLog, pushLog, locLog, bgLog, renderLog, engineLog, engineState, engineAvailable, dashLoadLog, pipelineSnapshots, serverState, user]);
+  }, [authLog, startupLog, nativeStartup, routeLog, pushLog, locLog, bgLog, batteryTaskLog, renderLog, engineLog, engineState, engineAvailable, dashLoadLog, pipelineSnapshots, serverState, user]);
 
   const onCopy = async () => {
     try {
@@ -3691,7 +3693,9 @@ function DiagnosticsContent() {
                 const min = Math.round(ageMs / 60_000);
                 const ageStr = min < 60 ? `${min} min ago` : `${Math.round(ageMs / 3_600_000)} h ago`;
                 const isOk = entry.event === 'background_battery_ok';
-                const isErr = entry.event === 'background_battery_error' || entry.event === 'background_battery_timeout';
+                const isErr = entry.event === 'background_battery_error'
+                  || entry.event === 'background_battery_timeout'
+                  || entry.event === 'background_location_error';
                 const dotColor = isOk ? Colors.success : isErr ? Colors.error : Colors.textTertiary;
                 const detail = entry.detail
                   ? Object.entries(entry.detail)

@@ -112,7 +112,8 @@ const BATTERY_EVENTS = new Set([
   'background_battery_configured', 'background_battery_configure_error',
   'background_battery_task_start', 'background_battery_ok',
   'background_battery_skipped', 'background_battery_error',
-  'background_battery_timeout',
+  'background_battery_timeout', 'background_location_persisted',
+  'background_location_skipped', 'background_location_error',
 ]);
 const SCREEN_RENDER_SOURCES = new Set([
   'dashboard-fetch', 'member-fetch', 'map-props', 'map-rendered',
