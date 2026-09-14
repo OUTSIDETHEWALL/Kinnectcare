@@ -4049,6 +4049,19 @@ async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> s
         return "unavailable"
 
     oid = occurrence["occurrence_id"]
+    # Do not allow a retry or another device to turn any durable missed
+    # terminal state into a taken contradiction, even if it is a historical
+    # row without the migration-safe terminal key or the occurrence state row
+    # is unavailable.
+    missed_terminal = await db.medication_logs.find_one(
+        {
+            "occurrence_id": oid,
+            "status": "missed",
+        },
+        {"_id": 0},
+    )
+    if missed_terminal:
+        return "blocked_missed"
     try:
         await collection.insert_one({
             **occurrence,
@@ -4092,6 +4105,7 @@ async def _persist_taken_medication_log(rem: dict, current: dict, occurrence: di
         "local_date": occurrence["local_date"],
         "slot_time": occurrence["slot_time"],
         "occurrence_id": occurrence["occurrence_id"],
+        "terminal_occurrence_key": occurrence["occurrence_id"],
     }
     existing = await db.medication_logs.find_one(
         {"occurrence_id": occurrence["occurrence_id"], "status": "taken"},
@@ -4105,6 +4119,124 @@ async def _persist_taken_medication_log(rem: dict, current: dict, occurrence: di
         # Another delivery won the unique occurrence insert.  This is a
         # successful idempotent retry, not an endpoint failure.
         return
+
+
+async def _persist_missed_medication_log(
+    rem: dict, current: dict, occurrence: dict, now: datetime
+) -> None:
+    """Persist exactly one missed log for an exact medication occurrence."""
+    doc = {
+        "id": str(uuid.uuid4()),
+        "family_group_id": current["family_group_id"],
+        "reminder_id": rem["id"],
+        "member_id": rem["member_id"],
+        "category": rem.get("category", "medication"),
+        "title": rem["title"],
+        "status": "missed",
+        "marked_at": now,
+        "local_date": occurrence["local_date"],
+        "slot_time": occurrence["slot_time"],
+        "occurrence_id": occurrence["occurrence_id"],
+        "terminal_occurrence_key": occurrence["occurrence_id"],
+    }
+    existing = await db.medication_logs.find_one(
+        {"occurrence_id": occurrence["occurrence_id"], "status": "missed"},
+        {"_id": 0},
+    )
+    if existing:
+        return
+    try:
+        await db.medication_logs.insert_one(doc)
+    except DuplicateKeyError:
+        # The partial unique occurrence index makes concurrent/retried
+        # requests converge on the first durable missed log.
+        return
+
+
+async def _arbitrate_manual_missed_occurrence(
+    occurrence: dict, now: datetime
+) -> tuple[str, Optional[str]]:
+    """Arbitrate an exact manual miss before touching reminder/log state.
+
+    Returns ``(state, claim_token)``:
+      claimed/resume — this request may persist/repair and gate the family stage;
+      acknowledged  — this occurrence is taken and must not be changed;
+      owned         — scheduler is currently sending, so retry safely;
+      blocked       — the occurrence mutex could not be established.
+
+    ``family_purpose=manual_miss`` is an in-progress, resumable owner marker,
+    not completion evidence.  A replay gets the same token and repairs every
+    missing durable artifact before returning.
+    """
+    if await med_scheduler._has_taken_log_after(
+        db,
+        occurrence["reminder_id"],
+        occurrence["member_id"],
+        occurrence["slot_time"],
+        occurrence["local_date"],
+    ):
+        return "acknowledged", None
+
+    claim_token = await med_scheduler._claim_occurrence_for_family(
+        db,
+        occurrence_id=occurrence["occurrence_id"],
+        reminder_id=occurrence["reminder_id"],
+        member_id=occurrence["member_id"],
+        slot_time=occurrence["slot_time"],
+        local_date=occurrence["local_date"],
+        now_utc=now,
+        family_purpose="manual_miss",
+    )
+    if claim_token:
+        return "claimed", claim_token
+
+    state = await db.medication_occurrences.find_one(
+        {"occurrence_id": occurrence["occurrence_id"]}, {"_id": 0}
+    )
+    if not state:
+        return "blocked", None
+    if state.get("acknowledged") or await med_scheduler._has_taken_log_after(
+        db,
+        occurrence["reminder_id"],
+        occurrence["member_id"],
+        occurrence["slot_time"],
+        occurrence["local_date"],
+    ):
+        return "acknowledged", None
+    if state.get("family_claimed"):
+        if state.get("family_purpose") == "manual_miss":
+            # This is a replay or concurrent request for the same resumable
+            # owner.  It must continue repairing state, never report success
+            # merely because an in-progress bit exists.
+            return "resume", state.get("family_claim_token")
+        if state.get("family_state") != "sent":
+            return "owned", None
+        # The scheduler has durably escalated this occurrence.  A manual miss
+        # may still record the member's explicit terminal log, but only one
+        # request may do so and it must never send a second family push.
+        result = await db.medication_occurrences.update_one(
+            {
+                "occurrence_id": occurrence["occurrence_id"],
+                "family_claimed": True,
+                "family_state": "sent",
+                "acknowledged": {"$ne": True},
+                "family_purpose": {"$exists": False},
+            },
+            {
+                "$set": {
+                    "family_purpose": "manual_miss",
+                }
+            },
+        )
+        if getattr(result, "matched_count", 0):
+            return "resume", state.get("family_claim_token")
+        state = await db.medication_occurrences.find_one(
+            {"occurrence_id": occurrence["occurrence_id"]}, {"_id": 0}
+        )
+        if state and state.get("family_purpose") == "manual_miss":
+            return "resume", state.get("family_claim_token")
+        return "owned", None
+    return "blocked", None
 
 
 @api_router.post("/reminders/{reminder_id}/mark")
@@ -4130,12 +4262,46 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
             headers={"Retry-After": "5"},
         )
 
+    # Manual exact medication misses must win/lose the occurrence mutex before
+    # changing either the reminder template or the append-only log.  In
+    # particular, a taken occurrence is never rewritten as missed.
+    manual_miss_state = None
+    manual_miss_claim_token = None
+    if (
+        body.status == "missed"
+        and occurrence
+        and rem.get("category", "medication") == "medication"
+    ):
+        manual_miss_state, manual_miss_claim_token = (
+            await _arbitrate_manual_missed_occurrence(occurrence, now)
+        )
+        if manual_miss_state == "acknowledged":
+            raise HTTPException(
+                status_code=409,
+                detail="Medication occurrence was already acknowledged; it was not marked missed",
+            )
+        if manual_miss_state == "owned":
+            raise HTTPException(
+                status_code=409,
+                detail="Medication escalation is already being sent for this occurrence; retry",
+            )
+        if manual_miss_state == "blocked":
+            raise HTTPException(
+                status_code=409,
+                detail="Medication occurrence could not be safely claimed; retry",
+            )
+
     # A T+15 scan and this endpoint use the same durable occurrence row.
     # Losing the claim means the request arrived while escalation was being
     # sent; do not report a successful taken mark alongside that escalation.
     ack_state = "unavailable"
     if body.status == "taken":
         ack_state = await _claim_medication_acknowledgment(occurrence, now)
+        if ack_state == "blocked_missed":
+            raise HTTPException(
+                status_code=409,
+                detail="Medication occurrence was already marked missed; it was not marked taken",
+            )
         if ack_state == "blocked":
             raise HTTPException(
                 status_code=409,
@@ -4151,10 +4317,17 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
             "last_marked_date": today,
         }}
     )
-    # Log every mark for medication history.  Taken occurrence rows are
-    # unique; repeated Android delivery therefore remains one logical mark.
+    # Log every mark for medication history.  Taken and exact missed
+    # occurrence rows are unique; repeated Android delivery therefore remains
+    # one logical mark.
     if body.status == "taken" and occurrence:
         await _persist_taken_medication_log(rem, current, occurrence, now)
+    elif (
+        body.status == "missed"
+        and occurrence
+        and rem.get("category", "medication") == "medication"
+    ):
+        await _persist_missed_medication_log(rem, current, occurrence, now)
     else:
         await db.medication_logs.insert_one({
             "id": str(uuid.uuid4()),
@@ -4173,6 +4346,159 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
         })
 
     if body.status == "missed":
+        # An occurrence-qualified medication miss uses the same durable
+        # medication_escalation row and family-stage reservation as the
+        # scheduler.  This is deliberately before the legacy recent-alert
+        # fallback: a retry (or two concurrent manual requests) must converge
+        # on the scheduler's alert and one family push for this exact dose.
+        if (
+            occurrence
+            and rem.get("category", "medication") == "medication"
+            and manual_miss_state in ("claimed", "resume")
+        ):
+            member_name = rem.get("member_name") or "your loved one"
+            title = f"💊 Medication missed: {rem['title']}"
+            message = (
+                f"{member_name} missed {rem['title']}"
+                + (f" ({rem.get('dosage')})" if rem.get("dosage") else "")
+                + "."
+            )
+            occurrence_id = occurrence["occurrence_id"]
+            alert_id = med_scheduler.build_medication_escalation_alert_id(
+                occurrence_id
+            )
+
+            # The occurrence row was already arbitrated above, before the
+            # reminder/log mutation.  A scheduler-sent occurrence has no
+            # sending claim and only needs the manual terminal log; it must
+            # not reserve/push a second stage.
+            claim_token = manual_miss_claim_token
+            occurrence_state = await db.medication_occurrences.find_one(
+                {"occurrence_id": occurrence_id}, {"_id": 0}
+            )
+            can_push = bool(
+                claim_token
+                and occurrence_state
+                and occurrence_state.get("family_state") == "sending"
+                and occurrence_state.get("family_purpose") == "manual_miss"
+                and occurrence_state.get("family_claim_token") == claim_token
+            )
+            if can_push:
+                alert_id = await med_scheduler._ensure_medication_escalation_alert(
+                    db,
+                    alert_id=alert_id,
+                    owner_id=rem.get("owner_id") or current.get("id"),
+                    family_group_id=current["family_group_id"],
+                    member_id=rem["member_id"],
+                    member_name=member_name,
+                    title=title,
+                    message=message,
+                    now_utc=now,
+                    reminder_id=reminder_id,
+                    medication_name=rem.get("title"),
+                    dosage=rem.get("dosage"),
+                    scheduled_time=occurrence["slot_time"],
+                    local_date=occurrence["local_date"],
+                    occurrence_id=occurrence_id,
+                )
+                won = await med_scheduler._try_record_stage(
+                    db,
+                    reminder_id=reminder_id,
+                    family_group_id=current["family_group_id"],
+                    member_id=rem["member_id"],
+                    slot_time=occurrence["slot_time"],
+                    local_date=occurrence["local_date"],
+                    stage=med_scheduler.STAGE_FAMILY,
+                    now_utc=now,
+                    claim_token=claim_token,
+                    allow_resume_claim=True,
+                )
+                if won and await med_scheduler._mark_stage_attempted(
+                    db,
+                    reminder_id=reminder_id,
+                    member_id=rem["member_id"],
+                    slot_time=occurrence["slot_time"],
+                    local_date=occurrence["local_date"],
+                    stage=med_scheduler.STAGE_FAMILY,
+                    claim_token=claim_token,
+                    now_utc=now,
+                ):
+                    try:
+                        await push_to_family_group(
+                            current["family_group_id"],
+                            title,
+                            message,
+                            {
+                                "type": "medication",
+                                "subtype": "family_alert",
+                                "reminder_id": reminder_id,
+                                "member_id": rem["member_id"],
+                                "member_name": member_name,
+                                "stage": med_scheduler.STAGE_FAMILY,
+                                "slot_time": occurrence["slot_time"],
+                                "local_date": occurrence["local_date"],
+                                "occurrence_id": occurrence_id,
+                                "alert_id": alert_id,
+                                "title": rem.get("title"),
+                                "dosage": rem.get("dosage"),
+                                "channelId": "meds_v2",
+                            },
+                        )
+                    except Exception as exc:
+                        # The durable alert and attempted-stage marker are
+                        # still the idempotent result.  Match scheduler
+                        # behavior: report the push failure, but do not turn
+                        # a committed manual miss into a retryable duplicate.
+                        logger.warning(
+                            f"manual medication miss push failed for {occurrence_id}: {exc}"
+                        )
+                    finally:
+                        await med_scheduler._finish_family_stage(
+                            db,
+                            reminder_id=reminder_id,
+                            member_id=rem["member_id"],
+                            slot_time=occurrence["slot_time"],
+                            local_date=occurrence["local_date"],
+                            claim_token=claim_token,
+                            now_utc=now,
+                        )
+                        await med_scheduler._finish_occurrence_family_claim(
+                            db, occurrence_id, now, claim_token
+                        )
+                else:
+                    # A concurrent owner may still be before its attempted
+                    # marker.  If that marker is already durable, however,
+                    # this replay is repairing the post-push finalization
+                    # after a crash and may safely close the stage.
+                    stage_doc = await db.med_notifications.find_one(
+                        {
+                            "reminder_id": reminder_id,
+                            "member_id": rem["member_id"],
+                            "slot_time": occurrence["slot_time"],
+                            "local_date": occurrence["local_date"],
+                            "stage": med_scheduler.STAGE_FAMILY,
+                        },
+                        {"_id": 0},
+                    )
+                    if stage_doc and stage_doc.get("delivery_attempted_at"):
+                        await med_scheduler._finish_family_stage(
+                            db,
+                            reminder_id=reminder_id,
+                            member_id=rem["member_id"],
+                            slot_time=occurrence["slot_time"],
+                            local_date=occurrence["local_date"],
+                            claim_token=claim_token,
+                            now_utc=now,
+                        )
+                    if stage_doc and (
+                        stage_doc.get("delivery_attempted_at")
+                        or stage_doc.get("delivery_state") == "sent"
+                    ):
+                        await med_scheduler._finish_occurrence_family_claim(
+                            db, occurrence_id, now, claim_token
+                        )
+            return {"ok": True, "status": body.status}
+
         recent_query = {
             "family_group_id": current["family_group_id"], "member_id": rem["member_id"],
             "created_at": {"$gte": now - timedelta(hours=1)},

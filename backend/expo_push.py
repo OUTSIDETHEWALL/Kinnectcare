@@ -10,6 +10,7 @@ them from the database.  This stops "ghost notifications" being sent
 indefinitely to uninstalled-app push tokens.
 """
 import logging
+import hashlib
 from typing import List, Optional, Dict, Any
 import httpx
 
@@ -44,10 +45,16 @@ def _collapse_id(data: dict) -> Optional[str]:
     safety net that complements the client-side `stableNotificationId`
     logic in push.ts.
 
-    Scheme mirrors stableNotificationId() in frontend/src/push.ts:
-      medication self-due  → med_<reminder_id>_due
-      medication family    → med_<reminder_id>_family
-      routine due          → rt_<reminder_id>_due
+    Medication and routine IDs are scoped to the exact occurrence.  A reminder
+    can have several doses on one local day, and the same reminder fires again
+    on the next day, so the reminder ID by itself is not a safe collapse key.
+    The digest keeps the value bounded and contains only characters accepted by
+    both FCM and APNs.
+
+    Scheme:
+      medication self-due  → med_<occurrence digest>_due
+      medication family    → med_<occurrence digest>_family
+      routine due          → rt_<occurrence digest>_due
       sos                  → sos_<alert_id>
       missed_checkin       → miss_<member_id>
 
@@ -62,11 +69,23 @@ def _collapse_id(data: dict) -> Optional[str]:
     stage = data.get("stage") or data.get("subtype")
 
     if t == "medication" and rid:
+        slot = data.get("slot_time")
+        local_date = data.get("local_date")
+        if not slot or not local_date:
+            return None
+        occurrence = "\x1f".join((str(rid), str(slot), str(local_date)))
+        digest = hashlib.sha256(occurrence.encode("utf-8")).hexdigest()[:24]
         if stage in ("family_alert",):
-            return f"med_{rid}_family"
-        return f"med_{rid}_due"
+            return f"med_{digest}_family"
+        return f"med_{digest}_due"
     if t == "routine" and rid:
-        return f"rt_{rid}_due"
+        slot = data.get("slot_time")
+        local_date = data.get("local_date")
+        if not slot or not local_date:
+            return None
+        occurrence = "\x1f".join((str(rid), str(slot), str(local_date)))
+        digest = hashlib.sha256(occurrence.encode("utf-8")).hexdigest()[:24]
+        return f"rt_{digest}_due"
     if t == "sos" and aid:
         return f"sos_{aid}"
     if t == "missed_checkin" and mid:
@@ -80,7 +99,7 @@ def _collapse_id(data: dict) -> Optional[str]:
 # Rule: if a push would render on the tray (has_title OR has_body) but the
 # user-visible content is functionally empty (<3 non-whitespace chars
 # across both fields, whitespace-only, single glyph/emoji), DROP the send
-# and log the source_tag + payload so we can trace who called us with junk.
+# and log non-sensitive routing metadata so we can trace who called us with junk.
 #
 # Data-only pushes (both title AND body empty) are FINE — they never render.
 # =========================================================================
@@ -135,9 +154,11 @@ def _record_blank_drop(entry: Dict[str, Any]) -> None:
     while len(_BLANK_DROP_RING) > _BLANK_DROP_MAX:
         _BLANK_DROP_RING.pop(0)
     logger.warning(
-        f"BLANK_PUSH_DROP: source={entry.get('source_tag')} "
-        f"title={entry.get('title')!r} body={entry.get('body')!r} "
-        f"tokens={entry.get('token_count')}"
+        f"BLANK_PUSH_DROP: type={entry.get('type')} "
+        f"subtype={entry.get('subtype')} stage={entry.get('stage')} "
+        f"channel={entry.get('channel_id')} "
+        f"tokens={entry.get('token_count')} "
+        f"collapse_id={entry.get('collapse_id')}"
     )
 
 
@@ -175,7 +196,6 @@ async def send_expo_push(
     data = data or {}
     cat_id = data.get("categoryIdentifier") or data.get("categoryId")
     channel_id = data.get("channelId") or "default"
-    source_tag = data.get("_source_tag") or "unknown"
     # Optional TTL (seconds) injected via data["_ttl"].  None = omit the
     # field and let FCM/APNs use their default (~28-day) redelivery window.
     # Callers that send time-sensitive status notifications (e.g. SOS
@@ -184,19 +204,16 @@ async def send_expo_push(
     _ttl = data.get("_ttl")
 
     # Build #62 — comprehensive outbound-push audit log.
-    # Every push (visible AND silent) is logged with source_tag,
-    # channel, priority, title/body previews, type — so on Railway
-    # we can grep for "[push-outbound]" and trace exactly which
-    # subsystem originated any given tray notification.  This is the
-    # instrumentation we needed when Charles reported the phantom-K
-    # notifications on Build #60/61 QA.
-    _t_preview = (title or "")[:40].replace("\n", " ")
-    _b_preview = (body or "")[:60].replace("\n", " ")
+    # Every push (visible AND silent) is logged with non-sensitive routing
+    # metadata only.  Never emit notification text, member names, medication
+    # names, or other payload previews to production logs.
+    collapse_id = _collapse_id(data)
     logger.info(
-        f"[push-outbound] source={source_tag!r} type={data.get('type', '?')!r} "
-        f"channel={channel_id!r} priority={priority!r} "
-        f"tokens={len(valid)} "
-        f"title={_t_preview!r} body={_b_preview!r}"
+        f"[push-outbound] type={data.get('type', '?')!r} "
+        f"subtype={data.get('subtype', '?')!r} "
+        f"stage={data.get('stage', '?')!r} "
+        f"channel={channel_id!r} tokens={len(valid)} "
+        f"collapse_id={collapse_id!r}"
     )
 
     # Build 53 — Blank notification safety net.  Reject any send where
@@ -207,12 +224,12 @@ async def send_expo_push(
     if _would_render_blank(title, body):
         entry = {
             "at": None,  # server.py sink stamps this
-            "source_tag": source_tag,
-            "title": title,
-            "body": body,
+            "type": data.get("type"),
+            "subtype": data.get("subtype"),
+            "stage": data.get("stage"),
             "channel_id": channel_id,
-            "data_keys": sorted(list(data.keys())),
             "token_count": len(valid),
+            "collapse_id": collapse_id,
         }
         _record_blank_drop(entry)
         if _mongo_sink is not None:
@@ -286,9 +303,8 @@ async def send_expo_push(
         # is the backend-side safety net that complements the client-side
         # stableNotificationId logic in push.ts — together they ensure
         # at most one tray entry per logical event on both Android and iOS.
-        _cid = _collapse_id(data)
-        if _cid:
-            msg["collapseId"] = _cid
+        if collapse_id:
+            msg["collapseId"] = collapse_id
         # Build 50 — ghost-notification KILL at the FCM protocol level.
         #
         # FCM has a strict rule: any message that contains a

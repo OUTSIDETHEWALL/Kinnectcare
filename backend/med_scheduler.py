@@ -136,6 +136,16 @@ async def ensure_indexes(db) -> None:
         partialFilterExpression={"status": "taken", "occurrence_id": {"$exists": True}},
         name="uniq_taken_medication_occurrence",
     )
+    # New terminal writes carry this migration-safe key.  Historical rows do
+    # not, so legacy duplicate missed occurrence_id values do not prevent the
+    # index from being created.  One key covers both taken and missed rows:
+    # new contradictions and same-status duplicates are both rejected.
+    await db.medication_logs.create_index(
+        [("terminal_occurrence_key", 1)],
+        unique=True,
+        partialFilterExpression={"terminal_occurrence_key": {"$exists": True}},
+        name="uniq_medication_terminal_occurrence",
+    )
     await db.medication_occurrences.create_index(
         [("occurrence_id", 1)],
         unique=True,
@@ -215,6 +225,7 @@ async def _claim_occurrence_for_family(
     slot_time: str,
     local_date: str,
     now_utc: datetime,
+    family_purpose: Optional[str] = None,
 ) -> Optional[str]:
     """Atomically claim an occurrence before starting family escalation.
 
@@ -235,23 +246,24 @@ async def _claim_occurrence_for_family(
         return None
     collection = db.medication_occurrences
     claim_token = str(uuid4())
+    initial_update = {
+        "family_claimed": True,
+        "family_claimed_at": now_utc,
+        "family_state": "sending",
+        "family_claim_token": claim_token,
+        "family_recovery_deadline_at": now_utc + timedelta(
+            minutes=FAMILY_RECOVERY_HORIZON_MINUTES
+        ),
+    }
+    if family_purpose:
+        initial_update["family_purpose"] = family_purpose
     result = await collection.update_one(
         {
             "occurrence_id": occurrence_id,
             "acknowledged": {"$ne": True},
             "family_claimed": {"$ne": True},
         },
-        {
-            "$set": {
-                "family_claimed": True,
-                "family_claimed_at": now_utc,
-                "family_state": "sending",
-                "family_claim_token": claim_token,
-                "family_recovery_deadline_at": now_utc + timedelta(
-                    minutes=FAMILY_RECOVERY_HORIZON_MINUTES
-                ),
-            }
-        },
+        {"$set": initial_update},
     )
     if getattr(result, "matched_count", 0):
         return claim_token
@@ -267,14 +279,15 @@ async def _claim_occurrence_for_family(
         },
         "family_recovery_deadline_at": {"$gt": now_utc},
     }
+    takeover_update = {
+        "family_claim_token": claim_token,
+        "family_claimed_at": now_utc,
+    }
+    if family_purpose:
+        takeover_update["family_purpose"] = family_purpose
     result = await collection.update_one(
         stale_query,
-        {
-            "$set": {
-                "family_claim_token": claim_token,
-                "family_claimed_at": now_utc,
-            }
-        },
+        {"$set": takeover_update},
     )
     if not getattr(result, "matched_count", 0):
         # Rows created before deadlines were added get one deadline at the
@@ -282,17 +295,18 @@ async def _claim_occurrence_for_family(
         # never moved by a takeover.
         stale_query.pop("family_recovery_deadline_at")
         stale_query["family_recovery_deadline_at"] = {"$exists": False}
+        takeover_update = {
+            "family_claim_token": claim_token,
+            "family_claimed_at": now_utc,
+            "family_recovery_deadline_at": now_utc + timedelta(
+                minutes=FAMILY_RECOVERY_HORIZON_MINUTES
+            ),
+        }
+        if family_purpose:
+            takeover_update["family_purpose"] = family_purpose
         result = await collection.update_one(
             stale_query,
-            {
-                "$set": {
-                    "family_claim_token": claim_token,
-                    "family_claimed_at": now_utc,
-                    "family_recovery_deadline_at": now_utc + timedelta(
-                        minutes=FAMILY_RECOVERY_HORIZON_MINUTES
-                    ),
-                }
-            },
+            {"$set": takeover_update},
         )
     return claim_token if getattr(result, "matched_count", 0) else None
 
@@ -324,6 +338,7 @@ async def _try_record_stage(
     stage: str,
     now_utc: datetime,
     claim_token: Optional[str] = None,
+    allow_resume_claim: bool = False,
 ) -> bool:
     """Reserve or reclaim a delivery stage without duplicating a push."""
     row = {
@@ -362,6 +377,15 @@ async def _try_record_stage(
             return False
         if existing.get("delivery_attempted_at"):
             return False
+        if (
+            allow_resume_claim
+            and claim_token
+            and existing.get("family_claim_token") == claim_token
+        ):
+            # The same occurrence owner is replaying after a crash before
+            # delivery.  Let the atomic attempted marker below choose the
+            # sole pusher; this is not a second claim.
+            return True
         claimed_at = existing.get("delivery_claimed_at") or existing.get("fired_at")
         if not claimed_at or claimed_at >= now_utc - timedelta(
             minutes=OCCURRENCE_CLAIM_STALE_MINUTES
