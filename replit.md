@@ -4,20 +4,34 @@ Family safety and senior wellness app. Backend on Railway (FastAPI/Python), data
 
 ## Project status
 
-Feature-complete for v1.0. No new features until public beta. Current goal: stabilize for public beta by resolving known bugs in priority order.
+Feature-complete for v1.0 and feature-locked for Beta. Current goal: stabilize for public beta by resolving reliability and safety defects. Do not add unrelated product features.
 
-## Engineering process
+## Beta stabilization process
 
-Every repair must follow this sequence — no exceptions:
+Kinnship is in fix-and-test mode, not extended diagnostic-investigation mode. Use the codebase, existing diagnostics, production database, backend and Railway logs, EAS records, and tests to diagnose reported defects directly.
 
-1. Observe the bug
-2. Investigate the code
-3. Collect live evidence from the database and/or API
-4. Explain the exact root cause
-5. State confidence level
-6. Describe exactly how the fix will be verified before anything else changes
+Default workflow:
 
-Speculative fixes are not acceptable. "This should work" is not acceptable. If confidence is low, say so.
+1. Treat the observable reproducible behavior as the bug report.
+2. Inspect available evidence directly and identify the most likely failure path.
+3. Briefly state the diagnosis and intended repair.
+4. Implement the safest practical fix supported by the evidence.
+5. Run focused and relevant regression tests, plus lint/typecheck/build checks as appropriate.
+6. Commit, create/merge the PR when authorized, and release to the correct production surface when authorized.
+7. Report the result concisely, including whether Railway, OTA, or a native build was required.
+
+Do not routinely ask Charles to navigate many diagnostic screens, collect large logs or screenshot sets, repeatedly reproduce a defect only to add instrumentation, or spend hours changing device settings. If physical-device evidence is the only reasonable way to distinguish materially different causes, explain the exact unknown and request one minimal test or screenshot.
+
+If several causes remain plausible but one robust fix safely covers them, implement that fix. Prefer idempotent, recoverable behavior over elegant but fragile behavior. Additional observability should be durable and server-visible whenever possible.
+
+Engineering priorities, in order:
+
+1. Reliability
+2. Correct behavior
+3. Caregiver confidence and safety
+4. Reasonable battery consumption
+5. Performance
+6. Everything else
 
 ## Git workflow
 
