@@ -81,7 +81,10 @@ def _make_coro():
 
 def _run_concurrent(*coros):
     """Run a set of coroutines concurrently and return their results."""
-    return asyncio.get_event_loop().run_until_complete(asyncio.gather(*coros))
+    async def _gather():
+        return await asyncio.gather(*coros)
+
+    return asyncio.get_event_loop().run_until_complete(_gather())
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────

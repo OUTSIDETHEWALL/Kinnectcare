@@ -4,7 +4,8 @@ test_battery_alert_lifecycle.py — Unit tests for check_low_battery()
 Two-tier battery alert system:
   • Early warning (≤ 20 %): type='low_battery_warning', sets low_battery_warn_alerted=True
   • Critical      (≤ 15 %): type='low_battery',         sets low_battery_alerted=True
-  • Reset: battery ≥ 25 % OR is_charging=True → both flags cleared, both alert types resolved
+  • Charging: resolves open alerts but preserves both flags until battery ≥ 25 %
+  • Reset: battery ≥ 25 % → both flags cleared, both alert types resolved
 
 Coverage:
   TestCriticalTrigger    — 15 % critical tier fires correctly
@@ -12,7 +13,7 @@ Coverage:
   TestNoDuplicate        — no double-alert when both flags already set
   TestHysteresis         — 15–24 % range never triggers recovery
   TestRecovery           — battery ≥ 25 % resolves both alert types and pushes recovery
-  TestIsChargingReset    — is_charging=True triggers reset regardless of battery level
+   TestIsChargingReset    — is_charging=True resolves but does not reset a low cycle
   TestConcurrentRecovery — exactly one recovery push when both upload paths converge
   TestRetrigger          — full lifecycle repeats after a complete charge cycle
 """
@@ -340,28 +341,28 @@ class TestRecovery:
 # ── TestIsChargingReset ───────────────────────────────────────────────────────
 
 class TestIsChargingReset:
-    """is_charging=True resets both flags even when battery is still below 25 %."""
+    """is_charging=True resolves alerts but preserves a low-battery cycle."""
 
     def test_charging_at_low_battery_resets(self, mock_db, mock_push):
-        """Phone starts charging at 20 % — still below clear threshold but should reset."""
+        """Phone starts charging at 20 % — resolve, but do not reset the cycle."""
         result = _call(
             battery_level=0.20,
             was_alerted=True,
             was_warn_alerted=True,
             is_charging=True,
         )
-        assert result == {"low_battery_warn_alerted": False, "low_battery_alerted": False}
+        assert result == {"low_battery_warn_alerted": True, "low_battery_alerted": True}
         mock_push.assert_called_once()
 
     def test_charging_at_critical_level_resets(self, mock_db, mock_push):
-        """Phone plugged in at 14 % — recovery fires immediately."""
+        """Phone plugged in at 14 % — recovery fires, flags remain set."""
         result = _call(
             battery_level=0.14,
             was_alerted=True,
             was_warn_alerted=True,
             is_charging=True,
         )
-        assert result == {"low_battery_warn_alerted": False, "low_battery_alerted": False}
+        assert result == {"low_battery_warn_alerted": True, "low_battery_alerted": True}
         mock_db.alerts.insert_one.assert_not_called()
 
     def test_not_charging_no_reset_below_25(self, mock_db, mock_push):
@@ -377,7 +378,7 @@ class TestIsChargingReset:
     def test_charging_no_flags_still_fires_critical(self, mock_db, mock_push):
         """Phone plugged in at 14 % with no prior alert — critical tier still fires.
 
-        is_charging only affects the *reset* path (when flags are already set).
+        is_charging only affects the *resolve* path (when flags are already set).
         If the phone drops to 14 % and is then plugged in before the next PATCH
         arrives, the reset block is skipped (both flags are False) and the
         critical alert fires normally.  The server will resolve it on the next
@@ -438,3 +439,92 @@ class TestRetrigger:
         result = _call(battery_level=0.08, was_alerted=True, was_warn_alerted=True)
         assert result == {}
         mock_db.alerts.insert_one.assert_not_called()
+
+
+# ── TestChargingRecoveryLifecycle ────────────────────────────────────────────
+
+class TestChargingRecoveryLifecycle:
+    """Charging must not reopen a still-low discharge cycle after unplugging."""
+
+    def test_critical_cycle_has_one_alert_and_one_recovery_push(self, mock_db, mock_push):
+        # The first charging reading resolves the open alert.  Later charging
+        # readings find no open alert, just as they would in MongoDB.
+        mock_db.alerts.find_one_and_update.side_effect = [
+            {"_id": "critical-alert"},
+            None,
+            None,
+        ]
+
+        result = _call(battery_level=0.15)
+        assert result == {"low_battery_alerted": True, "low_battery_warn_alerted": True}
+
+        result = _call(
+            battery_level=0.15,
+            was_alerted=True,
+            was_warn_alerted=True,
+            is_charging=True,
+        )
+        assert result == {"low_battery_alerted": True, "low_battery_warn_alerted": True}
+
+        # Unplugging below 25% and subsequent low readings stay in this cycle.
+        for level, charging in ((0.15, False), (0.17, True), (0.17, False), (0.18, False)):
+            result = _call(
+                battery_level=level,
+                was_alerted=True,
+                was_warn_alerted=True,
+                is_charging=charging,
+            )
+            if charging:
+                assert result == {
+                    "low_battery_alerted": True,
+                    "low_battery_warn_alerted": True,
+                }
+            else:
+                assert result == {}
+
+        assert mock_db.alerts.insert_one.call_count == 1
+        assert mock_push.call_count == 2
+        assert [
+            (call.kwargs.get("data") or call.args[3])["type"]
+            for call in mock_push.call_args_list
+        ] == ["low_battery", "battery_recovered"]
+        assert all(
+            call.args[0]["type"] != "low_battery_warning"
+            for call in mock_db.alerts.insert_one.call_args_list
+        )
+
+    def test_warning_cycle_has_one_alert_and_one_recovery_push(self, mock_db, mock_push):
+        mock_db.alerts.find_one_and_update.side_effect = [
+            {"_id": "warning-alert"},
+            None,
+        ]
+
+        result = _call(battery_level=0.20)
+        assert result == {"low_battery_warn_alerted": True}
+
+        result = _call(
+            battery_level=0.20,
+            was_warn_alerted=True,
+            is_charging=True,
+        )
+        assert result == {"low_battery_warn_alerted": True}
+
+        for level, charging in ((0.20, False), (0.21, True), (0.21, False), (0.22, False)):
+            result = _call(
+                battery_level=level,
+                was_warn_alerted=True,
+                is_charging=charging,
+            )
+            assert result == (
+                {"low_battery_warn_alerted": True}
+                if charging
+                else {}
+            )
+
+        assert mock_db.alerts.insert_one.call_count == 1
+        assert mock_db.alerts.insert_one.call_args[0][0]["type"] == "low_battery_warning"
+        assert mock_push.call_count == 2
+        assert [
+            (call.kwargs.get("data") or call.args[3])["type"]
+            for call in mock_push.call_args_list
+        ] == ["low_battery_warning", "battery_recovered"]

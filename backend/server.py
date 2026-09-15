@@ -3,6 +3,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 import os
 import json
@@ -345,6 +346,12 @@ class FamilyMember(BaseModel):
     # Used as the write-guard key so replay uploads can't overwrite
     # a more recent plug/unplug event from the dedicated PATCH endpoint.
     battery_updated_at: Optional[datetime] = None
+    # Backend-only election bit for one charging/recovery notification per
+    # discharge cycle.
+    battery_recovery_claimed: bool = False
+    # Distinguishes a real warning-tier claim from the warning flag consumed
+    # implicitly by a direct critical reading.
+    battery_warning_claimed: bool = False
     # Server-observed device activity.  Optional so member rows created before
     # device presence was introduced continue to deserialize unchanged.
     device_presence_at: Optional[datetime] = None
@@ -2815,13 +2822,13 @@ async def delete_member(member_id: str, current=Depends(get_current_user)):
 # check_low_battery() owns all threshold logic — change values here only.
 _BATTERY_WARN_THRESHOLD    = 0.20   # battery ≤ this → early-warning alert + push
 _BATTERY_CRIT_THRESHOLD    = 0.15   # battery ≤ this → critical alert + push
-_BATTERY_CLEAR_THRESHOLD   = 0.25   # battery ≥ this OR is_charging → reset both flags
+_BATTERY_CLEAR_THRESHOLD   = 0.25   # only battery ≥ this ends the discharge cycle
 # 10-point hysteresis band between critical (15 %) and clear (25 %) prevents
 # oscillation when battery hovers near the trigger (e.g. 14.9 % → alert,
 # 15.1 % → clear, 14.8 % → new alert → push spam).
 
 
-async def check_low_battery(
+async def _check_low_battery_legacy(
     *,
     member_id: str,
     family_group_id: str,
@@ -2839,7 +2846,10 @@ async def check_low_battery(
       • Critical      (≤ 15 %): "{name}'s phone battery is critically low ({pct}%)."
         → type='low_battery', sets low_battery_alerted=True
 
-    Both flags reset when battery rises above 25 % OR charging begins (is_charging=True).
+    Charging resolves open alerts and sends a recovery push, but does not end the
+    discharge cycle: the existing alert flags stay set until the battery actually
+    reaches 25 %.  This prevents an unplugged phone that is still below the
+    threshold from immediately generating the same alert again.
 
     Returns a dict of member-document fields for the caller to merge via $set.
     The helper NEVER writes to db.members directly.
@@ -2853,9 +2863,15 @@ async def check_low_battery(
     _member_phone     = prev_doc.get("phone") or None
     _battery_pct      = round(battery_level * 100)
 
-    # ── Reset: battery recovered (≥ 25 %) OR charging started ─────────────────
-    _should_reset = (battery_level >= _BATTERY_CLEAR_THRESHOLD) or bool(is_charging)
-    if _should_reset and (_was_warn_alerted or _was_crit_alerted):
+    # ── Resolve: battery recovered (≥ 25 %) or charging started ───────────────
+    #
+    # Charging is deliberately not a discharge-cycle reset.  A phone can report
+    # "charging" while it is still at 15–20 %, and it may report "not charging"
+    # again before reaching the clear threshold.  Keep the flags set across that
+    # transition so the same discharge cycle cannot emit another alert.
+    _battery_recovered = battery_level >= _BATTERY_CLEAR_THRESHOLD
+    _charging_started = bool(is_charging)
+    if (_battery_recovered or _charging_started) and (_was_warn_alerted or _was_crit_alerted):
         now_utc = datetime.now(timezone.utc)
         # Atomically resolve one open alert and check if we're the first caller —
         # race-safe: find_one_and_update returns None if a concurrent upload path
@@ -2905,7 +2921,21 @@ async def check_low_battery(
                 f"check_low_battery: recovery dedup — alerts already resolved "
                 f"by concurrent call for member={member_id}"
             )
-        return {"low_battery_warn_alerted": False, "low_battery_alerted": False}
+        if _battery_recovered:
+            # Reaching the clear threshold ends the discharge cycle.  If an
+            # earlier charging reading already resolved the open alert,
+            # _resolved_doc is None and no duplicate recovery push is sent.
+            return {"low_battery_warn_alerted": False, "low_battery_alerted": False}
+
+        # Charging at a still-low level only resolves the currently-open
+        # alert(s).  Preserve whichever true flags were present so a later
+        # unplugged reading cannot retrigger before the battery reaches 25%.
+        _flags_to_persist = {}
+        if _was_warn_alerted:
+            _flags_to_persist["low_battery_warn_alerted"] = True
+        if _was_crit_alerted:
+            _flags_to_persist["low_battery_alerted"] = True
+        return _flags_to_persist
 
     # ── Critical tier (≤ 15 %): fire once per discharge cycle ─────────────────
     if battery_level <= _BATTERY_CRIT_THRESHOLD and not _was_crit_alerted:
@@ -3006,6 +3036,451 @@ async def check_low_battery(
         return {"low_battery_warn_alerted": True}
 
     return {}
+
+
+def _normalize_battery_timestamp(timestamp: datetime) -> datetime:
+    """Match MongoDB BSON datetime precision before any battery claim."""
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    else:
+        timestamp = timestamp.astimezone(timezone.utc)
+    # BSON stores datetimes as integer milliseconds since epoch.  Truncate
+    # rather than round so the conditional write and all exact lifecycle
+    # claims use the value MongoDB actually persists.
+    return timestamp.replace(microsecond=(timestamp.microsecond // 1000) * 1000)
+
+
+async def _accept_battery_telemetry(
+    *,
+    member_id: str,
+    family_group_id: str,
+    battery_level: Optional[float],
+    is_charging: Optional[bool],
+    incoming_ts: datetime,
+    user_id: Optional[str] = None,
+) -> tuple[bool, Optional[dict]]:
+    """Atomically accept one battery reading, returning whether it won.
+
+    This is intentionally the only battery-state write primitive used by both
+    upload endpoints.  The timestamp predicate is part of the MongoDB write,
+    rather than a read/compare/unconditional-write sequence, so a location
+    replay cannot race a newer battery PATCH.
+    """
+    if battery_level is not None and battery_level < 0:
+        return False, None
+    if battery_level is None and is_charging is None:
+        return False, None
+
+    incoming_ts = _normalize_battery_timestamp(incoming_ts)
+    update: Dict[str, Any] = {"battery_updated_at": incoming_ts}
+    if battery_level is not None:
+        update["battery_level"] = min(1.0, battery_level)
+    if is_charging is not None:
+        update["is_charging"] = is_charging
+
+    filter_doc: Dict[str, Any] = {
+        "id": member_id,
+        "family_group_id": family_group_id,
+        "$or": [
+            {"battery_updated_at": {"$exists": False}},
+            {"battery_updated_at": {"$lt": incoming_ts}},
+        ],
+    }
+    if user_id is not None:
+        filter_doc["user_id"] = user_id
+
+    accepted_doc = await db.members.find_one_and_update(
+        filter_doc,
+        {"$set": update},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not isinstance(accepted_doc, dict):
+        return False, None
+    accepted_ts = accepted_doc.get("battery_updated_at")
+    if isinstance(accepted_ts, datetime) and accepted_ts.tzinfo is None:
+        accepted_ts = accepted_ts.replace(tzinfo=timezone.utc)
+    if accepted_ts != incoming_ts:
+        return False, None
+    return True, accepted_doc
+
+
+def _battery_state_filter(
+    member_id: str,
+    family_group_id: str,
+    accepted_ts: datetime,
+) -> dict:
+    return {
+        "id": member_id,
+        "family_group_id": family_group_id,
+        "battery_updated_at": accepted_ts,
+    }
+
+
+async def _confirm_battery_state(
+    state_filter: dict,
+    field: str,
+    value: Any,
+) -> Optional[dict]:
+    """Re-claim an already-set state only while this reading is current."""
+    return await db.members.find_one_and_update(
+        {**state_filter, field: value},
+        {"$set": {field: value}},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def _resolve_open_battery_alerts(member_id: str, family_group_id: str) -> None:
+    """Resolve every open battery alert for a member, regardless of tier."""
+    now_utc = datetime.now(timezone.utc)
+    await db.alerts.update_many(
+        {
+            "member_id": member_id,
+            "family_group_id": family_group_id,
+            "type": {"$in": ["low_battery", "low_battery_warning"]},
+            "resolved": {"$ne": True},
+        },
+        {"$set": {"resolved": True, "resolved_at": now_utc}},
+    )
+
+
+async def _create_battery_alert_if_missing(
+    *,
+    member_id: str,
+    family_group_id: str,
+    owner_id: str,
+    exclude_user_id: str,
+    member_name: str,
+    member_phone: Optional[str],
+    battery_level: float,
+    tier: str,
+) -> bool:
+    """Repair a claimed-but-missing alert and use its insert as push election.
+
+    Warning and critical each have a migration-safe partial unique index.  The
+    insert therefore arbitrates concurrent repair attempts: only the insert
+    winner sends a push.  This also makes a later reading able to repair a
+    crash between the member claim and the alert insert without duplicating a
+    notification.
+    """
+    existing = await db.alerts.find_one(
+        {
+            "member_id": member_id,
+            "family_group_id": family_group_id,
+            "type": tier,
+            "resolved": {"$ne": True},
+        }
+    )
+    if existing is not None:
+        return False
+
+    battery_pct = round(battery_level * 100)
+    critical = tier == "low_battery"
+    title = (
+        f"{member_name}'s battery is critically low"
+        if critical
+        else f"{member_name}'s battery is getting low"
+    )
+    message = (
+        f"{member_name}'s phone battery is critically low ({battery_pct}%). "
+        f"Charging the phone will help maintain location updates."
+        if critical
+        else f"{member_name}'s phone battery is getting low ({battery_pct}%). "
+        f"Charging the phone will help maintain location updates."
+    )
+    alert = Alert(
+        owner_id=owner_id,
+        family_group_id=family_group_id,
+        member_id=member_id,
+        member_name=member_name,
+        member_phone=member_phone,
+        type=tier,
+        severity="warning",
+        title=title,
+        message=message,
+    )
+    try:
+        await db.alerts.insert_one(alert.model_dump())
+    except DuplicateKeyError:
+        logger.debug(
+            f"battery alert repair deduped for member={member_id} tier={tier}"
+        )
+        return False
+
+    try:
+        await push_to_family_group(
+            family_group_id,
+            title=title,
+            body=message,
+            data={"type": tier, "member_id": member_id, "alert_id": alert.id},
+            exclude_user_id=exclude_user_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"battery alert push failed for member={member_id} tier={tier}: {exc}"
+        )
+    return True
+
+
+async def _check_low_battery_atomic(
+    *,
+    member_id: str,
+    family_group_id: str,
+    owner_id: str,
+    exclude_user_id: str,
+    battery_level: float,
+    is_charging: Optional[bool],
+    prev_doc: dict,
+    accepted_ts: datetime,
+) -> dict:
+    """Run lifecycle side effects only for this exact accepted reading."""
+    state_filter = _battery_state_filter(member_id, family_group_id, accepted_ts)
+    was_warn = bool(prev_doc.get("low_battery_warn_alerted", False))
+    was_critical = bool(prev_doc.get("low_battery_alerted", False))
+    warning_claimed = bool(prev_doc.get("battery_warning_claimed", False))
+    recovery_claimed = bool(prev_doc.get("battery_recovery_claimed", False))
+    member_name = prev_doc.get("name") or "Your family member"
+    member_phone = prev_doc.get("phone") or None
+
+    # A real charge to 25% ends the cycle.  If charging below 25% already
+    # claimed recovery, retain that claim so this branch cannot push twice.
+    if battery_level >= _BATTERY_CLEAR_THRESHOLD and (was_warn or was_critical):
+        if not recovery_claimed:
+            claimed = await db.members.find_one_and_update(
+                {
+                    **state_filter,
+                    "$or": [
+                        {"low_battery_warn_alerted": True},
+                        {"low_battery_alerted": True},
+                    ],
+                    "battery_recovery_claimed": {"$ne": True},
+                },
+                {
+                    "$set": {
+                        "low_battery_warn_alerted": False,
+                        "low_battery_alerted": False,
+                        "battery_recovery_claimed": True,
+                        "battery_warning_claimed": False,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+            if claimed is not None:
+                await _resolve_open_battery_alerts(member_id, family_group_id)
+                try:
+                    await push_to_family_group(
+                        family_group_id,
+                        title=f"{member_name}'s phone is charging",
+                        body=(
+                            f"{member_name}'s battery is back up to "
+                            f"{round(battery_level * 100)}%. Location tracking "
+                            f"is back to normal."
+                        ),
+                        data={"type": "battery_recovered", "member_id": member_id},
+                        exclude_user_id=exclude_user_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"battery recovery push failed for member={member_id}: {exc}"
+                    )
+                return {
+                    "low_battery_warn_alerted": False,
+                    "low_battery_alerted": False,
+                    "battery_recovery_claimed": True,
+                }
+        else:
+            cleared = await db.members.find_one_and_update(
+                {
+                    **state_filter,
+                    "$or": [
+                        {"low_battery_warn_alerted": True},
+                        {"low_battery_alerted": True},
+                    ],
+                },
+                {
+                    "$set": {
+                        "low_battery_warn_alerted": False,
+                        "low_battery_alerted": False,
+                        "battery_warning_claimed": False,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+            if cleared is not None:
+                await _resolve_open_battery_alerts(member_id, family_group_id)
+        return {}
+
+    # Charging at a still-low level resolves active rows exactly once per
+    # discharge cycle, but intentionally keeps both alert flags set.
+    if is_charging and (was_warn or was_critical):
+        if not recovery_claimed:
+            claimed = await db.members.find_one_and_update(
+                {
+                    **state_filter,
+                    "$or": [
+                        {"low_battery_warn_alerted": True},
+                        {"low_battery_alerted": True},
+                    ],
+                    "battery_recovery_claimed": {"$ne": True},
+                },
+                {"$set": {"battery_recovery_claimed": True}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if claimed is not None:
+                await _resolve_open_battery_alerts(member_id, family_group_id)
+                try:
+                    await push_to_family_group(
+                        family_group_id,
+                        title=f"{member_name}'s phone is charging",
+                        body=(
+                            f"{member_name}'s battery is back up to "
+                            f"{round(battery_level * 100)}%. Location tracking "
+                            f"is back to normal."
+                        ),
+                        data={"type": "battery_recovered", "member_id": member_id},
+                        exclude_user_id=exclude_user_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"battery recovery push failed for member={member_id}: {exc}"
+                    )
+                return {"battery_recovery_claimed": True}
+        else:
+            # A retry can still clean up rows if the first caller crashed after
+            # claiming the member state but before resolving every alert.
+            current = await _confirm_battery_state(
+                state_filter, "battery_recovery_claimed", True
+            )
+            if current is not None:
+                await _resolve_open_battery_alerts(member_id, family_group_id)
+        return {}
+
+    # Once charging has intentionally resolved the active rows, every reading
+    # below 25% remains in that same discharge cycle.  In particular, do not
+    # enter the tier-repair path below: a missing row after intentional
+    # recovery is not a crash-recovery case, and recreating it would also
+    # re-send a low-battery push.  Only a real >=25% reading clears the flags
+    # and permits the next cycle to claim a tier.
+    if recovery_claimed and (was_warn or was_critical):
+        return {}
+
+    # Critical is evaluated first.  A direct 15% reading creates only the
+    # critical alert (and marks warning as consumed); a warning reading followed
+    # by a critical reading gets one alert at each tier.
+    if battery_level <= _BATTERY_CRIT_THRESHOLD:
+        critical_claim = await db.members.find_one_and_update(
+            {
+                **state_filter,
+                "low_battery_alerted": {"$ne": True},
+            },
+            {
+                "$set": {
+                    "low_battery_alerted": True,
+                    "low_battery_warn_alerted": True,
+                    "battery_recovery_claimed": False,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if critical_claim is None and was_critical:
+            critical_claim = await _confirm_battery_state(
+                state_filter, "low_battery_alerted", True
+            )
+        if critical_claim is not None:
+            await _create_battery_alert_if_missing(
+                member_id=member_id,
+                family_group_id=family_group_id,
+                owner_id=owner_id,
+                exclude_user_id=exclude_user_id,
+                member_name=member_name,
+                member_phone=member_phone,
+                battery_level=battery_level,
+                tier="low_battery",
+            )
+            return {
+                "low_battery_alerted": True,
+                "low_battery_warn_alerted": True,
+                "battery_recovery_claimed": False,
+            }
+
+    if battery_level <= _BATTERY_WARN_THRESHOLD:
+        warning_claim = await db.members.find_one_and_update(
+            {
+                **state_filter,
+                "low_battery_warn_alerted": {"$ne": True},
+            },
+            {
+                "$set": {
+                    "low_battery_warn_alerted": True,
+                    "battery_warning_claimed": True,
+                    "battery_recovery_claimed": False,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        # A direct critical reading sets low_battery_warn_alerted=True to
+        # consume the warning tier without creating a warning row.  Only
+        # repair that row when a real warning claim previously existed.
+        if warning_claim is None and was_warn and (not was_critical or warning_claimed):
+            warning_claim = await _confirm_battery_state(
+                state_filter, "low_battery_warn_alerted", True
+            )
+        if warning_claim is not None:
+            await _create_battery_alert_if_missing(
+                member_id=member_id,
+                family_group_id=family_group_id,
+                owner_id=owner_id,
+                exclude_user_id=exclude_user_id,
+                member_name=member_name,
+                member_phone=member_phone,
+                battery_level=battery_level,
+                tier="low_battery_warning",
+            )
+            return {
+                "low_battery_warn_alerted": True,
+                "battery_recovery_claimed": False,
+            }
+
+    return {}
+
+
+async def check_low_battery(
+    *,
+    member_id: str,
+    family_group_id: str,
+    owner_id: str,
+    exclude_user_id: str,
+    battery_level: float,
+    is_charging: Optional[bool] = None,
+    prev_doc: dict,
+    battery_updated_at: Optional[datetime] = None,
+) -> dict:
+    """Evaluate battery lifecycle, using atomic member state when accepted.
+
+    Endpoint callers pass ``battery_updated_at`` only after
+    ``_accept_battery_telemetry`` wins its conditional write.  The optional
+    omission preserves the small direct unit-test API and legacy callers while
+    all production upload paths use the atomic branch.
+    """
+    if battery_updated_at is not None:
+        return await _check_low_battery_atomic(
+            member_id=member_id,
+            family_group_id=family_group_id,
+            owner_id=owner_id,
+            exclude_user_id=exclude_user_id,
+            battery_level=battery_level,
+            is_charging=is_charging,
+            prev_doc=prev_doc,
+            accepted_ts=battery_updated_at,
+        )
+    return await _check_low_battery_legacy(
+        member_id=member_id,
+        family_group_id=family_group_id,
+        owner_id=owner_id,
+        exclude_user_id=exclude_user_id,
+        battery_level=battery_level,
+        is_charging=is_charging,
+        prev_doc=prev_doc,
+    )
 
 
 @api_router.put("/members/{member_id}/location", response_model=FamilyMember)
@@ -3239,51 +3714,49 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     if raw_heading is not None:
         update["gps_heading"] = raw_heading
 
-    # Battery telemetry — timestamp-guarded write.
-    #
-    # Only update battery_level / is_charging if the effective timestamp
-    # of this upload (captured_at when present, server_now otherwise) is
-    # strictly newer than battery_updated_at already stored.  This prevents
-    # a replay packet captured 8 minutes ago from overwriting a plug-in
-    # event that arrived more recently via PATCH /members/{id}/battery.
-    #
-    # Guard: also reject -1 (SDK "unavailable" sentinel) and values out
-    # of range.  Clamp upper bound to 1.0 so a misbehaving client can't
-    # write > 100 %.
-    _batt_incoming_ts = incoming_captured_at or server_now
-    _batt_stored_ts   = prev_doc.get("battery_updated_at") if prev_doc else None
-    # Motor returns naive UTC datetimes; normalize before comparing against the
-    # always-aware incoming timestamp (codebase standard: UTC-aware throughout).
-    if _batt_stored_ts is not None and _batt_stored_ts.tzinfo is None:
-        _batt_stored_ts = _batt_stored_ts.replace(tzinfo=timezone.utc)
-    _batt_write_ok    = (
-        _batt_stored_ts is None
-        or _batt_incoming_ts > _batt_stored_ts
+    # Battery telemetry is accepted by the shared conditional write below.
+    # Do not put these fields in the later GPS/location $set: that write can
+    # legitimately race a newer PATCH /battery and must never overwrite it.
+    _batt_incoming_ts = _normalize_battery_timestamp(
+        incoming_captured_at or server_now
     )
-    if _batt_write_ok:
-        if data.battery_level is not None and data.battery_level >= 0:
-            update["battery_level"]      = min(1.0, data.battery_level)
-            update["battery_updated_at"] = _batt_incoming_ts
-        if data.is_charging is not None:
-            update["is_charging"]        = data.is_charging
-            update["battery_updated_at"] = _batt_incoming_ts
+    _batt_accepted = False
+    _batt_doc: Optional[dict] = None
+    if (
+        (data.battery_level is not None and data.battery_level >= 0)
+        or data.is_charging is not None
+    ):
+        _batt_accepted, _batt_doc = await _accept_battery_telemetry(
+            member_id=member_id,
+            family_group_id=current["family_group_id"],
+            battery_level=data.battery_level,
+            is_charging=data.is_charging,
+            incoming_ts=_batt_incoming_ts,
+        )
 
     # Battery alert lifecycle — delegated to shared helper.
     # check_low_battery() owns all threshold logic (15 % trigger / 25 % clear),
     # hysteresis, alert record creation, push fanout, and auto-resolution.
-    # The returned dict is merged into `update` so the flag change is written
-    # in the same atomic $set as the location fields below.
-    if data.battery_level is not None and prev_doc is not None:
-        _batt_update = await check_low_battery(
+    # A location payload may be rejected by the shared battery timestamp guard
+    # (for example, an offline replay arriving after a newer PATCH /battery),
+    # or may carry the SDK's invalid -1/unavailable sentinel. Such telemetry
+    # must not run alert lifecycle side effects.
+    if (
+        data.battery_level is not None
+        and data.battery_level >= 0
+        and _batt_accepted
+        and _batt_doc is not None
+    ):
+        await check_low_battery(
             member_id=member_id,
             family_group_id=current["family_group_id"],
             owner_id=current["id"],
             exclude_user_id=current["id"],
-            battery_level=data.battery_level,
+            battery_level=min(1.0, data.battery_level),
             is_charging=data.is_charging,
-            prev_doc=prev_doc,
+            prev_doc=_batt_doc,
+            battery_updated_at=_batt_incoming_ts,
         )
-        update.update(_batt_update)
 
     # Strip map-visible coordinate fields for replay catch-up points.
     # last_seen + captured_at remain in `update` so heartbeat monitoring
@@ -3535,18 +4008,21 @@ async def patch_member_battery(
             detail="You can only update battery telemetry for your own member.",
         )
 
-    server_now  = datetime.now(timezone.utc)
-    incoming_ts = data.battery_updated_at or server_now
-    stored_ts   = member_doc.get("battery_updated_at")
-    # Motor returns naive UTC datetimes; normalize before comparing against the
-    # always-aware incoming timestamp (codebase standard: UTC-aware throughout).
-    if stored_ts is not None and stored_ts.tzinfo is None:
-        stored_ts = stored_ts.replace(tzinfo=timezone.utc)
+    server_now = datetime.now(timezone.utc)
+    incoming_ts = _normalize_battery_timestamp(data.battery_updated_at or server_now)
 
-    if stored_ts is not None and incoming_ts <= stored_ts:
+    battery_accepted, accepted_doc = await _accept_battery_telemetry(
+        member_id=member_id,
+        family_group_id=current["family_group_id"],
+        battery_level=data.battery_level,
+        is_charging=data.is_charging,
+        incoming_ts=incoming_ts,
+        user_id=current["id"],
+    )
+    if not battery_accepted or accepted_doc is None:
         logger.debug(
             f"battery-patch: member={member_id} skipped — "
-            f"incoming {incoming_ts.isoformat()} <= stored {stored_ts.isoformat()}"
+            f"incoming {incoming_ts.isoformat()} did not win conditional write"
         )
         try:
             await stamp_device_presence(current, "battery-patch")
@@ -3557,62 +4033,28 @@ async def patch_member_battery(
             raise HTTPException(status_code=404, detail="Member not found after update")
         return FamilyMember(**doc)
 
-    update: Dict[str, Any] = {"battery_updated_at": incoming_ts}
-    if data.battery_level is not None and data.battery_level >= 0:
-        update["battery_level"] = min(1.0, data.battery_level)
-    if data.is_charging is not None:
-        update["is_charging"] = data.is_charging
-
-    if len(update) == 1:
-        # Only the timestamp — nothing substantive to write.
-        try:
-            await stamp_device_presence(current, "battery-patch")
-        except Exception:
-            logger.warning("device_presence failed after battery patch", exc_info=True)
-        doc = await db.members.find_one({"id": member_id}, {"_id": 0})
-        if not doc:
-            raise HTTPException(status_code=404, detail="Member not found after update")
-        return FamilyMember(**doc)
-
-    await db.members.update_one(
-        {
-            "id": member_id,
-            "family_group_id": current["family_group_id"],
-            "user_id": current["id"],
-        },
-        {"$set": update},
-    )
     logger.info(
         f"battery-patch: member={member_id} "
         f"level={data.battery_level!r} charging={data.is_charging!r} "
-        f"ts={incoming_ts.isoformat()} "
-        f"prev_ts={stored_ts.isoformat() if stored_ts else 'none'}"
+        f"ts={incoming_ts.isoformat()}"
     )
 
     # Battery alert lifecycle — same helper as PUT /location.
     # This is the path that catches threshold crossings on stationary devices
     # where the Transistor SDK hasn't uploaded a new location yet.  member_doc
-    # is the pre-write snapshot, so low_battery_alerted reflects state before
-    # this call even though battery_level was just written above.
-    if data.battery_level is not None:
-        _batt_update = await check_low_battery(
+    # is replaced by accepted_doc so member-level claims are based on the
+    # exact battery write that won the conditional timestamp race.
+    if data.battery_level is not None and data.battery_level >= 0:
+        await check_low_battery(
             member_id=member_id,
             family_group_id=current["family_group_id"],
             owner_id=current["id"],
             exclude_user_id=current["id"],
-            battery_level=data.battery_level,
+            battery_level=min(1.0, data.battery_level),
             is_charging=data.is_charging,
-            prev_doc=member_doc,
+            prev_doc=accepted_doc,
+            battery_updated_at=incoming_ts,
         )
-        if _batt_update:
-            await db.members.update_one(
-                {
-                    "id": member_id,
-                    "family_group_id": current["family_group_id"],
-                    "user_id": current["id"],
-                },
-                {"$set": _batt_update},
-            )
 
     try:
         await stamp_device_presence(current, "battery-patch")
@@ -6855,17 +7297,17 @@ async def _ensure_alert_dedup_index():
     # excluded from the index's partial filter and therefore never block each
     # other.
     #
-    # Pre-migration: before creating the index, we resolve any leftover
-    # duplicate unresolved low_battery docs from the same (family_group_id,
-    # member_id) pair.  Without this step, index creation on a populated DB
-    # would fail with "E11000 duplicate key" if such duplicates already exist.
-    # We keep the most-recently-created doc per pair unresolved and resolve the
-    # rest so the index can be built cleanly.
+    # Pre-migration: before creating either tier's index, resolve leftover
+    # duplicate unresolved low-battery docs from the same
+    # (family_group_id, member_id, type) tuple.  Without this step, index
+    # creation on a populated DB would fail with "E11000 duplicate key".
+    # Warning and critical are grouped separately so one tier never resolves
+    # the other while the migration is making the indexes safe.
     try:
         pipeline = [
             {
                 "$match": {
-                    "type": "low_battery",
+                    "type": {"$in": ["low_battery", "low_battery_warning"]},
                     "resolved": False,
                 }
             },
@@ -6877,6 +7319,7 @@ async def _ensure_alert_dedup_index():
                     "_id": {
                         "family_group_id": "$family_group_id",
                         "member_id": "$member_id",
+                        "type": "$type",
                     },
                     "ids": {"$push": "$id"},
                 }
@@ -6892,7 +7335,8 @@ async def _ensure_alert_dedup_index():
                 )
                 logger.info(
                     f"low_battery dedup pre-migration: resolved {res.modified_count} "
-                    f"duplicate(s) for member={group['_id']['member_id']}"
+                    f"duplicate(s) for member={group['_id']['member_id']} "
+                    f"type={group['_id'].get('type', 'low_battery')}"
                 )
     except Exception as e:
         logger.warning(f"low_battery dedup pre-migration skipped: {e}")
