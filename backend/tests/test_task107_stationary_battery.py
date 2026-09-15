@@ -69,6 +69,9 @@ def test_headless_patch_without_client_timestamp_advances_battery_timestamp():
         {**member, "battery_level": 0.82, "is_charging": False},
     ])
     database.members.update_one = AsyncMock()
+    database.members.find_one_and_update = AsyncMock(
+        return_value={**member, "battery_level": 0.82, "is_charging": False}
+    )
 
     current = {"id": "test-member-user", "family_group_id": FAMILY_GROUP_ID}
     with patch.object(server, "db", database), patch.object(
@@ -82,11 +85,7 @@ def test_headless_patch_without_client_timestamp_advances_battery_timestamp():
             )
         )
 
-    battery_call = next(
-        call
-        for call in database.members.update_one.call_args_list
-        if "battery_updated_at" in call.args[1]["$set"]
-    )
+    battery_call = database.members.find_one_and_update.call_args
     update = battery_call.args[1]["$set"]
     assert update["battery_level"] == 0.82
     assert update["is_charging"] is False
@@ -109,6 +108,7 @@ def test_old_replay_cannot_hide_newer_stationary_battery_state():
         copy.deepcopy(member),
     ])
     database.members.update_one = AsyncMock()
+    database.members.find_one_and_update = AsyncMock(return_value=None)
     current = {"id": "test-member-user", "family_group_id": FAMILY_GROUP_ID}
 
     with patch.object(server, "db", database), patch.object(
@@ -135,3 +135,46 @@ def test_old_replay_cannot_hide_newer_stationary_battery_state():
     assert result.battery_level == 0.82
     assert result.is_charging is True
     assert result.battery_updated_at == stored_at
+
+
+def test_stale_location_battery_does_not_run_alert_lifecycle():
+    """A replayed PUT /location battery sample cannot resolve or retrigger alerts."""
+    stored_at = datetime.now(timezone.utc) - timedelta(minutes=3)
+    old_capture = stored_at - timedelta(minutes=20)
+    member = _member_doc(
+        battery_level=0.15,
+        is_charging=False,
+        battery_updated_at=stored_at,
+        low_battery_alerted=True,
+        low_battery_warn_alerted=True,
+    )
+    target = {"id": MEMBER_ID, "user_id": "test-member-user"}
+    database = MagicMock()
+    database.members.find_one = AsyncMock(
+        side_effect=[target, copy.deepcopy(member), copy.deepcopy(member)]
+    )
+    database.members.find_one_and_update = AsyncMock(return_value=None)
+    write_result = MagicMock(matched_count=1, modified_count=1)
+    database.members.update_one = AsyncMock(return_value=write_result)
+    database.location_ingest_log.insert_one = AsyncMock()
+    database.location_history.insert_one = AsyncMock()
+    current = {
+        "id": "task-107-owner",
+        "family_group_id": FAMILY_GROUP_ID,
+        "family_group_role": "owner",
+    }
+    payload = server.LocationUpdate(
+        latitude=35.0,
+        longitude=-115.0,
+        battery_level=0.15,
+        is_charging=True,
+        timestamp=old_capture.isoformat(),
+    )
+    lifecycle = AsyncMock()
+
+    with patch.object(server, "db", database), patch.object(
+        server, "check_low_battery", lifecycle
+    ), patch.object(server.geocoding, "GEOCODE_BACKEND_ENABLED", True):
+        _run(server.update_member_location(MEMBER_ID, payload, current))
+
+    lifecycle.assert_not_awaited()

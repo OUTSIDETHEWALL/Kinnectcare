@@ -149,7 +149,10 @@ class TestMemberWithoutPhone:
         prev_doc = {"low_battery_alerted": False, "name": "Test Member"}
         result = _call(battery_level=0.10, prev_doc=prev_doc)
         mock_db.alerts.insert_one.assert_called_once()
-        assert result == {"low_battery_alerted": True}
+        assert result == {
+            "low_battery_alerted": True,
+            "low_battery_warn_alerted": True,
+        }
 
 
 # ── Test 3: guard-condition simulation ────────────────────────────────────────

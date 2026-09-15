@@ -13,7 +13,13 @@ description: Two-path independent battery monitoring — Transistor headless + W
 
 ## Two-path architecture
 
-Both paths call the same `PATCH /members/{id}/battery` endpoint. Backend write-guard (incoming_ts > stored_ts) ensures newest wins.
+Both paths feed one backend battery state machine. Timestamp acceptance and alert-state transitions must be atomic and use BSON millisecond precision; a read/check followed by an unconditional write is not sufficient when location and battery uploads race.
+
+Low-battery suppression lasts for the entire discharge cycle. Charging may resolve the visible alert and emit one recovery notice, but it does not clear warning/critical suppression below 25%. Only reaching 25% starts a new cycle.
+
+**Why:** Independent battery sources can report charging transitions seconds apart. Clearing suppression on `is_charging=true` allowed the next low `false` reading to recreate the same alert. MongoDB also truncates datetimes to milliseconds, so microsecond comparisons can reject a write that actually succeeded.
+
+**How to apply:** Atomically accept the newest telemetry, condition every lifecycle claim on that exact stored timestamp, elect recovery once at the member/cycle level, and reset all cycle markers only at the 25% boundary.
 
 **Path A — Transistor headless heartbeat** (`locationEngine.ts`):
 - Fires when SDK is active (motion, heartbeat events)
