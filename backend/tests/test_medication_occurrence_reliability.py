@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+import httpx
 
 os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
 os.environ.setdefault("DB_NAME", "medication_occurrence_tests")
@@ -18,6 +19,7 @@ import server  # noqa: E402
 from expo_push import _collapse_id  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 from pymongo.errors import DuplicateKeyError  # noqa: E402
+from starlette.requests import Request  # noqa: E402
 
 
 def _match(row, query):
@@ -113,6 +115,9 @@ class Collection:
 class DB:
     def __init__(self, reminders=()):
         self.reminders = Collection(reminders)
+        self.family_groups = Collection([
+            {"id": "g1", "owner_user_id": "owner"},
+        ])
         self.members = Collection()
         self.users = Collection()
         self.medication_logs = Collection()
@@ -263,6 +268,206 @@ def test_mark_is_idempotent_and_persists_exact_occurrence(monkeypatch):
         assert len(db.medication_logs.rows) == 1
         assert db.medication_logs.rows[0]["occurrence_id"] == _occurrence()
         assert db.medication_logs.rows[0]["slot_time"] == "14:00"
+
+    asyncio.run(scenario())
+
+
+def test_routine_taken_with_scheduled_times_keeps_legacy_path(monkeypatch):
+    async def scenario():
+        db = DB([{
+            "id": "routine-1", "owner_id": "owner", "family_group_id": "g1",
+            "member_id": "m1", "member_name": "Joyce", "title": "Walk",
+            "category": "routine", "times": [{"time": "14:00"}],
+            "status": "pending", "taken": False,
+        }])
+        db.members.rows.append({"id": "m1", "family_group_id": "g1", "user_id": "m1"})
+        db.users.rows.append({"id": "owner", "timezone": "UTC"})
+        monkeypatch.setattr(server, "db", db)
+        monkeypatch.setattr(server, "_med_scheduler_ready", True)
+        result = await server.mark_reminder(
+            "routine-1",
+            server.ReminderMark(
+                status="taken", slot_time="14:00", local_date="2026-09-12",
+            ),
+            {"id": "m1", "family_group_id": "g1", "timezone": "UTC"},
+        )
+        assert result == {"ok": True, "status": "taken"}
+        assert db.reminders.rows[0]["taken"] is True
+
+    asyncio.run(scenario())
+
+
+def test_alert_acknowledgment_closes_due_occurrence_before_t15(monkeypatch):
+    async def scenario():
+        db = DB([{
+            "id": "r1", "owner_id": "owner", "family_group_id": "g1",
+            "member_id": "m1", "member_name": "Joyce", "title": "Aspirin",
+            "dosage": "81 mg", "category": "medication",
+            "times": [{"time": "14:00"}], "status": "pending", "taken": False,
+        }])
+        db.members.rows.append({
+            "id": "m1", "owner_id": "owner", "family_group_id": "g1",
+            "user_id": "senior", "name": "Joyce",
+        })
+        db.users.rows.append({"id": "owner", "timezone": "UTC"})
+        monkeypatch.setattr(server, "db", db)
+        monkeypatch.setattr(server, "_med_scheduler_ready", True)
+        pushes = []
+
+        async def user_push(*args, **kwargs):
+            pushes.append(args)
+            return 1
+
+        due = await med_scheduler.process_pending_notifications(
+            db,
+            push_to_user=user_push,
+            push_to_family_group=lambda *args, **kwargs: asyncio.sleep(0),
+            now_utc=datetime(2026, 9, 12, 14, 0, tzinfo=timezone.utc),
+        )
+        assert due["fired_due"] == 1
+        alert = db.alerts.rows[0]
+        assert alert["self_due"] is True
+        assert alert["reminder_id"] == "r1"
+        assert alert["member_id"] == "m1"
+        assert alert["scheduled_time"] == "14:00"
+        assert alert["local_date"] == "2026-09-12"
+        assert alert["occurrence_id"] == _occurrence()
+
+        users = {
+            "owner-token": {"id": "owner", "family_group_id": "g1", "timezone": "UTC"},
+            "member-token": {"id": "other", "family_group_id": "g1", "timezone": "UTC"},
+        }
+
+        async def test_current_user(request: Request):
+            return users[request.headers["x-test-user"]]
+
+        server.app.dependency_overrides[server.get_current_user] = test_current_user
+        try:
+            transport = httpx.ASGITransport(app=server.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                denied = await client.post(
+                    f"/api/alerts/{alert['id']}/ack",
+                    headers={"x-test-user": "member-token"},
+                )
+                assert denied.status_code == 403
+                assert db.alerts.rows[0]["acknowledged"] is False
+                response = await client.post(
+                    f"/api/alerts/{alert['id']}/ack",
+                    headers={"x-test-user": "owner-token"},
+                )
+                assert response.status_code == 200
+                assert response.json() == {"ok": True, "status": "taken"}
+        finally:
+            server.app.dependency_overrides.pop(server.get_current_user, None)
+        assert len(db.medication_logs.rows) == 1
+        assert db.medication_logs.rows[0]["occurrence_id"] == _occurrence()
+        assert db.reminders.rows[0]["taken"] is True
+        assert db.alerts.rows[0]["acknowledged"] is True
+
+        # A retry is idempotent and cannot create a second terminal log.
+        assert await server.acknowledge_alert(alert["id"], {
+            "id": "owner", "family_group_id": "g1", "timezone": "UTC"
+        }) == {
+            "ok": True, "status": "taken"
+        }
+        assert len(db.medication_logs.rows) == 1
+
+        family_pushes = []
+
+        async def family_push(*args, **kwargs):
+            family_pushes.append(args)
+            return 1
+
+        later = await med_scheduler.process_pending_notifications(
+            db,
+            push_to_user=user_push,
+            push_to_family_group=family_push,
+            now_utc=datetime(2026, 9, 12, 14, 16, tzinfo=timezone.utc),
+        )
+        assert later["fired_family_alert"] == 0
+        assert family_pushes == []
+
+    asyncio.run(scenario())
+
+
+def test_alert_acknowledgment_conflict_does_not_hide_due_alert(monkeypatch):
+    async def scenario():
+        db = DB([{
+            "id": "r1", "owner_id": "owner", "family_group_id": "g1",
+            "member_id": "m1", "member_name": "Joyce", "title": "Aspirin",
+            "category": "medication", "times": [{"time": "14:00"}],
+        }])
+        db.members.rows.append({
+            "id": "m1", "family_group_id": "g1", "user_id": "senior",
+        })
+        occurrence_id = _occurrence()
+        db.medication_occurrences.rows.append({
+            "occurrence_id": occurrence_id, "reminder_id": "r1",
+            "member_id": "m1", "slot_time": "14:00",
+            "local_date": "2026-09-12", "acknowledged": False,
+            "family_claimed": True, "family_state": "sent",
+        })
+        db.alerts.rows.append({
+            "id": "due-alert", "family_group_id": "g1", "member_id": "m1",
+            "member_name": "Joyce", "type": "medication", "severity": "info",
+            "title": "Time to take Aspirin", "message": "Reminder",
+            "acknowledged": False, "self_due": True, "reminder_id": "r1",
+            "scheduled_time": "14:00", "local_date": "2026-09-12",
+            "occurrence_id": occurrence_id,
+        })
+        monkeypatch.setattr(server, "db", db)
+        monkeypatch.setattr(server, "_med_scheduler_ready", True)
+        with pytest.raises(HTTPException) as blocked:
+            await server.acknowledge_alert(
+                "due-alert",
+                {"id": "owner", "family_group_id": "g1", "timezone": "UTC"},
+            )
+        assert blocked.value.status_code == 409
+        assert db.alerts.rows[0]["acknowledged"] is False
+        assert db.medication_logs.rows == []
+
+    asyncio.run(scenario())
+
+
+def test_populated_missed_medication_alert_stays_checked_on_them(monkeypatch):
+    async def scenario():
+        db = DB()
+        db.alerts.rows.append({
+            "id": "missed-alert", "family_group_id": "g1", "member_id": "m1",
+            "member_name": "Joyce", "type": "medication", "severity": "warning",
+            "title": "Medication missed", "message": "Check on Joyce",
+            "acknowledged": False, "reminder_id": "r1", "medication_name": "Aspirin",
+            "scheduled_time": "14:00", "local_date": "2026-09-12",
+            "occurrence_id": _occurrence(),
+        })
+        monkeypatch.setattr(server, "db", db)
+        result = await server.acknowledge_alert(
+            "missed-alert",
+            {"id": "caregiver", "family_group_id": "g1", "timezone": "UTC"},
+        )
+        assert result == {"ok": True}
+        assert db.alerts.rows[0]["acknowledged"] is True
+        assert db.medication_logs.rows == []
+
+    asyncio.run(scenario())
+
+
+def test_legacy_medication_alert_acknowledgment_stays_generic(monkeypatch):
+    async def scenario():
+        db = DB()
+        db.alerts.rows.append({
+            "id": "legacy", "family_group_id": "g1", "member_id": "m1",
+            "member_name": "Joyce", "type": "medication", "severity": "info",
+            "title": "Time to take Aspirin", "message": "Reminder",
+            "acknowledged": False,
+        })
+        monkeypatch.setattr(server, "db", db)
+        result = await server.acknowledge_alert(
+            "legacy",
+            {"id": "caregiver", "family_group_id": "g1", "timezone": "UTC"},
+        )
+        assert result == {"ok": True}
+        assert db.alerts.rows[0]["acknowledged"] is True
 
     asyncio.run(scenario())
 

@@ -1,100 +1,4 @@
-import { Stack, useRouter, useSegments, usePathname } from 'expo-router';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { StatusBar } from 'expo-status-bar';
-import { AuthProvider, useAuth } from '../src/AuthContext';
-import { useEffect, useState, useRef } from 'react';import { View, ActivityIndicator, AppState, Platform, Linking, Alert } from 'react-native';
-import Constants from 'expo-constants';
-import * as Updates from 'expo-updates';
-import { Colors } from '../src/theme';
-import { registerForPushNotifications, setupNotificationsForOS, useNotificationListeners, setAppReadyForDeepLink, refreshPushTokenIfStale, dismissStaleAreYouOkNotifs } from '../src/push';
-import { isOnboardingDone, markOnboardingDone } from '../src/onboardingStore';
-import { hasPinForUser, isUnlockedNow } from '../src/pinAuth';
-import {
-  isAppLockEnabled,
-  markAppLockMigrationNoticeShown,
-  needsAppLockUnlock as shouldRequireAppLockUnlock,
-  shouldShowAppLockMigrationNotice,
-} from '../src/appLock';
-import { startBackgroundLocation, stopBackgroundLocation } from '../src/backgroundLocation';
-import { configureBatteryTask, BATTERY_OPT_PROMPTED_KEY } from '../src/batteryTask';
-import { refreshLocationIfStale, setMyMemberId, setMyUserId } from '../src/locationRefresh';
-import * as locationEngine from '../src/locationEngine';
-import * as leonidas from '../src/leonidas';
-import * as memberStore from '../src/store/memberStore';
-import { api, getCurrentToken, subscribeToTokenChanges } from '../src/api';
-import { logPipelineEvent } from '../src/refreshPipelineLog';
-import {
-  loadDisclaimerAck,
-  subscribeDisclaimerAck,
-  getDisclaimerAckSync,
-} from '../src/disclaimerStore';
-import { logResumeDecision, isAlertDismissed } from '../src/resumeDiagnostics';
-import { setActiveEmergency } from '../src/activeEmergency';
-import {
-  setPendingInvite,
-  getPendingInvite,
-  isInviteConsumed,
-} from '../src/pendingInvite';
-import { isPermissionsHandled } from '../src/permissionsStore';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { logStartupEvent } from '../src/startupDiagnostics';
-import { recordNativeStartupCheckpoint } from '../src/nativeStartupRecorder';
-
-// This is the first executed JS-side checkpoint in the root bundle.
-recordNativeStartupCheckpoint('js_runtime_initialized');
-
-function RootNav() {
-  const { user, loading } = useAuth();
-  const segments = useSegments();
-  const router = useRouter();
-  const pathname = usePathname();
-  const [onboardingChecked, setOnboardingChecked] = useState(false);
-  const [needsOnboarding, setNeedsOnboarding] = useState(false);
-  // App Lock is optional and off by default. A saved legacy PIN alone must
-  // never hold up session restoration, deep links, or monitoring startup.
-  const [appLockChecked, setAppLockChecked] = useState(false);
-  const [needsAppLockUnlock, setNeedsAppLockUnlock] = useState(false);
-  // Health disclaimer gate — first-launch only.  Acknowledgment stored in
-  // AsyncStorage under DISCLAIMER_ACK_KEY.  Required for Google Play
-  // medical-disclaimer compliance (v1.1.7).
-  const [disclaimerChecked, setDisclaimerChecked] = useState(false);
-  const [needsDisclaimer, setNeedsDisclaimer] = useState(false);
-  // Permission onboarding gate — shown once per install after the user
-  // authenticates for the first time.  Fires the OS location and
-  // notification dialogs with emotional, family-focused context.
-  const [permissionsChecked, setPermissionsChecked] = useState(false);
-  const [needsPermissions, setNeedsPermissions] = useState(false);
-  // Cold-start deep links must be resolved before RootNav makes its first
-  // route decision. Otherwise the generic onboarding/disclaimer gates can
-  // navigate away while the invite token is still being persisted.
-  const [initialLinkChecked, setInitialLinkChecked] = useState(false);
-  const [coldStartInviteToken, setColdStartInviteToken] = useState<string | null>(null);
-  const routeDecisionRef = useRef(0);
-  const rootMountedRecordedRef = useRef(false);
-
-  const logRootDecision = (
-    reason: string,
-    toRoute: string | null,
-    outcome: 'navigate' | 'hold' | 'ready',
-  ) => {
-    logStartupEvent({
-      phase: 'root_navigation_decision',
-      event: 'root_navigation_evaluated',
-      route: toRoute,
-      reason,
-      outcome,
-      details: {
-        decision: ++routeDecisionRef.current,
-        currentRoute: pathname || '/',
-        authenticated: !!user,
-        authLoading: loading,
-        onboardingChecked,
-        needsOnboarding,
-        appLockChecked,
-        needsAppLockUnlock,
-        disclaimerChecked,
-        needsDisclaimer,
-        permissionsChecked,
+ permissionsChecked,
         needsPermissions,
       },
     });
@@ -485,11 +389,11 @@ function RootNav() {
         });
       } catch (_e) {}
     };
-    if ((t === 'medication' && (subtype === 'self_due' || !subtype)) ||
-        (t === 'routine')) {
+    const medicationRoute = medicationSelfDueRoute(data);
+    if (medicationRoute || t === 'routine') {
       __logRoute('/(modals)/acknowledge');
       try {
-        router.replace({
+        router.replace(medicationRoute || {
           pathname: '/(modals)/acknowledge',
           params: {
             type: t,

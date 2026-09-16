@@ -314,4 +314,55 @@ describe('Alerts screen — Call button (component-level)', () => {
 
     expect(Linking.openURL).toHaveBeenCalledTimes(2);
   });
+
+  it('pressing a medication Acknowledge button posts the exact alert and refreshes after success', async () => {
+    const active = makeAlertDoc({
+      id: 'medication-alert-001',
+      type: 'medication',
+      severity: 'info',
+      title: 'Time for Joyce to take Aspirin',
+    });
+    const cleared = { ...active, acknowledged: true };
+    mockApiGet
+      .mockResolvedValueOnce({ data: [active] })
+      .mockResolvedValueOnce({ data: [cleared] });
+    mockApiPost.mockResolvedValue({ data: { ok: true } });
+
+    const renderer = await renderWithAlerts([active]);
+    const ack = findByTestID(renderer.root, 'alert-ack-medication-alert-001');
+    expect(ack).not.toBeNull();
+
+    await act(async () => {
+      await ack.props.onPress();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockApiPost).toHaveBeenCalledWith('/alerts/medication-alert-001/ack');
+    expect(mockApiGet).toHaveBeenCalledTimes(2);
+    expect(findByTestID(renderer.root, 'alert-ack-medication-alert-001')).toBeNull();
+  });
+
+  it('keeps a medication alert active when the Alerts Acknowledge request fails', async () => {
+    const active = makeAlertDoc({
+      id: 'medication-alert-failed',
+      type: 'medication',
+      severity: 'info',
+      title: 'Time for Joyce to take Aspirin',
+    });
+    mockApiGet.mockResolvedValue({ data: [active] });
+    mockApiPost.mockRejectedValue(new Error('offline'));
+
+    const renderer = await renderWithAlerts([active]);
+    const ack = findByTestID(renderer.root, 'alert-ack-medication-alert-failed');
+    expect(ack).not.toBeNull();
+
+    await act(async () => {
+      await ack.props.onPress();
+      await Promise.resolve();
+    });
+
+    expect(mockApiPost).toHaveBeenCalledWith('/alerts/medication-alert-failed/ack');
+    expect(findByTestID(renderer.root, 'alert-ack-medication-alert-failed')).not.toBeNull();
+  });
 });
