@@ -476,9 +476,11 @@ async def _log_alert(
     medication_name: Optional[str] = None,
     dosage: Optional[str] = None,
     scheduled_time: Optional[str] = None,
+    local_date: Optional[str] = None,
     missed_at: Optional[datetime] = None,
     missed_local_date: Optional[str] = None,
     occurrence_id: Optional[str] = None,
+    self_due: Optional[bool] = None,
     alert_id: Optional[str] = None,
     raise_on_error: bool = False,
 ) -> None:
@@ -499,17 +501,24 @@ async def _log_alert(
             "acknowledged": False,
             "created_at": now_utc,
         }
-        if missed_at is not None:
+        if reminder_id is not None:
             doc.update({
                 "reminder_id": reminder_id,
                 "medication_name": medication_name,
                 "dosage": dosage,
                 "scheduled_time": scheduled_time,
+            })
+        if missed_at is not None:
+            doc.update({
                 "missed_at": missed_at,
                 "missed_local_date": missed_local_date,
             })
         if occurrence_id:
             doc["occurrence_id"] = occurrence_id
+        if local_date is not None:
+            doc["local_date"] = local_date
+        if self_due is not None:
+            doc["self_due"] = self_due
         await db.alerts.insert_one(doc)
     except Exception as e:
         if raise_on_error:
@@ -991,6 +1000,13 @@ async def process_pending_notifications(
                         title=title,
                         message=f"Reminder sent at {slot_time} local.",
                         now_utc=now_utc,
+                        reminder_id=rem["id"],
+                        medication_name=rem.get("title"),
+                        dosage=rem.get("dosage"),
+                        scheduled_time=slot_time,
+                        local_date=local_date,
+                        occurrence_id=occurrence_id,
+                        self_due=not is_routine,
                     )
                     if is_routine:
                         counters["fired_routine_due"] += 1

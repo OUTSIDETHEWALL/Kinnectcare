@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
 import * as Device from 'expo-device';
@@ -880,9 +880,11 @@ export async function dismissStaleAreYouOkNotifs(
 // alerts screen, never flicker back, and never lose the deep-link to
 // a cold-start race.
 
-let pendingDeepLinkData: any = null;
-let liveOnAlert: ((data: any) => void) | null = null;
+type PendingNotificationResponse = { requestId: string; payload: any };
+let pendingDeepLinkData: PendingNotificationResponse[] = [];
+let liveOnAlert: ((data: any) => void | Promise<void>) | null = null;
 let appReadyForDeepLink = false;
+let flushInFlight = false;
 
 // Set of notification request IDs we have ALREADY enqueued as
 // deep-links during this app launch. Used to prevent the same
@@ -899,22 +901,152 @@ let appReadyForDeepLink = false;
 // bounced back to /(modals)/acknowledge after the user already
 // dismissed it. The medication-follow-up "acknowledge loop" bug.
 const consumedNotificationIds = new Set<string>();
+const CONSUMED_NOTIFICATION_STORAGE_KEY = '@kinnship/notification_response_consumed_v1';
+const PENDING_NOTIFICATION_STORAGE_KEY = '@kinnship/notification_response_pending_v1';
+const MAX_DURABLE_CONSUMED_NOTIFICATION_IDS = 100;
+let durableConsumedNotificationIds: Set<string> | null = null;
+
+async function loadDurableConsumedNotificationIds(): Promise<Set<string>> {
+  if (durableConsumedNotificationIds) return durableConsumedNotificationIds;
+  const ids = new Set<string>();
+  try {
+    const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+    const raw = await AsyncStorage.getItem(CONSUMED_NOTIFICATION_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(parsed)) {
+      for (const id of parsed.slice(-MAX_DURABLE_CONSUMED_NOTIFICATION_IDS)) {
+        if (typeof id === 'string' && id) ids.add(id);
+      }
+    }
+  } catch (_e) {}
+  durableConsumedNotificationIds = ids;
+  return ids;
+}
+
+async function persistConsumedNotificationId(id: string): Promise<void> {
+  const ids = await loadDurableConsumedNotificationIds();
+  ids.add(id);
+  const bounded = Array.from(ids).slice(-MAX_DURABLE_CONSUMED_NOTIFICATION_IDS);
+  const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+  await AsyncStorage.setItem(
+    CONSUMED_NOTIFICATION_STORAGE_KEY,
+    JSON.stringify(bounded),
+  );
+}
+
+/**
+ * The pending record is the crash-safe handoff between the OS response and
+ * RootNav. It is written before the payload enters the in-memory queue.
+ */
+async function readPendingNotificationResponses(): Promise<PendingNotificationResponse[]> {
+  const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+  const raw = await AsyncStorage.getItem(PENDING_NOTIFICATION_STORAGE_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    return rows
+      .filter((row) => row?.requestId && row?.payload);
+  } catch (_e) {}
+  return [];
+}
+
+async function persistPendingNotificationResponses(
+  records: PendingNotificationResponse[],
+): Promise<void> {
+  const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+  if (!records.length) {
+    await AsyncStorage.removeItem(PENDING_NOTIFICATION_STORAGE_KEY);
+    return;
+  }
+  await AsyncStorage.setItem(PENDING_NOTIFICATION_STORAGE_KEY, JSON.stringify(records));
+}
+
+async function removePendingNotificationResponse(requestId: string): Promise<void> {
+  const existing = await readPendingNotificationResponses();
+  const remaining = existing.filter((row) => row.requestId !== requestId);
+  if (remaining.length !== existing.length) {
+    await persistPendingNotificationResponses(remaining);
+  }
+}
+
+async function clearLastNotificationResponse(): Promise<void> {
+  const clearLast = (Notifications as any).clearLastNotificationResponseAsync;
+  if (typeof clearLast === 'function') await clearLast();
+}
+
+/**
+ * Persist a body tap before enqueueing it. Storage failure deliberately
+ * prevents the in-memory queue from seeing the event, so the native response
+ * remains available for a later retry.
+ */
+async function stageNotificationResponse(
+  requestId: string | undefined,
+  payload: any,
+): Promise<boolean> {
+  if (!requestId) return false;
+  if (consumedNotificationIds.has(requestId)) return false;
+  const durable = await loadDurableConsumedNotificationIds();
+  if (durable.has(requestId)) {
+    await removePendingNotificationResponse(requestId);
+    consumedNotificationIds.add(requestId);
+    await clearLastNotificationResponse();
+    return false;
+  }
+  const record = { requestId, payload };
+  const durablePending = await readPendingNotificationResponses();
+  if (durablePending.some((row) => row.requestId === requestId)) return false;
+  await persistPendingNotificationResponses([
+    ...durablePending,
+    record,
+  ]);
+  pendingDeepLinkData = [
+    ...pendingDeepLinkData.filter((row) => row.requestId !== requestId),
+    record,
+  ];
+  tryFlush();
+  return true;
+}
+
 function markNotificationConsumed(id?: string | null): void {
   if (id) consumedNotificationIds.add(id);
 }
-function isNotificationConsumed(id?: string | null): boolean {
-  return !!id && consumedNotificationIds.has(id);
+// Used only by module-level tests to emulate a terminated/restarted JS
+// process. Production callers must rely on the durable marker instead.
+export function __resetNotificationResponseStateForTests(): void {
+  consumedNotificationIds.clear();
+  durableConsumedNotificationIds = null;
+  pendingDeepLinkData = [];
+  appReadyForDeepLink = false;
+  flushInFlight = false;
 }
 
 function tryFlush() {
-  if (!appReadyForDeepLink) return;
-  const data = pendingDeepLinkData;
-  if (!data || !liveOnAlert) return;
-  pendingDeepLinkData = null;
+  if (!appReadyForDeepLink || flushInFlight) return;
+  const record = pendingDeepLinkData[0];
+  if (!record || !liveOnAlert) return;
+  flushInFlight = true;
+  let finalized = false;
   // Dispatch on next microtask so any in-flight router.replace from
   // RootNav has committed before our deep-link push runs.
-  setTimeout(() => {
-    try { liveOnAlert?.(data); } catch (_e) {}
+  setTimeout(async () => {
+    try {
+      await liveOnAlert?.(record.payload);
+      await persistConsumedNotificationId(record.requestId);
+      consumedNotificationIds.add(record.requestId);
+      await removePendingNotificationResponse(record.requestId);
+      await clearLastNotificationResponse();
+      pendingDeepLinkData = pendingDeepLinkData.filter(
+        (row) => row.requestId !== record.requestId,
+      );
+      finalized = true;
+    } catch (_e) {
+      // Keep the durable pending record and retry when RootNav/listener is
+      // ready again. A thrown callback must never consume the OS response.
+    } finally {
+      flushInFlight = false;
+      if (finalized) tryFlush();
+    }
   }, 0);
 }
 
@@ -923,12 +1055,9 @@ export function setAppReadyForDeepLink(ready: boolean): void {
   if (ready) tryFlush();
 }
 
-export function enqueueDeepLink(data: any): void {
-  if (!data) return;
-  // If the app is already ready, fire immediately — no flicker.
-  // Otherwise queue until RootNav signals ready.
-  pendingDeepLinkData = data;
-  tryFlush();
+export async function enqueueDeepLink(data: any, requestId?: string): Promise<void> {
+  if (!data || !requestId) return;
+  await stageNotificationResponse(requestId, data);
 }
 
 // ---------- Notification response handler ----------
@@ -941,86 +1070,43 @@ export function enqueueDeepLink(data: any): void {
 // we can mark the medication as taken silently without opening the app.
 export function useNotificationListeners(onAlert?: (data: any) => void) {
   const [last, setLast] = useState<Notifications.Notification | null>(null);
+  // RootNav supplies an inline callback. Keep that callback current without
+  // tearing down the native listeners on every navigation/state render.
+  const onAlertRef = useRef(onAlert);
+  onAlertRef.current = onAlert;
+
   useEffect(() => {
     // Register the live alert callback so the pending-deep-link queue
     // can fire it whenever RootNav signals app-ready.
-    liveOnAlert = onAlert || null;
-    // Auth may have completed before this hook mounts (including a cold
-    // start).  Replay durable action records whenever the authenticated
-    // runtime is available; failures stay queued.
-    replayPendingMedicationAcknowledgments().catch(() => {});
-    // CONDITIONAL RETRY (v1.2-hotfix3): only attempt a flush at mount
-    // if there is ACTUAL pending data AND the app is already ready.
-    // The previous unconditional tryFlush() at every effect re-run
-    // (this hook re-mounts on every RootNav render because onAlert
-    // is an inline arrow) caused a stale `getLastNotificationResponseAsync`
-    // response from prior testing sessions to be re-fired on plain
-    // app opens — routing the user into /alert/[id] (which then
-    // bounced back through alerts → dashboard).  The repeated
-    // unmount/remount of the dashboard caused TouchableOpacity press
-    // events to be lost, which presented as "SOS button does
-    // nothing".  By gating on `appReadyForDeepLink && pendingDeepLinkData`
-    // we only re-attempt the flush in the narrow case it was
-    // designed for: a genuine notification tap that arrived during
-    // the cleanup/remount window of this hook.
-    if (appReadyForDeepLink && pendingDeepLinkData) {
-      tryFlush();
-    }
-
-    // COLD-START RECOVERY: if the OS launched the app via a notification
-    // intent BEFORE our JS listener was attached, the response will be
-    // available here. We enqueue it so it fires once RootNav clears the
-    // auth + PIN gate.
-    //
-    // IMPORTANT — only fire ONCE per notification id per launch. Without
-    // this guard, every re-render of RootNav (which has an inline
-    // `onAlert` arrow function as the only dep on this effect) re-runs
-    // the effect, which re-fires `getLastNotificationResponseAsync()` —
-    // and Android keeps returning the SAME response forever, so the
-    // same notification would get deep-linked again and again, bouncing
-    // the user back to /(modals)/acknowledge after they already
-    // dismissed it. (See "medication acknowledge loop" bug.)
-    //
-    // FRESHNESS GUARD (v1.2-hotfix3): `getLastNotificationResponseAsync`
-    // persistently returns the LAST tap response across JS-process
-    // restarts.  So if the user tapped a notification yesterday and
-    // opens the app today via the launcher icon, that day-old response
-    // would be re-enqueued — routing them straight into /alert/[id]
-    // instead of the dashboard.  In OTA v8 this surfaced as "SOS
-    // button does nothing" because the unconditional tryFlush() was
-    // now reliably firing those stale responses, causing the
-    // dashboard to unmount/remount in rapid succession and dropping
-    // TouchableOpacity press events on the floor.
-    //
-    // We guard with the notification's `date` field — if the tap is
-    // older than 60 seconds we treat it as stale and skip enqueueing.
-    // 60s is generous enough that legitimate "tap then reopen the
-    // app while the system is launching it" flows still fire, but
-    // tight enough that next-day reopens never accidentally deep-link.
+    liveOnAlert = (data) => onAlertRef.current?.(data);
+    // Recover the durable handoff before consulting Expo's last response.
+    // A crash after storage but before routing must replay the pending payload.
     (async () => {
       try {
+        await replayPendingMedicationAcknowledgments();
+        const durablePending = await readPendingNotificationResponses();
+        const consumed = await loadDurableConsumedNotificationIds();
+        const replayablePending = durablePending.filter(
+          (record) => !consumed.has(record.requestId),
+        );
+        for (const record of durablePending) {
+          if (consumed.has(record.requestId)) {
+            await removePendingNotificationResponse(record.requestId);
+          }
+        }
+        pendingDeepLinkData = replayablePending;
+
         const cold = await Notifications.getLastNotificationResponseAsync();
         if (cold && cold.actionIdentifier === Notifications.DEFAULT_ACTION_IDENTIFIER) {
           const reqId = cold.notification?.request?.identifier;
-          if (isNotificationConsumed(reqId)) return;
-          // Freshness gate — see doc-block above.
-          const notifDate = (cold.notification as any)?.date;
-          const ageMs = typeof notifDate === 'number'
-            ? Date.now() - notifDate
-            : Number.POSITIVE_INFINITY;
-          if (ageMs > 60 * 1000) {
-            // Stale launch response — mark consumed so we don't keep
-            // checking it on every effect re-mount, but DO NOT
-            // enqueue.
-            markNotificationConsumed(reqId);
-            return;
-          }
           const data: any = cold.notification?.request?.content?.data || {};
           if (data && data.type) {
-            markNotificationConsumed(reqId);
-            enqueueDeepLink({ ...data, notification_id: reqId });
+            await enqueueDeepLink({ ...data, notification_id: reqId }, reqId);
           }
         }
+        // Stage the last Expo response before allowing the first queued
+        // record to finalize and clear Expo's last-response slot.
+        tryFlush();
       } catch (_e) {}
     })();
 
@@ -1154,12 +1240,11 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
       // NEED_HELP — opens the app (opensAppToForeground: true) so the member
       // can reach the SOS flow which requires foreground GPS + UI consent.
       if (actionId === 'NEED_HELP') {
-        markNotificationConsumed(reqId);
-        enqueueDeepLink({
+        await enqueueDeepLink({
           ...data,
           type: 'are_you_ok_request',
           _action: 'need_help',
-        });
+        }, reqId);
         return;
       }
 
@@ -1202,19 +1287,13 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
       // (cold start, PIN unlock pending), the deep-link is held
       // until ready, eliminating the flicker-back-to-home bug.
       //
-      // Mark this notification id as consumed so the cold-start
-      // recovery branch above doesn't re-enqueue it on the next
-      // useEffect re-run. This is the core fix for the "acknowledge
-      // loops back" bug — see the consumedNotificationIds doc-block
-      // for the full backstory.
-      markNotificationConsumed(reqId);
-      enqueueDeepLink({ ...data, notification_id: reqId });
+      await enqueueDeepLink({ ...data, notification_id: reqId }, reqId);
     });
     return () => {
       recv.remove();
       resp.remove();
       liveOnAlert = null;
     };
-  }, [onAlert]);
+  }, []);
   return last;
 }
