@@ -12,7 +12,6 @@ import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, MemberSummary, MissedMedicationDetail, DashboardSummary, getBillingStatus, BillingStatus, FamilyInvite, listFamilyInvites, revokeFamilyInvite, Alert as ApiAlert } from '../../src/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { formatLastSeenAge } from '../../src/locationRefresh';
 import {
   requestRefresh as requestMemberRefresh,
   clearIfNewer as clearRefreshIfNewer,
@@ -35,9 +34,8 @@ import { useAuth } from '../../src/AuthContext';
 import * as memberStore from '../../src/store/memberStore';
 import { logPipelineEvent } from '../../src/refreshPipelineLog';
 import { useActiveEmergency } from '../../src/activeEmergency';
-import { getBatteryDisplay } from '../../src/batteryStatus';
-import { getDeviceCommunicationStatus } from '../../src/deviceStatus';
-import { buildNeedsAttentionIssues } from '../../src/needsAttention';
+import { buildNeedsAttentionIssues, NeedsAttentionIssue } from '../../src/needsAttention';
+import { getFamilyCardStatus } from '../../src/familyCardStatus';
 import { confirmPendingInviteCancellation } from '../../src/pendingInviteCancellation';
 import { stampMembersResponse } from '../../src/pipelineSnapshot';
 import { recordLocationUploadSuccess } from '../../src/locationUploadSuccess';
@@ -878,6 +876,7 @@ export default function Dashboard() {
         {seniors.length > 0 && <Text style={styles.subSection}>👴 Seniors</Text>}
         {seniors.map(m => (
           <MemberCard key={m.id} member={m} sum={sumOf(m.id)} isSenior
+            issues={needsAttentionIssues.filter(issue => issue.memberId === m.id)}
             onPress={() => router.push(`/member/${m.id}`)}
             onCheckIn={m.user_id === user?.id ? () => quickCheckIn(m) : undefined}
             onWelfareCheck={m.user_id && m.user_id !== user?.id ? () => sendWelfareCheck(m) : undefined}
@@ -889,6 +888,7 @@ export default function Dashboard() {
         {family.length > 0 && <Text style={styles.subSection}>👨‍👩‍👧 Family</Text>}
         {family.map(m => (
           <MemberCard key={m.id} member={m} sum={sumOf(m.id)}
+            issues={needsAttentionIssues.filter(issue => issue.memberId === m.id)}
             onPress={() => router.push(`/member/${m.id}`)}
             onCheckIn={m.user_id === user?.id ? () => quickCheckIn(m) : undefined}
             onWelfareCheck={m.user_id && m.user_id !== user?.id ? () => sendWelfareCheck(m) : undefined}
@@ -1239,8 +1239,9 @@ function PendingInviteCard({
 }
 
 
-function MemberCard({ member, sum, isSenior, onPress, onCheckIn, onWelfareCheck, welfareCheck, welfareCheckSending }: {
+function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfareCheck, welfareCheck, welfareCheckSending }: {
   member: Member; sum?: MemberSummary; isSenior?: boolean;
+  issues: NeedsAttentionIssue[];
   onPress: () => void; onCheckIn?: () => void; onWelfareCheck?: () => void;
   welfareCheck?: { status: string; responded_at?: string; created_at?: string };
   welfareCheckSending?: boolean;
@@ -1272,8 +1273,8 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn, onWelfareCheck,
   useEffect(() => subscribeRefreshing(member.id, setRefreshing), [member.id]);
   const seenMs = member.last_seen ? new Date(member.last_seen).getTime() : 0;
   const ageLabel = seenMs ? formatTimeAgo(seenMs) : '';
-  const presenceTimestamp = selectPresenceTimestamp(member);
-  const deviceStatus = getDeviceCommunicationStatus(member);
+  const cardStatus = getFamilyCardStatus(member, issues);
+  const deviceStatus = cardStatus.device;
 
   // v1.2.0 (44) — log every render with the exact prop value the card
   // received and the ageLabel it rendered.  Fire-and-forget; the helper
@@ -1290,7 +1291,10 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn, onWelfareCheck,
   } catch (_e) {}
 
   return (
-    <View testID={`member-card-${member.id}`} style={styles.memberCard}>
+    <View
+      testID={`member-card-${member.id}`}
+      style={[styles.memberCard, cardStatus.hasActiveProblem && styles.memberCardAttention]}
+    >
       <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={styles.memberMain}>
         <View style={styles.avatarWrap}>
           {member.avatar_url ? (
@@ -1336,12 +1340,8 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn, onWelfareCheck,
               >
                 {deviceStatus.label}
               </Text>
-              <Text style={styles.memberMetaLastKnown}>📍 Last known location</Text>
-              <Text style={styles.memberMeta}>{member.location_name || 'Unknown'}</Text>
-              {presenceTimestamp ? (
-                <Text style={styles.memberMetaFreshness}>
-                  Updated {formatLastSeenAge(presenceTimestamp)}
-                </Text>
+               {cardStatus.contactLabel ? (
+                 <Text style={styles.memberMetaFreshness}>{cardStatus.contactLabel}</Text>
               ) : null}
             </>
           )}
@@ -1352,15 +1352,7 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn, onWelfareCheck,
               intentional "no data" state.  Age is always shown so
               caregivers can judge how fresh the reading is. */}
           {(() => {
-            const bLevel = (member as any).battery_level as number | null | undefined;
-            const updatedAt = (member as any).battery_updated_at as string | null | undefined;
-            const isCharging = (member as any).is_charging as boolean | null | undefined;
-            const battery = getBatteryDisplay(
-              bLevel,
-              isCharging,
-              updatedAt,
-              deviceStatus.kind === 'healthy' ? 'current' : 'last-known',
-            );
+            const battery = cardStatus.battery;
             if (!battery) return null;
             const statusStyle =
               battery.tone === 'charging'
@@ -1376,6 +1368,15 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn, onWelfareCheck,
               </>
             );
           })()}
+          {(member as any).location_sharing_enabled !== false ? (
+            <>
+              <Text style={styles.memberMetaLastKnown}>📍 {cardStatus.locationLabel}</Text>
+              <Text style={styles.memberMeta}>{member.location_name || 'Unknown'}</Text>
+              {cardStatus.locationAgeLabel ? (
+                <Text style={styles.memberMetaAge}>{cardStatus.locationAgeLabel}</Text>
+              ) : null}
+            </>
+          ) : null}
           {/* Build #59 — hide the medication chip row entirely when
               there's no medication schedule at all.  Previously the
               row rendered "0/0 taken" for seniors with no meds set
@@ -1595,6 +1596,7 @@ const styles = StyleSheet.create({
     marginHorizontal: 24, marginTop: 10, padding: 14, backgroundColor: Colors.surface, borderRadius: 18,
     boxShadow: '0px 3px 10px rgba(27,94,53,0.06)', elevation: 2,
   },
+  memberCardAttention: { borderWidth: 2, borderColor: Colors.warning },
   memberMain: { flexDirection: 'row', alignItems: 'center' },
   avatarWrap: { position: 'relative' },
   avatar: { width: 56, height: 56, borderRadius: 28 },
@@ -1608,8 +1610,8 @@ const styles = StyleSheet.create({
   memberMetaAge: { fontSize: 11, color: Colors.textTertiary, marginTop: 1, opacity: 0.75 },
   // Build XX — freshness-first family card labels.
   memberMetaLastKnown: { fontSize: 11, color: Colors.textTertiary, marginTop: 2, fontWeight: '600' },
-  memberMetaFreshness: { fontSize: 13, color: Colors.primary, fontWeight: '700', marginTop: 2 },
-  deviceStatus: { fontSize: 12, fontWeight: '800', marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.4 },
+  memberMetaFreshness: { fontSize: 12, color: Colors.textSecondary, fontWeight: '600', marginTop: 2 },
+  deviceStatus: { fontSize: 14, fontWeight: '800', marginTop: 3 },
   deviceStatusHealthy: { color: Colors.success },
   deviceStatusDelayed: { color: Colors.warning },
   deviceStatusNotResponding: { color: Colors.error },
@@ -1632,7 +1634,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, gap: 4,
   },
   _refreshAllText_unused: { color: Colors.primary, fontWeight: '700', fontSize: 13 },
-  batteryLine:         { fontSize: 12, fontWeight: '600', marginTop: 4 },
+  batteryLine:         { fontSize: 14, fontWeight: '700', marginTop: 5 },
   batteryLineCharging: { color: Colors.success },
   batteryLineLow:      { color: Colors.error },
   batteryLineOk:       { color: Colors.textTertiary },
