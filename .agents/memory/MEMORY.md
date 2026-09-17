@@ -30,3 +30,4 @@
 - [Stripe entitlement webhook reconciliation](stripe-entitlement-webhook-reconciliation.md) — reconcile current subscription state, use supported object conversion, and fail non-2xx when persistence does not match a user.
 - [Medication acknowledgment occurrence safety](medication-acknowledgment-occurrence-safety.md) — acknowledgments and T+15 escalation coordinate on one exact occurrence with durable retry and terminal delivery states.
 - [BackgroundFetch execution generations](background-fetch-execution-generations.md) — task IDs are reused; timeout and completion guards must be scoped to one invocation.
+- [Caregiver battery and device status](caregiver-battery-device-status.md) — one battery incident escalates in place; dashboard device states reuse movement-aware tolerance.

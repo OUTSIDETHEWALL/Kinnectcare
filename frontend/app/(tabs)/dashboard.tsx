@@ -36,6 +36,8 @@ import * as memberStore from '../../src/store/memberStore';
 import { logPipelineEvent } from '../../src/refreshPipelineLog';
 import { useActiveEmergency } from '../../src/activeEmergency';
 import { getBatteryDisplay } from '../../src/batteryStatus';
+import { getDeviceCommunicationStatus } from '../../src/deviceStatus';
+import { buildNeedsAttentionIssues } from '../../src/needsAttention';
 import { confirmPendingInviteCancellation } from '../../src/pendingInviteCancellation';
 import { stampMembersResponse } from '../../src/pipelineSnapshot';
 import { recordLocationUploadSuccess } from '../../src/locationUploadSuccess';
@@ -96,19 +98,20 @@ export default function Dashboard() {
   const [summary, setSummary] = useState<MemberSummary[]>([]);
   const [missedMedicationDetails, setMissedMedicationDetails] = useState<MissedMedicationDetail[]>([]);
   const [showMissedMedications, setShowMissedMedications] = useState(false);
+  const [showNeedsAttention, setShowNeedsAttention] = useState(false);
   const [billing, setBilling] = useState<BillingStatus | null>(null);
   // Build #59 — pending invitations surfaced on the dashboard so a
   // caregiver can see who they've invited but who hasn't accepted
   // yet ("🟡 Invitation Pending").  Fetched alongside /members and
   // refreshed on the same cadence.
   const [pendingInvites, setPendingInvites] = useState<FamilyInvite[]>([]);
-  // Unacknowledged alerts — fetched alongside /members and /summary on every
+  // Unresolved alerts — fetched alongside /members and /summary on every
   // load() so Needs Attention and Missed Meds reflect the same state as the
   // Alerts tab.  Medication alert records persist across day rollovers; the
   // /summary medication_missed count resets to 0 at midnight, which caused
   // the dashboard to disagree with the Alerts tab on active escalations.
   //
-  // Persistence: the last-known set of unacknowledged alerts is written to
+  // Persistence: the last-known set of unresolved alerts is written to
   // AsyncStorage on every successful /alerts fetch.  On mount (including after
   // a force-kill restart) the cached snapshot is restored immediately so Needs
   // Attention shows the correct non-zero count before the first network round-
@@ -178,15 +181,16 @@ export default function Dashboard() {
         const cached = await AsyncStorage.getItem(key);
         if (cached) {
           const parsed = JSON.parse(cached) as ApiAlert[];
-          // Only restore alerts that are still active: unacknowledged AND
-          // unresolved.  A battery_recovered push resolves the low_battery alert
+          // Only restore alerts that are still unresolved. Acknowledging a
+          // notification does not resolve its underlying battery condition.
+          // A battery_recovered push resolves the low_battery alert
           // on the backend before the cache is refreshed; if the caregiver
           // force-kills and restarts the app we must not flash a stale "Needs
           // Attention: 1" from the old snapshot.  Filtering by !resolved here
           // (in addition to !acknowledged) ensures a pre-recovery cache entry
           // cannot re-surface after a restart — the server is the source of
           // truth and the next /alerts fetch will write a clean snapshot.
-          setActiveAlerts(parsed.filter((a: ApiAlert) => !a.acknowledged && !a.resolved));
+          setActiveAlerts(parsed.filter((a: ApiAlert) => !a.resolved));
         }
       } catch (_e) {}
     })();
@@ -364,7 +368,9 @@ export default function Dashboard() {
         // AsyncStorage snapshot restored on mount) so Needs Attention never
         // drops to 0 just because of a transient network error.
         if (ar !== null) {
-          // Filter to only active alerts: unacknowledged AND unresolved.
+          // Filter to current unresolved conditions. Alert acknowledgement only
+          // dismisses notification history; it must not hide an active battery
+          // incident from Needs Attention before recovery.
           // The battery_recovered path resolves the low_battery alert on the
           // backend without setting acknowledged=True, so filtering by
           // !acknowledged alone would keep a resolved alert in state and in the
@@ -376,7 +382,7 @@ export default function Dashboard() {
           // activeBattAlerts (line ~667) already applies !resolved for display,
           // but defence-in-depth at the write site prevents any re-surface path.
           const freshAlerts = ((ar.data as ApiAlert[]) || []).filter(
-            (a: ApiAlert) => !a.acknowledged && !a.resolved,
+            (a: ApiAlert) => !a.resolved,
           );
           setActiveAlerts(freshAlerts);
           // Persist the fresh snapshot so it survives a force-kill restart.
@@ -741,80 +747,15 @@ export default function Dashboard() {
   const family = members.filter(m => m.role === 'family');
   const sumOf = (id: string) => summary.find(s => s.member_id === id);
 
-  // Unresolved low_battery alerts — used as a fallback signal in Needs Attention
-  // so the count stays non-zero even when member.battery_level has gone stale or
-  // risen into the hysteresis band (15% trigger / 25% clear).  Filtering by
-  // !a.resolved (not just !a.acknowledged) ensures auto-resolved alerts don't
-  // double-count with the real-time member.battery_level check below.
-  const activeBattAlerts = activeAlerts.filter(
-    a => a.type === 'low_battery' && !a.resolved,
-  );
   const totalMedMissed = missedMedicationDetails.length;
-
-  // Needs Attention — live count of currently active issues.
-  // Resolves automatically as conditions clear; no manual acknowledgement required.
-  // Sources: active SOS, battery low per-member, missed medications, missed daily check-in.
-  type NeedsAttentionSeverity = 'ok' | 'medium' | 'critical';
-  let needsAttentionCount = 0;
-  let needsAttentionSeverity: NeedsAttentionSeverity = 'ok';
-  const _bumpSeverity = (
-    current: NeedsAttentionSeverity,
-    next: NeedsAttentionSeverity,
-  ): NeedsAttentionSeverity => {
-    if (next === 'critical') return 'critical';
-    if (next === 'medium' && current !== 'critical') return 'medium';
-    return current;
-  };
-  // SOS in progress → critical
-  if (activeEmergency) {
-    needsAttentionCount += 1;
-    needsAttentionSeverity = _bumpSeverity(needsAttentionSeverity, 'critical');
-  }
-  for (const _m of members) {
-    // Battery low — any role.
-    // Two evidence sources OR'd together so neither alone can miss an event:
-    //   1. Real-time: member.battery_level <= 20% and fresh (≤15 min) — catches
-    //      the immediate drop before an alert record has been written.
-    //   2. Persistent: unresolved low_battery alert in db.alerts — survives
-    //      stale battery readings and the hysteresis band (alert stays active
-    //      until battery >= 25%, even if the level reading is now 16-24%).
-    // OR prevents double-counting: a member counts as +1 regardless of how many
-    // evidence sources are active simultaneously.
-    const _battAgeMs = _m.battery_updated_at
-      ? Date.now() - new Date(_m.battery_updated_at).getTime()
-      : null;
-    const _memberBattAlerts = activeBattAlerts.filter(a => a.member_id === _m.id);
-    const _hasBatteryIssue = (
-      (_battAgeMs !== null && _battAgeMs <= 15 * 60 * 1000 &&
-       _m.battery_level != null && _m.battery_level <= 0.20 && !_m.is_charging)
-      || _memberBattAlerts.length > 0
-    );
-    if (_hasBatteryIssue) {
-      needsAttentionCount += 1;
-      needsAttentionSeverity = _bumpSeverity(needsAttentionSeverity, 'medium');
-    }
-    if (_m.role !== 'senior') continue;
-    const _s = sumOf(_m.id);
-    if (!_s) continue;
-    // Missed medication details come from durable active alert occurrences in
-    // /summary, so this count and the detail modal cannot disagree.
-    const _effectiveMissed = missedMedicationDetails.filter(
-      detail => detail.member_id === _m.id,
-    ).length;
-    if (_effectiveMissed > 0) {
-      needsAttentionCount += _effectiveMissed;
-      needsAttentionSeverity = _bumpSeverity(needsAttentionSeverity, 'medium');
-    }
-    // Missed daily check-in — only when a schedule is actually configured
-    if ((_m.daily_checkin_time || _m.checkin_interval_hours) && !_s.checked_in_today) {
-      needsAttentionCount += 1;
-      needsAttentionSeverity = _bumpSeverity(needsAttentionSeverity, 'medium');
-    }
-  }
-  const needsAttentionColor =
-    needsAttentionSeverity === 'critical' ? Colors.error :
-    needsAttentionSeverity === 'medium'   ? Colors.warning :
-    Colors.primary;  // match Members + Missed Meds green exactly
+  const needsAttentionIssues = buildNeedsAttentionIssues({
+    members,
+    summary,
+    missedMedicationDetails,
+    activeAlerts,
+    activeEmergency,
+  });
+  const needsAttentionCount = needsAttentionIssues.length;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -877,12 +818,22 @@ export default function Dashboard() {
             <Text style={styles.summaryLbl}>Members</Text>
           </View>
           <View style={styles.summaryDivider} />
-          <View style={styles.summaryItem}>
-            <Text style={[styles.summaryNum, { color: needsAttentionColor }]}>
+          <TouchableOpacity
+            testID="dashboard-needs-attention"
+            style={[styles.summaryItem, needsAttentionCount > 0 && styles.summaryItemAlert]}
+            disabled={needsAttentionCount === 0}
+            onPress={() => setShowNeedsAttention(true)}
+            activeOpacity={0.75}
+            accessibilityRole={needsAttentionCount > 0 ? 'button' : undefined}
+            accessibilityLabel={`${needsAttentionCount} issues need attention`}
+          >
+            <Text style={[styles.summaryNum, needsAttentionCount > 0 && styles.summaryMissedText]}>
               {needsAttentionCount}
             </Text>
-            <Text style={styles.summaryLbl}>Needs Attention</Text>
-          </View>
+            <Text style={[styles.summaryLbl, needsAttentionCount > 0 && styles.summaryMissedText]}>
+              Needs Attention
+            </Text>
+          </TouchableOpacity>
           <View style={styles.summaryDivider} />
           <TouchableOpacity
             testID="dashboard-missed-meds"
@@ -1021,6 +972,64 @@ export default function Dashboard() {
           </TouchableOpacity>
         )}
       </ScrollView>
+
+      <Modal
+        visible={showNeedsAttention && needsAttentionCount > 0}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowNeedsAttention(false)}
+      >
+        <View style={styles.missedModalBackdrop}>
+          <View
+            style={styles.missedModalCard}
+            testID="needs-attention-modal"
+            accessibilityViewIsModal
+          >
+            <View style={styles.missedModalHeader}>
+              <Text style={styles.missedModalTitle}>Needs Attention</Text>
+              <TouchableOpacity
+                testID="needs-attention-close"
+                onPress={() => setShowNeedsAttention(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close needs attention"
+                style={styles.missedModalClose}
+              >
+                <Icon name="close" size={22} color={Colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.missedModalList} testID="needs-attention-list">
+              {needsAttentionIssues.map((issue, index) => (
+                <View
+                  key={issue.id}
+                  testID={`needs-attention-issue-${index}`}
+                  style={[
+                    styles.missedMedicationRow,
+                    index > 0 && styles.missedMedicationRowBorder,
+                  ]}
+                >
+                  <Text style={styles.missedMemberName}>{issue.memberName}</Text>
+                  <Text style={[
+                    styles.needsAttentionIssueTitle,
+                    issue.severity === 'critical' && styles.needsAttentionIssueCritical,
+                  ]}>
+                    {issue.title}
+                  </Text>
+                  <Text style={styles.missedMedicationFallback}>{issue.detail}</Text>
+                  <Text style={styles.needsAttentionAction}>{issue.action}</Text>
+                </View>
+              ))}
+            </ScrollView>
+            <TouchableOpacity
+              testID="needs-attention-done"
+              onPress={() => setShowNeedsAttention(false)}
+              style={styles.missedModalDone}
+              accessibilityRole="button"
+            >
+              <Text style={styles.missedModalDoneText}>Done</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={showMissedMedications && totalMedMissed > 0}
@@ -1264,6 +1273,7 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn, onWelfareCheck,
   const seenMs = member.last_seen ? new Date(member.last_seen).getTime() : 0;
   const ageLabel = seenMs ? formatTimeAgo(seenMs) : '';
   const presenceTimestamp = selectPresenceTimestamp(member);
+  const deviceStatus = getDeviceCommunicationStatus(member);
 
   // v1.2.0 (44) — log every render with the exact prop value the card
   // received and the ageLabel it rendered.  Fire-and-forget; the helper
@@ -1315,6 +1325,17 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn, onWelfareCheck,
             </Text>
           ) : (
             <>
+              <Text
+                testID={`member-device-status-${member.id}`}
+                style={[
+                  styles.deviceStatus,
+                  deviceStatus.kind === 'healthy' && styles.deviceStatusHealthy,
+                  deviceStatus.kind === 'delayed' && styles.deviceStatusDelayed,
+                  deviceStatus.kind === 'not-responding' && styles.deviceStatusNotResponding,
+                ]}
+              >
+                {deviceStatus.label}
+              </Text>
               <Text style={styles.memberMetaLastKnown}>📍 Last known location</Text>
               <Text style={styles.memberMeta}>{member.location_name || 'Unknown'}</Text>
               {presenceTimestamp ? (
@@ -1334,7 +1355,12 @@ function MemberCard({ member, sum, isSenior, onPress, onCheckIn, onWelfareCheck,
             const bLevel = (member as any).battery_level as number | null | undefined;
             const updatedAt = (member as any).battery_updated_at as string | null | undefined;
             const isCharging = (member as any).is_charging as boolean | null | undefined;
-            const battery = getBatteryDisplay(bLevel, isCharging, updatedAt);
+            const battery = getBatteryDisplay(
+              bLevel,
+              isCharging,
+              updatedAt,
+              deviceStatus.kind === 'healthy' ? 'current' : 'last-known',
+            );
             if (!battery) return null;
             const statusStyle =
               battery.tone === 'charging'
@@ -1546,6 +1572,9 @@ const styles = StyleSheet.create({
   missedMemberName: { fontSize: 16, fontWeight: '800', color: Colors.textPrimary },
   missedMedicationName: { fontSize: 15, fontWeight: '700', color: Colors.error, marginTop: 4 },
   missedMedicationFallback: { fontSize: 14, color: Colors.textSecondary, marginTop: 4, lineHeight: 20 },
+  needsAttentionIssueTitle: { fontSize: 15, fontWeight: '700', color: Colors.warning, marginTop: 4 },
+  needsAttentionIssueCritical: { color: Colors.error },
+  needsAttentionAction: { fontSize: 13, color: Colors.textPrimary, marginTop: 6, lineHeight: 19 },
   missedMedicationMeta: { fontSize: 13, color: Colors.textSecondary, marginTop: 4 },
   missedModalDone: {
     minHeight: 48,
@@ -1580,6 +1609,10 @@ const styles = StyleSheet.create({
   // Build XX — freshness-first family card labels.
   memberMetaLastKnown: { fontSize: 11, color: Colors.textTertiary, marginTop: 2, fontWeight: '600' },
   memberMetaFreshness: { fontSize: 13, color: Colors.primary, fontWeight: '700', marginTop: 2 },
+  deviceStatus: { fontSize: 12, fontWeight: '800', marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.4 },
+  deviceStatusHealthy: { color: Colors.success },
+  deviceStatusDelayed: { color: Colors.warning },
+  deviceStatusNotResponding: { color: Colors.error },
   // Build #57 — Location Sharing Off row: neutral grey lock + honest
   // copy, replaces the "📍 Location Name" line entirely so caregivers
   // can't misread a private member as tracking-healthy.

@@ -105,6 +105,14 @@ class _StatefulAlerts:
                 raise DuplicateKeyError("battery tier already active")
             self.documents.append(copy.deepcopy(document))
 
+    async def find_one_and_update(self, filter_doc, update_doc, **_kwargs):
+        async with self._lock:
+            for document in self.documents:
+                if _matches(document, filter_doc):
+                    document.update(update_doc.get("$set", {}))
+                    return copy.deepcopy(document)
+        return None
+
     async def update_many(self, filter_doc, update_doc):
         async with self._lock:
             for document in self.documents:
@@ -168,7 +176,7 @@ async def _accepted_reading(db, level, charging, timestamp):
     return accepted, document
 
 
-def test_warning_critical_rows_then_concurrent_charging_claim_one_recovery():
+def test_warning_escalates_same_row_then_concurrent_charging_claims_one_recovery():
     database = _StatefulDb(_base_document(), claim_barrier=asyncio.Barrier(2))
     push = AsyncMock()
     base = server._normalize_battery_timestamp(datetime.now(timezone.utc))
@@ -208,10 +216,9 @@ def test_warning_critical_rows_then_concurrent_charging_claim_one_recovery():
             ),
         )
 
-    assert {row["type"] for row in database.alerts.documents} == {
-        "low_battery_warning",
-        "low_battery",
-    }
+    assert len(database.alerts.documents) == 1
+    assert database.alerts.documents[0]["type"] == "low_battery"
+    assert database.alerts.documents[0]["battery_stage"] == "critical"
     assert all(row["resolved"] is True for row in database.alerts.documents)
     assert [call.kwargs["data"]["type"] for call in push.call_args_list] == [
         "low_battery_warning",
@@ -276,7 +283,8 @@ def test_bson_millisecond_timestamp_is_used_for_acceptance_and_claim():
         ))
 
     assert database.members.document["battery_updated_at"] == normalized
-    assert database.alerts.documents[0]["type"] == "low_battery_warning"
+    assert database.alerts.documents[0]["type"] == "low_battery"
+    assert database.alerts.documents[0]["battery_stage"] == "low"
     assert push.call_count == 1
 
 
@@ -345,8 +353,12 @@ def test_cycle_boundary_clears_warning_claim_before_direct_critical_cycle():
         _run(_accepted_reading(database, 0.18, False, base + timedelta(seconds=4)))
 
     assert [row["type"] for row in database.alerts.documents] == [
-        "low_battery_warning",
         "low_battery",
+        "low_battery",
+    ]
+    assert [row["battery_stage"] for row in database.alerts.documents] == [
+        "low",
+        "critical",
     ]
     assert database.alerts.documents[0]["resolved"] is True
     assert database.alerts.documents[1]["resolved"] is False

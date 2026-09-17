@@ -124,6 +124,7 @@ jest.mock('react-native', () => {
     Image: wrap('Image'),
     RefreshControl: wrap('RefreshControl'),
     ActivityIndicator: wrap('ActivityIndicator'),
+    Modal: wrap('Modal'),
     StyleSheet: { create: (s: any) => s, flatten: (s: any) => s, absoluteFill: {} },
     Platform: {
       select: (obj: any) => obj.default ?? obj.ios ?? Object.values(obj)[0],

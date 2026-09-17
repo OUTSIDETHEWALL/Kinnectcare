@@ -33,13 +33,17 @@ export function getBatteryDisplay(
   batteryLevel: number | null | undefined,
   isCharging: boolean | null | undefined,
   updatedAt: string | null | undefined,
+  freshness: 'current' | 'last-known' = 'current',
 ): BatteryDisplay | null {
   if (batteryLevel == null) return null;
 
   const pct = Math.round(batteryLevel * 100);
+  const prefix = freshness === 'last-known' ? 'Last known battery: ' : '';
   if (isCharging) {
     return {
-      statusText: `🔌 Charging · ${pct}%`,
+      statusText: freshness === 'last-known'
+        ? `${prefix}${pct}% · was charging`
+        : `🔌 Charging · ${pct}%`,
       ageLabel: updatedAt
         ? `Updated ${formatBatteryAge(updatedAt)}`
         : 'Last update unknown',
@@ -49,7 +53,7 @@ export function getBatteryDisplay(
 
   if (batteryLevel <= 0.20) {
     return {
-      statusText: `🔴 ${pct}% · Low`,
+      statusText: `${freshness === 'last-known' ? prefix : '🔴 '}${pct}% · Low`,
       ageLabel: updatedAt
         ? `Updated ${formatBatteryAge(updatedAt)}`
         : 'Last update unknown',
@@ -58,7 +62,7 @@ export function getBatteryDisplay(
   }
 
   return {
-    statusText: `🟢 ${pct}%`,
+    statusText: `${freshness === 'last-known' ? prefix : '🟢 '}${pct}%`,
     ageLabel: updatedAt
       ? `Updated ${formatBatteryAge(updatedAt)}`
       : 'Last update unknown',
