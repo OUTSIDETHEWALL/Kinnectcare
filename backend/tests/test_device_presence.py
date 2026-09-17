@@ -132,6 +132,7 @@ def test_self_battery_patch_stamps_presence():
     database.members.find_one = AsyncMock(side_effect=[
         copy.deepcopy(member), {**member, "battery_level": 0.6},
     ])
+    database.members.find_one_and_update = AsyncMock(return_value={**member, "battery_level": 0.6})
     database.members.update_one = AsyncMock()
     current = {"id": "user-1", "family_group_id": "family-1"}
     with patch.object(server, "db", database), \
@@ -167,6 +168,7 @@ def test_battery_response_is_reread_after_presence_stamp():
     )
     database = MagicMock()
     database.members.find_one = AsyncMock(side_effect=[before, after])
+    database.members.find_one_and_update = AsyncMock(return_value=after)
     database.members.update_one = AsyncMock()
     current = {"id": "user-1", "family_group_id": "family-1"}
     with patch.object(server, "db", database), \

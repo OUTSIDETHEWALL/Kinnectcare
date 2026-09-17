@@ -458,6 +458,7 @@ class Alert(BaseModel):
     member_id: str
     member_name: str
     type: str
+    battery_stage: Optional[str] = None
     severity: str
     title: str
     message: str
@@ -3161,27 +3162,28 @@ async def _create_battery_alert_if_missing(
     battery_level: float,
     tier: str,
 ) -> bool:
-    """Repair a claimed-but-missing alert and use its insert as push election.
-
-    Warning and critical each have a migration-safe partial unique index.  The
-    insert therefore arbitrates concurrent repair attempts: only the insert
-    winner sends a push.  This also makes a later reading able to repair a
-    crash between the member claim and the alert insert without duplicating a
-    notification.
-    """
+    """Create or escalate the member's one active battery incident."""
     existing = await db.alerts.find_one(
         {
             "member_id": member_id,
             "family_group_id": family_group_id,
-            "type": tier,
+            "type": {"$in": ["low_battery", "low_battery_warning"]},
             "resolved": {"$ne": True},
         }
     )
-    if existing is not None:
+    critical = tier == "low_battery"
+    existing_stage = (existing or {}).get("battery_stage")
+    if existing_stage is None and existing is not None:
+        existing_stage = (
+            "critical"
+            if existing.get("type") == "low_battery"
+            and "critical" in str(existing.get("title", "")).lower()
+            else "low"
+        )
+    if existing is not None and (not critical or existing_stage == "critical"):
         return False
 
     battery_pct = round(battery_level * 100)
-    critical = tier == "low_battery"
     title = (
         f"{member_name}'s battery is critically low"
         if critical
@@ -3194,31 +3196,55 @@ async def _create_battery_alert_if_missing(
         else f"{member_name}'s phone battery is getting low ({battery_pct}%). "
         f"Charging the phone will help maintain location updates."
     )
-    alert = Alert(
-        owner_id=owner_id,
-        family_group_id=family_group_id,
-        member_id=member_id,
-        member_name=member_name,
-        member_phone=member_phone,
-        type=tier,
-        severity="warning",
-        title=title,
-        message=message,
-    )
-    try:
-        await db.alerts.insert_one(alert.model_dump())
-    except DuplicateKeyError:
-        logger.debug(
-            f"battery alert repair deduped for member={member_id} tier={tier}"
+    alert_id: Optional[str] = None
+    if existing is not None:
+        updated = await db.alerts.find_one_and_update(
+            {
+                "id": existing["id"],
+                "resolved": {"$ne": True},
+                "battery_stage": {"$ne": "critical"},
+            },
+            {
+                "$set": {
+                    "type": "low_battery",
+                    "battery_stage": "critical",
+                    "title": title,
+                    "message": message,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
         )
-        return False
+        if updated is None:
+            return False
+        alert_id = existing["id"]
+    else:
+        alert = Alert(
+            owner_id=owner_id,
+            family_group_id=family_group_id,
+            member_id=member_id,
+            member_name=member_name,
+            member_phone=member_phone,
+            type="low_battery",
+            battery_stage="critical" if critical else "low",
+            severity="warning",
+            title=title,
+            message=message,
+        )
+        try:
+            await db.alerts.insert_one(alert.model_dump())
+        except DuplicateKeyError:
+            logger.debug(
+                f"battery incident insert deduped for member={member_id} tier={tier}"
+            )
+            return False
+        alert_id = alert.id
 
     try:
         await push_to_family_group(
             family_group_id,
             title=title,
             body=message,
-            data={"type": tier, "member_id": member_id, "alert_id": alert.id},
+            data={"type": tier, "member_id": member_id, "alert_id": alert_id},
             exclude_user_id=exclude_user_id,
         )
     except Exception as exc:
@@ -7438,6 +7464,54 @@ async def _ensure_alert_dedup_index():
     # creation on a populated DB would fail with "E11000 duplicate key".
     # Warning and critical are grouped separately so one tier never resolves
     # the other while the migration is making the indexes safe.
+    #
+    # Current model: Low and Critical are stages of one canonical
+    # type="low_battery" incident.  Convert legacy warning rows before
+    # enforcing the canonical unique index.  If an old critical row already
+    # exists for the same member, retain it and resolve the redundant warning.
+    try:
+        legacy_warnings = db.alerts.find({
+            "type": "low_battery_warning",
+            "resolved": False,
+        })
+        async for warning in legacy_warnings:
+            canonical = await db.alerts.find_one({
+                "family_group_id": warning.get("family_group_id"),
+                "member_id": warning.get("member_id"),
+                "type": "low_battery",
+                "resolved": False,
+            })
+            if canonical:
+                await db.alerts.update_one(
+                    {"id": warning.get("id")},
+                    {"$set": {
+                        "resolved": True,
+                        "resolved_at": datetime.now(timezone.utc),
+                    }},
+                )
+                await db.alerts.update_one(
+                    {"id": canonical.get("id")},
+                    {"$set": {"battery_stage": "critical"}},
+                )
+            else:
+                await db.alerts.update_one(
+                    {"id": warning.get("id"), "resolved": False},
+                    {"$set": {
+                        "type": "low_battery",
+                        "battery_stage": "low",
+                    }},
+                )
+        await db.alerts.update_many(
+            {
+                "type": "low_battery",
+                "battery_stage": {"$exists": False},
+                "resolved": False,
+            },
+            {"$set": {"battery_stage": "critical"}},
+        )
+    except Exception as e:
+        logger.warning(f"battery incident normalization skipped: {e}")
+
     try:
         pipeline = [
             {

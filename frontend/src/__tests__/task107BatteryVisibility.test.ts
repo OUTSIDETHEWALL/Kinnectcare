@@ -19,13 +19,13 @@ describe('Task 107 — caregiver battery row during a long stationary period', (
     jest.useRealTimers();
   });
 
-  it('keeps a healthy battery row visible after 20 minutes without a new reading', () => {
+  it('labels a battery reading as last known when device communication is delayed', () => {
     const readingAt = new Date(Date.now() - 20 * 60_000).toISOString();
 
-    const display = getBatteryDisplay(0.82, false, readingAt);
+    const display = getBatteryDisplay(0.82, false, readingAt, 'last-known');
 
     expect(display).not.toBeNull();
-    expect(display?.statusText).toBe('🟢 82%');
+    expect(display?.statusText).toBe('Last known battery: 82%');
     expect(display?.ageLabel).toBe('Updated 20 min ago');
   });
 

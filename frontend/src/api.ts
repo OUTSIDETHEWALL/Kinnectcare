@@ -286,7 +286,8 @@ export type Alert = {
   id: string;
   member_id: string;
   member_name: string;
-  type: 'missed_checkin' | 'low_battery' | 'medication' | 'routine' | 'sos';
+  type: 'missed_checkin' | 'low_battery' | 'low_battery_warning' | 'medication' | 'routine' | 'sos';
+  battery_stage?: 'low' | 'critical' | null;
   severity: 'critical' | 'warning' | 'info';
   title: string;
   message: string;
