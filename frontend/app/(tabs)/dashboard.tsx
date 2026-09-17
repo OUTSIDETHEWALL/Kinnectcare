@@ -1340,17 +1340,14 @@ function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfa
               >
                 {deviceStatus.label}
               </Text>
-               {cardStatus.contactLabel ? (
+              {deviceStatus.kind !== 'healthy' && cardStatus.contactLabel ? (
                  <Text style={styles.memberMetaFreshness}>{cardStatus.contactLabel}</Text>
               ) : null}
             </>
           )}
-          {/* Battery status — always shows last known reading so caregivers
-              never lose visibility into Mom's battery state just because
-              the phone was stationary overnight.  The row is hidden only
-              when battery_level has never been recorded (null) — an
-              intentional "no data" state.  Age is always shown so
-              caregivers can judge how fresh the reading is. */}
+          {/* Battery status — always shows the latest reading. Normal current
+              readings stay concise; stale readings retain their age so the
+              caregiver can understand why the value is marked last known. */}
           {(() => {
             const battery = cardStatus.battery;
             if (!battery) return null;
@@ -1364,15 +1361,19 @@ function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfa
             return (
               <>
                 <Text style={[styles.batteryLine, statusStyle]}>{battery.statusText}</Text>
-                <Text style={[styles.batteryLine, styles.batteryLineAge]}>{battery.ageLabel}</Text>
+                {battery.statusText.toLowerCase().includes('last known') ? (
+                  <Text style={[styles.batteryLine, styles.batteryLineAge]}>{battery.ageLabel}</Text>
+                ) : null}
               </>
             );
           })()}
           {(member as any).location_sharing_enabled !== false ? (
             <>
-              <Text style={styles.memberMetaLastKnown}>📍 {cardStatus.locationLabel}</Text>
-              <Text style={styles.memberMeta}>{member.location_name || 'Unknown'}</Text>
-              {cardStatus.locationAgeLabel ? (
+              <Text style={styles.memberMeta}>
+                📍 {cardStatus.locationLabel === 'Last known location' ? 'Last known location: ' : ''}
+                {member.location_name || 'Unknown'}
+              </Text>
+              {cardStatus.locationLabel === 'Last known location' && cardStatus.locationAgeLabel ? (
                 <Text style={styles.memberMetaAge}>{cardStatus.locationAgeLabel}</Text>
               ) : null}
             </>
@@ -1609,7 +1610,6 @@ const styles = StyleSheet.create({
   memberMeta: { fontSize: 13, color: Colors.textTertiary, marginTop: 1 },
   memberMetaAge: { fontSize: 11, color: Colors.textTertiary, marginTop: 1, opacity: 0.75 },
   // Build XX — freshness-first family card labels.
-  memberMetaLastKnown: { fontSize: 11, color: Colors.textTertiary, marginTop: 2, fontWeight: '600' },
   memberMetaFreshness: { fontSize: 12, color: Colors.textSecondary, fontWeight: '600', marginTop: 2 },
   deviceStatus: { fontSize: 14, fontWeight: '800', marginTop: 3 },
   deviceStatusHealthy: { color: Colors.success },
