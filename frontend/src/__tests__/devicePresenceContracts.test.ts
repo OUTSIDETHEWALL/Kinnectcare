@@ -15,14 +15,19 @@ describe('device presence telemetry contracts', () => {
     expect(source('src/batteryTask.ts')).toContain("'X-Kinnship-Presence-Source': 'battery-task'");
   });
 
-  it('uses presence selection only for caregiver Updated labels and leaves GPS freshness logic on last_seen', () => {
+  it('uses presence selection only for caregiver contact labels and leaves GPS freshness logic on last_seen', () => {
     const dashboard = source('app/(tabs)/dashboard.tsx');
     const memberDetail = source('app/member/[id].tsx');
+    const familyCardStatus = source('src/familyCardStatus.ts');
 
-    for (const text of [dashboard, memberDetail]) {
-      expect(text).toContain('selectPresenceTimestamp');
-      expect(text).toMatch(/Updated \{formatLastSeenAge\(presenceTimestamp\)\}/);
-    }
+    expect(dashboard).toContain('getFamilyCardStatus(member, issues)');
+    expect(familyCardStatus).toContain('selectPresenceTimestamp');
+    expect(familyCardStatus).toContain("'Last update' : 'Last contact'");
+    expect(familyCardStatus).toContain('const lastSeen = usableTimestamp(member.last_seen, nowMs)');
+    expect(familyCardStatus).toContain('last_seen: lastSeen');
+    expect(familyCardStatus).toContain("'Location' : 'Last known location'");
+    expect(memberDetail).toContain('selectPresenceTimestamp');
+    expect(memberDetail).toMatch(/Updated \{formatLastSeenAge\(presenceTimestamp\)\}/);
     expect(dashboard).toContain('const seenMs = member.last_seen ? new Date(member.last_seen).getTime() : 0;');
     expect(dashboard).toContain('requestMemberRefresh(mb.id, seenMs || null);');
     expect(memberDetail).toContain('const seenMs = md.last_seen ? new Date(md.last_seen).getTime() : 0;');

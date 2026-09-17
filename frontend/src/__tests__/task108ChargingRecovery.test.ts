@@ -98,12 +98,12 @@ describe('Task 108 — headless charging recovery', () => {
     expect(headlessTask).toBeDefined();
 
     // The last known reading is from a long stationary/offline period: the
-    // caregiver currently sees a stale, non-charging battery state.
+    // caregiver currently sees a low, non-charging battery state.
     const offlineReadingAt = new Date(
       Date.now() - 20 * 60_000,
     ).toISOString();
-    expect(getBatteryDisplay(0.18, false, offlineReadingAt)).toMatchObject({
-      statusText: '🔴 18% · Low',
+    expect(getBatteryDisplay(0.18, false, offlineReadingAt, 'current', 'low')).toMatchObject({
+      statusText: 'Battery Low · 18%',
       tone: 'low',
     });
 
@@ -162,7 +162,7 @@ describe('Task 108 — headless charging recovery', () => {
         patchBody.battery_updated_at,
       ),
     ).toMatchObject({
-      statusText: '🔌 Charging · 18%',
+      statusText: 'Charging · 18%',
       tone: 'charging',
     });
   });

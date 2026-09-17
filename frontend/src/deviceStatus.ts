@@ -11,8 +11,14 @@ export type DeviceCommunicationStatus = {
 
 const MINUTE = 60 * 1000;
 
+type DeviceCommunicationInput = {
+  device_presence_at?: string | null;
+  last_seen?: string | null;
+  is_moving?: boolean | null;
+};
+
 export function getDeviceCommunicationStatus(
-  member: Pick<Member, 'device_presence_at' | 'last_seen' | 'is_moving'>,
+  member: DeviceCommunicationInput,
   nowMs: number = Date.now(),
 ): DeviceCommunicationStatus {
   const timestamp = selectPresenceTimestamp(member);

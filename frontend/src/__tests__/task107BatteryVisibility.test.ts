@@ -32,13 +32,13 @@ describe('Task 107 — caregiver battery row during a long stationary period', (
   it('keeps the charging or low state visible three minutes after a force-kill', () => {
     const readingAt = new Date(Date.now() - 23 * 60_000).toISOString();
 
-    expect(getBatteryDisplay(0.18, false, readingAt)).toMatchObject({
-      statusText: '🔴 18% · Low',
+    expect(getBatteryDisplay(0.18, false, readingAt, 'current', 'low')).toMatchObject({
+      statusText: 'Battery Low · 18%',
       ageLabel: 'Updated 23 min ago',
       tone: 'low',
     });
     expect(getBatteryDisplay(0.18, true, readingAt)).toMatchObject({
-      statusText: '🔌 Charging · 18%',
+      statusText: 'Charging · 18%',
       ageLabel: 'Updated 23 min ago',
       tone: 'charging',
     });
