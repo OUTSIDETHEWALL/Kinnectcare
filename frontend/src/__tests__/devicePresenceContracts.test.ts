@@ -33,4 +33,14 @@ describe('device presence telemetry contracts', () => {
     expect(memberDetail).toContain('const seenMs = md.last_seen ? new Date(md.last_seen).getTime() : 0;');
     expect(memberDetail).toContain('requestMemberRefresh(md.id, seenMs || null);');
   });
+
+  it('hides technical ages for healthy current rows and retains stale context', () => {
+    const dashboard = source('app/(tabs)/dashboard.tsx');
+
+    expect(dashboard).toContain("deviceStatus.kind !== 'healthy' && cardStatus.contactLabel");
+    expect(dashboard).toContain("battery.statusText.toLowerCase().includes('last known')");
+    expect(dashboard).toContain("cardStatus.locationLabel === 'Last known location' && cardStatus.locationAgeLabel");
+    expect(dashboard).toContain("'Last known location: '");
+    expect(dashboard).not.toContain('styles.memberMetaLastKnown');
+  });
 });
