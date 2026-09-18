@@ -31,15 +31,18 @@ export function getDeviceCommunicationStatus(
   const ageMs = Math.max(0, nowMs - seenMs);
 
   const delayedAfter =
-    member.is_moving === true ? 2 * MINUTE :
+    member.is_moving === true ? 10 * MINUTE :
     member.is_moving === false ? 60 * MINUTE :
     10 * MINUTE;
   const notRespondingAfter =
-    member.is_moving === true ? 5 * MINUTE :
+    member.is_moving === true ? 25 * MINUTE :
     member.is_moving === false ? 240 * MINUTE :
     60 * MINUTE;
 
-  if (ageMs > notRespondingAfter) {
+  const isNotResponding = member.is_moving === true
+    ? ageMs >= notRespondingAfter
+    : ageMs > notRespondingAfter;
+  if (isNotResponding) {
     return { kind: 'not-responding', label: 'Device Not Responding', ageMs };
   }
   if (ageMs > delayedAfter) {
