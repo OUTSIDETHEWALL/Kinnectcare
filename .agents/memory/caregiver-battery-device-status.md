@@ -9,8 +9,8 @@ Battery Low at 20% and Battery Critical at 15% are stages of one active incident
 
 **How to apply:** Any battery alert or Needs Attention change must preserve one unresolved incident per member, escalation in place, stale/parallel telemetry guards, and recovery-only removal.
 
-Dashboard device communication states reuse the established movement-aware timing tolerance: moving 2/5 minutes, stationary 60/240 minutes, and unknown movement 10/60 minutes for delayed/not-responding boundaries.
+Dashboard device communication states use movement-aware timing tolerance: moving 10/25 minutes, stationary 60/240 minutes, and unknown movement 10/60 minutes for delayed/not-responding boundaries. For moving devices, exactly 10 minutes remains healthy and exactly 25 minutes is not responding.
 
-**Why:** These thresholds already reflect the proven upload and heartbeat cadence and avoid false alarms for normally sleeping Android devices.
+**Why:** Five nights of beta use showed ordinary cellular, network, and Android scheduling gaps can reach 5–10 minutes during healthy moving-device operation. The 10/25 balance avoids false concern without waiting an hour to identify a moving-device outage.
 
 **How to apply:** Use current device-presence/location timestamps for classification. Do not introduce a new poller or narrow these thresholds independently of the shared tracking model.

@@ -84,11 +84,11 @@ describe('Family card caregiver presentation', () => {
   it('labels delayed information as last known instead of current', () => {
     expect(getFamilyCardStatus(member({
       is_moving: true,
-      device_presence_at: ago(3),
+      device_presence_at: ago(11),
       battery_level: 0.72,
     }), [], NOW)).toMatchObject({
       device: { label: 'Update Delayed' },
-      contactLabel: 'Last contact 3 min ago',
+      contactLabel: 'Last contact 11 min ago',
       locationLabel: 'Location',
       locationAgeLabel: 'Updated 1 min ago',
       battery: { statusText: 'Last known battery: 72%' },
@@ -117,9 +117,9 @@ describe('Family card caregiver presentation', () => {
   it('renders an old low reading neutrally when there is no active incident', () => {
     expect(getFamilyCardStatus(member({
       is_moving: true,
-      device_presence_at: ago(6),
+      device_presence_at: ago(25),
       battery_level: 0.19,
-      battery_updated_at: ago(6),
+      battery_updated_at: ago(25),
     }), [issue('device', 'Device Not Responding')], NOW).battery).toMatchObject({
       statusText: 'Last known battery: 19%',
       tone: 'ok',
@@ -163,7 +163,7 @@ describe('Family card caregiver presentation', () => {
 
   it('keeps an unresolved critical incident prominent while marking its percentage last known', () => {
     expect(getFamilyCardStatus(
-      member({ is_moving: true, device_presence_at: ago(6), battery_level: 0.14 }),
+      member({ is_moving: true, device_presence_at: ago(25), battery_level: 0.14 }),
       [
         issue('device', 'Device Not Responding'),
         issue('battery', 'Battery Critical'),
@@ -177,7 +177,7 @@ describe('Family card caregiver presentation', () => {
 
   it('matches a prolonged outage issue and clears when communication resumes', () => {
     const outage = issue('device', 'Device Not Responding');
-    const stopped = getFamilyCardStatus(member({ is_moving: true, device_presence_at: ago(6) }), [outage], NOW);
+    const stopped = getFamilyCardStatus(member({ is_moving: true, device_presence_at: ago(25) }), [outage], NOW);
     expect(stopped.device.label).toBe('Device Not Responding');
     expect(stopped.hasActiveProblem).toBe(true);
 

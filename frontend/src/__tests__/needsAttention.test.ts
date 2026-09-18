@@ -46,6 +46,7 @@ const build = (members: Member[], activeAlerts: Alert[]) => buildNeedsAttentionI
   nowMs: NOW,
 });
 
+
 describe('current Needs Attention issues', () => {
   it('does not infer an incident from a raw 21% reading', () => {
     expect(build([member('a', { battery_level: 0.21 })], [])).toEqual([]);
@@ -84,5 +85,14 @@ describe('current Needs Attention issues', () => {
     expect(build([member('a', { device_presence_at: ago(241) })], []))
       .toEqual([expect.objectContaining({ kind: 'device', title: 'Device Not Responding' })]);
     expect(build([member('a', { device_presence_at: ago(1) })], [])).toEqual([]);
+  });
+
+  it('uses the canonical moving-device boundary for a prolonged outage', () => {
+    expect(build([member('a', { is_moving: true, device_presence_at: ago(24) })], []))
+      .toEqual([]);
+    expect(build([member('a', { is_moving: true, device_presence_at: ago(25) })], []))
+      .toEqual([expect.objectContaining({ kind: 'device', title: 'Device Not Responding' })]);
+    expect(build([member('a', { is_moving: true, device_presence_at: ago(1) })], []))
+      .toEqual([]);
   });
 });
