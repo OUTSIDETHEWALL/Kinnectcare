@@ -14,7 +14,9 @@ const mockRouterReplace = jest.fn();
 const mockRouter = { replace: mockRouterReplace };
 const mockApiGet = jest.fn();
 const mockRouteContent = jest.fn<any, []>(() => null);
-const mockSegments = ['(tabs)'];
+let mockSegments = ['(tabs)'];
+let mockNotificationCallback: ((data: any) => void) | null = null;
+let mockPendingNotification: any = null;
 
 jest.mock('react-native', () => {
   const React = require('react');
@@ -158,8 +160,16 @@ jest.mock('../AuthContext', () => ({
 jest.mock('../push', () => ({
   registerForPushNotifications: jest.fn(() => Promise.resolve()),
   setupNotificationsForOS: jest.fn(() => Promise.resolve()),
-  useNotificationListeners: jest.fn(),
-  setAppReadyForDeepLink: jest.fn(),
+  useNotificationListeners: jest.fn((callback: (data: any) => void) => {
+    mockNotificationCallback = callback;
+  }),
+  setAppReadyForDeepLink: jest.fn((ready: boolean) => {
+    if (ready && mockNotificationCallback && mockPendingNotification) {
+      const pending = mockPendingNotification;
+      mockPendingNotification = null;
+      setTimeout(() => mockNotificationCallback?.(pending), 0);
+    }
+  }),
   refreshPushTokenIfStale: jest.fn(() => Promise.resolve()),
   dismissStaleAreYouOkNotifs: jest.fn(() => Promise.resolve()),
 }));
@@ -307,6 +317,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockAppStateListeners.clear();
   mockRouteContent.mockReturnValue(null);
+  mockSegments = ['(tabs)'];
+  mockNotificationCallback = null;
+  mockPendingNotification = null;
   jest.useFakeTimers();
 });
 
@@ -341,5 +354,73 @@ describe('MissedCheckinDetail — Return to Dashboard after app resume', () => {
 
     expect(mockRouterReplace).toHaveBeenCalledTimes(1);
     expect(mockRouterReplace).toHaveBeenCalledWith('/(tabs)/dashboard');
+  });
+});
+
+describe('RootLayout — authenticated medication notification startup', () => {
+  const medicationOccurrence = {
+    type: 'medication',
+    subtype: 'self_due',
+    reminder_id: 'aspirin-reminder',
+    title: 'Aspirin',
+    dosage: '81 mg',
+    member_name: 'Joyce',
+    member_id: 'joyce-member',
+    slot_time: '14:00',
+    local_date: '2026-09-19',
+    occurrence_id: 'joyce-aspirin-2026-09-19-1400',
+    notification_id: 'android-medication-request',
+  };
+
+  it('lets a queued cold-start body tap replace Family with the exact occurrence modal', async () => {
+    mockSegments = ['(auth)', 'login'];
+    mockPendingNotification = medicationOccurrence;
+    let renderer!: ReturnType<typeof create>;
+
+    await act(async () => {
+      renderer = create(<RootLayout />);
+      await flushPromises();
+    });
+    await act(async () => {
+      jest.runOnlyPendingTimers();
+      await flushPromises();
+    });
+
+    expect(mockRouterReplace).toHaveBeenNthCalledWith(1, '/(tabs)/dashboard');
+    expect(mockRouterReplace).toHaveBeenNthCalledWith(2, {
+      pathname: '/(modals)/acknowledge',
+      params: {
+        type: 'medication',
+        reminder_id: 'aspirin-reminder',
+        title: 'Aspirin',
+        dosage: '81 mg',
+        member_name: 'Joyce',
+        stage: '',
+        member_id: 'joyce-member',
+        slot_time: '14:00',
+        local_date: '2026-09-19',
+        occurrence_id: 'joyce-aspirin-2026-09-19-1400',
+        notification_id: 'android-medication-request',
+      },
+    });
+    renderer.unmount();
+  });
+
+  it('keeps an ordinary authenticated launch on the normal Family route', async () => {
+    mockSegments = ['(auth)', 'login'];
+    let renderer!: ReturnType<typeof create>;
+
+    await act(async () => {
+      renderer = create(<RootLayout />);
+      await flushPromises();
+    });
+    await act(async () => {
+      jest.runOnlyPendingTimers();
+      await flushPromises();
+    });
+
+    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
+    expect(mockRouterReplace).toHaveBeenCalledWith('/(tabs)/dashboard');
+    renderer.unmount();
   });
 });
