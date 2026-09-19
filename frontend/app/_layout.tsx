@@ -1402,9 +1402,13 @@ function RootNav() {
 
     if (user && !needsAppLockUnlock && !onPinScreen && !onPermissionsScreen && (inAuthGroup || isWelcome || isOnboarding)) {
       // Do not race a voluntary PIN setup/change screen. Otherwise an
-      // authenticated session opens the app immediately by default.
+      // authenticated session opens the app immediately by default. Release
+      // any queued notification response after scheduling this replacement:
+      // push.ts dispatches on the next task, so a valid deep-link becomes the
+      // final route instead of remaining stranded behind the dashboard.
       logRootDecision('authenticated_start_route', '/(tabs)/dashboard', 'navigate');
       router.replace('/(tabs)/dashboard');
+      setAppReadyForDeepLink(true);
       return;
     }
     // GATE CLEARED — let push.ts flush any queued notification
