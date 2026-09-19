@@ -19,6 +19,10 @@ import {
   STALE_THRESHOLD_MS,
 } from '../../src/locationRefreshState';
 import { formatRelativeLocal, formatTimeAgo, selectPresenceTimestamp } from '../../src/timeFormat';
+import {
+  getDashboardModalCardStyle,
+  shouldScrollDashboardModalList,
+} from '../../src/dashboardModalLayout';
 import { logScreenRender } from '../../src/screenRenderLog';
 import {
   startLoad as dashStartLoad,
@@ -981,7 +985,10 @@ export default function Dashboard() {
       >
         <View style={styles.missedModalBackdrop}>
           <View
-            style={styles.missedModalCard}
+            style={[
+              styles.missedModalCard,
+              getDashboardModalCardStyle(insets.bottom),
+            ]}
             testID="needs-attention-modal"
             accessibilityViewIsModal
           >
@@ -997,7 +1004,13 @@ export default function Dashboard() {
                 <Icon name="close" size={22} color={Colors.textPrimary} />
               </TouchableOpacity>
             </View>
-            <ScrollView style={styles.missedModalList} testID="needs-attention-list">
+            <ScrollView
+              style={styles.missedModalList}
+              testID="needs-attention-list"
+              scrollEnabled={shouldScrollDashboardModalList(needsAttentionIssues.length)}
+              nestedScrollEnabled
+              showsVerticalScrollIndicator={shouldScrollDashboardModalList(needsAttentionIssues.length)}
+            >
               {needsAttentionIssues.map((issue, index) => (
                 <View
                   key={issue.id}
@@ -1039,7 +1052,10 @@ export default function Dashboard() {
       >
         <View style={styles.missedModalBackdrop}>
           <View
-            style={styles.missedModalCard}
+            style={[
+              styles.missedModalCard,
+              getDashboardModalCardStyle(insets.bottom),
+            ]}
             testID="missed-medications-modal"
             accessibilityViewIsModal
           >
@@ -1055,7 +1071,12 @@ export default function Dashboard() {
                 <Icon name="close" size={22} color={Colors.textPrimary} />
               </TouchableOpacity>
             </View>
-            <ScrollView style={styles.missedModalList}>
+            <ScrollView
+              style={styles.missedModalList}
+              scrollEnabled={shouldScrollDashboardModalList(missedMedicationDetails.length)}
+              nestedScrollEnabled
+              showsVerticalScrollIndicator={shouldScrollDashboardModalList(missedMedicationDetails.length)}
+            >
               {missedMedicationDetails.map((detail, index) => {
                 const medicationLine = detail.medication_name
                   ? `${detail.medication_name}${detail.dosage ? ` — ${detail.dosage}` : ''}`
@@ -1552,6 +1573,7 @@ const styles = StyleSheet.create({
     paddingTop: 18,
     paddingBottom: 28,
     maxHeight: '78%',
+    flexShrink: 1,
   },
   missedModalHeader: {
     flexDirection: 'row',
@@ -1568,7 +1590,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: Colors.background,
   },
-  missedModalList: { flexGrow: 0 },
+  missedModalList: { flexGrow: 0, flexShrink: 1 },
   missedMedicationRow: { paddingVertical: 14 },
   missedMedicationRowBorder: { borderTopWidth: 1, borderTopColor: Colors.border },
   missedMemberName: { fontSize: 16, fontWeight: '800', color: Colors.textPrimary },
