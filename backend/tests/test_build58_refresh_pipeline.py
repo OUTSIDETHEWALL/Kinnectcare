@@ -8,9 +8,9 @@ POST /api/members/{member_id}/request-location-refresh:
      `{ok:true, skipped:"target_sharing_off", request_id:...}` and
      dispatches NO push.
   2. When a refresh push IS sent, `send_expo_push` is invoked with
-     `priority="normal"` (not the default "high") so FCM no longer
-     aggressively wakes the Android notification handler and draws
-     a blank-"K" tray placeholder.
+     `priority="high"` so FCM can wake a Doze/App-Standby Android device.
+     The helper keeps it invisible by omitting notification fields for
+     data-only payloads.
 
 Also covers:
   • Case C — SOS/meds callers still use default "high" priority
@@ -42,6 +42,7 @@ import requests
 
 BASE_URL = "https://family-guard-37.preview.emergentagent.com"
 API = f"{BASE_URL}/api"
+BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 ALICE_JWT = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -228,8 +229,8 @@ class TestCaseA_SharingOffShortCircuit:
 # Case B — Normal-priority refresh push (P0)
 # =============================================================================
 
-class TestCaseB_NormalPriorityRefresh:
-    def test_refresh_sends_with_priority_normal(self, created_members, created_users):
+class TestCaseB_HighPriorityRefresh:
+    def test_refresh_sends_with_priority_high(self, created_members, created_users):
         target_uid = _make_target_user(sharing_enabled=True, with_token=True)
         created_users.append(target_uid)
         mid = _make_member(name="TEST_B58_B_on", link_user_id=target_uid)
@@ -249,11 +250,11 @@ class TestCaseB_NormalPriorityRefresh:
         rid = body["request_id"]
 
         tail = _log_tail_since(off)
-        # push_sending line records priority=normal + channel=silent_v2
+        # push_sending line records priority=high + channel=silent_v2
         assert re.search(
-            rf"STAGE=push_sending request_id={re.escape(rid)} tokens=1 priority=normal channel=silent_v2",
+            rf"STAGE=push_sending request_id={re.escape(rid)} tokens=1 priority=high channel=silent_v2",
             tail,
-        ), f"Expected push_sending priority=normal log for rid={rid}. Tail:\n{tail[-3000:]}"
+        ), f"Expected push_sending priority=high log for rid={rid}. Tail:\n{tail[-3000:]}"
         # push_sent tokens=1
         assert re.search(
             rf"STAGE=push_sent request_id={re.escape(rid)} tokens=1",
@@ -265,7 +266,7 @@ class TestCaseB_NormalPriorityRefresh:
         title="", body="", data.type="request_location_refresh",
         data.channelId="silent_v2", data._source_tag="refresh".
         Reads server.py directly to guard against accidental future edits."""
-        src = Path("/app/backend/server.py").read_text()
+        src = (BACKEND_DIR / "server.py").read_text()
         # locate the request_location_refresh function
         block_match = re.search(
             r"@api_router\.post\(\"/members/\{member_id\}/request-location-refresh\"\)"
@@ -279,7 +280,7 @@ class TestCaseB_NormalPriorityRefresh:
         assert '"type": "request_location_refresh"' in blk
         assert '"channelId": "silent_v2"' in blk
         assert '"_source_tag": "refresh"' in blk
-        assert 'priority="normal"' in blk, "refresh push must pass priority=normal"
+        assert 'priority="high"' in blk, "refresh push must pass priority=high"
 
 
 # =============================================================================
@@ -291,7 +292,7 @@ class TestCaseC_HighPriorityDefaultsPreserved:
         """The signature default must remain 'high' so all other callers
         (SOS, meds, alerts) get high-priority pushes unchanged."""
         import sys
-        sys.path.insert(0, "/app/backend")
+        sys.path.insert(0, str(BACKEND_DIR))
         from expo_push import send_expo_push  # noqa
         import inspect
         sig = inspect.signature(send_expo_push)
@@ -304,18 +305,18 @@ class TestCaseC_HighPriorityDefaultsPreserved:
     def test_no_other_caller_passes_priority(self):
         """Grep server.py for all send_expo_push calls; only the refresh
         route may override priority. Everyone else uses the default."""
-        src = Path("/app/backend/server.py").read_text()
+        src = (BACKEND_DIR / "server.py").read_text()
         # Find all `send_expo_push(...)` invocations with their argument block.
         # We only need to guarantee no non-refresh caller passes priority=.
         callers = re.findall(r"send_expo_push\s*\((.*?)\)", src, re.DOTALL)
         assert callers, "expected at least 1 send_expo_push caller in server.py"
         offenders = []
         for arg_block in callers:
-            if "priority=" in arg_block and 'priority="normal"' not in arg_block:
+            if "priority=" in arg_block and 'priority="high"' not in arg_block:
                 offenders.append(arg_block[:200])
         assert not offenders, (
-            "Some send_expo_push callers set priority to a non-'normal' value "
-            "(would downgrade or misroute user-visible pushes):\n"
+            "Some send_expo_push callers set an unsupported explicit priority "
+            "(would downgrade or misroute pushes):\n"
             + "\n---\n".join(offenders)
         )
 
