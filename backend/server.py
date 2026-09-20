@@ -6421,7 +6421,7 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
     try:
         logger.info(
             f"[refresh-pipeline] STAGE=push_sending "
-            f"request_id={request_id} tokens={len(tokens)} priority=normal channel=silent_v2"
+            f"request_id={request_id} tokens={len(tokens)} priority=high channel=silent_v2"
         )
         await send_expo_push(
             tokens=tokens,
@@ -6442,18 +6442,16 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
                 "_source_tag": "refresh",
             },
             sound="",
-            # Build #58 — downgrade refresh pushes to "normal" priority.
-            # Previously ALL pushes used "high" which on Android (esp.
-            # Samsung / Xiaomi / One UI) forces FCM to aggressively wake
-            # the notification handler pre-JS-boot — the OS then draws
-            # a placeholder "K" tray entry that persists for 1-3 s
-            # before our JS listener can dismiss it.  Root cause of the
-            # blank-K notifications correlating with every Refresh
-            # Trace.  Silent refreshes don't need instant delivery —
-            # they can piggyback on the device's next FCM sync — so
-            # "normal" is a safe downgrade.  SOS / meds / check-ins /
-            # family alerts keep the default "high".
-            priority="normal",
+            # Recovery pushes must be high priority. Android may defer a
+            # normal-priority data message indefinitely while the app is in
+            # Doze/App Standby — exactly when this recovery path is needed.
+            #
+            # The historical reason for using normal priority was a transient
+            # blank "K" notification on some OEMs. expo_push.py now prevents
+            # that at the FCM protocol boundary: data-only messages omit
+            # title, body, and top-level channelId, so there is no notification
+            # payload for Android to render even when priority is high.
+            priority="high",
         )
         trace["push_sent_at"] = int(_t.time() * 1000)
         logger.info(

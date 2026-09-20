@@ -182,13 +182,11 @@ async def send_expo_push(
         categoryIdentifier — iOS/Android notification category (for action buttons)
         channelId          — Android notification channel id (e.g. 'meds_v2', 'sos')
 
-    `priority`: Build #58 — configurable.  Historically hard-coded to
-    "high" which is correct for SOS / medications / user-visible
-    notifications.  Silent data-only pushes (refresh) should use
-    "normal" so FCM does NOT aggressively wake the OS notification
-    handler — root cause of the "blank K" tray flashes Charles saw
-    correlating with every Refresh Trace.  See
-    request_location_refresh below for the concrete change.
+    `priority`: configurable. High priority is required for urgent visible
+    notifications and for data-only recovery wake-ups that must run while an
+    Android device is in Doze/App Standby. Data-only messages omit title,
+    body, and top-level channelId below, so high priority does not make them
+    visible.
     """
     valid = [t for t in (tokens or []) if is_valid_expo_token(t)]
     if not valid:
