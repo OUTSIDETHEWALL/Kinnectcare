@@ -16,7 +16,12 @@ import {
   needsAppLockUnlock as shouldRequireAppLockUnlock,
   shouldShowAppLockMigrationNotice,
 } from '../src/appLock';
-import { startBackgroundLocation, stopBackgroundLocation } from '../src/backgroundLocation';
+import { stopBackgroundLocation } from '../src/backgroundLocation';
+import {
+  ensureTransistorLocationEngine,
+  needsLocationEngineBootstrap,
+  startLegacyLocationFallback,
+} from '../src/locationEngineExclusivity';
 import { configureBatteryTask, BATTERY_OPT_PROMPTED_KEY } from '../src/batteryTask';
 import { refreshLocationIfStale, setMyMemberId, setMyUserId } from '../src/locationRefresh';
 import * as locationEngine from '../src/locationEngine';
@@ -1014,15 +1019,11 @@ function RootNav() {
       //  Source code for the expo-location TaskManager path remains in
       //  the repo per the Phase 5 cleanup directive (don't remove yet),
       //  but the legacy engine is NOT invoked at runtime when the
-      //  Transistor build is available.  Reason: running both engines
-      //  concurrently risks (a) a second foreground-service slot in
-      //  Android's notification shade and (b) duplicate PUTs to
-      //  /api/members/{id}/location for every fix.  Transistor is the
-      //  single source of truth on this build.  If a future fallback
-      //  OTA ships without Transistor, this gate returns false and the
-      //  legacy path resumes automatically.
-      if (locationEngine.isAvailable()) return;
-
+      //  Transistor build is available.  The shared fallback helper also
+      //  removes a persisted legacy task when Transistor is present, so
+      //  engine selection reconciles old device state instead of merely
+      //  skipping a new legacy start.  Expo Location runs only on builds
+      //  where the Transistor native module is genuinely unavailable.
       if (!user?.id) {
         await stopBackgroundLocation();
         return;
@@ -1038,7 +1039,7 @@ function RootNav() {
           await stopBackgroundLocation();
           return;
         }
-        await startBackgroundLocation(me.id);
+        await startLegacyLocationFallback(me.id);
       } catch (_e) {
         // Silent — next session retries.
       }
@@ -1124,7 +1125,7 @@ function RootNav() {
       // for this exact user.id, this is a flicker re-run — skip the
       // whole boot dance.  No log noise, no SDK churn, no patrol
       // restart.
-      if (engineBootedForUserIdRef.current === user.id) {
+      if (!needsLocationEngineBootstrap(engineBootedForUserIdRef.current, user.id)) {
         return;
       }
       try {
@@ -1192,11 +1193,13 @@ function RootNav() {
           // Missing config — bail rather than start with broken auth.
           return;
         }
-        await locationEngine.start({
+        const started = await ensureTransistorLocationEngine({
           backendBaseUrl,
           memberId: me.id,
           jwt,
         });
+        if (cancelled) return;
+        if (!started) return;
         // Leonidas v1.0 — passive health monitor.  Boots in lockstep
         // with the location engine; tears down on sign-out via the
         // cleanup block below.  No-op if already active.

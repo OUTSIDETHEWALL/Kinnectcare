@@ -46,8 +46,9 @@ import {
 import { getPreferences, updatePreferences } from '../../src/preferences';
 import {
   setLocationSharingEnabled, isLocationSharingEnabled,
-  stopBackgroundLocation, startBackgroundLocation,
+  stopBackgroundLocation,
 } from '../../src/backgroundLocation';
+import { startLegacyLocationFallback } from '../../src/locationEngineExclusivity';
 import { fetchAll as refetchMembers } from '../../src/store/memberStore';
 import { getEngineLog, getLastHttpSuccessTs } from '../../src/locationEngine';
 import { computeHealthItems, worstHealthStatus, HealthItem } from '../../src/healthCheck';
@@ -812,7 +813,7 @@ export default function MeScreen() {
         // secured).  We use the cached member id.
         try {
           const memberId = await AsyncStorage.getItem('kc_my_member_id_v1');
-          if (memberId) await startBackgroundLocation(memberId);
+          if (memberId) await startLegacyLocationFallback(memberId);
         } catch (_e) {}
       } else {
         // Immediately stop the OS-owned task so no further coords
