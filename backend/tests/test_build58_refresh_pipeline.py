@@ -262,7 +262,7 @@ class TestCaseB_HighPriorityRefresh:
         ), f"Expected push_sent tokens=1 log for rid={rid}. Tail:\n{tail[-3000:]}"
 
     def test_refresh_uses_silent_data_only_payload_shape(self):
-        """Static verification of the payload shape passed to send_expo_push:
+        """Static verification of the payload shape passed to Expo:
         title="", body="", data.type="request_location_refresh",
         data.channelId="silent_v2", data._source_tag="refresh".
         Reads server.py directly to guard against accidental future edits."""
@@ -275,6 +275,7 @@ class TestCaseB_HighPriorityRefresh:
         )
         assert block_match, "could not locate request_location_refresh block"
         blk = block_match.group(0)
+        assert "send_expo_push_with_tickets(" in blk
         assert 'title=""' in blk, "refresh push must have empty title"
         assert 'body=""' in blk, "refresh push must have empty body"
         assert '"type": "request_location_refresh"' in blk
@@ -303,20 +304,18 @@ class TestCaseC_HighPriorityDefaultsPreserved:
         )
 
     def test_no_other_caller_passes_priority(self):
-        """Grep server.py for all send_expo_push calls; only the refresh
-        route may override priority. Everyone else uses the default."""
+        """Only the recovery ticketed sender may override priority.
+
+        Existing visible-notification callers continue to use
+        ``send_expo_push`` with its unchanged high-priority default.
+        """
         src = (BACKEND_DIR / "server.py").read_text()
-        # Find all `send_expo_push(...)` invocations with their argument block.
-        # We only need to guarantee no non-refresh caller passes priority=.
         callers = re.findall(r"send_expo_push\s*\((.*?)\)", src, re.DOTALL)
         assert callers, "expected at least 1 send_expo_push caller in server.py"
-        offenders = []
-        for arg_block in callers:
-            if "priority=" in arg_block and 'priority="high"' not in arg_block:
-                offenders.append(arg_block[:200])
+        offenders = [arg_block[:200] for arg_block in callers if "priority=" in arg_block]
         assert not offenders, (
-            "Some send_expo_push callers set an unsupported explicit priority "
-            "(would downgrade or misroute pushes):\n"
+            "Existing send_expo_push callers must keep using the shared high "
+            "priority default:\n"
             + "\n---\n".join(offenders)
         )
 
