@@ -33,7 +33,12 @@ def _to_utc_iso(v: Optional[datetime]) -> Optional[str]:
         v = v.replace(tzinfo=timezone.utc)
     return v.isoformat()
 
-from expo_push import send_expo_push, register_blank_drop_sink
+from expo_push import (
+    get_expo_push_receipts,
+    register_blank_drop_sink,
+    send_expo_push,
+    send_expo_push_with_tickets,
+)
 import billing
 import family_group as fg
 import sms
@@ -6238,6 +6243,12 @@ _REFRESH_PUSH_THROTTLE: dict = {}
 # ============================================================
 from collections import deque as _deque
 _REFRESH_TRACE_LOG: _deque = _deque(maxlen=200)
+_RECOVERY_RECEIPT_WORKER: Optional[asyncio.Task] = None
+_RECOVERY_RECEIPT_DELAY = timedelta(minutes=15)
+_RECOVERY_RECEIPT_RETRY_DELAY = timedelta(minutes=5)
+_RECOVERY_RECEIPT_MAX_ATTEMPTS = 3
+_RECOVERY_RECEIPT_POLL_S = 30
+_RECOVERY_RECEIPT_LEASE = timedelta(minutes=2)
 
 
 def _trace_record_request(member_id: str, requester_user_id: str, request_id: str) -> dict:
@@ -6276,6 +6287,165 @@ def _trace_record_gps(member_id: str, lat: float, lon: float) -> None:
         entry["gps_lat"] = lat
         entry["gps_lon"] = lon
         return
+
+
+def _signal_advanced(value: Any, sent_at: datetime) -> bool:
+    if not isinstance(value, datetime):
+        return False
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value > sent_at
+
+
+async def _collect_recovery_push_receipts(evidence: Dict[str, Any]) -> None:
+    """Collect one receipt attempt for a database-claimed evidence record."""
+    request_id = evidence["request_id"]
+    claim_id = evidence.get("receipt_claim_id")
+    try:
+        ticket_ids = [
+            ticket.get("ticket_id")
+            for ticket in (evidence.get("tickets") or [])
+            if isinstance(ticket, dict) and isinstance(ticket.get("ticket_id"), str)
+        ]
+        if not ticket_ids:
+            return
+
+        receipts: Dict[str, Dict[str, Any]] = {}
+        last_error_type: Optional[str] = None
+        attempts = int(evidence.get("receipt_attempts") or 0) + 1
+        try:
+            receipts = await get_expo_push_receipts(ticket_ids)
+        except Exception as receipt_error:
+            last_error_type = type(receipt_error).__name__
+            logger.warning(
+                f"[refresh-pipeline] STAGE=receipt_error "
+                f"request_id={request_id} attempt={attempts} "
+                f"error={last_error_type}"
+            )
+
+        sent_at = evidence.get("sent_at")
+        if not isinstance(sent_at, datetime):
+            sent_at = datetime.now(timezone.utc)
+        elif sent_at.tzinfo is None:
+            sent_at = sent_at.replace(tzinfo=timezone.utc)
+        member = await db.members.find_one(
+            {"id": evidence.get("member_id")},
+            {
+                "_id": 0,
+                "last_seen": 1,
+                "captured_at": 1,
+                "battery_updated_at": 1,
+                "device_presence_at": 1,
+            },
+        ) or {}
+        safe_receipts = {
+            ticket_id: {
+                "status": receipt.get("status"),
+                "error": receipt.get("error"),
+            }
+            for ticket_id, receipt in receipts.items()
+        }
+        found_all = all(ticket_id in safe_receipts for ticket_id in ticket_ids)
+        retry = not found_all and attempts < _RECOVERY_RECEIPT_MAX_ATTEMPTS
+        signals = {
+            "location_contact_advanced": _signal_advanced(member.get("last_seen"), sent_at),
+            "gps_capture_advanced": _signal_advanced(member.get("captured_at"), sent_at),
+            "battery_advanced": _signal_advanced(member.get("battery_updated_at"), sent_at),
+            "presence_advanced": _signal_advanced(member.get("device_presence_at"), sent_at),
+            "observed_at": datetime.now(timezone.utc),
+        }
+        update_result = await db.recovery_push_evidence.update_one(
+            {"request_id": request_id, "receipt_claim_id": claim_id},
+            {
+                "$set": {
+                    "receipts": safe_receipts,
+                    "receipt_status": (
+                        "complete"
+                        if found_all
+                        else "pending"
+                        if retry
+                        else "query_error"
+                        if last_error_type
+                        else "incomplete"
+                    ),
+                    "receipt_error_type": last_error_type,
+                    "receipt_attempts": attempts,
+                    "receipt_checked_at": datetime.now(timezone.utc),
+                    "receipt_check_after": (
+                        datetime.now(timezone.utc) + _RECOVERY_RECEIPT_RETRY_DELAY
+                        if retry
+                        else evidence.get("receipt_check_after")
+                    ),
+                    "signals_after_send": signals,
+                },
+                "$unset": {
+                    "receipt_lease_until": "",
+                    "receipt_claim_id": "",
+                },
+            },
+        )
+        if getattr(update_result, "matched_count", 1) == 0:
+            logger.info(
+                f"[refresh-pipeline] STAGE=receipt_stale_claim "
+                f"request_id={request_id}"
+            )
+            return
+        logger.info(
+            f"[refresh-pipeline] STAGE=receipt_checked request_id={request_id} "
+            f"receipts={len(safe_receipts)}/{len(ticket_ids)} "
+            f"status={'complete' if found_all else 'incomplete'} "
+            f"signals_advanced={any(value is True for value in signals.values())}"
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        # Leave the record in "collecting"; its short database lease expires
+        # and the periodic worker will reclaim it after a transient failure.
+        logger.warning(
+            f"[refresh-pipeline] STAGE=receipt_collector_error "
+            f"request_id={request_id} error={type(error).__name__}"
+        )
+
+
+async def _recovery_receipt_worker_loop() -> None:
+    """Claim due receipt records atomically so restarts/replicas are safe."""
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            claim_id = uuid.uuid4().hex
+            evidence = await db.recovery_push_evidence.find_one_and_update(
+                {
+                    "$or": [
+                        {
+                            "receipt_status": "pending",
+                            "receipt_check_after": {"$lte": now},
+                        },
+                        {
+                            "receipt_status": "collecting",
+                            "receipt_lease_until": {"$lte": now},
+                        },
+                    ]
+                },
+                {"$set": {
+                    "receipt_status": "collecting",
+                    "receipt_lease_until": now + _RECOVERY_RECEIPT_LEASE,
+                    "receipt_claim_id": claim_id,
+                }},
+                sort=[("receipt_check_after", 1)],
+                return_document=ReturnDocument.AFTER,
+            )
+            if evidence:
+                await _collect_recovery_push_receipts(evidence)
+                continue
+            await asyncio.sleep(_RECOVERY_RECEIPT_POLL_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning(
+                f"[refresh-pipeline] STAGE=receipt_worker_error "
+                f"error={type(error).__name__}"
+            )
+            await asyncio.sleep(_RECOVERY_RECEIPT_POLL_S)
 
 
 @api_router.post("/members/{member_id}/request-location-refresh")
@@ -6423,7 +6593,8 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
             f"[refresh-pipeline] STAGE=push_sending "
             f"request_id={request_id} tokens={len(tokens)} priority=high channel=silent_v2"
         )
-        await send_expo_push(
+        send_started_at = datetime.now(timezone.utc)
+        send_result = await send_expo_push_with_tickets(
             tokens=tokens,
             title="",
             body="",
@@ -6453,10 +6624,62 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
             # payload for Android to render even when priority is high.
             priority="high",
         )
+        tickets = send_result.get("tickets") or []
+        ticket_ids = [
+            ticket.get("ticket_id")
+            for ticket in tickets
+            if isinstance(ticket, dict) and ticket.get("ticket_id")
+        ]
+        # Use the post-response timestamp as the evidence boundary. Device
+        # activity during the outbound HTTP request cannot be attributed to
+        # this recovery push.
+        send_completed_at = datetime.now(timezone.utc)
+        evidence = {
+            "request_id": request_id,
+            "member_id": member_id,
+            "target_user_id": target_user_id,
+            "send_started_at": send_started_at,
+            "sent_at": send_completed_at,
+            "expires_at": send_completed_at + timedelta(days=30),
+            "priority": "high",
+            "data_only": True,
+            "channel_in_data": "silent_v2",
+            "token_count": send_result.get("valid_token_count", 0),
+            "tickets": tickets,
+            "transport_status": send_result.get("transport_status"),
+            "transport_http_status": send_result.get("http_status"),
+            "transport_error_type": send_result.get("error_type"),
+            "receipt_status": "pending" if ticket_ids else "not_available",
+            "receipt_check_after": send_completed_at + _RECOVERY_RECEIPT_DELAY,
+            "receipts": {},
+            "signals_after_send": None,
+        }
+        persisted = False
+        persist_error: Optional[Exception] = None
+        for persist_attempt in range(1, 4):
+            try:
+                await db.recovery_push_evidence.update_one(
+                    {"request_id": request_id},
+                    {"$set": evidence},
+                    upsert=True,
+                )
+                persisted = True
+                break
+            except Exception as error:
+                persist_error = error
+                if persist_attempt < 3:
+                    await asyncio.sleep(0.2 * persist_attempt)
+        if not persisted:
+            logger.warning(
+                f"[refresh-pipeline] STAGE=tracking_unavailable "
+                f"request_id={request_id} error={type(persist_error).__name__} "
+                f"ticket_count={len(ticket_ids)}"
+            )
         trace["push_sent_at"] = int(_t.time() * 1000)
         logger.info(
             f"[refresh-pipeline] STAGE=push_sent "
-            f"request_id={request_id} tokens={len(tokens)}"
+            f"request_id={request_id} tokens={len(tokens)} "
+            f"transport={send_result.get('transport_status')} tickets={len(ticket_ids)}"
         )
     except Exception as e:
         logger.warning(f"[refresh-pipeline] STAGE=push_error request_id={request_id} error={type(e).__name__}: {e}")
@@ -7355,7 +7578,14 @@ async def _migrate_family_groups():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    global _med_scheduler, _med_scheduler_ready
+    global _med_scheduler, _med_scheduler_ready, _RECOVERY_RECEIPT_WORKER
+    if _RECOVERY_RECEIPT_WORKER and not _RECOVERY_RECEIPT_WORKER.done():
+        _RECOVERY_RECEIPT_WORKER.cancel()
+        try:
+            await _RECOVERY_RECEIPT_WORKER
+        except asyncio.CancelledError:
+            pass
+    _RECOVERY_RECEIPT_WORKER = None
     _med_scheduler_ready = False
     if _med_scheduler:
         try:
@@ -7616,6 +7846,9 @@ async def _ensure_alert_dedup_index():
         # debugging session; nothing here is needed longer.
         ("location_ingest_log", "at",         86400,        None),
         ("blank_push_drops",    "at",         86400,        None),
+        # Stale-device recovery push evidence — enough time to investigate a
+        # beta incident without retaining device-routing metadata indefinitely.
+        ("recovery_push_evidence", "expires_at", 0,         None),
         # Build XX — GPS quality history: 7 days covers multi-day field-test
         # sessions without accumulating indefinitely.  Only accepted writes
         # are stored so collection growth is bounded by upload frequency.
@@ -7642,6 +7875,16 @@ async def _ensure_alert_dedup_index():
             logger.warning(f"persist_blank_drop failed: {e}")
     register_blank_drop_sink(_persist_blank_drop)
     logger.info("blank_push_drops sink registered.")
+
+
+@app.on_event("startup")
+async def _resume_recovery_receipt_collection():
+    """Start the database-backed collector; due records survive restarts."""
+    global _RECOVERY_RECEIPT_WORKER
+    if _RECOVERY_RECEIPT_WORKER and not _RECOVERY_RECEIPT_WORKER.done():
+        return
+    _RECOVERY_RECEIPT_WORKER = asyncio.create_task(_recovery_receipt_worker_loop())
+    logger.info("Recovery receipt collector started.")
 
 
 @app.on_event("startup")

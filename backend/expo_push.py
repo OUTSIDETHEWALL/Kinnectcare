@@ -17,6 +17,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 EXPO_PUSH_API = "https://exp.host/--/api/v2/push/send"
+EXPO_RECEIPTS_API = "https://exp.host/--/api/v2/push/getReceipts"
 
 # Error codes Expo returns for tokens that are no longer reachable. When
 # we see any of these for a given token we remove it from the user's
@@ -162,21 +163,24 @@ def _record_blank_drop(entry: Dict[str, Any]) -> None:
     )
 
 
-async def send_expo_push(
+def _token_fingerprint(token: str) -> str:
+    """Non-reversible identifier safe to persist in diagnostic evidence."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
+async def _send_expo_push_result(
     tokens: List[str],
     title: str,
     body: str,
     data: Optional[Dict[str, Any]] = None,
     sound: str = "default",
     priority: str = "high",
-) -> List[str]:
-    """Send a push notification to a list of Expo push tokens.
+) -> Dict[str, Any]:
+    """Send through Expo and return an auditable, token-safe result.
 
-    Returns a list of tokens that the Expo API reported as PERMANENTLY
-    invalid (DeviceNotRegistered etc.) so the caller can remove them
-    from its store.  Transient errors (MessageRateExceeded, network
-    failures, MessageTooBig) are NOT returned — we'll retry those on
-    the next push.
+    The public ``send_expo_push`` wrapper below preserves the historical
+    dead-token-list contract used by all existing callers. Recovery diagnostics
+    can opt into this richer result to retain successful Expo ticket IDs.
 
     Optional fields read from `data`:
         categoryIdentifier — iOS/Android notification category (for action buttons)
@@ -189,8 +193,17 @@ async def send_expo_push(
     visible.
     """
     valid = [t for t in (tokens or []) if is_valid_expo_token(t)]
+    result: Dict[str, Any] = {
+        "valid_token_count": len(valid),
+        "dead_tokens": [],
+        "tickets": [],
+        "transport_status": "not_sent",
+        "http_status": None,
+        "error_type": None,
+    }
     if not valid:
-        return []
+        result["transport_status"] = "no_valid_tokens"
+        return result
     data = data or {}
     cat_id = data.get("categoryIdentifier") or data.get("categoryId")
     channel_id = data.get("channelId") or "default"
@@ -235,7 +248,8 @@ async def send_expo_push(
                 await _mongo_sink(entry)
             except Exception as e:
                 logger.warning(f"blank_drop mongo sink failed: {e}")
-        return []
+        result["transport_status"] = "blank_push_dropped"
+        return result
 
     messages = []
     is_data_only = not bool((title or "").strip()) and not bool((body or "").strip())
@@ -345,7 +359,6 @@ async def send_expo_push(
             msg["categoryIdentifier"] = cat_id
         messages.append(msg)
 
-    dead: List[str] = []
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(
@@ -353,11 +366,13 @@ async def send_expo_push(
                 json=messages,
                 headers={"Content-Type": "application/json"},
             )
+            result["http_status"] = r.status_code
             if r.status_code >= 400:
                 logger.warning(
                     f"Expo push non-200: {r.status_code} body={r.text[:300]}"
                 )
-                return []
+                result["transport_status"] = "http_error"
+                return result
             # Parse per-message response. Expo returns:
             #   { "data": [ { "status": "ok" | "error", ... }, ... ] }
             # The order matches the order of messages we sent, so we can
@@ -365,18 +380,29 @@ async def send_expo_push(
             try:
                 payload = r.json()
             except Exception:
-                return []
+                result["transport_status"] = "invalid_json"
+                return result
             results = payload.get("data") or []
             if not isinstance(results, list):
-                return []
+                result["transport_status"] = "invalid_response_shape"
+                return result
+            result["transport_status"] = "response_received"
             for token, res in zip(valid, results):
                 if not isinstance(res, dict):
                     continue
-                if res.get("status") == "error":
-                    details = res.get("details") or {}
-                    err = details.get("error") if isinstance(details, dict) else None
+                status = res.get("status")
+                details = res.get("details") or {}
+                err = details.get("error") if isinstance(details, dict) else None
+                ticket = {
+                    "token_fingerprint": _token_fingerprint(token),
+                    "status": status if isinstance(status, str) else "unknown",
+                    "ticket_id": res.get("id") if isinstance(res.get("id"), str) else None,
+                    "error": err if isinstance(err, str) else None,
+                }
+                result["tickets"].append(ticket)
+                if status == "error":
                     if err in DEAD_TOKEN_ERRORS:
-                        dead.append(token)
+                        result["dead_tokens"].append(token)
                         logger.info(
                             f"Expo push: pruning dead token (err={err}) "
                             f"token={token[:25]}..."
@@ -387,5 +413,84 @@ async def send_expo_push(
                             f"msg={res.get('message')!r}"
                         )
     except Exception as e:
+        result["transport_status"] = "exception"
+        result["error_type"] = type(e).__name__
         logger.warning(f"Expo push failed: {e}")
-    return dead
+    return result
+
+
+async def send_expo_push(
+    tokens: List[str],
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+    sound: str = "default",
+    priority: str = "high",
+) -> List[str]:
+    """Send a push and preserve the historical dead-token-list return value."""
+    result = await _send_expo_push_result(
+        tokens=tokens,
+        title=title,
+        body=body,
+        data=data,
+        sound=sound,
+        priority=priority,
+    )
+    return result["dead_tokens"]
+
+
+async def send_expo_push_with_tickets(
+    tokens: List[str],
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+    sound: str = "default",
+    priority: str = "high",
+) -> Dict[str, Any]:
+    """Send a push and retain Expo ticket metadata without exposing tokens."""
+    return await _send_expo_push_result(
+        tokens=tokens,
+        title=title,
+        body=body,
+        data=data,
+        sound=sound,
+        priority=priority,
+    )
+
+
+async def get_expo_push_receipts(ticket_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Fetch Expo receipts for ticket IDs.
+
+    The returned dictionary contains only Expo receipt status, error code, and
+    message. Callers decide what subset is safe to persist.
+    """
+    ids = [ticket_id for ticket_id in ticket_ids if isinstance(ticket_id, str) and ticket_id]
+    if not ids:
+        return {}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(
+            EXPO_RECEIPTS_API,
+            json={"ids": ids[:1000]},
+            headers={"Content-Type": "application/json"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    data = payload.get("data") or {}
+    if not isinstance(data, dict):
+        raise ValueError("Expo receipt response data was not an object")
+    receipts: Dict[str, Dict[str, Any]] = {}
+    for ticket_id, receipt in data.items():
+        if not isinstance(ticket_id, str) or not isinstance(receipt, dict):
+            continue
+        details = receipt.get("details") or {}
+        error = details.get("error") if isinstance(details, dict) else None
+        receipts[ticket_id] = {
+            "status": receipt.get("status"),
+            "error": error if isinstance(error, str) else None,
+            "message": (
+                receipt.get("message")[:300]
+                if isinstance(receipt.get("message"), str)
+                else None
+            ),
+        }
+    return receipts
