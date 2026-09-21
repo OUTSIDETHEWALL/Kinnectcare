@@ -30,6 +30,7 @@ import { api } from './api';
 import * as memberStore from './store/memberStore';
 import { ensureBackgroundLocationDisclosure } from './backgroundLocationDisclosure';
 import { recordLocationUploadSuccess } from './locationUploadSuccess';
+import * as locationEngine from './locationEngine';
 
 export const BG_LOCATION_TASK = 'kinnship/background-location-v1';
 export const SOS_ACTIVE_KEY = '@kinnship/sos_active_v1';
@@ -425,6 +426,13 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
  */
 export async function startBackgroundLocation(memberId: string): Promise<boolean> {
   if (Platform.OS === 'web') return false;
+  // The legacy task is a fallback only. Guard at the lowest public entry
+  // point so bootstrap, settings, and SOS cadence changes cannot bypass
+  // engine exclusivity on a Transistor-capable binary.
+  if (locationEngine.isAvailable()) {
+    await stopBackgroundLocation();
+    return false;
+  }
   // Persist the member-id keyed used by the OS-task to know whose
   // record to update.  Read fresh on every tick to handle account
   // switches without restarting the service.
@@ -487,16 +495,21 @@ export async function startBackgroundLocation(memberId: string): Promise<boolean
   return true;
 }
 
-/** Stop the foreground service.  Idempotent. */
-export async function stopBackgroundLocation(): Promise<void> {
+/** Stop the foreground service. Idempotent; returns true once stopped. */
+export async function stopBackgroundLocation(): Promise<boolean> {
   try {
     const running = await Location.hasStartedLocationUpdatesAsync(BG_LOCATION_TASK);
     if (running) await Location.stopLocationUpdatesAsync(BG_LOCATION_TASK);
-  } catch (_e) {}
+    const stillRunning = await Location.hasStartedLocationUpdatesAsync(BG_LOCATION_TASK);
+    if (stillRunning) return false;
+  } catch (_e) {
+    return false;
+  }
   try {
     await AsyncStorage.removeItem(BG_LOCATION_MEMBER_ID_KEY);
     await AsyncStorage.removeItem(SOS_ACTIVE_KEY);
   } catch (_e) {}
+  return true;
 }
 
 /**
