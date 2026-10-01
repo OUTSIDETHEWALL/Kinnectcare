@@ -31,6 +31,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
+import { captureDiagnosticSource, readNativeSdkEvidence, shareFullDiagnostics } from '../src/fullDiagnosticsExport';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
 import { getNotificationLog, clearNotificationLog } from '../src/notificationLog';
@@ -124,6 +125,8 @@ import {
   attachDiagnosticsStorageRecordContext,
   auditDiagnosticsStorage,
   captureDiagnosticsCrash,
+  DIAGNOSTICS_STORAGE_KEYS,
+  readDiagnosticsStorageEvidence,
   getDiagnosticsStorageRecordTraceContext,
   traceDiagnosticsRecords,
   traceDiagnosticsStorageRead,
@@ -816,6 +819,7 @@ function DiagnosticsContent() {
   const [serverState, setServerState] = useState<any>(null);
   const [serverStateLoading, setServerStateLoading] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [sharingAll, setSharingAll] = useState(false);
   // Task #21 Deliverable 2 — side-by-side device comparison.
   // Fetched from /api/diagnostics/family-snapshot on demand.
   const [familySnapshot, setFamilySnapshot] = useState<any>(null);
@@ -1400,6 +1404,122 @@ function DiagnosticsContent() {
       );
     } catch (e: any) {
       Alert.alert('Could not copy', e?.message || 'Try again.');
+    }
+  };
+
+  const onShareAll = async () => {
+    if (sharingAll) return;
+    setSharingAll(true);
+    try {
+      let model = battOptInfo.model;
+      let manufacturer = battOptInfo.manufacturer;
+      try {
+        const Device: typeof import('expo-device') = require('expo-device');
+        model = Device.modelName ?? model;
+        manufacturer = Device.manufacturer ?? manufacturer;
+      } catch { /* Battery-optimization metadata remains available. */ }
+      // Re-read the critical rolling logs when the button is pressed: React
+      // state may still reflect the last time this screen was opened.
+      const capture = captureDiagnosticSource;
+      // Copy every retained buffer before view readers apply age/cap filters.
+      // Never scan arbitrary app storage: auth/session keys are not evidence.
+      const retainedDiagnosticBuffers = Object.fromEntries(await Promise.all(
+        [...DIAGNOSTICS_STORAGE_KEYS,
+          '@kinnship/diagnostics_storage_audit_v1',
+          '@kinnship/diagnostics_storage_audit_progress_v1',
+          '@kinnship/diagnostics_storage_audit_history_v1',
+          '@kinnship/diagnostics_storage_cleanup_history_v1',
+        ].map(async key => [key,
+          await capture(() => AsyncStorage.getItem(key)),
+        ]),
+      ));
+      const [
+        engine, battery, timestamps, uploadStats, recovery, sdk, notifications,
+        locations, snapshots, refresh, restrictions, batteryOptimization,
+        permissions, startupEvidence, nativeStartupEvidence, cardEvents,
+        powerManager, batteryOptimizationRequest, storageEvidence,
+      ] = await Promise.all([
+        capture(getEngineDiagnostics),
+        capture(readBatteryTaskLog),
+        capture(getPipelineTimestamps),
+        capture(getPersistentHttpUploadStats),
+        capture(leonidas.getRecoveryLog),
+        captureDiagnosticSource(readNativeSdkEvidence, 45000),
+        capture(getNotificationLog),
+        capture(readLocationRefreshLog),
+        capture(readPipelineSnapshots),
+        capture(getRefreshPipelineLog),
+        capture(getRestrictionStatus),
+        capture(checkBatteryOptimization),
+        capture(async () => {
+          const Location = await import('expo-location');
+          const [foreground, background] = await Promise.all([
+            Location.getForegroundPermissionsAsync(),
+            Location.getBackgroundPermissionsAsync(),
+          ]);
+          const Notifications = await import('expo-notifications');
+          const notifications = await Notifications.getPermissionsAsync();
+          return { foreground, background, notifications };
+        }),
+        capture(readStartupDiagnostics),
+        capture(async () => nativeStartupCheckpointsForCopy(readNativeStartupCheckpoints())),
+        capture(getCardRenderLog),
+        capture(requestShowPowerManager),
+        capture(requestShowIgnoreBatteryOptimizations),
+        capture(readDiagnosticsStorageEvidence),
+      ]);
+      const liveLogs = Object.fromEntries(await Promise.all([
+        ['authClear', readAuthClearLog],
+        ['route', readRouteLog],
+        ['pushRefresh', readPushRefreshLog],
+        ['backgroundLocationTask', readBgTaskLog],
+        ['screenRender', readScreenRenderLog],
+        ['dashboardLoad', getDashboardLoadLog],
+      ].map(async ([name, read]) => [
+        name, await capture(read as () => Promise<unknown>),
+      ])));
+      const payload = {
+        ...buildPayload(),
+        exportScope: 'Full Diagnostics — on-device data and previously fetched server views',
+        localTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown',
+        nativeBuildVersion: Constants.nativeBuildVersion ?? null,
+        evidenceLimits: 'All retained buffers and all native SDK logs returned by its reader are included without export slicing. Existing recording caps, age filters and HTTP response-body caps are unchanged. Older evicted evidence cannot be recovered. Android Logcat is not available through the existing in-app readers. Failed or timed-out sources are explicitly marked.',
+        retainedDiagnosticBuffers,
+        device: {
+          androidVersion: String(Platform.Version),
+          manufacturer,
+          model,
+          batteryOptimization,
+          restrictions,
+          powerManager,
+          batteryOptimizationRequest,
+        },
+        currentDiagnostics: {
+          engine, batteryTask: battery, pipelineTimestamps: timestamps,
+          uploadStats, leonidasRecovery: recovery, nativeSdk: sdk,
+          notifications, locationRefresh: locations,
+          pipelineSnapshots: snapshots, refreshPipeline: refresh,
+          leonidasSnapshot: leonidas.getSnapshot(),
+          lastSuccessfulUpload: await capture(getLastHttpSuccessTs),
+          gpsHistory: { data: gpsHistory, error: gpsHistoryErr, note: 'Most recently fetched by Diagnostics screen' },
+          deviceComparison: familySnapshot,
+          serverState,
+          deviceBatteryLevel,
+          permissions,
+          startupEvidence,
+          nativeStartupEvidence,
+          cardRenderEvents: cardEvents,
+          liveLogs,
+          storageEvidence,
+          serverRefreshTraces: { data: refreshTraces, note: 'Most recently fetched by Diagnostics screen' },
+          listenersAttached: isListenersAttached(),
+        },
+      };
+      await shareFullDiagnostics(payload);
+    } catch (error: any) {
+      Alert.alert('Could not share diagnostics', error?.message || String(error));
+    } finally {
+      setSharingAll(false);
     }
   };
 
@@ -3337,6 +3457,23 @@ function DiagnosticsContent() {
             <Text style={styles.secondaryBtnText}>Refresh</Text>
           </TouchableOpacity>
         </View>
+
+        {Platform.OS === 'android' && (
+          <View style={styles.actionRow}>
+            <TouchableOpacity
+              testID="diagnostics-share-all"
+              style={styles.primaryBtn}
+              onPress={() => { void onShareAll(); }}
+              disabled={sharingAll}
+              accessibilityRole="button"
+              accessibilityLabel="Share All Diagnostics"
+            >
+              <Text style={styles.primaryBtnText}>
+                {sharingAll ? 'Preparing diagnostics…' : 'Share All Diagnostics'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         {/* Build 53 — dedicated bg_task_log export.  Focused view of
             the Transistor headless execution trace for remote debug. */}

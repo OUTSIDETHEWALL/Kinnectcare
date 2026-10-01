@@ -7,4 +7,4 @@ Add one Export Diagnostics File action beside Copy Log in the next normal Androi
 
 **Why:** Clipboard transfer through SMS or Telegram truncated a large diagnostics export. The current production binary does not contain a native file-sharing module, and introducing one through an OTA-only update risks a module-load crash.
 
-**How to apply:** Include the required native sharing dependency only when preparing the next otherwise-needed Android binary. Preserve Copy Log and all diagnostic contents, retention, storage, and operational behavior. Do not create a standalone Android binary solely for this usability improvement.
+**How to apply:** Native sharing requires an Android binary, never an OTA-only release. Preserve Copy Log and all diagnostic contents, retention, storage, and operational behavior. Do not initiate a standalone diagnostics binary unless the user explicitly requests one; that request overrides the earlier deferral.

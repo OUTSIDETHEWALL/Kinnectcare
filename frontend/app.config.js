@@ -77,7 +77,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 65, // Build 65 — diagnostic startup recorder for the fresh-install invitation freeze.
+      versionCode: 66, // Build 66 — Share All Diagnostics tooling only.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
