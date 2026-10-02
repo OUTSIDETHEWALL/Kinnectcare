@@ -33,3 +33,4 @@
 - [Caregiver battery and device status](caregiver-battery-device-status.md) — one battery incident escalates in place; dashboard device states reuse movement-aware tolerance.
 - [Android recovery push invariant](android-recovery-push-invariant.md) — stale-device recovery must be high-priority and strictly data-only so Doze cannot defer it and Android cannot render it.
 - [Diagnostics file export](diagnostics-file-export.md) — add native full-log file sharing only with the next normal Android binary, never as an OTA-only native-module addition.
+- [Cold-headless validation boundary](cold-headless-validation-boundary.md) — warm-process success and native heartbeat firings do not prove cold background bootstrap.
