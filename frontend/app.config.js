@@ -77,7 +77,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 66, // Build 66 — Share All Diagnostics tooling only.
+      versionCode: 67, // Build 67 — Cold-headless entry registration only.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
