@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Alert, Platform } from 'react-native';
+import * as Location from 'expo-location';
 
 /**
  * Google Play requires an in-app, prominent disclosure immediately before an
@@ -13,6 +14,7 @@ export const BACKGROUND_LOCATION_DISCLOSURE_TEXT =
   'with members of your Kinnship family group and is never used for advertising.';
 
 const DISCLOSURE_SHOWN_KEY = '@kinnship/background_location_disclosure_shown_v1';
+let pendingDisclosure: Promise<void> | null = null;
 
 function showDisclosureAlert(): Promise<void> {
   return new Promise((resolve) => {
@@ -26,18 +28,30 @@ function showDisclosureAlert(): Promise<void> {
 }
 
 /**
- * Show the prominent disclosure once per Android installation, directly before
- * the app requests background location. It is intentionally not a substitute
- * for Android's runtime permission prompt, which follows immediately after.
+ * Await acknowledgment before an Android location permission request.
+ * An acknowledgment restored from old app data is not sufficient if location
+ * permission has never been requested. Concurrent callers share the entire
+ * check/dialog/save operation, not just the visible alert.
  */
-export async function ensureBackgroundLocationDisclosure(): Promise<void> {
-  if (Platform.OS !== 'android') return;
+export function ensureBackgroundLocationDisclosure(): Promise<void> {
+  if (Platform.OS !== 'android') return Promise.resolve();
+  if (pendingDisclosure) return pendingDisclosure;
 
+  pendingDisclosure = checkAndShowDisclosure().finally(() => {
+    pendingDisclosure = null;
+  });
+  return pendingDisclosure;
+}
+
+async function checkAndShowDisclosure(): Promise<void> {
   try {
-    if (await AsyncStorage.getItem(DISCLOSURE_SHOWN_KEY) === 'true') return;
+    if (await AsyncStorage.getItem(DISCLOSURE_SHOWN_KEY) === 'true') {
+      const permission = await Location.getForegroundPermissionsAsync();
+      if (permission.status !== 'undetermined') return;
+    }
   } catch (_e) {
-    // If local storage is temporarily unavailable, still disclose rather than
-    // silently proceeding to Android's sensitive-permission prompt.
+    // If storage or permission-state lookup fails, disclose rather than
+    // trusting a possibly stale acknowledgment.
   }
 
   await showDisclosureAlert();

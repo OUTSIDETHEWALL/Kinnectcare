@@ -77,7 +77,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 67, // Build 67 — Cold-headless entry registration only.
+      versionCode: 68, // Build 68 — Location disclosure ordering; preserves Build 67.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
