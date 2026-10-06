@@ -10,8 +10,8 @@
  *   • Emotional copy — people care about family, not GPS
  *   • Never a dead end — if denied, explain consequences and offer
  *     "Open Settings" and "Continue Anyway" (no traps, no punishment)
- *   • 0 extra taps on the happy path — context shown during the family
- *     join loading state, OS dialogs fired automatically
+ *   • Android location disclosure requires Continue before the OS dialog;
+ *     other permission dialogs retain their existing automatic sequence
  */
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -24,6 +24,7 @@ import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { Colors } from '../../src/theme';
 import { markPermissionsHandled } from '../../src/permissionsStore';
+import { ensureBackgroundLocationDisclosure } from '../../src/backgroundLocationDisclosure';
 
 type PermissionStage =
   | 'loading'           // brief pause — user reads context before OS dialog
@@ -46,14 +47,19 @@ export default function Permissions() {
     return () => clearTimeout(t);
   }, [stage]);
 
-  // Auto-fire location dialog when we enter location-context stage.
+  // Android's location dialog follows affirmative acknowledgment of the
+  // Kinnship disclosure. Other platforms retain their existing sequence.
   useEffect(() => {
     if (stage !== 'location-context') return;
     if (fired.current) return;
     fired.current = true;
+    let cancelled = false;
     (async () => {
       try {
+        await ensureBackgroundLocationDisclosure();
+        if (cancelled) return;
         const { status } = await Location.requestForegroundPermissionsAsync();
+        if (cancelled) return;
         if (status === 'granted') {
           setLocationGranted(true);
           fired.current = false; // reset so notification effect can fire
@@ -63,9 +69,10 @@ export default function Permissions() {
         }
       } catch (_e) {
         // Unexpected error — treat as denied so user isn't stuck.
-        setStage('location-denied');
+        if (!cancelled) setStage('location-denied');
       }
     })();
+    return () => { cancelled = true; };
   }, [stage]);
 
   const proceedToNotifications = () => {
@@ -130,7 +137,7 @@ export default function Permissions() {
   }
 
   if (stage === 'location-context') {
-    // Shown for a split second before the OS dialog fires.
+    // Remains behind the Android disclosure until Continue is acknowledged.
     return (
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.center}>
