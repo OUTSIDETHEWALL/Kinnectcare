@@ -407,6 +407,71 @@ describe('medication and routine notification reliability', () => {
     expect(replayed).toHaveBeenCalledWith(pending.payload);
   });
 
+  it('resets stale readiness on listener mount before replaying a cold medication tap', async () => {
+    const callback = jest.fn();
+    mockLastResponse.mockResolvedValue(bodyResponse('remounted-cold-tap'));
+    setAppReadyForDeepLink(true);
+    function Harness() {
+      useNotificationListeners(callback);
+      return null;
+    }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(React.createElement(Harness));
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    expect(callback).not.toHaveBeenCalled();
+    expect(mockClearLastResponse).not.toHaveBeenCalled();
+    await act(async () => {
+      setAppReadyForDeepLink(true);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledWith(expect.objectContaining({
+      occurrence_id: 'occurrence-remounted-cold-tap',
+      notification_id: 'remounted-cold-tap',
+    }));
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('rechecks a gate closed after flush scheduling and leaves the exact tap pending', async () => {
+    const callback = jest.fn();
+    const callbacks: Array<(response: any) => Promise<void>> = [];
+    mockAddResponse.mockImplementation((handler: any) => {
+      callbacks.push(handler);
+      return { remove: jest.fn() };
+    });
+    function Harness() {
+      useNotificationListeners(callback);
+      return null;
+    }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(React.createElement(Harness));
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    await act(async () => {
+      await callbacks[0](bodyResponse('gate-closed'));
+      setAppReadyForDeepLink(true);
+      setAppReadyForDeepLink(false);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    expect(callback).not.toHaveBeenCalled();
+    expect(mockClearLastResponse).not.toHaveBeenCalled();
+    expect(mockStorageSet).not.toHaveBeenCalledWith(
+      '@kinnship/notification_response_consumed_v1', expect.any(String),
+    );
+    await act(async () => {
+      setAppReadyForDeepLink(true);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledWith(expect.objectContaining({
+      occurrence_id: 'occurrence-gate-closed',
+    }));
+    await act(async () => { renderer.unmount(); });
+  });
+
   it('keeps pending when the routing callback throws, then retries successfully', async () => {
     const callbacks: Array<(response: any) => Promise<void>> = [];
     mockAddResponse.mockImplementation((handler: any) => {
@@ -640,8 +705,10 @@ describe('medication and routine notification reliability', () => {
       useNotificationListeners(callback);
       return null;
     }
-    create(React.createElement(ListenerHarness));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    let initialRenderer!: ReturnType<typeof create>;
+    await act(async () => {
+      initialRenderer = create(React.createElement(ListenerHarness));
+    });
 
     for (let i = 0; i < 21; i += 1) {
       await responseHandlers[0](bodyResponse(`queue-${i}`));
@@ -655,8 +722,11 @@ describe('medication and routine notification reliability', () => {
       useNotificationListeners(callback);
       return null;
     }
-    create(React.createElement(RestartedHarness));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    let restartedRenderer!: ReturnType<typeof create>;
+    await act(async () => {
+      initialRenderer.unmount();
+      restartedRenderer = create(React.createElement(RestartedHarness));
+    });
     await act(async () => {
       setAppReadyForDeepLink(true);
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -668,5 +738,6 @@ describe('medication and routine notification reliability', () => {
     expect(JSON.parse(consumedStorage || '[]')).toEqual(
       Array.from({ length: 21 }, (_, i) => `queue-${i}`),
     );
+    await act(async () => { restartedRenderer.unmount(); });
   });
 });

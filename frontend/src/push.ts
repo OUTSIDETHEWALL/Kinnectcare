@@ -1031,6 +1031,9 @@ function tryFlush() {
   // RootNav has committed before our deep-link push runs.
   setTimeout(async () => {
     try {
+      // A remount or a launch gate may close after this task was scheduled.
+      // Never consume a response merely because the previous screen was ready.
+      if (!appReadyForDeepLink || !liveOnAlert) return;
       await liveOnAlert?.(record.payload);
       await persistConsumedNotificationId(record.requestId);
       consumedNotificationIds.add(record.requestId);
@@ -1076,6 +1079,9 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
   onAlertRef.current = onAlert;
 
   useEffect(() => {
+    // A previous RootNav may have been ready in this same JS process.
+    // Only the newly mounted RootNav can release its pending responses.
+    setAppReadyForDeepLink(false);
     // Register the live alert callback so the pending-deep-link queue
     // can fire it whenever RootNav signals app-ready.
     liveOnAlert = (data) => onAlertRef.current?.(data);
@@ -1290,6 +1296,7 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
       await enqueueDeepLink({ ...data, notification_id: reqId }, reqId);
     });
     return () => {
+      setAppReadyForDeepLink(false);
       recv.remove();
       resp.remove();
       liveOnAlert = null;
