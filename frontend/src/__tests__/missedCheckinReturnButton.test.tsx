@@ -17,6 +17,8 @@ const mockRouteContent = jest.fn<any, []>(() => null);
 let mockSegments = ['(tabs)'];
 let mockNotificationCallback: ((data: any) => void) | null = null;
 let mockPendingNotification: any = null;
+let mockAuthUser: { id: string } | null = { id: 'caregiver-001' };
+let mockAuthLoading = false;
 
 jest.mock('react-native', () => {
   const React = require('react');
@@ -154,7 +156,7 @@ jest.mock('../api', () => ({
 
 jest.mock('../AuthContext', () => ({
   AuthProvider: ({ children }: any) => children,
-  useAuth: () => ({ user: { id: 'caregiver-001' }, loading: false }),
+  useAuth: () => ({ user: mockAuthUser, loading: mockAuthLoading }),
 }));
 
 jest.mock('../push', () => ({
@@ -166,8 +168,14 @@ jest.mock('../push', () => ({
   setAppReadyForDeepLink: jest.fn((ready: boolean) => {
     if (ready && mockNotificationCallback && mockPendingNotification) {
       const pending = mockPendingNotification;
-      mockPendingNotification = null;
-      setTimeout(() => mockNotificationCallback?.(pending), 0);
+      setTimeout(() => {
+        try {
+          mockNotificationCallback?.(pending);
+          mockPendingNotification = null;
+        } catch (_error) {
+          // Match the real durable queue: a closed gate retains the response.
+        }
+      }, 0);
     }
   }),
   refreshPushTokenIfStale: jest.fn(() => Promise.resolve()),
@@ -320,6 +328,8 @@ beforeEach(() => {
   mockSegments = ['(tabs)'];
   mockNotificationCallback = null;
   mockPendingNotification = null;
+  mockAuthUser = { id: 'caregiver-001' };
+  mockAuthLoading = false;
   jest.useFakeTimers();
 });
 
@@ -386,6 +396,20 @@ describe('RootLayout — authenticated medication notification startup', () => {
       await flushPromises();
     });
 
+    // A replace request is not a committed navigator. Wait for segments to
+    // confirm the normal launch redirect before delivering the medication tap.
+    expect(mockRouterReplace).toHaveBeenCalledTimes(1);
+    expect(mockPendingNotification).toBe(medicationOccurrence);
+    mockSegments = ['(tabs)'];
+    await act(async () => {
+      renderer.update(<RootLayout />);
+      await flushPromises();
+    });
+    await act(async () => {
+      jest.runOnlyPendingTimers();
+      await flushPromises();
+    });
+
     expect(mockRouterReplace).toHaveBeenNthCalledWith(1, '/(tabs)/dashboard');
     expect(mockRouterReplace).toHaveBeenNthCalledWith(2, {
       pathname: '/(modals)/acknowledge',
@@ -406,6 +430,66 @@ describe('RootLayout — authenticated medication notification startup', () => {
     renderer.unmount();
   });
 
+  it('retains a medication tap during session restoration instead of routing before authentication', async () => {
+    mockAuthUser = null;
+    mockAuthLoading = true;
+    mockSegments = [];
+    mockPendingNotification = medicationOccurrence;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<RootLayout />);
+      await flushPromises();
+    });
+    // Emulate the stale process-wide ready signal seen in the Android log.
+    const { setAppReadyForDeepLink } = require('../push');
+    await act(async () => {
+      setAppReadyForDeepLink(true);
+      jest.runOnlyPendingTimers();
+      await flushPromises();
+    });
+    expect(mockRouterReplace).not.toHaveBeenCalled();
+    expect(mockPendingNotification).toBe(medicationOccurrence);
+
+    mockAuthUser = { id: 'caregiver-001' };
+    mockAuthLoading = false;
+    mockSegments = ['(auth)', 'login'];
+    await act(async () => {
+      renderer.update(<RootLayout />);
+      await flushPromises();
+    });
+    await act(async () => {
+      jest.runOnlyPendingTimers();
+      await flushPromises();
+    });
+    expect(mockRouterReplace).toHaveBeenCalledWith('/(tabs)/dashboard');
+    expect(mockRouterReplace.mock.calls.every(
+      ([destination]) => destination === '/(tabs)/dashboard',
+    )).toBe(true);
+    expect(mockPendingNotification).toBe(medicationOccurrence);
+
+    mockSegments = ['(tabs)'];
+    await act(async () => {
+      renderer.update(<RootLayout />);
+      await flushPromises();
+    });
+    await act(async () => {
+      jest.runOnlyPendingTimers();
+      await flushPromises();
+    });
+    expect(mockRouterReplace).toHaveBeenLastCalledWith({
+      pathname: '/(modals)/acknowledge',
+      params: expect.objectContaining({
+        reminder_id: medicationOccurrence.reminder_id,
+        member_id: medicationOccurrence.member_id,
+        slot_time: medicationOccurrence.slot_time,
+        local_date: medicationOccurrence.local_date,
+        occurrence_id: medicationOccurrence.occurrence_id,
+      }),
+    });
+    expect(mockPendingNotification).toBeNull();
+    await act(async () => { renderer.unmount(); });
+  });
+
   it('keeps an ordinary authenticated launch on the normal Family route', async () => {
     mockSegments = ['(auth)', 'login'];
     let renderer!: ReturnType<typeof create>;
@@ -422,5 +506,28 @@ describe('RootLayout — authenticated medication notification startup', () => {
     expect(mockRouterReplace).toHaveBeenCalledTimes(1);
     expect(mockRouterReplace).toHaveBeenCalledWith('/(tabs)/dashboard');
     renderer.unmount();
+  });
+
+  it.each([
+    [{ type: 'sos', alert_id: 'sos-one' }, '/alert/[id]'],
+    [{ type: 'missed_checkin', alert_id: 'checkin-one' }, '/missed-checkin/[id]'],
+    [{ type: 'routine', reminder_id: 'routine-one' }, '/(modals)/acknowledge'],
+    [{
+      type: 'medication', subtype: 'family_alert', alert_id: 'caregiver-one',
+      reminder_id: 'reminder-one',
+    }, '/(modals)/acknowledge'],
+    [{
+      type: 'are_you_ok_request', request_id: 'welfare-one', member_id: 'member-one',
+    }, '/are-you-ok-response'],
+  ])('preserves the existing destination for %j', async (payload, pathname) => {
+    mockApiGet.mockResolvedValue({ data: [] });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<RootLayout />);
+      await flushPromises();
+    });
+    await act(async () => { mockNotificationCallback!(payload); });
+    expect(mockRouterReplace).toHaveBeenLastCalledWith(expect.objectContaining({ pathname }));
+    await act(async () => { renderer.unmount(); });
   });
 });

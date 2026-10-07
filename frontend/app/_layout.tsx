@@ -492,10 +492,30 @@ function RootNav() {
       } catch (_e) {}
     };
     const medicationRoute = medicationSelfDueRoute(data);
-    if (medicationRoute || t === 'routine') {
+    if (medicationRoute) {
+      const segment = segments[0] as string | undefined;
+      const onLaunchRoute = !segment || segment === 'index' ||
+        segment === '(auth)' || segment === 'onboarding' || segment === 'disclaimer';
+      // Readiness in push.ts is process-wide; RootNav can remount in the same
+      // process while restoring this session. Keep this exact occurrence
+      // pending until the CURRENT navigator and authentication gates settle.
+      if (
+        loading || !user?.id || !initialLinkChecked || !onboardingChecked ||
+        !disclaimerChecked || !permissionsChecked || !appLockChecked ||
+        needsDisclaimer || needsPermissions || needsAppLockUnlock || onLaunchRoute
+      ) {
+        throw new Error('Medication tap is waiting for authenticated navigation');
+      }
+      __logRoute('/(modals)/acknowledge');
+      // Do not consume the tap through a fallback destination if navigation
+      // fails. The durable queue retries when RootNav becomes ready again.
+      router.replace(medicationRoute as any);
+      return;
+    }
+    if (t === 'routine') {
       __logRoute('/(modals)/acknowledge');
       try {
-        router.replace(medicationRoute || {
+        router.replace({
           pathname: '/(modals)/acknowledge',
           params: {
             type: t,
