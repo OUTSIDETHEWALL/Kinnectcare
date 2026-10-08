@@ -8,6 +8,7 @@ import { useRouter, useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
+import { foregroundLocationForAutomaticCaller } from '../../src/permissionCoordinator';
 import * as Notifications from 'expo-notifications';
 import { Colors, StatusColor } from '../../src/theme';
 import { api, Member, MemberSummary, MissedMedicationDetail, DashboardSummary, getBillingStatus, BillingStatus, FamilyInvite, listFamilyInvites, revokeFamilyInvite, Alert as ApiAlert } from '../../src/api';
@@ -570,7 +571,7 @@ export default function Dashboard() {
   useEffect(() => {
     (async () => {
       try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
+        const { status } = await foregroundLocationForAutomaticCaller();
         if (status !== 'granted' || members.length === 0 || !user?.id) return;
 
         // ============================================================

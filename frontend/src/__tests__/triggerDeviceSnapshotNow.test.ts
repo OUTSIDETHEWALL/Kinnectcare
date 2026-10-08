@@ -26,6 +26,13 @@ const FAKE_CFG = {
   backendBaseUrl: 'https://api.example.com',
 };
 
+jest.mock('../permissionCoordinator', () => ({
+  readPermissionSnapshot: jest.fn(async () => ({
+    foreground: 'granted', background: 'granted', notifications: 'granted',
+  })),
+  serializePermissionOperation: (operation: () => Promise<unknown>) => operation(),
+}));
+
 describe('triggerDeviceSnapshotNow', () => {
   afterEach(() => {
     jest.resetModules();

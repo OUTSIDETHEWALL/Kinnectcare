@@ -15,6 +15,7 @@ describe('fresh onboarding location permission order', () => {
   let replace: jest.Mock;
   let platform: { OS: string };
   let tree: any;
+  let appStateListeners: Set<(state: string) => void>;
 
   beforeEach(() => {
     jest.resetModules();
@@ -23,6 +24,7 @@ describe('fresh onboarding location permission order', () => {
     React = require('react');
     renderer = require('react-test-renderer');
     tree = null;
+    appStateListeners = new Set();
     platform = { OS: 'android' };
     storage = {
       getItem: jest.fn().mockResolvedValue(null),
@@ -31,8 +33,11 @@ describe('fresh onboarding location permission order', () => {
     location = {
       getForegroundPermissionsAsync: jest.fn().mockResolvedValue({ status: 'undetermined' }),
       requestForegroundPermissionsAsync: jest.fn().mockResolvedValue({ status: 'granted' }),
+      getBackgroundPermissionsAsync: jest.fn().mockResolvedValue({ status: 'granted' }),
+      requestBackgroundPermissionsAsync: jest.fn().mockResolvedValue({ status: 'granted' }),
     };
     notifications = {
+      getPermissionsAsync: jest.fn().mockResolvedValue({ status: 'undetermined' }),
       requestPermissionsAsync: jest.fn().mockResolvedValue({ status: 'granted' }),
     };
     alert = jest.fn();
@@ -42,6 +47,13 @@ describe('fresh onboarding location permission order', () => {
       View: 'View', Text: 'Text', TouchableOpacity: 'TouchableOpacity',
       ActivityIndicator: 'ActivityIndicator', Platform: platform,
       Linking: { openSettings: jest.fn() }, Alert: { alert },
+      AppState: {
+        currentState: 'active',
+        addEventListener: jest.fn((_event: string, listener: (state: string) => void) => {
+          appStateListeners.add(listener);
+          return { remove: () => appStateListeners.delete(listener) };
+        }),
+      },
       StyleSheet: { create: (styles: unknown) => styles },
     }));
     jest.doMock('react-native-safe-area-context', () => ({ SafeAreaView: 'SafeAreaView' }));
@@ -113,6 +125,38 @@ describe('fresh onboarding location permission order', () => {
     expect(JSON.stringify(tree.toJSON())).toContain('Continue Anyway');
     expect(notifications.requestPermissionsAsync).not.toHaveBeenCalled();
     expect(markHandled).not.toHaveBeenCalled();
+  });
+
+  it('offers Continue Anyway for background denial without blocking the app', async () => {
+    location.getBackgroundPermissionsAsync.mockResolvedValue({ status: 'undetermined' });
+    location.requestBackgroundPermissionsAsync.mockResolvedValue({ status: 'denied' });
+    await reachLocationStage();
+    await acknowledge();
+    expect(location.requestBackgroundPermissionsAsync).toHaveBeenCalledTimes(1);
+    expect(notifications.requestPermissionsAsync).not.toHaveBeenCalled();
+    expect(JSON.stringify(tree.toJSON())).toContain('You can continue using Kinnship');
+    const continueButton = tree.root.findAllByType('TouchableOpacity').find((node: any) =>
+      node.findAllByType('Text').some((text: any) => text.props.children === 'Continue Anyway'));
+    await renderer.act(async () => { continueButton.props.onPress(); });
+    expect(markHandled).toHaveBeenCalledTimes(1);
+    expect(replace).toHaveBeenCalledWith('/(tabs)/dashboard');
+  });
+
+  it('a Settings return after background denial reads state without requesting background again', async () => {
+    location.getForegroundPermissionsAsync.mockResolvedValue({ status: 'granted' });
+    location.getBackgroundPermissionsAsync.mockResolvedValue({ status: 'undetermined' });
+    location.requestBackgroundPermissionsAsync.mockResolvedValue({ status: 'denied' });
+    await reachLocationStage();
+    await acknowledge();
+    expect(appStateListeners.size).toBeGreaterThan(0);
+    location.getBackgroundPermissionsAsync.mockResolvedValue({ status: 'granted' });
+    await renderer.act(async () => {
+      for (const listener of [...appStateListeners]) listener('background');
+      for (const listener of [...appStateListeners]) listener('active');
+    });
+    expect(location.requestBackgroundPermissionsAsync).toHaveBeenCalledTimes(1);
+    expect(markHandled).toHaveBeenCalledTimes(1);
+    expect(replace).toHaveBeenCalledWith('/(tabs)/dashboard');
   });
 
   it('does not ask permission if disclosure presentation fails', async () => {

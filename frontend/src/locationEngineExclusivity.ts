@@ -3,11 +3,12 @@ import {
   stopBackgroundLocation,
 } from './backgroundLocation';
 import * as locationEngine from './locationEngine';
-import type { LocationEngineConfig } from './locationEngine';
+import type { LocationEngineConfig, LocationStartupOutcome } from './locationEngine';
 
 type InFlightTransistorStart = {
   key: string;
-  promise: Promise<boolean>;
+  isCurrent?: () => boolean;
+  promise: Promise<LocationStartupOutcome>;
 };
 
 let transistorStartInFlight: InFlightTransistorStart | null = null;
@@ -25,11 +26,11 @@ export function needsLocationEngineBootstrap(
  */
 export async function ensureTransistorLocationEngine(
   config: LocationEngineConfig,
-): Promise<boolean> {
-  if (!locationEngine.isAvailable()) return false;
+): Promise<LocationStartupOutcome> {
+  if (!locationEngine.isAvailable()) return 'failed';
   const key = `${config.backendBaseUrl}\u0000${config.memberId}\u0000${config.jwt}`;
   if (transistorStartInFlight) {
-    if (transistorStartInFlight.key === key) {
+    if (transistorStartInFlight.key === key && transistorStartInFlight.isCurrent === config.isCurrent) {
       return transistorStartInFlight.promise;
     }
     await transistorStartInFlight.promise;
@@ -38,12 +39,11 @@ export async function ensureTransistorLocationEngine(
 
   const startPromise = (async () => {
     const legacyStopped = await stopBackgroundLocation();
-    if (!legacyStopped) return false;
+    if (!legacyStopped) return 'failed' as const;
 
-    await locationEngine.start(config);
-    return true;
+    return locationEngine.start(config);
   })();
-  transistorStartInFlight = { key, promise: startPromise };
+  transistorStartInFlight = { key, isCurrent: config.isCurrent, promise: startPromise };
 
   try {
     return await startPromise;
@@ -64,5 +64,7 @@ export async function startLegacyLocationFallback(memberId: string): Promise<boo
     return false;
   }
 
-  return startBackgroundLocation(memberId);
+  // Automatic bootstrap is passive. Explicit SOS cadence calls retain the
+  // legacy helper's existing permission behavior.
+  return startBackgroundLocation(memberId, false);
 }

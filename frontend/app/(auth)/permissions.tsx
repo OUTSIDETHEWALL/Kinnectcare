@@ -16,20 +16,19 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator,
-  Platform, Linking, Alert,
+  Platform, Linking, Alert, AppState,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import * as Location from 'expo-location';
-import * as Notifications from 'expo-notifications';
 import { Colors } from '../../src/theme';
 import { markPermissionsHandled } from '../../src/permissionsStore';
-import { ensureBackgroundLocationDisclosure } from '../../src/backgroundLocationDisclosure';
+import { notificationPermission, readPermissionSnapshot, requestOnboardingLocation } from '../../src/permissionCoordinator';
 
 type PermissionStage =
   | 'loading'           // brief pause — user reads context before OS dialog
   | 'location-context'  // show location explanation then auto-fire dialog
   | 'location-denied'   // user denied — offer Settings / Continue Anyway
+  | 'background-denied'
   | 'notification-context' // show notifications explanation
   | 'notification-denied'
   | 'done';             // mark handled, route to dashboard
@@ -39,6 +38,34 @@ export default function Permissions() {
   const [stage, setStage] = useState<PermissionStage>('loading');
   const [locationGranted, setLocationGranted] = useState(false);
   const fired = useRef(false);
+
+  // Settings returns only inspect authorization; denied choices never
+  // automatically reopen an OS prompt or restart the permission sequence.
+  useEffect(() => {
+    if (!['location-denied', 'background-denied', 'notification-denied'].includes(stage)) return;
+    let cancelled = false;
+    let previous = AppState.currentState;
+    const subscription = AppState.addEventListener('change', next => {
+      const resumed = next === 'active' && previous !== 'active';
+      previous = next;
+      if (!resumed) return;
+      void readPermissionSnapshot().then(p => {
+        if (cancelled) return;
+        if (stage === 'notification-denied' && p.notifications === 'granted') {
+          void finish();
+        } else if (stage !== 'notification-denied' && p.foreground === 'granted') {
+          setLocationGranted(true);
+          fired.current = false;
+          setStage(Platform.OS === 'android' && p.background !== 'granted'
+            ? 'background-denied' : 'notification-context');
+        }
+      }).catch(() => {});
+    });
+    return () => { cancelled = true; subscription.remove(); };
+    // finish is intentionally read from this mounted stage, not a dependency
+    // which would replace the Settings-return listener on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage]);
 
   // After a brief moment showing context, fire the OS dialogs in sequence.
   useEffect(() => {
@@ -56,14 +83,13 @@ export default function Permissions() {
     let cancelled = false;
     (async () => {
       try {
-        await ensureBackgroundLocationDisclosure();
+        const result = await requestOnboardingLocation(() => !cancelled);
         if (cancelled) return;
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (cancelled) return;
-        if (status === 'granted') {
+        if (result?.foreground === 'granted') {
           setLocationGranted(true);
           fired.current = false; // reset so notification effect can fire
-          setStage('notification-context');
+          setStage(Platform.OS === 'android' && result.background !== 'granted'
+            ? 'background-denied' : 'notification-context');
         } else {
           setStage('location-denied');
         }
@@ -85,22 +111,30 @@ export default function Permissions() {
     if (stage !== 'notification-context') return;
     if (fired.current) return;
     fired.current = true;
+    let cancelled = false;
     (async () => {
       try {
-        const { status } = await Notifications.requestPermissionsAsync();
+        const { status } = await notificationPermission(true, () => !cancelled);
+        if (cancelled) return;
         if (status === 'granted') {
           finish();
         } else {
           setStage('notification-denied');
         }
       } catch (_e) {
-        finish();
+        if (!cancelled) setStage('notification-denied');
       }
     })();
+    return () => { cancelled = true; };
   }, [stage]);
 
   const finish = async () => {
-    await markPermissionsHandled();
+    try {
+      await markPermissionsHandled();
+    } catch (_e) {
+      Alert.alert('Setup could not be saved', 'Please try Continue again.');
+      return;
+    }
     setStage('done');
     // RootNav re-reads permissionsHandled and routes to dashboard.
     router.replace('/(tabs)/dashboard');
@@ -160,16 +194,18 @@ export default function Permissions() {
     );
   }
 
-  if (stage === 'location-denied') {
+  if (stage === 'location-denied' || stage === 'background-denied') {
     return (
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.center}>
           <Text style={styles.emoji}>📍</Text>
-          <Text style={styles.title}>Your family won&apos;t be able to see you&apos;re safe.</Text>
+          <Text style={styles.title}>{stage === 'background-denied'
+            ? 'Location sharing is limited while Kinnship is closed.'
+            : 'Your family won’t be able to see you’re safe.'}</Text>
           <Text style={styles.body}>
-            Without location, your family can&apos;t tell when you&apos;ve arrived
-            somewhere — and SOS alerts won&apos;t be able to pinpoint your
-            location in an emergency.
+            {stage === 'background-denied'
+              ? 'To keep your family map updated when the app is closed or not in use, open Settings → Permissions → Location and choose Allow all the time. You can continue using Kinnship without background location.'
+              : 'Without location, your family can’t tell when you’ve arrived somewhere — and SOS alerts won’t be able to pinpoint your location in an emergency.'}
           </Text>
           <TouchableOpacity
             style={styles.primaryBtn}

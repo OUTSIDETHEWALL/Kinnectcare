@@ -22,7 +22,7 @@ import {
 describe('background-location engine exclusivity', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockStartTransistor.mockResolvedValue(undefined);
+    mockStartTransistor.mockResolvedValue('background-ready');
     mockStartLegacy.mockResolvedValue(true);
     mockStopLegacy.mockResolvedValue(true);
   });
@@ -34,7 +34,7 @@ describe('background-location engine exclusivity', () => {
       order.push('stop-legacy');
       return true;
     });
-    mockStartTransistor.mockImplementation(async () => { order.push('start-transistor'); });
+    mockStartTransistor.mockImplementation(async () => { order.push('start-transistor'); return 'background-ready'; });
 
     const started = await ensureTransistorLocationEngine({
       backendBaseUrl: 'https://example.test',
@@ -42,7 +42,7 @@ describe('background-location engine exclusivity', () => {
       jwt: 'jwt',
     });
 
-    expect(started).toBe(true);
+    expect(started).toBe('background-ready');
     expect(order).toEqual(['stop-legacy', 'start-transistor']);
     expect(mockStartLegacy).not.toHaveBeenCalled();
   });
@@ -54,7 +54,7 @@ describe('background-location engine exclusivity', () => {
 
     expect(started).toBe(true);
     expect(mockStartLegacy).toHaveBeenCalledTimes(1);
-    expect(mockStartLegacy).toHaveBeenCalledWith('member-1');
+    expect(mockStartLegacy).toHaveBeenCalledWith('member-1', false);
     expect(mockStopLegacy).not.toHaveBeenCalled();
     expect(mockStartTransistor).not.toHaveBeenCalled();
   });
@@ -79,7 +79,7 @@ describe('background-location engine exclusivity', () => {
       jwt: 'jwt',
     });
 
-    expect(started).toBe(false);
+    expect(started).toBe('failed');
     expect(mockStartTransistor).not.toHaveBeenCalled();
   });
 

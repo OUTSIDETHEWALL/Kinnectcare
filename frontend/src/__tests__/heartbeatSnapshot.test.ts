@@ -57,6 +57,13 @@ function getLogEntries(mockSetItem: jest.Mock): any[] {
   }
 }
 
+jest.mock('../permissionCoordinator', () => ({
+  readPermissionSnapshot: jest.fn(async () => ({
+    foreground: 'granted', background: 'granted', notifications: 'granted',
+  })),
+  serializePermissionOperation: (operation: () => Promise<unknown>) => operation(),
+}));
+
 describe('onHeartbeat → pushDeviceSnapshotToBackend (Task #56)', () => {
   afterEach(() => {
     jest.resetModules();

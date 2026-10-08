@@ -65,7 +65,8 @@ import { Platform, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
-import { ensureBackgroundLocationDisclosure } from './backgroundLocationDisclosure';
+import { BACKGROUND_LOCATION_DISCLOSURE_TEXT } from './backgroundLocationDisclosure';
+import { readPermissionSnapshot, serializePermissionOperation } from './permissionCoordinator';
 import {
   LOCATION_UPLOAD_SUCCESS_KEY,
   getLocationUploadSuccessTs,
@@ -748,15 +749,20 @@ export type LocationEngineConfig = {
   memberId: string;
   /** Current JWT — used by the SDK's native HTTP transport. */
   jwt: string;
+  /** A disposed session/onboarding operation must not start a native service. */
+  isCurrent?: () => boolean;
 };
 
 export type LocationEngineState = {
   enabled: boolean;
-  trackingMode: 'unknown' | 'foreground' | 'background' | 'idle';
+  trackingMode: 'unknown' | 'location-and-geofences' | 'geofences-only';
+  authorization?: 'background' | 'foreground-only' | 'denied' | 'unknown';
   isMoving: boolean | null;
   lastSampleAt: number | null;
   odometerMeters: number | null;
 };
+
+export type LocationStartupOutcome = 'background-ready' | 'foreground-only' | 'denied' | 'failed';
 
 let cachedConfig: LocationEngineConfig | null = null;
 let isReady = false;
@@ -1356,7 +1362,7 @@ function round01(n: any): number | null {
   return Math.round(n * 100) / 100;
 }
 
-function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any> {
+export function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any> {
   const uploadUrl =
     `${cfg.backendBaseUrl.replace(/\/$/, '')}/api/members/${cfg.memberId}/location`;
 
@@ -1390,6 +1396,13 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
 
     // Foreground service (Android — required by Android 14+)
     foregroundService: true,
+    locationAuthorizationRequest: 'Always',
+    backgroundPermissionRationale: {
+      title: 'Location sharing in the background',
+      message: BACKGROUND_LOCATION_DISCLOSURE_TEXT,
+      positiveAction: 'Change to {backgroundPermissionOptionLabel}',
+      negativeAction: 'Not now',
+    },
     notification: {
       // Explicit fixed id ensures Android updates the existing
       // foreground-service notification in place rather than creating
@@ -1451,7 +1464,12 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
  * Each step logs success or failure to the diagnostic ring buffer
  * so the Diagnostics screen can show exactly where the engine failed.
  */
-export async function start(cfg: LocationEngineConfig): Promise<void> {
+export function start(cfg: LocationEngineConfig): Promise<LocationStartupOutcome> {
+  return serializePermissionOperation(() => startConfiguredEngine(cfg));
+}
+
+async function startConfiguredEngine(cfg: LocationEngineConfig): Promise<LocationStartupOutcome> {
+  if (cfg.isCurrent && !cfg.isCurrent()) return 'failed';
   await logEvent('start_invoked', {
     hasJwt: !!cfg.jwt,
     memberId: cfg.memberId,
@@ -1462,13 +1480,37 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
   const lib = bgGeo();
   if (!lib) {
     await logEvent('start_skipped', { reason: 'native_module_unavailable' });
-    return;
+    return 'failed';
   }
+
+  // Android requests belong to permission onboarding, not automatic startup.
+  // Settings reconciliation is read-only and cannot open another dialog.
+  let outcome: LocationStartupOutcome = 'background-ready';
+  if (Platform.OS === 'android') {
+    try {
+      const permissions = await readPermissionSnapshot();
+      if (permissions.foreground !== 'granted') {
+        await lib.stop();
+        await logEvent('startup_outcome', { outcome: 'denied' });
+        return 'denied';
+      }
+      if (permissions.background !== 'granted') outcome = 'foreground-only';
+    } catch (e: any) {
+      await logEvent('startup_outcome', { outcome: 'failed', error: String(e?.message || e) });
+      return 'failed';
+    }
+  }
+  if (cfg.isCurrent && !cfg.isCurrent()) return 'failed';
 
   // ----- Attach SDK event listeners (idempotent) -----
   attachSdkListeners(lib);
 
   const config = buildSdkConfig(lib, cfg);
+  if (Platform.OS === 'android') {
+    // Do not let ready/start retry background permission behind the UI.
+    config.locationAuthorizationRequest = outcome === 'background-ready' ? 'Always' : 'WhenInUse';
+    config.disableLocationAuthorizationAlert = true;
+  }
   cachedConfig = cfg;
 
   // ----- Attach expo-battery listeners (idempotent) -----
@@ -1548,9 +1590,10 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
     await logEvent('ready_or_setConfig_error', {
       error: String(e?.message || e),
     });
+    await logEvent('startup_outcome', { outcome: 'failed', reason: 'native_config_failed' });
     // Don't continue to start() — without a successful ready/setConfig
     // the engine state is undefined.
-    return;
+    return 'failed';
   }
 
   // ----- requestPermission() (CRITICAL on Android 10+) -----
@@ -1567,11 +1610,9 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
   //   AUTHORIZATION_STATUS_WHEN_IN_USE (2) — foreground only
   //   AUTHORIZATION_STATUS_DENIED (1) — denied
   //   AUTHORIZATION_STATUS_NOT_DETERMINED (0) — never asked
-  try {
-    // The native SDK owns this Android request path, so it needs the same
-    // Play-compliant prominent disclosure as the legacy expo-location path.
-    await ensureBackgroundLocationDisclosure();
+  if (Platform.OS !== 'android') try {
     const status = await lib.requestPermission();
+    outcome = status === 3 ? 'background-ready' : status === 2 ? 'foreground-only' : 'denied';
     await logEvent('requestPermission_ok', {
       status,
       // Add human-readable label for the Diagnostics panel.
@@ -1586,13 +1627,16 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
     await logEvent('requestPermission_error', {
       error: String(e?.message || e),
     });
-    // Continue anyway — the user may have granted permission via the
-    // OS settings page outside the SDK's request flow.  start() will
-    // then succeed.  If permission really is denied, start() will
-    // log its own failure.
+    return 'failed';
+  }
+  if (outcome === 'denied') {
+    await lib.stop();
+    await logEvent('startup_outcome', { outcome });
+    return outcome;
   }
 
   // ----- start() — the actual tracking subscription -----
+  if (cfg.isCurrent && !cfg.isCurrent()) return 'failed';
   try {
     const state = await lib.start();
     await logEvent('started_ok', {
@@ -1600,10 +1644,24 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
       trackingMode: state?.trackingMode,
       isMoving: state?.isMoving,
     });
+    if (!state?.enabled) {
+      await logEvent('startup_outcome', { outcome: 'failed', reason: 'sdk_not_enabled' });
+      return 'failed';
+    }
+    if (Platform.OS === 'android') {
+      const permissions = await readPermissionSnapshot();
+      outcome = permissions.foreground !== 'granted' ? 'denied'
+        : permissions.background === 'granted' ? 'background-ready' : 'foreground-only';
+      if (outcome === 'denied') await lib.stop();
+    }
+    await logEvent('startup_outcome', { outcome });
+    return outcome;
   } catch (e: any) {
     await logEvent('start_error', {
       error: String(e?.message || e),
     });
+    await logEvent('startup_outcome', { outcome: 'failed', reason: 'native_start_failed' });
+    return 'failed';
   }
 }
 
@@ -1732,7 +1790,12 @@ export async function getState(): Promise<LocationEngineState> {
     const state = await lib.getState();
     return {
       enabled: !!state?.enabled,
-      trackingMode: state?.trackingMode === 1 ? 'foreground' : 'background',
+      trackingMode: state?.trackingMode === 1 ? 'location-and-geofences'
+        : state?.trackingMode === 0 ? 'geofences-only' : 'unknown',
+      authorization: Platform.OS === 'android'
+        ? await readPermissionSnapshot().then(p => p.foreground !== 'granted' ? 'denied' as const
+          : p.background === 'granted' ? 'background' as const : 'foreground-only' as const)
+        : undefined,
       isMoving: state?.isMoving ?? null,
       lastSampleAt: null,
       odometerMeters: state?.odometer ?? null,

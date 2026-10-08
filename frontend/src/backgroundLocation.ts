@@ -424,7 +424,7 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
  * Caller is responsible for showing a contextual permission rationale
  * BEFORE invoking this (see handle_permissions_contract).
  */
-export async function startBackgroundLocation(memberId: string): Promise<boolean> {
+export async function startBackgroundLocation(memberId: string, interactive = true): Promise<boolean> {
   if (Platform.OS === 'web') return false;
   // The legacy task is a fallback only. Guard at the lowest public entry
   // point so bootstrap, settings, and SOS cadence changes cannot bypass
@@ -439,12 +439,14 @@ export async function startBackgroundLocation(memberId: string): Promise<boolean
   await AsyncStorage.setItem(BG_LOCATION_MEMBER_ID_KEY, memberId);
 
   const fg = await Location.getForegroundPermissionsAsync();
+  if (Platform.OS === 'android' && !interactive && fg.status !== 'granted') return false;
   if (fg.status !== 'granted') {
     const req = await Location.requestForegroundPermissionsAsync();
     if (req.status !== 'granted') return false;
   }
   const bg = await Location.getBackgroundPermissionsAsync();
   if (bg.status !== 'granted') {
+    if (Platform.OS === 'android' && !interactive) return false;
     // Google Play prominent disclosure: this must appear immediately before
     // Android's background-location prompt, including when this function is
     // reached from the root bootstrap or an SOS cadence restart.
