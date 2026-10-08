@@ -514,6 +514,40 @@ describe('Android permission gates and tracking lifecycle at the real navigation
     await act(async () => { renderer.unmount(); });
   });
 
+  it.each(['sign-out', 'session replacement'])('revokes pending engine ownership on %s', async reason => {
+    let resolveStart!: (value: any) => void;
+    engine.start.mockImplementationOnce(() => new Promise(resolve => { resolveStart = resolve; }));
+    const renderer = await mount();
+    const cfg = engine.start.mock.calls[0][0];
+    expect(cfg.isCurrent()).toBe(true);
+    expect(cfg.isOwnerCurrent()).toBe(true);
+    engine.stop.mockClear();
+    mockAuthUser = reason === 'sign-out' ? null : { id: 'replacement-user' };
+    await act(async () => { renderer.update(<RootLayout />); });
+    await settle();
+    expect(cfg.isCurrent()).toBe(false);
+    expect(cfg.isOwnerCurrent()).toBe(false);
+    expect(engine.stop).toHaveBeenCalled();
+    await act(async () => { resolveStart('failed'); });
+    await settle();
+    expect(leonidas.start).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('bootstrap reconciliation does not revoke the cached live-session owner', async () => {
+    const renderer = await mount();
+    const cfg = engine.start.mock.calls[0][0];
+    mockPermissionSnapshot.background = 'denied';
+    await act(async () => {
+      for (const listener of [...mockAppStateListeners]) listener('background');
+      for (const listener of [...mockAppStateListeners]) listener('active');
+    });
+    await settle();
+    expect(cfg.isCurrent()).toBe(false);
+    expect(cfg.isOwnerCurrent()).toBe(true);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it('cold medication tap retains its exact occurrence while permission UI is active', async () => {
     permissions.isPermissionsHandled.mockResolvedValue(false);
     mockSegments = ['(auth)', 'permissions'];

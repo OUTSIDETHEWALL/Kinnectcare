@@ -488,8 +488,10 @@ describe('medication and routine notification reliability', () => {
       useNotificationListeners(failing);
       return null;
     }
-    create(React.createElement(FailingHarness));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    let failingRenderer!: ReturnType<typeof create>;
+    await act(async () => {
+      failingRenderer = create(React.createElement(FailingHarness));
+    });
     await act(async () => {
       await callbacks[0](bodyResponse('callback-failure'));
       setAppReadyForDeepLink(true);
@@ -502,6 +504,7 @@ describe('medication and routine notification reliability', () => {
       expect.any(String),
     );
 
+    await act(async () => { failingRenderer.unmount(); });
     __resetNotificationResponseStateForTests();
     const pending = {
       requestId: 'callback-failure',
@@ -517,14 +520,17 @@ describe('medication and routine notification reliability', () => {
       useNotificationListeners(retried);
       return null;
     }
-    create(React.createElement(RetriedHarness));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    let retriedRenderer!: ReturnType<typeof create>;
+    await act(async () => {
+      retriedRenderer = create(React.createElement(RetriedHarness));
+    });
     await act(async () => {
       setAppReadyForDeepLink(true);
       await new Promise(resolve => setTimeout(resolve, 10));
     });
     expect(retried).toHaveBeenCalledTimes(1);
     expect(mockClearLastResponse).toHaveBeenCalledTimes(1);
+    await act(async () => { retriedRenderer.unmount(); });
   });
 
   it('reconciles consumed plus pending remnant without routing again', async () => {

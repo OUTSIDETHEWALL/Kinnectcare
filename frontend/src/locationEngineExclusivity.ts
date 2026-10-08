@@ -4,11 +4,14 @@ import {
 } from './backgroundLocation';
 import * as locationEngine from './locationEngine';
 import type { LocationEngineConfig, LocationStartupOutcome } from './locationEngine';
+import { Platform } from 'react-native';
+
+type TransistorStartResult = LocationStartupOutcome | boolean;
 
 type InFlightTransistorStart = {
   key: string;
   isCurrent?: () => boolean;
-  promise: Promise<LocationStartupOutcome>;
+  promise: Promise<TransistorStartResult>;
 };
 
 let transistorStartInFlight: InFlightTransistorStart | null = null;
@@ -26,8 +29,8 @@ export function needsLocationEngineBootstrap(
  */
 export async function ensureTransistorLocationEngine(
   config: LocationEngineConfig,
-): Promise<LocationStartupOutcome> {
-  if (!locationEngine.isAvailable()) return 'failed';
+): Promise<TransistorStartResult> {
+  if (!locationEngine.isAvailable()) return Platform.OS === 'android' ? 'failed' : false;
   const key = `${config.backendBaseUrl}\u0000${config.memberId}\u0000${config.jwt}`;
   if (transistorStartInFlight) {
     if (transistorStartInFlight.key === key && transistorStartInFlight.isCurrent === config.isCurrent) {
@@ -39,9 +42,12 @@ export async function ensureTransistorLocationEngine(
 
   const startPromise = (async () => {
     const legacyStopped = await stopBackgroundLocation();
-    if (!legacyStopped) return 'failed' as const;
+    if (!legacyStopped) return Platform.OS === 'android' ? 'failed' as const : false;
 
-    return locationEngine.start(config);
+    const outcome = await locationEngine.start(config);
+    // The pre-PR iOS adapter returned true after attempting SDK startup, and
+    // false if exclusivity could not be established. Keep those semantics.
+    return Platform.OS === 'android' ? outcome : true;
   })();
   transistorStartInFlight = { key, isCurrent: config.isCurrent, promise: startPromise };
 

@@ -8,6 +8,7 @@ describe('Android permission/startup policy', () => {
   let coordinator: typeof import('../permissionCoordinator');
   let store: typeof import('../permissionsStore');
   let engine: typeof import('../locationEngine');
+  let platform: { OS: string };
 
   const config = { memberId: 'member', jwt: 'test-jwt', backendBaseUrl: 'https://example.test' };
   const grant = (status: string) => ({ status, granted: status === 'granted' });
@@ -40,8 +41,9 @@ describe('Android permission/startup policy', () => {
       'onConnectivityChange', 'onGeofence', 'onSchedule']) {
       sdk[name] = jest.fn(() => ({ remove: jest.fn() }));
     }
+    platform = { OS: 'android' };
     jest.doMock('react-native', () => ({
-      Platform: { OS: 'android' }, Alert: { alert },
+      Platform: platform, Alert: { alert },
       AppState: { currentState: 'active', addEventListener: jest.fn(() => ({ remove: jest.fn() })) },
     }));
     jest.doMock('@react-native-async-storage/async-storage', () => ({
@@ -66,6 +68,131 @@ describe('Android permission/startup policy', () => {
   it('requires setup for a clean install', async () => {
     expect(await store.isPermissionsHandled()).toBe(false);
   });
+
+  it('preserves best-effort iOS setup persistence', async () => {
+    platform.OS = 'ios';
+    const nativeStorage = require('@react-native-async-storage/async-storage');
+    nativeStorage.setItem.mockRejectedValueOnce(new Error('storage unavailable'));
+    await expect(store.markPermissionsHandled()).resolves.toBeUndefined();
+    expect(location.getForegroundPermissionsAsync).not.toHaveBeenCalled();
+  });
+
+  async function untilCalled(mock: jest.Mock) {
+    for (let i = 0; i < 300 && mock.mock.calls.length === 0; i++) await Promise.resolve();
+    expect(mock).toHaveBeenCalled();
+  }
+
+  it.each(['cancelled bootstrap', 'sign-out', 'session replacement', 'member removal'])(
+    'stops a late native start after %s, before any replacement starts', async reason => {
+      let current = true;
+      let resolveStart!: (value: any) => void;
+      sdk.start.mockImplementationOnce(() => new Promise(resolve => { resolveStart = resolve; }));
+      const pending = engine.start({ ...config, isCurrent: () => current, isOwnerCurrent: () => current });
+      await untilCalled(sdk.start);
+      current = false;
+      const stopped = reason === 'cancelled bootstrap' ? Promise.resolve() : engine.stop();
+      const replacement = reason === 'session replacement'
+        ? engine.start({ ...config, memberId: 'replacement', isOwnerCurrent: () => true }) : null;
+      resolveStart({ enabled: true });
+      expect(await pending).toBe('failed');
+      await stopped;
+      expect(sdk.stop).toHaveBeenCalled();
+      if (replacement) {
+        expect(await replacement).toBe('background-ready');
+        expect(sdk.stop.mock.invocationCallOrder[0]).toBeLessThan(sdk.start.mock.invocationCallOrder[1]);
+        expect(sdk.setConfig).toHaveBeenLastCalledWith(expect.objectContaining({
+          url: expect.stringContaining('/members/replacement/location'),
+        }));
+      } else {
+        await expect(engine.restart()).rejects.toThrow('no current session/member owner');
+      }
+      expect((await engine.getEngineLog()).some(e =>
+        e.event === 'startup_outcome' && e.detail?.reason === 'ownership_lost')).toBe(true);
+    },
+  );
+
+  it.each(['ready', 'setConfig'])('stops cancellation during native %s without calling start', async method => {
+    if (method === 'setConfig') await engine.start(config);
+    sdk.start.mockClear();
+    let current = true;
+    let resolveConfig!: (value: any) => void;
+    sdk[method].mockImplementationOnce(() => new Promise(resolve => { resolveConfig = resolve; }));
+    const pending = engine.start({ ...config, isCurrent: () => current });
+    await untilCalled(sdk[method]);
+    current = false;
+    resolveConfig({ enabled: true });
+    expect(await pending).toBe('failed');
+    expect(sdk.start).not.toHaveBeenCalled();
+    expect(sdk.stop).toHaveBeenCalled();
+  });
+
+  it('recovery retains live session ownership after bootstrap effect cleanup', async () => {
+    let effectCurrent = true;
+    let ownerCurrent = true;
+    await engine.start({ ...config, isCurrent: () => effectCurrent, isOwnerCurrent: () => ownerCurrent });
+    effectCurrent = false;
+    await engine.restart();
+    expect(sdk.start).toHaveBeenCalledTimes(2);
+    ownerCurrent = false;
+    await expect(engine.restart()).rejects.toThrow('no current session/member owner');
+    expect(sdk.start).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['failed', 'denied', 'foreground-only'])(
+    'never logs restart_completed for a %s restart outcome', async outcome => {
+      await engine.start(config);
+      await engine.clearEngineLog();
+      if (outcome === 'failed') sdk.start.mockResolvedValue({ enabled: false });
+      if (outcome === 'denied') location.getForegroundPermissionsAsync.mockResolvedValue(grant('denied'));
+      if (outcome === 'foreground-only') location.getBackgroundPermissionsAsync.mockResolvedValue(grant('denied'));
+      await expect(engine.restart()).rejects.toThrow(`not background-ready: ${outcome}`);
+      const log = await engine.getEngineLog();
+      expect(log.some(e => e.event === 'restart_completed')).toBe(false);
+      expect(log.some(e => e.event === 'restart_failed' && e.detail?.outcome === outcome)).toBe(true);
+    },
+  );
+
+  it('serializes token refresh with session revocation and replacement configuration', async () => {
+    let current = true;
+    await engine.start({ ...config, isOwnerCurrent: () => current });
+    let resolveRefresh!: (value: any) => void;
+    sdk.setConfig.mockImplementationOnce(() => new Promise(resolve => { resolveRefresh = resolve; }));
+    const refresh = engine.setAuthToken('refreshed-test-jwt');
+    await untilCalled(sdk.setConfig);
+    current = false;
+    const stopped = engine.stop();
+    const replacement = engine.start({ ...config, memberId: 'replacement', jwt: 'replacement-test-jwt' });
+    resolveRefresh({ enabled: true });
+    await refresh;
+    await stopped;
+    expect(await replacement).toBe('background-ready');
+    expect(sdk.setConfig).toHaveBeenLastCalledWith(expect.objectContaining({
+      url: expect.stringContaining('/members/replacement/location'),
+      authorization: expect.objectContaining({ accessToken: 'replacement-test-jwt' }),
+    }));
+    expect(sdk.stop).toHaveBeenCalled();
+  });
+
+  it('stops a native start when post-start permission reconciliation fails', async () => {
+    location.getForegroundPermissionsAsync
+      .mockResolvedValueOnce(grant('granted'))
+      .mockRejectedValueOnce(new Error('permission lookup unavailable'));
+    expect(await engine.start(config)).toBe('failed');
+    expect(sdk.stop).toHaveBeenCalled();
+    await expect(engine.restart()).rejects.toThrow('no current session/member owner');
+  });
+
+  it.each(['denied', 'throws', 'foreground-only'])(
+    'preserves iOS start-after-request behavior when permission %s', async permission => {
+      platform.OS = 'ios';
+      if (permission === 'throws') sdk.requestPermission.mockRejectedValue(new Error('native request error'));
+      else sdk.requestPermission.mockResolvedValue(permission === 'denied' ? 1 : 2);
+      expect(await engine.start(config)).toBe('background-ready');
+      expect(sdk.start).toHaveBeenCalledTimes(1);
+      expect(sdk.stop).not.toHaveBeenCalled();
+      expect(location.getForegroundPermissionsAsync).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['undetermined', 'denied'])('rejects an Android-restored legacy flag with background %s', async status => {
     storage.set('@kinnship/permissions_handled_v1', 'true');

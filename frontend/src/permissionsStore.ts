@@ -44,6 +44,10 @@ export async function isPermissionsHandled(): Promise<boolean> {
 }
 
 export async function markPermissionsHandled(): Promise<void> {
+  if (Platform.OS !== 'android') {
+    try { await AsyncStorage.setItem(KEY, 'true'); } catch (_e) {}
+    return;
+  }
   // Surface persistence errors instead of navigating into a setup loop.
   if (Platform.OS === 'android') {
     await AsyncStorage.setItem(DECISION_KEY, JSON.stringify(await readPermissionSnapshot()));

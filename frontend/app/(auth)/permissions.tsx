@@ -31,6 +31,7 @@ type PermissionStage =
   | 'background-denied'
   | 'notification-context' // show notifications explanation
   | 'notification-denied'
+  | 'save-failed'
   | 'done';             // mark handled, route to dashboard
 
 export default function Permissions() {
@@ -38,10 +39,17 @@ export default function Permissions() {
   const [stage, setStage] = useState<PermissionStage>('loading');
   const [locationGranted, setLocationGranted] = useState(false);
   const fired = useRef(false);
+  const saving = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   // Settings returns only inspect authorization; denied choices never
   // automatically reopen an OS prompt or restart the permission sequence.
   useEffect(() => {
+    if (Platform.OS !== 'android') return;
     if (!['location-denied', 'background-denied', 'notification-denied'].includes(stage)) return;
     let cancelled = false;
     let previous = AppState.currentState;
@@ -122,19 +130,36 @@ export default function Permissions() {
           setStage('notification-denied');
         }
       } catch (_e) {
-        if (!cancelled) setStage('notification-denied');
+        if (!cancelled) {
+          if (Platform.OS === 'android') setStage('notification-denied');
+          else void finish();
+        }
       }
     })();
     return () => { cancelled = true; };
   }, [stage]);
 
   const finish = async () => {
+    if (Platform.OS !== 'android') {
+      // Preserve the original iOS completion path.
+      await markPermissionsHandled();
+      setStage('done');
+      router.replace('/(tabs)/dashboard');
+      return;
+    }
+    if (saving.current) return;
+    saving.current = true;
     try {
       await markPermissionsHandled();
     } catch (_e) {
+      if (!mounted.current) return;
+      setStage('save-failed');
       Alert.alert('Setup could not be saved', 'Please try Continue again.');
       return;
+    } finally {
+      saving.current = false;
     }
+    if (!mounted.current) return;
     setStage('done');
     // RootNav re-reads permissionsHandled and routes to dashboard.
     router.replace('/(tabs)/dashboard');
@@ -220,6 +245,22 @@ export default function Permissions() {
             activeOpacity={0.7}
           >
             <Text style={styles.secondaryBtnText}>Continue Anyway</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (stage === 'save-failed') {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={styles.center}>
+          <Text style={styles.title}>Setup could not be saved</Text>
+          <Text style={styles.body}>
+            Your permission choices have not changed. Tap Continue to try saving them again.
+          </Text>
+          <TouchableOpacity style={styles.primaryBtn} onPress={finish} activeOpacity={0.8}>
+            <Text style={styles.primaryBtnText}>Continue</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>

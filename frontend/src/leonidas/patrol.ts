@@ -10,7 +10,7 @@
  * shares the same `runOnePatrol()` core; this file is structured to
  * support that without redesign.
  */
-import { AppState, AppStateStatus } from 'react-native';
+import { AppState, AppStateStatus, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as locationEngine from '../locationEngine';
 import * as memberStore from '../store/memberStore';
@@ -197,6 +197,7 @@ export async function runOnePatrol(): Promise<HealthSnapshot> {
     });
 
     let result: RecoveryResult = 'failure';
+    let restartSucceeded = false;
 
     // Restart path (critical only) — least intrusive recovery FIRST,
     // restart is the exception not the rule.
@@ -210,6 +211,7 @@ export async function runOnePatrol(): Promise<HealthSnapshot> {
         // locationEngine.restart() now encapsulates stop() + start()
         // using the cached config, so recovery is fully autonomous.
         await locationEngine.restart();
+        restartSucceeded = true;
         await logRecovery('engine-restart-succeeded', verdict.state);
       } catch (e: any) {
         await logRecovery('engine-restart-failed', verdict.state, {
@@ -243,7 +245,7 @@ export async function runOnePatrol(): Promise<HealthSnapshot> {
     } else {
       // Restart-only (no fresh-fix request) — declare success/failure
       // based on engine state alone.
-      result = engine_enabled ? 'success' : 'failure';
+      result = (Platform.OS === 'android' ? restartSucceeded : engine_enabled) ? 'success' : 'failure';
     }
 
     snapshot.recovery_result = result;

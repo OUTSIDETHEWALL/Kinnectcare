@@ -166,6 +166,78 @@ describe('fresh onboarding location permission order', () => {
     expect(JSON.stringify(tree.toJSON())).toContain('Continue Anyway');
   });
 
+  it.each(['notification approval', 'Continue Anyway', 'Settings grant'])(
+    'offers a save-only retry after completion fails via %s', async path => {
+      if (path !== 'notification approval') {
+        notifications.requestPermissionsAsync.mockResolvedValue({ status: 'denied' });
+      }
+      markHandled.mockRejectedValueOnce(new Error('storage unavailable'));
+      await reachLocationStage();
+      await acknowledge();
+      if (path === 'Continue Anyway') {
+        const button = tree.root.findAllByType('TouchableOpacity').find((node: any) =>
+          node.findAllByType('Text').some((text: any) => text.props.children === 'Continue Anyway'));
+        await renderer.act(async () => { button.props.onPress(); });
+      } else if (path === 'Settings grant') {
+        notifications.getPermissionsAsync.mockResolvedValue({ status: 'granted' });
+        await renderer.act(async () => {
+          for (const listener of [...appStateListeners]) listener('background');
+          for (const listener of [...appStateListeners]) listener('active');
+        });
+      }
+      expect(replace).not.toHaveBeenCalled();
+      expect(tree.root.findAllByType('ActivityIndicator')).toHaveLength(0);
+      expect(JSON.stringify(tree.toJSON())).toContain('Setup could not be saved');
+      const retry = tree.root.findAllByType('TouchableOpacity').find((node: any) =>
+        node.findAllByType('Text').some((text: any) => text.props.children === 'Continue'));
+      await renderer.act(async () => { await retry.props.onPress(); });
+      expect(markHandled).toHaveBeenCalledTimes(2);
+      expect(replace).toHaveBeenCalledTimes(1);
+      expect(replace).toHaveBeenCalledWith('/(tabs)/dashboard');
+      expect(location.requestForegroundPermissionsAsync).toHaveBeenCalledTimes(1);
+      expect(notifications.requestPermissionsAsync).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['decision write', 'completion write', 'permission read'])(
+    'retries the real permissions store safely after a failed %s', async failure => {
+      const values = new Map<string, string>();
+      let fail = true;
+      storage.getItem.mockImplementation(async (key: string) => values.get(key) ?? null);
+      storage.setItem.mockImplementation(async (key: string, value: string) => {
+        const failingKey = failure === 'decision write'
+          ? '@kinnship/permission_decision_v2' : '@kinnship/permissions_handled_v1';
+        if (failure !== 'permission read' && key === failingKey && fail) {
+          fail = false;
+          throw new Error('storage unavailable');
+        }
+        values.set(key, value);
+      });
+      location.getForegroundPermissionsAsync.mockResolvedValue({ status: 'granted' });
+      if (failure === 'permission read') {
+        location.getForegroundPermissionsAsync.mockRejectedValueOnce(new Error('permission read unavailable'));
+      }
+      notifications.requestPermissionsAsync.mockImplementation(async () => {
+        notifications.getPermissionsAsync.mockResolvedValue({ status: 'granted' });
+        return { status: 'granted' };
+      });
+      const realStore = jest.requireActual('../permissionsStore');
+      markHandled.mockImplementation(() => realStore.markPermissionsHandled());
+      await reachLocationStage();
+      await acknowledge();
+      expect(replace).not.toHaveBeenCalled();
+      const retry = tree.root.findAllByType('TouchableOpacity').find((node: any) =>
+        node.findAllByType('Text').some((text: any) => text.props.children === 'Continue'));
+      expect(retry).toBeDefined();
+      await renderer.act(async () => { await retry.props.onPress(); });
+      expect(await realStore.isPermissionsHandled()).toBe(true);
+      expect(markHandled).toHaveBeenCalledTimes(2);
+      expect(replace).toHaveBeenCalledTimes(1);
+      expect(location.requestForegroundPermissionsAsync).toHaveBeenCalledTimes(1);
+      expect(notifications.requestPermissionsAsync).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('does not request permission from an unmounted screen while awaiting Continue', async () => {
     await reachLocationStage();
     await renderer.act(async () => { tree.unmount(); });
@@ -192,5 +264,13 @@ describe('fresh onboarding location permission order', () => {
     expect(location.requestForegroundPermissionsAsync).toHaveBeenCalledTimes(1);
     expect(notifications.requestPermissionsAsync).toHaveBeenCalledTimes(1);
     expect(markHandled).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves iOS continuation when requesting notification permission fails', async () => {
+    platform.OS = 'ios';
+    notifications.requestPermissionsAsync.mockRejectedValue(new Error('notification request unavailable'));
+    await reachLocationStage();
+    expect(markHandled).toHaveBeenCalledTimes(1);
+    expect(replace).toHaveBeenCalledWith('/(tabs)/dashboard');
   });
 });

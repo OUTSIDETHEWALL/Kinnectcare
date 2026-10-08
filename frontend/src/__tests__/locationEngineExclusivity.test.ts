@@ -2,6 +2,7 @@ const mockIsAvailable = jest.fn();
 const mockStartTransistor = jest.fn();
 const mockStartLegacy = jest.fn();
 const mockStopLegacy = jest.fn();
+jest.mock('react-native', () => ({ Platform: { OS: 'android' } }));
 
 jest.mock('../locationEngine', () => ({
   isAvailable: (...args: unknown[]) => mockIsAvailable(...args),
@@ -18,13 +19,34 @@ import {
   needsLocationEngineBootstrap,
   startLegacyLocationFallback,
 } from '../locationEngineExclusivity';
+import { Platform as mockPlatform } from 'react-native';
 
 describe('background-location engine exclusivity', () => {
   beforeEach(() => {
+    mockPlatform.OS = 'android';
     jest.clearAllMocks();
     mockStartTransistor.mockResolvedValue('background-ready');
     mockStartLegacy.mockResolvedValue(true);
     mockStopLegacy.mockResolvedValue(true);
+  });
+
+  it('preserves iOS false when legacy tracking cannot be stopped', async () => {
+    mockPlatform.OS = 'ios';
+    mockIsAvailable.mockReturnValue(true);
+    mockStopLegacy.mockResolvedValue(false);
+    expect(await ensureTransistorLocationEngine({
+      backendBaseUrl: 'https://example.test', memberId: 'member-1', jwt: 'jwt',
+    })).toBe(false);
+    expect(mockStartTransistor).not.toHaveBeenCalled();
+  });
+
+  it('preserves iOS successful-adapter semantics after an unsuccessful SDK attempt', async () => {
+    mockPlatform.OS = 'ios';
+    mockIsAvailable.mockReturnValue(true);
+    mockStartTransistor.mockResolvedValue('failed');
+    expect(await ensureTransistorLocationEngine({
+      backendBaseUrl: 'https://example.test', memberId: 'member-1', jwt: 'jwt',
+    })).toBe(true);
   });
 
   it('stops a persisted legacy task before starting Transistor', async () => {

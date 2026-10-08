@@ -638,11 +638,14 @@ function RootNav() {
     );
   }, []);
 
+  const androidPushBlocked = Platform.OS === 'android' && (!permissionsChecked || needsPermissions);
+  const androidStartupBlocked = Platform.OS === 'android'
+    && (loading || !permissionsChecked || needsPermissions);
   useEffect(() => {
-    if (user && permissionsChecked && !needsPermissions) {
+    if (user && !androidPushBlocked) {
       registerForPushNotifications().catch(() => {});
     }
-  }, [user?.id, permissionsChecked, needsPermissions]);
+  }, [user?.id, androidPushBlocked]);
 
   // ============================================================
   //  Auto push-token refresh on app foreground (v1.2.1)
@@ -1049,7 +1052,7 @@ function RootNav() {
         await stopBackgroundLocation();
         return;
       }
-      if (loading || !permissionsChecked || needsPermissions) return;
+      if (androidStartupBlocked) return;
       try {
         // Build 47 — canonical store fetch.  The store dedupes
         // concurrent fetchAll() calls so this shares the in-flight
@@ -1069,7 +1072,7 @@ function RootNav() {
     return () => {
       cancelled = true;
     };
-  }, [user?.id, loading, permissionsChecked, needsPermissions]);
+  }, [user?.id, androidStartupBlocked]);
 
   // ============================================================
   //  v1.4 (Phase 2) — Transistor Location Engine wiring
@@ -1119,10 +1122,23 @@ function RootNav() {
   //  switching to a different user.id).  Idempotent re-runs are no-ops.
   const engineBootedForUserIdRef = useRef<string | null>(null);
   const [startupRevision, setStartupRevision] = useState(0);
+  const engineSessionRef = useRef({ userId: user?.id });
+  if (engineSessionRef.current.userId !== user?.id) {
+    engineSessionRef.current = { userId: user?.id };
+  }
+  const androidStartupRevision = Platform.OS === 'android' ? startupRevision : 0;
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    return () => {
+      engineBootedForUserIdRef.current = null;
+      try { leonidas.stop(); } catch (_e) {}
+      void locationEngine.stop();
+    };
+  }, [user?.id]);
   // Observe linkage for the whole session, including after the initial 90 s
   // wait expires. Settings/resume only READ permissions; never display UI.
   useEffect(() => {
-    if (!user?.id) return;
+    if (!user?.id || Platform.OS !== 'android') return;
     let disposed = false;
     let memberId = memberStore.getMyMember(user.id)?.id ?? null;
     let fingerprint: string | null = null;
@@ -1149,11 +1165,9 @@ function RootNav() {
       const nextId = memberStore.getMyMember(user.id)?.id ?? null;
       if (nextId !== memberId) {
         memberId = nextId;
-        if (nextId === null) {
-          engineBootedForUserIdRef.current = null;
-          try { leonidas.stop(); } catch (_e) {}
-          void locationEngine.stop();
-        }
+        engineBootedForUserIdRef.current = null;
+        try { leonidas.stop(); } catch (_e) {}
+        void locationEngine.stop();
         setStartupRevision(value => value + 1);
       }
     });
@@ -1171,12 +1185,16 @@ function RootNav() {
   }, [user?.id]);
 
   // Token refresh stays subscribed across passive startup reconciliation.
-  useEffect(() => subscribeToTokenChanges(tok => {
-    if (user?.id && tok) locationEngine.setAuthToken(tok).catch(() => {});
-  }), [user?.id]);
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    return subscribeToTokenChanges(tok => {
+      if (user?.id && tok) locationEngine.setAuthToken(tok).catch(() => {});
+    });
+  }, [user?.id]);
 
   useEffect(() => {
     let cancelled = false;
+    let unsubscribeToken: (() => void) | null = null;
     // Holds a direct teardown handle for the member-row subscriber
     // block so the cleanup function can resolve it immediately on
     // sign-out / effect re-run rather than waiting for the next
@@ -1186,14 +1204,14 @@ function RootNav() {
     (async () => {
       if (!user?.id) {
         // Genuine sign-out — tear everything down.
-        if (engineBootedForUserIdRef.current !== null) {
+        if (Platform.OS === 'android' || engineBootedForUserIdRef.current !== null) {
           try { leonidas.stop(); } catch (_e) {}
           await locationEngine.stop();
           engineBootedForUserIdRef.current = null;
         }
         return;
       }
-      if (loading || !permissionsChecked || needsPermissions) return;
+      if (androidStartupBlocked) return;
       if (!locationEngine.isAvailable()) {
         // Web / Expo Go / non-Transistor build — legacy engine remains
         // authoritative on this device.  Leonidas is a no-op without
@@ -1204,7 +1222,8 @@ function RootNav() {
       // for this exact user.id, this is a flicker re-run — skip the
       // whole boot dance.  No log noise, no SDK churn, no patrol
       // restart.
-      const startupKey = `${user.id}:${startupRevision}`;
+      const session = engineSessionRef.current;
+      const startupKey = `${user.id}:${androidStartupRevision}`;
       if (!needsLocationEngineBootstrap(engineBootedForUserIdRef.current, startupKey)) {
         return;
       }
@@ -1278,10 +1297,16 @@ function RootNav() {
           backendBaseUrl,
           memberId: me.id,
           jwt,
-          isCurrent: () => !cancelled && memberStore.getMyMember(user.id)?.id === me.id,
+          ...(Platform.OS === 'android' ? {
+            isCurrent: () => !cancelled && engineSessionRef.current === session
+              && memberStore.getMyMember(user.id)?.id === me.id,
+            isOwnerCurrent: () => engineSessionRef.current === session
+              && memberStore.getMyMember(user.id)?.id === me.id,
+          } : {}),
         });
         if (cancelled) return;
-        if (started === 'failed' || started === 'denied') {
+        if (Platform.OS !== 'android' && started === false) return;
+        if (Platform.OS === 'android' && (started === 'failed' || started === 'denied')) {
           engineBootedForUserIdRef.current = null;
           try { leonidas.stop(); } catch (_e) {}
           return;
@@ -1290,7 +1315,7 @@ function RootNav() {
         // with the location engine; tears down on sign-out via the
         // cleanup block below.  No-op if already active.
         try {
-          if (started === 'background-ready') leonidas.start();
+          if (Platform.OS !== 'android' || started === 'background-ready') leonidas.start();
           else leonidas.stop();
         } catch (_e) {}
         // Battery subsystem — independent 30-minute target via WorkManager
@@ -1301,6 +1326,11 @@ function RootNav() {
         // See useEffect below; fired there so the user has context from
         // onboarding before being asked about a system setting.
         engineBootedForUserIdRef.current = startupKey;
+        if (Platform.OS !== 'android') {
+          unsubscribeToken = subscribeToTokenChanges(tok => {
+            if (tok) locationEngine.setAuthToken(tok).catch(() => {});
+          });
+        }
       } catch (_e) {
         // Silent — without an authenticated /members fetch we can't
         // identify the member row to upload to.  Next session retries.
@@ -1314,6 +1344,7 @@ function RootNav() {
       // subscription live until the next store write or the 90 s
       // timeout.
       if (cancelWait) { cancelWait(); cancelWait = null; }
+      if (unsubscribeToken) { unsubscribeToken(); unsubscribeToken = null; }
       // Build 49 — do NOT call leonidas.stop() here unconditionally.
       // The cleanup runs on every effect re-evaluation (including
       // flickers during token rotation), and stopping/restarting on
@@ -1321,10 +1352,11 @@ function RootNav() {
       // noise we're eliminating in this build.  Real teardown happens
       // in the `!user?.id` branch above when sign-out is genuine.
     };
-  }, [user?.id, loading, permissionsChecked, needsPermissions, startupRevision]);
+  }, [user?.id, androidStartupBlocked, androidStartupRevision]);
 
   useEffect(() => {
-    if (loading || !initialLinkChecked || !onboardingChecked || !appLockChecked || !disclaimerChecked || !permissionsChecked) {
+    if (loading || !initialLinkChecked || !onboardingChecked || !appLockChecked || !disclaimerChecked
+      || (Platform.OS === 'android' && !permissionsChecked)) {
       logRootDecision('startup_gates_pending', null, 'hold');
       return;
     }
@@ -1471,7 +1503,7 @@ function RootNav() {
     if (user && onPermissionsScreen) {
       // Keep the exact pending medication occurrence queued until the user
       // finishes (or explicitly declines) setup. The screen is not readiness.
-      setAppReadyForDeepLink(false);
+      setAppReadyForDeepLink(Platform.OS !== 'android');
       return;
     }
     if (user && needsPermissions && !needsAppLockUnlock && !onPermissionsScreen) {

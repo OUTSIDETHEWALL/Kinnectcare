@@ -47,6 +47,10 @@ let onboardingLocation: {
 } | null = null;
 
 export function requestOnboardingLocation(isCurrent: () => boolean = () => true): Promise<LocationDecision> {
+  if (Platform.OS !== 'android') {
+    return location().requestForegroundPermissionsAsync().then(permission =>
+      isCurrent() ? { foreground: permission.status, background: 'undetermined' } : null);
+  }
   if (onboardingLocation) {
     // A remounted screen adopts the pending disclosure instead of issuing a
     // second request. The disposed screen still ignores the shared result.
@@ -83,6 +87,7 @@ export function requestOnboardingLocation(isCurrent: () => boolean = () => true)
 }
 
 export function foregroundLocationForAutomaticCaller() {
+  if (Platform.OS !== 'android') return location().requestForegroundPermissionsAsync();
   return serializePermissionOperation(() => Platform.OS === 'android'
     ? location().getForegroundPermissionsAsync()
     : location().requestForegroundPermissionsAsync());
@@ -92,6 +97,14 @@ export function notificationPermission(
   interactive = false,
   isCurrent: () => boolean = () => true,
 ) {
+  if (Platform.OS !== 'android' && interactive) return notificationApi().requestPermissionsAsync();
+  if (Platform.OS !== 'android') {
+    return (async () => {
+      const Notifications = notificationApi();
+      const existing = await Notifications.getPermissionsAsync();
+      return existing.status === 'granted' ? existing : Notifications.requestPermissionsAsync();
+    })();
+  }
   return serializePermissionOperation(async () => {
     const Notifications = notificationApi();
     const existing = await Notifications.getPermissionsAsync();

@@ -26,3 +26,17 @@ An OTA once imported a native package that was absent from the installed binary.
   // populated lazily after confirming native build version
   ```
 - `try/catch` around the *call site* is NOT sufficient — the import itself (top-level) is what crashes.
+
+## Compiled permission wording before JavaScript
+
+Do not claim that a JavaScript rationale override eliminates a vendor default
+compiled into the installed Android binary. Native boot/service startup can run
+before JavaScript applies the override, even when every JS-controlled path is correct.
+
+**Why:** The user requires conservative claims about Transistor's native default
+permission wording; an OTA cannot replace that binary resource.
+
+**How to apply:** Verify JS-controlled configuration separately from physical cold
+native boot/headless behavior. Observe the installed binary before foreground JS
+configuration, confirm the active update/runtime, and distinguish ordinary process
+death from Force stop. Do not substitute mocked or warm-process success for that evidence.
