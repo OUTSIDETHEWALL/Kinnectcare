@@ -65,12 +65,20 @@ import { Platform, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
-import { ensureBackgroundLocationDisclosure } from './backgroundLocationDisclosure';
+import { BACKGROUND_LOCATION_DISCLOSURE_TEXT } from './backgroundLocationDisclosure';
+import { readPermissionSnapshot, serializePermissionOperation } from './permissionCoordinator';
 import {
   LOCATION_UPLOAD_SUCCESS_KEY,
   getLocationUploadSuccessTs,
   recordLocationUploadSuccess,
 } from './locationUploadSuccess';
+
+const BACKGROUND_PERMISSION_RATIONALE = {
+  title: 'Location sharing in the background',
+  message: BACKGROUND_LOCATION_DISCLOSURE_TEXT,
+  positiveAction: 'Change to {backgroundPermissionOptionLabel}',
+  negativeAction: 'Not now',
+};
 
 // Lazy require so this module is safe to import on web (where the
 // native module is absent).
@@ -425,6 +433,12 @@ function registerHeadlessTaskOnce(): void {
           const st = await lib.getState();
           if (st?.enabled === false) {
             await logEvent('headless_engine_disabled_restart_attempted');
+            if (Platform.OS === 'android') {
+              // JS-controlled headless recovery must also override old native
+              // rationale text before start. This does not request permission
+              // or change locationAuthorizationRequest.
+              await lib.setConfig({ backgroundPermissionRationale: BACKGROUND_PERMISSION_RATIONALE });
+            }
             await lib.start();
             await logEvent('headless_engine_disabled_restart_ok');
           }
@@ -748,19 +762,34 @@ export type LocationEngineConfig = {
   memberId: string;
   /** Current JWT — used by the SDK's native HTTP transport. */
   jwt: string;
+  /** A disposed session/onboarding operation must not start a native service. */
+  isCurrent?: () => boolean;
+  /** Session/member ownership, independent of a single bootstrap effect. */
+  isOwnerCurrent?: () => boolean;
 };
 
 export type LocationEngineState = {
   enabled: boolean;
-  trackingMode: 'unknown' | 'foreground' | 'background' | 'idle';
+  trackingMode: 'unknown' | 'location-and-geofences' | 'geofences-only';
+  authorization?: 'background' | 'foreground-only' | 'denied' | 'unknown';
   isMoving: boolean | null;
   lastSampleAt: number | null;
   odometerMeters: number | null;
 };
 
+export type LocationStartupOutcome = 'background-ready' | 'foreground-only' | 'denied' | 'failed';
+
 let cachedConfig: LocationEngineConfig | null = null;
 let isReady = false;
 let listenersAttached = false;
+let engineGeneration = 0;
+let engineQueue: Promise<unknown> = Promise.resolve();
+
+function serializeEngineOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = engineQueue.then(operation);
+  engineQueue = result.catch(() => {});
+  return result;
+}
 
 // ============================================================
 //  Device info injection (Task #21 — engine snapshot enrichment)
@@ -1356,7 +1385,7 @@ function round01(n: any): number | null {
   return Math.round(n * 100) / 100;
 }
 
-function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any> {
+export function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any> {
   const uploadUrl =
     `${cfg.backendBaseUrl.replace(/\/$/, '')}/api/members/${cfg.memberId}/location`;
 
@@ -1390,6 +1419,8 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
 
     // Foreground service (Android — required by Android 14+)
     foregroundService: true,
+    locationAuthorizationRequest: 'Always',
+    backgroundPermissionRationale: { ...BACKGROUND_PERMISSION_RATIONALE },
     notification: {
       // Explicit fixed id ensures Android updates the existing
       // foreground-service notification in place rather than creating
@@ -1451,7 +1482,20 @@ function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<string, any
  * Each step logs success or failure to the diagnostic ring buffer
  * so the Diagnostics screen can show exactly where the engine failed.
  */
-export async function start(cfg: LocationEngineConfig): Promise<void> {
+export function start(cfg: LocationEngineConfig): Promise<LocationStartupOutcome> {
+  if (Platform.OS !== 'android') return startConfiguredEngine(cfg, engineGeneration);
+  const generation = engineGeneration;
+  return serializePermissionOperation(() =>
+    serializeEngineOperation(() => startConfiguredEngine(cfg, generation)));
+}
+
+async function startConfiguredEngine(cfg: LocationEngineConfig, generation: number): Promise<LocationStartupOutcome> {
+  const ownsStart = () => Platform.OS !== 'android' || (
+    generation === engineGeneration
+    && (!cfg.isCurrent || cfg.isCurrent())
+    && (!cfg.isOwnerCurrent || cfg.isOwnerCurrent())
+  );
+  if (!ownsStart()) return 'failed';
   await logEvent('start_invoked', {
     hasJwt: !!cfg.jwt,
     memberId: cfg.memberId,
@@ -1462,21 +1506,58 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
   const lib = bgGeo();
   if (!lib) {
     await logEvent('start_skipped', { reason: 'native_module_unavailable' });
-    return;
+    return 'failed';
   }
+  // This runs inside the native lifecycle queue: no replacement start can
+  // configure the SDK until this obsolete operation has stopped its service.
+  const stopIfObsolete = async (): Promise<boolean> => {
+    if (ownsStart()) return false;
+    cachedConfig = null;
+    await lib.stop();
+    await logEvent('startup_outcome', { outcome: 'failed', reason: 'ownership_lost' });
+    return true;
+  };
+
+  // Android requests belong to permission onboarding, not automatic startup.
+  // Settings reconciliation is read-only and cannot open another dialog.
+  let outcome: LocationStartupOutcome = 'background-ready';
+  if (Platform.OS === 'android') {
+    try {
+      const permissions = await readPermissionSnapshot();
+      if (permissions.foreground !== 'granted') {
+        await lib.stop();
+        await logEvent('startup_outcome', { outcome: 'denied' });
+        return 'denied';
+      }
+      if (permissions.background !== 'granted') outcome = 'foreground-only';
+    } catch (e: any) {
+      cachedConfig = null;
+      await lib.stop();
+      await logEvent('startup_outcome', { outcome: 'failed', error: String(e?.message || e) });
+      return 'failed';
+    }
+  }
+  if (await stopIfObsolete()) return 'failed';
 
   // ----- Attach SDK event listeners (idempotent) -----
   attachSdkListeners(lib);
 
   const config = buildSdkConfig(lib, cfg);
-  cachedConfig = cfg;
+  if (Platform.OS === 'android') {
+    // Do not let ready/start retry background permission behind the UI.
+    config.locationAuthorizationRequest = outcome === 'background-ready' ? 'Always' : 'WhenInUse';
+    config.disableLocationAuthorizationAlert = true;
+  }
+  if (Platform.OS !== 'android') cachedConfig = cfg;
 
   // ----- Attach expo-battery listeners (idempotent) -----
   // Must be called after cachedConfig is set so pushBatteryUpdate() can
   // resolve the member ID and backend URL.  Also sends an initial reading
   // immediately so the caregiver sees up-to-date battery on first launch.
-  attachBatteryListeners();
-  void pushBatteryUpdate('startup');
+  if (Platform.OS !== 'android') {
+    attachBatteryListeners();
+    void pushBatteryUpdate('startup');
+  }
 
   // ----- Snapshot pre-ready SDK state ─────────────────────────────
   // The key diagnostic for the blank-notification hypothesis: if
@@ -1500,6 +1581,7 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
 
   // ----- ready() / setConfig() ─────────────────────────────────────
   try {
+    if (await stopIfObsolete()) return 'failed';
     if (isReady) {
       await logEvent('setConfig_invoked');
       await lib.setConfig(config);
@@ -1544,13 +1626,19 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
         // Best-effort — never abort engine startup for a diagnostic log.
       }
     }
+    if (await stopIfObsolete()) return 'failed';
   } catch (e: any) {
+    if (Platform.OS === 'android') {
+      cachedConfig = null;
+      await lib.stop();
+    }
     await logEvent('ready_or_setConfig_error', {
       error: String(e?.message || e),
     });
+    await logEvent('startup_outcome', { outcome: 'failed', reason: 'native_config_failed' });
     // Don't continue to start() — without a successful ready/setConfig
     // the engine state is undefined.
-    return;
+    return 'failed';
   }
 
   // ----- requestPermission() (CRITICAL on Android 10+) -----
@@ -1567,10 +1655,7 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
   //   AUTHORIZATION_STATUS_WHEN_IN_USE (2) — foreground only
   //   AUTHORIZATION_STATUS_DENIED (1) — denied
   //   AUTHORIZATION_STATUS_NOT_DETERMINED (0) — never asked
-  try {
-    // The native SDK owns this Android request path, so it needs the same
-    // Play-compliant prominent disclosure as the legacy expo-location path.
-    await ensureBackgroundLocationDisclosure();
+  if (Platform.OS !== 'android') try {
     const status = await lib.requestPermission();
     await logEvent('requestPermission_ok', {
       status,
@@ -1586,29 +1671,64 @@ export async function start(cfg: LocationEngineConfig): Promise<void> {
     await logEvent('requestPermission_error', {
       error: String(e?.message || e),
     });
-    // Continue anyway — the user may have granted permission via the
-    // OS settings page outside the SDK's request flow.  start() will
-    // then succeed.  If permission really is denied, start() will
-    // log its own failure.
+    // Preserve pre-PR iOS behavior: start still gets a chance after a
+    // denied/erroring request (including authorization changed in Settings).
   }
 
   // ----- start() — the actual tracking subscription -----
   try {
+    if (await stopIfObsolete()) return 'failed';
     const state = await lib.start();
+    if (await stopIfObsolete()) return 'failed';
     await logEvent('started_ok', {
       enabled: !!state?.enabled,
       trackingMode: state?.trackingMode,
       isMoving: state?.isMoving,
     });
+    if (!state?.enabled) {
+      await logEvent('startup_outcome', { outcome: 'failed', reason: 'sdk_not_enabled' });
+      return 'failed';
+    }
+    if (Platform.OS === 'android') {
+      const permissions = await readPermissionSnapshot();
+      outcome = permissions.foreground !== 'granted' ? 'denied'
+        : permissions.background === 'granted' ? 'background-ready' : 'foreground-only';
+      if (outcome === 'denied') await lib.stop();
+      if (await stopIfObsolete()) return 'failed';
+    }
+    await logEvent('startup_outcome', { outcome });
+    if (await stopIfObsolete()) return 'failed';
+    if (Platform.OS === 'android' && outcome !== 'denied') {
+      // Recovery owns the session, not the cancellable reconciliation effect.
+      cachedConfig = { ...cfg, isCurrent: cfg.isOwnerCurrent ?? cfg.isCurrent };
+      attachBatteryListeners();
+      void pushBatteryUpdate('startup');
+    }
+    return outcome;
   } catch (e: any) {
+    if (Platform.OS === 'android') {
+      cachedConfig = null;
+      await lib.stop();
+    }
     await logEvent('start_error', {
       error: String(e?.message || e),
     });
+    await logEvent('startup_outcome', { outcome: 'failed', reason: 'native_start_failed' });
+    return 'failed';
   }
 }
 
 /** Stop the engine.  Logs the outcome. */
-export async function stop(): Promise<void> {
+export function stop(): Promise<void> {
+  if (Platform.OS !== 'android') return stopConfiguredEngine();
+  // Invalidate synchronously, even when a native start is still awaiting its
+  // callback or a permission disclosure is keeping the permission queue busy.
+  engineGeneration += 1;
+  cachedConfig = null;
+  return serializeEngineOperation(stopConfiguredEngine);
+}
+
+async function stopConfiguredEngine(): Promise<void> {
   await logEvent('stop_invoked');
   const lib = bgGeo();
   if (!lib) {
@@ -1641,6 +1761,28 @@ export async function stop(): Promise<void> {
  * or propagates the error from stop()/start() with its own log entries.
  */
 export async function restart(): Promise<void> {
+  if (Platform.OS === 'android') {
+    const generation = engineGeneration;
+    return serializePermissionOperation(() => serializeEngineOperation(async () => {
+      await logEvent('restart_invoked');
+      const cfg = cachedConfig;
+      if (!cfg || generation !== engineGeneration || (cfg.isCurrent && !cfg.isCurrent())) {
+        if (cfg) {
+          cachedConfig = null;
+          await stopConfiguredEngine();
+        }
+        await logEvent('restart_failed', { outcome: 'failed', reason: 'no_current_owner' });
+        throw new Error('Location restart has no current session/member owner');
+      }
+      await stopConfiguredEngine();
+      const outcome = await startConfiguredEngine(cfg, generation);
+      if (outcome !== 'background-ready') {
+        await logEvent('restart_failed', { outcome });
+        throw new Error(`Location restart is not background-ready: ${outcome}`);
+      }
+      await logEvent('restart_completed', { outcome });
+    }));
+  }
   await logEvent('restart_invoked');
   if (!cachedConfig) {
     await logEvent('restart_skipped', { reason: 'no_cached_config' });
@@ -1679,8 +1821,20 @@ function _jwtExpMs(jwt: string): number | null {
   }
 }
 
-export async function setAuthToken(jwt: string): Promise<void> {
+export function setAuthToken(jwt: string): Promise<void> {
+  const generation = engineGeneration;
+  return Platform.OS === 'android'
+    ? serializeEngineOperation(() => setAuthTokenConfigured(jwt, generation))
+    : setAuthTokenConfigured(jwt, generation);
+}
+
+async function setAuthTokenConfigured(jwt: string, generation: number): Promise<void> {
   const lib = bgGeo();
+  if (Platform.OS === 'android' && (generation !== engineGeneration
+    || (cachedConfig?.isCurrent && !cachedConfig.isCurrent()))) {
+    await logEvent('setAuthToken_skipped', { reason: 'ownership_lost' });
+    return;
+  }
   if (!lib || !cachedConfig) {
     await logEvent('setAuthToken_skipped', {
       hasLib: !!lib,
@@ -1702,6 +1856,13 @@ export async function setAuthToken(jwt: string): Promise<void> {
         accessToken: jwt,
       },
     });
+    if (Platform.OS === 'android' && (generation !== engineGeneration
+      || (cachedConfig?.isCurrent && !cachedConfig.isCurrent()))) {
+      cachedConfig = null;
+      await lib.stop();
+      await logEvent('setAuthToken_skipped', { reason: 'ownership_lost' });
+      return;
+    }
     await logEvent('setAuthToken_ok', {
       jwt_exp_ms: expMs,
       minutes_until_expiry: minutesUntilExpiry,
@@ -1732,7 +1893,12 @@ export async function getState(): Promise<LocationEngineState> {
     const state = await lib.getState();
     return {
       enabled: !!state?.enabled,
-      trackingMode: state?.trackingMode === 1 ? 'foreground' : 'background',
+      trackingMode: state?.trackingMode === 1 ? 'location-and-geofences'
+        : state?.trackingMode === 0 ? 'geofences-only' : 'unknown',
+      authorization: Platform.OS === 'android'
+        ? await readPermissionSnapshot().then(p => p.foreground !== 'granted' ? 'denied' as const
+          : p.background === 'granted' ? 'background' as const : 'foreground-only' as const)
+        : undefined,
       isMoving: state?.isMoving ?? null,
       lastSampleAt: null,
       odometerMeters: state?.odometer ?? null,

@@ -1,6 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Alert, Platform } from 'react-native';
-import * as Location from 'expo-location';
 
 /**
  * Google Play requires an in-app, prominent disclosure immediately before an
@@ -46,8 +45,16 @@ export function ensureBackgroundLocationDisclosure(): Promise<void> {
 async function checkAndShowDisclosure(): Promise<void> {
   try {
     if (await AsyncStorage.getItem(DISCLOSURE_SHOWN_KEY) === 'true') {
-      const permission = await Location.getForegroundPermissionsAsync();
-      if (permission.status !== 'undetermined') return;
+      // Read only when disclosing; a headless module import must not
+      // initialize a foreground permission API.
+      const Location: typeof import('expo-location') = require('expo-location');
+      const [foreground, background] = await Promise.all([
+        Location.getForegroundPermissionsAsync(),
+        Location.getBackgroundPermissionsAsync(),
+      ]);
+      // Restored acknowledgment + foreground permission is not evidence of
+      // background authorization on this installation.
+      if (foreground.status === 'granted' && background.status === 'granted') return;
     }
   } catch (_e) {
     // If storage or permission-state lookup fails, disclose rather than

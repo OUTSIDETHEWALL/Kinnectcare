@@ -3,11 +3,15 @@ import {
   stopBackgroundLocation,
 } from './backgroundLocation';
 import * as locationEngine from './locationEngine';
-import type { LocationEngineConfig } from './locationEngine';
+import type { LocationEngineConfig, LocationStartupOutcome } from './locationEngine';
+import { Platform } from 'react-native';
+
+type TransistorStartResult = LocationStartupOutcome | boolean;
 
 type InFlightTransistorStart = {
   key: string;
-  promise: Promise<boolean>;
+  isCurrent?: () => boolean;
+  promise: Promise<TransistorStartResult>;
 };
 
 let transistorStartInFlight: InFlightTransistorStart | null = null;
@@ -25,11 +29,11 @@ export function needsLocationEngineBootstrap(
  */
 export async function ensureTransistorLocationEngine(
   config: LocationEngineConfig,
-): Promise<boolean> {
-  if (!locationEngine.isAvailable()) return false;
+): Promise<TransistorStartResult> {
+  if (!locationEngine.isAvailable()) return Platform.OS === 'android' ? 'failed' : false;
   const key = `${config.backendBaseUrl}\u0000${config.memberId}\u0000${config.jwt}`;
   if (transistorStartInFlight) {
-    if (transistorStartInFlight.key === key) {
+    if (transistorStartInFlight.key === key && transistorStartInFlight.isCurrent === config.isCurrent) {
       return transistorStartInFlight.promise;
     }
     await transistorStartInFlight.promise;
@@ -38,12 +42,14 @@ export async function ensureTransistorLocationEngine(
 
   const startPromise = (async () => {
     const legacyStopped = await stopBackgroundLocation();
-    if (!legacyStopped) return false;
+    if (!legacyStopped) return Platform.OS === 'android' ? 'failed' as const : false;
 
-    await locationEngine.start(config);
-    return true;
+    const outcome = await locationEngine.start(config);
+    // The pre-PR iOS adapter returned true after attempting SDK startup, and
+    // false if exclusivity could not be established. Keep those semantics.
+    return Platform.OS === 'android' ? outcome : true;
   })();
-  transistorStartInFlight = { key, promise: startPromise };
+  transistorStartInFlight = { key, isCurrent: config.isCurrent, promise: startPromise };
 
   try {
     return await startPromise;
@@ -64,5 +70,7 @@ export async function startLegacyLocationFallback(memberId: string): Promise<boo
     return false;
   }
 
-  return startBackgroundLocation(memberId);
+  // Automatic bootstrap is passive. Explicit SOS cadence calls retain the
+  // legacy helper's existing permission behavior.
+  return startBackgroundLocation(memberId, false);
 }

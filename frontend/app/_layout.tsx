@@ -42,6 +42,7 @@ import {
   isInviteConsumed,
 } from '../src/pendingInvite';
 import { isPermissionsHandled } from '../src/permissionsStore';
+import { readPermissionSnapshot } from '../src/permissionCoordinator';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { logStartupEvent } from '../src/startupDiagnostics';
 import { recordNativeStartupCheckpoint } from '../src/nativeStartupRecorder';
@@ -637,11 +638,14 @@ function RootNav() {
     );
   }, []);
 
+  const androidPushBlocked = Platform.OS === 'android' && (!permissionsChecked || needsPermissions);
+  const androidStartupBlocked = Platform.OS === 'android'
+    && (loading || !permissionsChecked || needsPermissions);
   useEffect(() => {
-    if (user) {
+    if (user && !androidPushBlocked) {
       registerForPushNotifications().catch(() => {});
     }
-  }, [user?.id]);
+  }, [user?.id, androidPushBlocked]);
 
   // ============================================================
   //  Auto push-token refresh on app foreground (v1.2.1)
@@ -1048,6 +1052,7 @@ function RootNav() {
         await stopBackgroundLocation();
         return;
       }
+      if (androidStartupBlocked) return;
       try {
         // Build 47 — canonical store fetch.  The store dedupes
         // concurrent fetchAll() calls so this shares the in-flight
@@ -1067,7 +1072,7 @@ function RootNav() {
     return () => {
       cancelled = true;
     };
-  }, [user?.id]);
+  }, [user?.id, androidStartupBlocked]);
 
   // ============================================================
   //  v1.4 (Phase 2) — Transistor Location Engine wiring
@@ -1116,6 +1121,77 @@ function RootNav() {
   //  for in a ref, and only tear down on a genuine change (logout, or
   //  switching to a different user.id).  Idempotent re-runs are no-ops.
   const engineBootedForUserIdRef = useRef<string | null>(null);
+  const [startupRevision, setStartupRevision] = useState(0);
+  const engineSessionRef = useRef({ userId: user?.id });
+  if (engineSessionRef.current.userId !== user?.id) {
+    engineSessionRef.current = { userId: user?.id };
+  }
+  const androidStartupRevision = Platform.OS === 'android' ? startupRevision : 0;
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    return () => {
+      engineBootedForUserIdRef.current = null;
+      try { leonidas.stop(); } catch (_e) {}
+      void locationEngine.stop();
+    };
+  }, [user?.id]);
+  // Observe linkage for the whole session, including after the initial 90 s
+  // wait expires. Settings/resume only READ permissions; never display UI.
+  useEffect(() => {
+    if (!user?.id || Platform.OS !== 'android') return;
+    let disposed = false;
+    let memberId = memberStore.getMyMember(user.id)?.id ?? null;
+    let fingerprint: string | null = null;
+    let reading = false;
+    const reconcile = async () => {
+      if (reading) return;
+      reading = true;
+      try {
+        const next = Platform.OS === 'android'
+          ? JSON.stringify(await readPermissionSnapshot()) : 'ios';
+        if (disposed) return;
+        if ((fingerprint !== null && fingerprint !== next)
+          || engineBootedForUserIdRef.current === null) {
+          setStartupRevision(value => value + 1);
+        }
+        fingerprint = next;
+      } catch (_e) {
+        // A failed lookup cannot certify background readiness.
+        if (!disposed) void locationEngine.logEvent('permission_reconciliation_failed');
+      } finally { reading = false; }
+    };
+    void reconcile();
+    const unsubscribe = memberStore.subscribeMember(() => {
+      const nextId = memberStore.getMyMember(user.id)?.id ?? null;
+      if (nextId !== memberId) {
+        memberId = nextId;
+        engineBootedForUserIdRef.current = null;
+        try { leonidas.stop(); } catch (_e) {}
+        void locationEngine.stop();
+        setStartupRevision(value => value + 1);
+      }
+    });
+    let previousState = AppState.currentState;
+    const subscription = AppState.addEventListener('change', next => {
+      const resumed = next === 'active' && previousState !== 'active';
+      previousState = next;
+      if (resumed) void reconcile();
+    });
+    return () => {
+      disposed = true;
+      unsubscribe();
+      subscription.remove();
+    };
+  }, [user?.id]);
+
+  // Token refresh stays subscribed across passive startup reconciliation.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    return subscribeToTokenChanges(tok => {
+      if (user?.id && tok) locationEngine.setAuthToken(tok).catch(() => {});
+    });
+  }, [user?.id]);
+
   useEffect(() => {
     let cancelled = false;
     let unsubscribeToken: (() => void) | null = null;
@@ -1128,13 +1204,14 @@ function RootNav() {
     (async () => {
       if (!user?.id) {
         // Genuine sign-out — tear everything down.
-        if (engineBootedForUserIdRef.current !== null) {
+        if (Platform.OS === 'android' || engineBootedForUserIdRef.current !== null) {
           try { leonidas.stop(); } catch (_e) {}
           await locationEngine.stop();
           engineBootedForUserIdRef.current = null;
         }
         return;
       }
+      if (androidStartupBlocked) return;
       if (!locationEngine.isAvailable()) {
         // Web / Expo Go / non-Transistor build — legacy engine remains
         // authoritative on this device.  Leonidas is a no-op without
@@ -1145,7 +1222,9 @@ function RootNav() {
       // for this exact user.id, this is a flicker re-run — skip the
       // whole boot dance.  No log noise, no SDK churn, no patrol
       // restart.
-      if (!needsLocationEngineBootstrap(engineBootedForUserIdRef.current, user.id)) {
+      const session = engineSessionRef.current;
+      const startupKey = `${user.id}:${androidStartupRevision}`;
+      if (!needsLocationEngineBootstrap(engineBootedForUserIdRef.current, startupKey)) {
         return;
       }
       try {
@@ -1208,6 +1287,7 @@ function RootNav() {
           return;
         }
         const jwt = await getCurrentToken();
+        if (cancelled) return;
         const backendBaseUrl = process.env.EXPO_PUBLIC_BACKEND_URL || '';
         if (!jwt || !backendBaseUrl) {
           // Missing config — bail rather than start with broken auth.
@@ -1217,13 +1297,27 @@ function RootNav() {
           backendBaseUrl,
           memberId: me.id,
           jwt,
+          ...(Platform.OS === 'android' ? {
+            isCurrent: () => !cancelled && engineSessionRef.current === session
+              && memberStore.getMyMember(user.id)?.id === me.id,
+            isOwnerCurrent: () => engineSessionRef.current === session
+              && memberStore.getMyMember(user.id)?.id === me.id,
+          } : {}),
         });
         if (cancelled) return;
-        if (!started) return;
+        if (Platform.OS !== 'android' && started === false) return;
+        if (Platform.OS === 'android' && (started === 'failed' || started === 'denied')) {
+          engineBootedForUserIdRef.current = null;
+          try { leonidas.stop(); } catch (_e) {}
+          return;
+        }
         // Leonidas v1.0 — passive health monitor.  Boots in lockstep
         // with the location engine; tears down on sign-out via the
         // cleanup block below.  No-op if already active.
-        try { leonidas.start(); } catch (_e) {}
+        try {
+          if (Platform.OS !== 'android' || started === 'background-ready') leonidas.start();
+          else leonidas.stop();
+        } catch (_e) {}
         // Battery subsystem — independent 30-minute target via WorkManager
         // (Android) / BGTaskScheduler (iOS).  Runs even when the device
         // hasn't moved and the Transistor SDK is idle.
@@ -1231,14 +1325,12 @@ function RootNav() {
         // Part 7 — Battery optimization prompt moved to post-onboarding.
         // See useEffect below; fired there so the user has context from
         // onboarding before being asked about a system setting.
-        engineBootedForUserIdRef.current = user.id;
-        // Subscribe AFTER successful start so any rolling token
-        // refresh during the live session flows through.
-        unsubscribeToken = subscribeToTokenChanges((tok) => {
-          if (tok) {
-            locationEngine.setAuthToken(tok).catch(() => {});
-          }
-        });
+        engineBootedForUserIdRef.current = startupKey;
+        if (Platform.OS !== 'android') {
+          unsubscribeToken = subscribeToTokenChanges(tok => {
+            if (tok) locationEngine.setAuthToken(tok).catch(() => {});
+          });
+        }
       } catch (_e) {
         // Silent — without an authenticated /members fetch we can't
         // identify the member row to upload to.  Next session retries.
@@ -1252,10 +1344,7 @@ function RootNav() {
       // subscription live until the next store write or the 90 s
       // timeout.
       if (cancelWait) { cancelWait(); cancelWait = null; }
-      if (unsubscribeToken) {
-        unsubscribeToken();
-        unsubscribeToken = null;
-      }
+      if (unsubscribeToken) { unsubscribeToken(); unsubscribeToken = null; }
       // Build 49 — do NOT call leonidas.stop() here unconditionally.
       // The cleanup runs on every effect re-evaluation (including
       // flickers during token rotation), and stopping/restarting on
@@ -1263,10 +1352,11 @@ function RootNav() {
       // noise we're eliminating in this build.  Real teardown happens
       // in the `!user?.id` branch above when sign-out is genuine.
     };
-  }, [user?.id]);
+  }, [user?.id, androidStartupBlocked, androidStartupRevision]);
 
   useEffect(() => {
-    if (loading || !initialLinkChecked || !onboardingChecked || !appLockChecked || !disclaimerChecked) {
+    if (loading || !initialLinkChecked || !onboardingChecked || !appLockChecked || !disclaimerChecked
+      || (Platform.OS === 'android' && !permissionsChecked)) {
       logRootDecision('startup_gates_pending', null, 'hold');
       return;
     }
@@ -1410,6 +1500,12 @@ function RootNav() {
     // screen is picked up as soon as segments change after its
     // router.replace('/(tabs)/dashboard').
     const onPermissionsScreen = inAuthGroup && authSubroute === 'permissions';
+    if (user && onPermissionsScreen) {
+      // Keep the exact pending medication occurrence queued until the user
+      // finishes (or explicitly declines) setup. The screen is not readiness.
+      setAppReadyForDeepLink(Platform.OS !== 'android');
+      return;
+    }
     if (user && needsPermissions && !needsAppLockUnlock && !onPermissionsScreen) {
       (async () => {
         const handled = await isPermissionsHandled();

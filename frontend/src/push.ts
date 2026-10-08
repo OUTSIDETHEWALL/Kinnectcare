@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import * as Notifications from 'expo-notifications';
+import { notificationPermission } from './permissionCoordinator';
 import * as TaskManager from 'expo-task-manager';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
@@ -525,7 +526,7 @@ export async function setupNotificationsForOS(): Promise<void> {
 }
 
 
-export async function registerForPushNotifications(): Promise<string | null> {
+export async function registerForPushNotifications(interactive = false): Promise<string | null> {
   try {
     if (Platform.OS === 'web') {
       setStatus({ state: 'unsupported', reason: 'web preview' });
@@ -541,12 +542,7 @@ export async function registerForPushNotifications(): Promise<string | null> {
     // directly (e.g. Settings → "Retry push registration").  Idempotent.
     await setupNotificationsForOS();
 
-    const { status: existing } = await Notifications.getPermissionsAsync();
-    let finalStatus = existing;
-    if (existing !== 'granted') {
-      const { status } = await Notifications.requestPermissionsAsync();
-      finalStatus = status;
-    }
+    const { status: finalStatus } = await notificationPermission(interactive);
     if (finalStatus !== 'granted') {
       setStatus({ state: 'permission_denied' });
       return null;

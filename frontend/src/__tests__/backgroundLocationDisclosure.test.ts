@@ -26,6 +26,7 @@ describe('Android prominent location disclosure', () => {
     };
     location = {
       getForegroundPermissionsAsync: jest.fn().mockResolvedValue({ status: 'undetermined' }),
+      getBackgroundPermissionsAsync: jest.fn().mockResolvedValue({ status: 'granted' }),
       requestForegroundPermissionsAsync: jest.fn(),
       requestBackgroundPermissionsAsync: jest.fn(),
     };
@@ -78,7 +79,7 @@ describe('Android prominent location disclosure', () => {
     await pending;
   });
 
-  it.each(['granted', 'denied'])(
+  it.each(['granted'])(
     'retains an acknowledgment when Android permission is already %s',
     async status => {
       storage.getItem.mockResolvedValue('true');
@@ -88,6 +89,17 @@ describe('Android prominent location disclosure', () => {
       expect(storage.setItem).not.toHaveBeenCalled();
     },
   );
+
+  it.each(['undetermined', 'denied'])('does not trust a restored acknowledgment with background %s', async status => {
+    storage.getItem.mockResolvedValue('true');
+    location.getForegroundPermissionsAsync.mockResolvedValue({ status: 'granted' });
+    location.getBackgroundPermissionsAsync.mockResolvedValue({ status });
+    const pending = ensure();
+    await settle();
+    expect(alert).toHaveBeenCalledTimes(1);
+    continueDisclosure();
+    await pending;
+  });
 
   it('shares a single pending operation during slow reads, the dialog, and slow writes', async () => {
     const read = deferred<string | null>();

@@ -3035,6 +3035,10 @@ function DiagnosticsContent() {
               {engineState?.trackingMode ?? 'unknown'}
             </Text>
             <Text style={styles.entryLine}>
+              <Text style={styles.entryK}>location authorization: </Text>
+              {engineState?.authorization ?? 'unknown'}
+            </Text>
+            <Text style={styles.entryLine}>
               <Text style={styles.entryK}>isMoving: </Text>
               {engineState?.isMoving === null ? '—' : String(engineState?.isMoving)}
             </Text>

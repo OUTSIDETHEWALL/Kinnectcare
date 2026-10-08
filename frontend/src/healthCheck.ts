@@ -233,8 +233,12 @@ export function computeHealthItems(
   // 1 — Background service: most recent sdk_onEnabledChange.
   //     null → 'unknown' (not yet seen, normal on fresh start — not an error).
   const enabledEvt = rev.find((e) => e.event === 'sdk_onEnabledChange') ?? null;
+  const startup = rev.find(e => e.event === 'startup_outcome')?.detail?.outcome;
   const bgStatus: HealthStatus =
-    enabledEvt === null             ? 'unknown'
+    startup === 'denied' || startup === 'failed' ? 'error'
+    : startup === 'foreground-only' ? 'warn'
+    : startup === 'background-ready' && enabledEvt === null ? 'ok'
+    : enabledEvt === null             ? 'unknown'
     : enabledEvt.detail?.enabled   ? 'ok'
     : 'error';
 
@@ -290,7 +294,8 @@ export function computeHealthItems(
   //     Cap hbStatus at 'ok' in that case.  Only surface 'error' when both the
   //     heartbeat AND uploads are stale — that is the genuine failure state.
   const hbEvt = rev.find(
-    (e) => e.event === 'sdk_onHeartbeat' || e.event === 'headless_task_invoked',
+    (e) => e.event === 'sdk_onHeartbeat'
+      || (e.event === 'headless_task_invoked' && e.detail?.eventName === 'heartbeat'),
   ) ?? null;
   const hbAge = hbEvt ? now - hbEvt.at : null;
   const uploadRecent = uploadAge !== null && uploadAge < 5 * 60_000;
@@ -318,7 +323,9 @@ export function computeHealthItems(
   return [
     {
       icon:   healthIcon(bgStatus),
-      label:  bgStatus === 'ok'      ? 'Background service running'
+      label:  startup === 'foreground-only' ? 'Background location not authorized — foreground only'
+              : startup === 'denied' ? 'Location permission not granted'
+              : bgStatus === 'ok'      ? 'Background service running'
               : bgStatus === 'error' ? 'Background service stopped'
               : 'Background service: waiting for first event',
       status: bgStatus,

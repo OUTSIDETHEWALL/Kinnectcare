@@ -19,6 +19,7 @@ let mockNotificationCallback: ((data: any) => void) | null = null;
 let mockPendingNotification: any = null;
 let mockAuthUser: { id: string } | null = { id: 'caregiver-001' };
 let mockAuthLoading = false;
+let mockPermissionSnapshot = { foreground: 'granted', background: 'granted', notifications: 'granted' };
 
 jest.mock('react-native', () => {
   const React = require('react');
@@ -139,6 +140,7 @@ jest.mock('../store/memberStore', () => ({
   useMember: () => null,
   fetchAll: jest.fn(() => Promise.resolve([])),
   fetchOne: jest.fn(() => Promise.resolve()),
+  getMyMember: jest.fn(() => undefined),
   subscribeMember: jest.fn(() => jest.fn()),
 }));
 
@@ -201,7 +203,7 @@ jest.mock('../appLock', () => ({
 
 jest.mock('../backgroundLocation', () => ({
   startBackgroundLocation: jest.fn(() => Promise.resolve()),
-  stopBackgroundLocation: jest.fn(() => Promise.resolve()),
+  stopBackgroundLocation: jest.fn(() => Promise.resolve(true)),
 }));
 
 jest.mock('../batteryTask', () => ({
@@ -235,7 +237,7 @@ jest.mock('../locationEngine', () => ({
   })),
   isListenersAttached: jest.fn(() => false),
   isAvailable: jest.fn(() => false),
-  start: jest.fn(() => Promise.resolve()),
+  start: jest.fn(() => Promise.resolve('background-ready')),
   stop: jest.fn(() => Promise.resolve()),
   setAuthToken: jest.fn(() => Promise.resolve()),
 }));
@@ -272,6 +274,10 @@ jest.mock('../pendingInvite', () => ({
 
 jest.mock('../permissionsStore', () => ({
   isPermissionsHandled: jest.fn(() => Promise.resolve(true)),
+}));
+
+jest.mock('../permissionCoordinator', () => ({
+  readPermissionSnapshot: jest.fn(async () => ({ ...mockPermissionSnapshot })),
 }));
 
 import React from 'react';
@@ -330,6 +336,7 @@ beforeEach(() => {
   mockPendingNotification = null;
   mockAuthUser = { id: 'caregiver-001' };
   mockAuthLoading = false;
+  mockPermissionSnapshot = { foreground: 'granted', background: 'granted', notifications: 'granted' };
   jest.useFakeTimers();
 });
 
@@ -364,6 +371,206 @@ describe('MissedCheckinDetail — Return to Dashboard after app resume', () => {
 
     expect(mockRouterReplace).toHaveBeenCalledTimes(1);
     expect(mockRouterReplace).toHaveBeenCalledWith('/(tabs)/dashboard');
+  });
+});
+
+describe('Android permission gates and tracking lifecycle at the real navigation root', () => {
+  const native = require('react-native');
+  const members = require('../store/memberStore');
+  const engine = require('../locationEngine');
+  const permissions = require('../permissionsStore');
+  const push = require('../push');
+  const leonidas = require('../leonidas');
+  const originalBackendUrl = process.env.EXPO_PUBLIC_BACKEND_URL;
+  let me: any;
+  let subscribers: Set<(member: any) => void>;
+
+  beforeEach(() => {
+    process.env.EXPO_PUBLIC_BACKEND_URL = 'https://example.test';
+    native.Platform.OS = 'android';
+    me = { id: 'member-001', user_id: 'caregiver-001' };
+    subscribers = new Set();
+    members.getMyMember.mockImplementation(() => me);
+    members.fetchAll.mockImplementation(async () => me ? [me] : []);
+    members.subscribeMember.mockImplementation((callback: (member: any) => void) => {
+      subscribers.add(callback);
+      return () => subscribers.delete(callback);
+    });
+    engine.isAvailable.mockReturnValue(true);
+    engine.start.mockImplementation(async () => mockPermissionSnapshot.background === 'granted'
+      ? 'background-ready' : 'foreground-only');
+    permissions.isPermissionsHandled.mockResolvedValue(true);
+    mockApiGet.mockResolvedValue({ data: [] });
+  });
+
+  afterEach(() => {
+    if (originalBackendUrl === undefined) delete process.env.EXPO_PUBLIC_BACKEND_URL;
+    else process.env.EXPO_PUBLIC_BACKEND_URL = originalBackendUrl;
+    native.Platform.OS = 'ios';
+    members.getMyMember.mockImplementation(() => undefined);
+    members.fetchAll.mockResolvedValue([]);
+    members.subscribeMember.mockImplementation(() => jest.fn());
+    engine.isAvailable.mockReturnValue(false);
+    engine.start.mockResolvedValue('background-ready');
+    permissions.isPermissionsHandled.mockResolvedValue(true);
+  });
+
+  async function mount() {
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<RootLayout />);
+      for (let i = 0; i < 10; i++) await flushPromises();
+    });
+    return renderer;
+  }
+
+  async function settle() {
+    await act(async () => {
+      for (let i = 0; i < 10; i++) await flushPromises();
+    });
+  }
+
+  it.each(['clean install', 'restored app data', 'invited/new member', 'returning/rejoining member'])(
+    'holds automatic tracking/push for %s until setup is handled', async () => {
+      permissions.isPermissionsHandled.mockResolvedValue(false);
+      const renderer = await mount();
+      expect(engine.start).not.toHaveBeenCalled();
+      expect(push.registerForPushNotifications).not.toHaveBeenCalled();
+      expect(mockRouterReplace).toHaveBeenCalledWith('/(auth)/permissions');
+      permissions.isPermissionsHandled.mockResolvedValue(true);
+      mockSegments = ['(tabs)'];
+      await act(async () => { renderer.update(<RootLayout />); });
+      await settle();
+      expect(engine.start).toHaveBeenCalledTimes(1);
+      expect(leonidas.start).toHaveBeenCalledTimes(1);
+      await act(async () => { renderer.unmount(); });
+    },
+  );
+
+  it('a new family owner without a linked member never starts tracking', async () => {
+    me = null;
+    const renderer = await mount();
+    await act(async () => { jest.advanceTimersByTime(91_000); });
+    await settle();
+    expect(engine.start).not.toHaveBeenCalled();
+    expect(leonidas.start).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('starts when delayed member linkage arrives after the old wait expired', async () => {
+    me = null;
+    const renderer = await mount();
+    await act(async () => { jest.advanceTimersByTime(91_000); });
+    await settle();
+    expect(engine.start).not.toHaveBeenCalled();
+    me = { id: 'late-member', user_id: 'caregiver-001' };
+    await act(async () => {
+      for (const callback of [...subscribers]) callback(me);
+    });
+    await settle();
+    expect(engine.start).toHaveBeenCalledTimes(1);
+    expect(engine.start).toHaveBeenCalledWith(expect.objectContaining({ memberId: 'late-member' }));
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('restored session waits for authentication, not just a cached user', async () => {
+    mockAuthLoading = true;
+    const renderer = await mount();
+    expect(engine.start).not.toHaveBeenCalled();
+    mockAuthLoading = false;
+    await act(async () => { renderer.update(<RootLayout />); });
+    await settle();
+    expect(engine.start).toHaveBeenCalledTimes(1);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('reconciles a Settings grant once, without repeated starts on unchanged resumes', async () => {
+    mockPermissionSnapshot.background = 'denied';
+    const renderer = await mount();
+    expect(engine.start).toHaveBeenCalledTimes(1);
+    expect(leonidas.start).not.toHaveBeenCalled();
+    mockPermissionSnapshot.background = 'granted';
+    await act(async () => {
+      for (const listener of [...mockAppStateListeners]) listener('background');
+      for (const listener of [...mockAppStateListeners]) listener('active');
+    });
+    await settle();
+    expect(engine.start).toHaveBeenCalledTimes(2);
+    expect(leonidas.start).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      for (const listener of [...mockAppStateListeners]) listener('background');
+      for (const listener of [...mockAppStateListeners]) listener('active');
+    });
+    await settle();
+    expect(engine.start).toHaveBeenCalledTimes(2);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('a failed engine outcome cannot start the background health monitor', async () => {
+    engine.start.mockResolvedValue('failed');
+    const renderer = await mount();
+    expect(engine.start).toHaveBeenCalled();
+    expect(leonidas.start).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it.each(['sign-out', 'session replacement'])('revokes pending engine ownership on %s', async reason => {
+    let resolveStart!: (value: any) => void;
+    engine.start.mockImplementationOnce(() => new Promise(resolve => { resolveStart = resolve; }));
+    const renderer = await mount();
+    const cfg = engine.start.mock.calls[0][0];
+    expect(cfg.isCurrent()).toBe(true);
+    expect(cfg.isOwnerCurrent()).toBe(true);
+    engine.stop.mockClear();
+    mockAuthUser = reason === 'sign-out' ? null : { id: 'replacement-user' };
+    await act(async () => { renderer.update(<RootLayout />); });
+    await settle();
+    expect(cfg.isCurrent()).toBe(false);
+    expect(cfg.isOwnerCurrent()).toBe(false);
+    expect(engine.stop).toHaveBeenCalled();
+    await act(async () => { resolveStart('failed'); });
+    await settle();
+    expect(leonidas.start).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('bootstrap reconciliation does not revoke the cached live-session owner', async () => {
+    const renderer = await mount();
+    const cfg = engine.start.mock.calls[0][0];
+    mockPermissionSnapshot.background = 'denied';
+    await act(async () => {
+      for (const listener of [...mockAppStateListeners]) listener('background');
+      for (const listener of [...mockAppStateListeners]) listener('active');
+    });
+    await settle();
+    expect(cfg.isCurrent()).toBe(false);
+    expect(cfg.isOwnerCurrent()).toBe(true);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('cold medication tap retains its exact occurrence while permission UI is active', async () => {
+    permissions.isPermissionsHandled.mockResolvedValue(false);
+    mockSegments = ['(auth)', 'permissions'];
+    mockPendingNotification = {
+      type: 'medication', subtype: 'self_due', reminder_id: 'dose-001',
+      member_id: 'member-001', occurrence_id: 'exact-occurrence',
+      slot_time: '14:00', local_date: '2026-10-08',
+    };
+    const renderer = await mount();
+    expect(push.setAppReadyForDeepLink).not.toHaveBeenCalledWith(true);
+    expect(mockPendingNotification?.occurrence_id).toBe('exact-occurrence');
+    expect(engine.start).not.toHaveBeenCalled();
+    permissions.isPermissionsHandled.mockResolvedValue(true);
+    mockSegments = ['(tabs)'];
+    await act(async () => { renderer.update(<RootLayout />); });
+    await settle();
+    await act(async () => { jest.advanceTimersByTime(1); });
+    await settle();
+    expect(mockRouterReplace).toHaveBeenLastCalledWith(expect.objectContaining({
+      pathname: '/(modals)/acknowledge',
+      params: expect.objectContaining({ occurrence_id: 'exact-occurrence' }),
+    }));
+    await act(async () => { renderer.unmount(); });
   });
 });
 

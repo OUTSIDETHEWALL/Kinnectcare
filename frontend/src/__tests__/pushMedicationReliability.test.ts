@@ -300,8 +300,10 @@ describe('medication and routine notification reliability', () => {
       useNotificationListeners(callback);
       return null;
     }
-    create(React.createElement(ListenerHarness));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    let listener!: ReturnType<typeof create>;
+    await act(async () => {
+      listener = create(React.createElement(ListenerHarness));
+    });
     await act(async () => {
       setAppReadyForDeepLink(true);
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -326,6 +328,7 @@ describe('medication and routine notification reliability', () => {
 
     // Simulate a fresh JS process: in-memory state is gone, but the bounded
     // durable request-id marker remains.
+    await act(async () => { listener.unmount(); });
     __resetNotificationResponseStateForTests();
     mockStorageGet.mockResolvedValue(JSON.stringify(['cold-medication-request']));
     const restartedCallback = jest.fn();
@@ -334,14 +337,16 @@ describe('medication and routine notification reliability', () => {
       return null;
     }
     mockLastResponse.mockResolvedValue(response);
-    create(React.createElement(RestartedListenerHarness));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await act(async () => {
+      listener = create(React.createElement(RestartedListenerHarness));
+    });
     await act(async () => {
       setAppReadyForDeepLink(true);
       await new Promise(resolve => setTimeout(resolve, 10));
     });
     expect(restartedCallback).not.toHaveBeenCalled();
     expect(mockClearLastResponse).toHaveBeenCalledTimes(2);
+    await act(async () => { listener.unmount(); });
   });
 
   it('does not enqueue or consume a tap when pending storage fails', async () => {
@@ -483,8 +488,10 @@ describe('medication and routine notification reliability', () => {
       useNotificationListeners(failing);
       return null;
     }
-    create(React.createElement(FailingHarness));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    let failingRenderer!: ReturnType<typeof create>;
+    await act(async () => {
+      failingRenderer = create(React.createElement(FailingHarness));
+    });
     await act(async () => {
       await callbacks[0](bodyResponse('callback-failure'));
       setAppReadyForDeepLink(true);
@@ -497,6 +504,7 @@ describe('medication and routine notification reliability', () => {
       expect.any(String),
     );
 
+    await act(async () => { failingRenderer.unmount(); });
     __resetNotificationResponseStateForTests();
     const pending = {
       requestId: 'callback-failure',
@@ -512,14 +520,17 @@ describe('medication and routine notification reliability', () => {
       useNotificationListeners(retried);
       return null;
     }
-    create(React.createElement(RetriedHarness));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    let retriedRenderer!: ReturnType<typeof create>;
+    await act(async () => {
+      retriedRenderer = create(React.createElement(RetriedHarness));
+    });
     await act(async () => {
       setAppReadyForDeepLink(true);
       await new Promise(resolve => setTimeout(resolve, 10));
     });
     expect(retried).toHaveBeenCalledTimes(1);
     expect(mockClearLastResponse).toHaveBeenCalledTimes(1);
+    await act(async () => { retriedRenderer.unmount(); });
   });
 
   it('reconciles consumed plus pending remnant without routing again', async () => {

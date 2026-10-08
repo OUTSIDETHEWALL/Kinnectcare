@@ -26,6 +26,13 @@ const FAKE_CFG = {
   backendBaseUrl: 'https://api.example.com',
 };
 
+jest.mock('../permissionCoordinator', () => ({
+  readPermissionSnapshot: jest.fn(async () => ({
+    foreground: 'granted', background: 'granted', notifications: 'granted',
+  })),
+  serializePermissionOperation: (operation: () => Promise<unknown>) => operation(),
+}));
+
 describe('triggerDeviceSnapshotNow', () => {
   afterEach(() => {
     jest.resetModules();
@@ -57,7 +64,7 @@ describe('triggerDeviceSnapshotNow', () => {
           ready: jest.fn().mockResolvedValue({ enabled: true }),
           setConfig: jest.fn().mockResolvedValue(undefined),
           requestPermission: jest.fn().mockResolvedValue(3),
-          start: jest.fn().mockResolvedValue(undefined),
+          start: jest.fn().mockResolvedValue({ enabled: true }),
           onHeartbeat: jest.fn().mockReturnValue({ remove: jest.fn() }),
           onLocation: jest.fn().mockReturnValue({ remove: jest.fn() }),
           onHttp: jest.fn().mockReturnValue({ remove: jest.fn() }),
@@ -108,7 +115,7 @@ describe('triggerDeviceSnapshotNow', () => {
           ready: jest.fn().mockResolvedValue({ enabled: true }),
           setConfig: jest.fn().mockResolvedValue(undefined),
           requestPermission: jest.fn().mockResolvedValue(3),
-          start: jest.fn().mockResolvedValue(undefined),
+          start: jest.fn().mockResolvedValue({ enabled: true }),
           onHeartbeat: jest.fn().mockReturnValue({ remove: jest.fn() }),
           onLocation: jest.fn().mockReturnValue({ remove: jest.fn() }),
           onHttp: jest.fn().mockReturnValue({ remove: jest.fn() }),
@@ -197,7 +204,7 @@ describe('triggerDeviceSnapshotNow', () => {
           ready: jest.fn().mockResolvedValue({ enabled: true }),
           setConfig: jest.fn().mockResolvedValue(undefined),
           requestPermission: jest.fn().mockResolvedValue(3),
-          start: jest.fn().mockResolvedValue(undefined),
+          start: jest.fn().mockResolvedValue({ enabled: true }),
           onHeartbeat: jest.fn().mockReturnValue({ remove: jest.fn() }),
           onLocation: jest.fn().mockReturnValue({ remove: jest.fn() }),
           onHttp: jest.fn().mockReturnValue({ remove: jest.fn() }),

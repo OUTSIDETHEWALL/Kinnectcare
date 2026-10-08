@@ -653,7 +653,7 @@ export default function MeScreen() {
 
   const retryPushRegistration = async () => {
     setPushRetrying(true);
-    try { await registerForPushNotifications(); } finally { setPushRetrying(false); }
+    try { await registerForPushNotifications(true); } finally { setPushRetrying(false); }
   };
 
   const openEditName = () => {
