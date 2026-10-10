@@ -13,6 +13,13 @@ NOW = datetime(2026, 9, 12, 14, 15, tzinfo=timezone.utc)
 PROOF = {"outcome": "accepted", "accepted_ticket_ids": ["ticket-1"]}
 
 
+def _run(coro):
+    # asyncio.run() clears the ambient loop used by older synchronous tests.
+    # An explicit loop factory lets these tests own/close only their own loop.
+    with asyncio.Runner(loop_factory=asyncio.new_event_loop) as runner:
+        return runner.run(coro)
+
+
 def setup(monkeypatch):
     db = DB([{
         "id": "r1", "owner_id": "owner", "family_group_id": "g1",
@@ -96,7 +103,7 @@ def test_live_sender_remains_exclusive_then_late_taken_succeeds(monkeypatch, pat
         assert len(calls) == len(db.med_notifications.rows) == 1
         assert db.med_notifications.rows == history
         assert [log["status"] for log in db.medication_logs.rows] == ["taken"]
-    asyncio.run(scenario())
+    _run(scenario())
 
 
 def test_cancelled_sender_recovers_to_unknown_and_never_resends(monkeypatch):
@@ -124,7 +131,7 @@ def test_cancelled_sender_recovers_to_unknown_and_never_resends(monkeypatch):
             with pytest.raises(HTTPException):
                 await acknowledge(body, path)
         assert not db.medication_logs.rows
-    asyncio.run(scenario())
+    _run(scenario())
 
 
 def test_cross_process_stale_uncertainty_fences_late_original_completion(monkeypatch):
@@ -153,7 +160,7 @@ def test_cross_process_stale_uncertainty_fences_late_original_completion(monkeyp
         assert db.medication_occurrences.rows[0]["family_state"] == "unknown"
         with pytest.raises(HTTPException):
             await acknowledge(body, "recipient")
-    asyncio.run(scenario())
+    _run(scenario())
 
 
 def test_saved_success_repairs_occurrence_after_finalization_crash(monkeypatch):
@@ -176,7 +183,7 @@ def test_saved_success_repairs_occurrence_after_finalization_crash(monkeypatch):
         await tick(db, push)
         assert (await acknowledge(body, "recipient"))["status"] == "taken"
         assert len(db.med_notifications.rows) == len(db.medication_logs.rows) == 1
-    asyncio.run(scenario())
+    _run(scenario())
 
 
 @pytest.mark.parametrize("result", [1, None, {"outcome": "failed", "accepted_ticket_ids": []}])
@@ -192,7 +199,7 @@ def test_attempt_counts_or_failed_sends_cannot_expose_sent(monkeypatch, result):
         with pytest.raises(HTTPException):
             await acknowledge(body, "recipient")
         assert not db.medication_logs.rows
-    asyncio.run(scenario())
+    _run(scenario())
 
 
 def test_obsolete_sender_cannot_finalize_new_stage_or_occurrence(monkeypatch):
@@ -216,7 +223,7 @@ def test_obsolete_sender_cannot_finalize_new_stage_or_occurrence(monkeypatch):
         await med_scheduler._finish_occurrence_family_claim(db, body.occurrence_id, NOW, "obsolete")
         assert db.med_notifications.rows == before
         assert db.medication_occurrences.rows[0]["family_state"] == "sending"
-    asyncio.run(scenario())
+    _run(scenario())
 
 
 def test_legacy_sent_without_completion_evidence_remains_blocked(monkeypatch):
@@ -229,7 +236,7 @@ def test_legacy_sent_without_completion_evidence_remains_blocked(monkeypatch):
         with pytest.raises(HTTPException):
             await acknowledge(body, "recipient")
         assert not db.medication_logs.rows
-    asyncio.run(scenario())
+    _run(scenario())
 
 
 @pytest.mark.parametrize("transport,tickets,expected", [
@@ -253,7 +260,7 @@ def test_provider_evidence_not_attempt_count(monkeypatch, transport, tickets, ex
         )
         assert result["outcome"] == expected
         assert "synthetic-test-token" not in str(result)
-    asyncio.run(scenario())
+    _run(scenario())
 
 
 def test_real_family_dispatch_waits_for_all_recipients_and_preserves_other_pushes(monkeypatch):
@@ -296,7 +303,7 @@ def test_real_family_dispatch_waits_for_all_recipients_and_preserves_other_pushe
         assert len(calls) == 2
         assert await server.push_to_family_group("g1", "SOS", "help", {"type": "sos"}) == 2
         assert len(calls) == 2
-    asyncio.run(scenario())
+    _run(scenario())
 
 
 def test_manual_miss_after_success_retains_terminal_ownership_through_recovery(monkeypatch):
@@ -319,4 +326,4 @@ def test_manual_miss_after_success_retains_terminal_ownership_through_recovery(m
         with pytest.raises(HTTPException):
             await acknowledge(body, "recipient")
         assert not db.medication_logs.rows
-    asyncio.run(scenario())
+    _run(scenario())
