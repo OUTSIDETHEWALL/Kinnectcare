@@ -74,7 +74,9 @@ class Collection:
             raise DuplicateKeyError("duplicate stage")
         if any(
             row.get("occurrence_id")
+            and row.get("type") != "medication"
             and old.get("occurrence_id") == row.get("occurrence_id")
+            and old.get("type") != "medication"
             and (
                 row.get("status") == "taken"
                 or "status" not in row
@@ -405,7 +407,7 @@ def test_alert_acknowledgment_conflict_does_not_hide_due_alert(monkeypatch):
             "occurrence_id": occurrence_id, "reminder_id": "r1",
             "member_id": "m1", "slot_time": "14:00",
             "local_date": "2026-09-12", "acknowledged": False,
-            "family_claimed": True, "family_state": "sent",
+            "family_claimed": True, "family_state": "sending",
         })
         db.alerts.rows.append({
             "id": "due-alert", "family_group_id": "g1", "member_id": "m1",
@@ -625,7 +627,7 @@ def test_stale_stage_reserved_before_push_recovers_past_t75():
 
         async def family_push(*args, **kwargs):
             pushes.append(args)
-            return 1
+            return {"outcome": "accepted", "accepted_ticket_ids": ["ticket-1"]}
 
         result = await med_scheduler.process_pending_notifications(
             db,
@@ -643,7 +645,7 @@ def test_stale_stage_reserved_before_push_recovers_past_t75():
     asyncio.run(scenario())
 
 
-def test_attempted_push_crash_finalizes_permanently_past_horizon(monkeypatch):
+def test_attempted_push_crash_becomes_unknown_without_resend_or_taken(monkeypatch):
     async def scenario():
         db = DB([{
             "id": "r1", "owner_id": "owner", "family_group_id": "g1",
@@ -702,8 +704,8 @@ def test_attempted_push_crash_finalizes_permanently_past_horizon(monkeypatch):
         await tick(datetime(2026, 9, 12, 16, 0, tzinfo=timezone.utc))
         await tick(datetime(2026, 9, 12, 18, 0, tzinfo=timezone.utc))
         assert pushes == []
-        assert db.med_notifications.rows[0]["delivery_state"] == "sent"
-        assert db.medication_occurrences.rows[0]["family_state"] == "sent"
+        assert db.med_notifications.rows[0]["delivery_state"] == "unknown"
+        assert db.medication_occurrences.rows[0]["family_state"] == "unknown"
         assert db.medication_occurrences.rows[0]["family_claimed"] is True
 
         monkeypatch.setattr(server, "db", db)
@@ -718,7 +720,9 @@ def test_attempted_push_crash_finalizes_permanently_past_horizon(monkeypatch):
                 {"id": "senior", "family_group_id": "g1", "timezone": "UTC"},
             )
         assert blocked.value.status_code == 409
-        assert db.medication_logs.rows == []
+        assert len(db.medication_logs.rows) == 0
+        assert db.medication_occurrences.rows[0]["family_claimed"] is True
+        assert db.medication_occurrences.rows[0]["family_state"] == "unknown"
 
     asyncio.run(scenario())
 
@@ -815,7 +819,7 @@ def test_startup_resets_readiness_and_does_not_start_without_indexes(monkeypatch
     asyncio.run(scenario())
 
 
-def test_acknowledgment_is_blocked_after_family_claim_finalization(monkeypatch):
+def test_acknowledgment_is_allowed_after_family_claim_finalization(monkeypatch):
     async def scenario():
         db = DB()
         occurrence_id = _occurrence()
@@ -830,24 +834,25 @@ def test_acknowledgment_is_blocked_after_family_claim_finalization(monkeypatch):
         })
         db.medication_occurrences.rows.append({
             "occurrence_id": occurrence_id, "family_claimed": True,
-            "family_state": "sent", "acknowledged": False,
+            "family_state": "sent", "family_send_completed": True, "acknowledged": False,
         })
         monkeypatch.setattr(server, "db", db)
         monkeypatch.setattr(server, "_med_scheduler_ready", True)
-        with pytest.raises(HTTPException) as blocked:
-            await server.mark_reminder(
-                "r1",
-                server.ReminderMark(
-                    status="taken", slot_time="14:00",
-                    local_date="2026-09-12", occurrence_id=occurrence_id,
-                ),
-                {"id": "senior", "family_group_id": "g1", "timezone": "UTC"},
-            )
-        assert blocked.value.status_code == 409
-        assert not db.medication_logs.rows
+        result = await server.mark_reminder(
+            "r1",
+            server.ReminderMark(
+                status="taken", slot_time="14:00",
+                local_date="2026-09-12", occurrence_id=occurrence_id,
+            ),
+            {"id": "senior", "family_group_id": "g1", "timezone": "UTC"},
+        )
+        assert result == {"ok": True, "status": "taken"}
+        assert len(db.medication_logs.rows) == 1
         reminder = await db.reminders.find_one({"id": "r1"})
-        assert reminder["taken"] is False
-        assert reminder["status"] == "pending"
+        assert reminder["taken"] is True
+        assert reminder["status"] == "taken"
+        assert db.medication_occurrences.rows[0]["family_claimed"] is True
+        assert db.medication_occurrences.rows[0]["family_state"] == "sent"
 
     asyncio.run(scenario())
 
@@ -1441,7 +1446,7 @@ def test_scheduler_escalation_then_manual_miss_converges_without_second_push(
 
         async def family_push(*args, **kwargs):
             pushes.append(args)
-            return 1
+            return {"outcome": "accepted", "accepted_ticket_ids": ["ticket-1"]}
 
         await med_scheduler.process_pending_notifications(
             db,

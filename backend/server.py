@@ -1184,11 +1184,14 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
         )
 
 
-async def push_to_family_group(family_group_id: str, title: str, body: str, data: dict, exclude_user_id: Optional[str] = None) -> int:
+async def push_to_family_group(family_group_id: str, title: str, body: str, data: dict, exclude_user_id: Optional[str] = None) -> int | dict:
     """Fan out a push notification to every user in the given family group.
 
     Returns the total number of devices (push tokens) the notification was
     attempted on across all users in the group.
+
+    Exact medication family escalation alone returns provider completion
+    evidence instead; an attempted count must not unlock medication Taken.
 
     Build 53 — inject a source_tag into the outgoing data dict so the
     blank-notification safety net can attribute any accidentally-blank
@@ -1201,6 +1204,13 @@ async def push_to_family_group(family_group_id: str, title: str, body: str, data
         # Non-destructive — attach a lightweight breadcrumb.
         data = {**data, "_source_tag": f"family:{data.get('type', 'unknown')}"}
     user_ids = await fg.list_group_user_ids(db, family_group_id)
+    if isinstance(data, dict) and data.get("type") == "medication" and data.get("stage") == med_scheduler.STAGE_FAMILY:
+        from medication_delivery import send_verified_escalation
+        return await send_verified_escalation(
+            db, [uid for uid in user_ids if uid != exclude_user_id], title, body, data,
+            send_with_tickets=send_expo_push_with_tickets,
+            in_quiet_hours=_is_in_quiet_hours,
+        )
     total = 0
     for uid in user_ids:
         if exclude_user_id and uid == exclude_user_id:
@@ -4574,7 +4584,9 @@ async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> s
 
     Mongo's conditional update is the occurrence-level mutex shared with the
     scheduler.  ``duplicate`` means a retry of an already persisted mark;
-    ``blocked`` means the scheduler is currently sending the T+15 escalation.
+    ``blocked`` means escalation or a terminal manual miss still owns the
+    occurrence. A completed scheduler escalation is history, not a permanent
+    prohibition on the recipient subsequently taking the dose.
     """
     collection = getattr(db, "medication_occurrences", None)
     if collection is None:
@@ -4606,7 +4618,19 @@ async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> s
     result = await collection.update_one(
         {
             "occurrence_id": oid,
-            "family_claimed": {"$ne": True},
+            "acknowledged": {"$ne": True},
+            "$or": [
+                {"family_claimed": {"$ne": True}},
+                {
+                    "family_claimed": True,
+                    "family_state": "sent",
+                    "family_send_completed": True,
+                    # Manual misses use this same mutex. Excluding their
+                    # ownership closes the gap before their terminal log is
+                    # written, including a miss racing with this late mark.
+                    "family_purpose": {"$exists": False},
+                },
+            ],
         },
         {"$set": {"acknowledged": True, "acknowledged_at": now}},
     )
@@ -4614,10 +4638,10 @@ async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> s
         return "claimed"
 
     state = await collection.find_one({"occurrence_id": oid}, {"_id": 0})
-    if state and state.get("family_claimed"):
-        return "blocked"
     if state and state.get("acknowledged"):
         return "duplicate"
+    if state and state.get("family_claimed"):
+        return "blocked"
     # A concurrent update may have won between our conditional update and
     # read.  Treat that as a retry rather than creating a second mark.
     return "blocked"
@@ -5021,22 +5045,13 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
                     claim_token=claim_token,
                     allow_resume_claim=True,
                 )
-                if won and await med_scheduler._mark_stage_attempted(
-                    db,
-                    reminder_id=reminder_id,
-                    member_id=rem["member_id"],
-                    slot_time=occurrence["slot_time"],
-                    local_date=occurrence["local_date"],
-                    stage=med_scheduler.STAGE_FAMILY,
-                    claim_token=claim_token,
-                    now_utc=now,
-                ):
-                    try:
-                        await push_to_family_group(
-                            current["family_group_id"],
-                            title,
-                            message,
-                            {
+                if won:
+                    await med_scheduler._deliver_family_stage(
+                        db, reminder_id=reminder_id, member_id=rem["member_id"],
+                        slot_time=occurrence["slot_time"], local_date=occurrence["local_date"],
+                        claim_token=claim_token, now_utc=now, push=push_to_family_group,
+                        family_group_id=current["family_group_id"], title=title,
+                        body=message, data={
                                 "type": "medication",
                                 "subtype": "family_alert",
                                 "reminder_id": reminder_id,
@@ -5050,29 +5065,8 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
                                 "title": rem.get("title"),
                                 "dosage": rem.get("dosage"),
                                 "channelId": "meds_v2",
-                            },
-                        )
-                    except Exception as exc:
-                        # The durable alert and attempted-stage marker are
-                        # still the idempotent result.  Match scheduler
-                        # behavior: report the push failure, but do not turn
-                        # a committed manual miss into a retryable duplicate.
-                        logger.warning(
-                            f"manual medication miss push failed for {occurrence_id}: {exc}"
-                        )
-                    finally:
-                        await med_scheduler._finish_family_stage(
-                            db,
-                            reminder_id=reminder_id,
-                            member_id=rem["member_id"],
-                            slot_time=occurrence["slot_time"],
-                            local_date=occurrence["local_date"],
-                            claim_token=claim_token,
-                            now_utc=now,
-                        )
-                        await med_scheduler._finish_occurrence_family_claim(
-                            db, occurrence_id, now, claim_token
-                        )
+                        },
+                    )
                 else:
                     # A concurrent owner may still be before its attempted
                     # marker.  If that marker is already durable, however,
@@ -5088,19 +5082,8 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
                         },
                         {"_id": 0},
                     )
-                    if stage_doc and stage_doc.get("delivery_attempted_at"):
-                        await med_scheduler._finish_family_stage(
-                            db,
-                            reminder_id=reminder_id,
-                            member_id=rem["member_id"],
-                            slot_time=occurrence["slot_time"],
-                            local_date=occurrence["local_date"],
-                            claim_token=claim_token,
-                            now_utc=now,
-                        )
                     if stage_doc and (
-                        stage_doc.get("delivery_attempted_at")
-                        or stage_doc.get("delivery_state") == "sent"
+                        stage_doc.get("delivery_state") in ("sent", "unknown", "failed")
                     ):
                         await med_scheduler._finish_occurrence_family_claim(
                             db, occurrence_id, now, claim_token
