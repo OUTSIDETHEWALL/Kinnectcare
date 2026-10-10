@@ -114,7 +114,7 @@ describe('family medication acknowledgment modal', () => {
       await findByTestID(renderer.root, 'notif-acknowledge')?.props.onPress();
     });
     expect(mockAlert).toHaveBeenCalledWith(
-      'Could not acknowledge', 'Medication occurrence was already marked missed', [{ text: 'OK' }],
+      'Could not acknowledge', 'This dose was already marked missed and cannot be marked Taken.', [{ text: 'OK' }],
     );
     expect(mockDismiss).not.toHaveBeenCalled();
     expect(findByTestID(renderer.root, 'notif-acknowledge')).not.toBeNull();

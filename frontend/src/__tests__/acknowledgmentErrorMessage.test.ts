@@ -1,15 +1,15 @@
 import { acknowledgmentErrorMessage } from '../acknowledgmentErrorMessage';
 
 describe('interactive acknowledgment error messages', () => {
-  it.each([409, 400, 401, 403, 404, 503])('shows the server detail for HTTP %s, never offline', status => {
+  it.each([409, 400, 401, 403, 404, 503, 500])('does not expose arbitrary server detail for HTTP %s', status => {
     expect(acknowledgmentErrorMessage({
       response: { status, data: { detail: 'Server explanation' } }, request: {},
-    })).toBe('Server explanation');
+    })).not.toMatch(/Server explanation|offline|connection/);
   });
 
   it.each([undefined, '', ['validation error']])('uses a server fallback when detail is unusable', detail => {
     expect(acknowledgmentErrorMessage({ response: { status: 409, data: { detail } } }))
-      .toBe('The server could not complete this acknowledgment. Please refresh and try again.');
+      .toBe('This dose cannot be confirmed yet. Please refresh and try again.');
   });
 
   it('only suggests checking connectivity when a request got no response', () => {

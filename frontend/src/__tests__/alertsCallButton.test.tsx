@@ -325,7 +325,7 @@ describe('Alerts screen — Call button (component-level)', () => {
       await findByTestID(renderer.root, 'alert-ack-alert-001')?.props.onPress();
     });
     expect(RNAlert.alert).toHaveBeenCalledWith(
-      'Could not acknowledge', 'Medication escalation is currently in progress',
+      'Could not acknowledge', 'This dose cannot be confirmed yet. Please refresh and try again.',
     );
     expect(findByTestID(renderer.root, 'alert-ack-alert-001')).not.toBeNull();
     await act(async () => { renderer.unmount(); });

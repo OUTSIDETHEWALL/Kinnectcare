@@ -25,6 +25,7 @@ def setup_occurrence(monkeypatch, *, state="sent", purpose=None):
         "occurrence_id": oid, "reminder_id": "r1", "member_id": "m1",
         "slot_time": "14:00", "local_date": "2026-09-12",
         "acknowledged": False, "family_claimed": True, "family_state": state,
+        "family_send_completed": state == "sent",
         "family_claim_token": "durable-token", "family_claimed_at": sent_at,
         "escalation_sent_at": sent_at,
     })
