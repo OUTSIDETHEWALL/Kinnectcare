@@ -21,6 +21,19 @@ async function flushPromises(): Promise<void> {
   }
 }
 
+jest.mock('../androidTrackingRecovery', () => ({
+  BACKGROUND_PERMISSION_RATIONALE: {},
+  authorizeTrackingIntent: jest.fn(), revokeTrackingIntent: jest.fn(),
+  trackingIntentEpoch: () => 0,
+  recoverUnexpectedlyDisabledTracking: jest.fn(async (sdk, _current, authorized) => {
+    const state = await sdk.getState();
+    const member = state.url?.match(/\/members\/([^/]+)\/location/);
+    if (member) authorized?.({ memberId: member[1], baseUrl: state.url.split('/api/')[0],
+      token: state.authorization.accessToken, isCurrent: async () => true });
+    return 'already_enabled';
+  }),
+}));
+
 describe('Task 108 — headless charging recovery', () => {
   beforeEach(() => {
     jest.useFakeTimers();

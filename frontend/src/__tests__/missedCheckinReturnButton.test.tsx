@@ -430,6 +430,34 @@ describe('Android permission gates and tracking lifecycle at the real navigation
     });
   }
 
+  it('ordinary root/activity destruction does not stop native location tracking', async () => {
+    const renderer = await mount();
+    expect(engine.start).toHaveBeenCalled();
+    engine.stop.mockClear();
+    await act(async () => { renderer.unmount(); });
+    expect(engine.stop).not.toHaveBeenCalled();
+  });
+
+  it('confirmed sign-out still stops native tracking', async () => {
+    const renderer = await mount();
+    engine.stop.mockClear();
+    mockAuthUser = null;
+    mockAuthLoading = false;
+    await act(async () => { renderer.update(<RootLayout />); });
+    await settle();
+    expect(engine.stop).toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('does not interpret initial authentication restoration as sign-out', async () => {
+    mockAuthUser = null;
+    mockAuthLoading = true;
+    engine.stop.mockClear();
+    const renderer = await mount();
+    expect(engine.stop).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
   it.each(['clean install', 'restored app data', 'invited/new member', 'returning/rejoining member'])(
     'holds automatic tracking/push for %s until setup is handled', async () => {
       permissions.isPermissionsHandled.mockResolvedValue(false);

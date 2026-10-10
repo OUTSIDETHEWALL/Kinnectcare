@@ -4,6 +4,17 @@ async function flushPromises(): Promise<void> {
   for (let i = 0; i < 30; i++) await Promise.resolve();
 }
 
+jest.mock('../androidTrackingRecovery', () => ({
+  BACKGROUND_PERMISSION_RATIONALE: {},
+  authorizeTrackingIntent: jest.fn(), revokeTrackingIntent: jest.fn(),
+  trackingIntentEpoch: () => 0,
+  recoverUnexpectedlyDisabledTracking: jest.fn(async (_sdk, _current, authorized) => {
+    authorized?.({ memberId: 'member-1', baseUrl: 'https://api.example',
+      token: 'verified-test-session', isCurrent: async () => true });
+    return 'already_enabled';
+  }),
+}));
+
 describe('headless activity wake recovery', () => {
   afterEach(() => {
     jest.resetModules();
@@ -53,6 +64,7 @@ describe('headless activity wake recovery', () => {
       jest.mock('react-native-background-geolocation', () => ({
         default: {
           registerHeadlessTask: jest.fn((task) => { headlessTask = task; }),
+          getState: jest.fn(async () => ({ enabled: true })),
           getCurrentPosition: mockGetCurrentPosition,
         },
       }));

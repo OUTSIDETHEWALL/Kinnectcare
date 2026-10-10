@@ -1,5 +1,22 @@
 const ENGINE_LOG_KEY = '@kinnship/location_engine_log_v1';
 const BATTERY_LOG_KEY = '@kinnship/battery_task_log_v1';
+// These tests isolate transport/cadence after recovery authorization.
+// Real ownership, cold boot and independent-wake guards are covered separately.
+jest.mock('../androidTrackingRecovery', () => ({
+  BACKGROUND_PERMISSION_RATIONALE: {},
+  authorizeTrackingIntent: jest.fn(),
+  revokeTrackingIntent: jest.fn(),
+  trackingIntentEpoch: () => 0,
+  recoverUnexpectedlyDisabledTracking: jest.fn(async (sdk, _current, onAuthorized) => {
+    const state = await sdk.getState();
+    const member = state.url?.match(/\/members\/([^/]+)\/location/);
+    if (member && state.authorization?.accessToken) onAuthorized?.({
+      memberId: member[1], baseUrl: state.url.split('/api/')[0],
+      token: state.authorization.accessToken, isCurrent: async () => true,
+    });
+    return 'already_enabled';
+  }),
+}));
 
 function storageMock() {
   const data = new Map<string, string>();
@@ -165,7 +182,7 @@ describe('minimum device-presence freshness', () => {
     expect(mockFinish).toHaveBeenCalledWith('presence-refresh');
   });
 
-  it('still requests a persisted stationary position when battery auth state is missing', async () => {
+  it('does not acquire persisted GPS without an authorized session receipt', async () => {
     let mockConfiguredHandler: ((taskId: string) => Promise<void>) | undefined;
     const mockStorage = storageMock();
     const mockFinish = jest.fn();
@@ -211,10 +228,7 @@ describe('minimum device-presence freshness', () => {
     await Promise.resolve();
     await mockConfiguredHandler!('stationary-refresh');
 
-    expect(mockGetCurrentPosition).toHaveBeenCalledWith(expect.objectContaining({
-      persist: true,
-      extras: { source: 'workmanager-stationary-refresh' },
-    }));
+    expect(mockGetCurrentPosition).not.toHaveBeenCalled();
     const log = JSON.parse(mockStorage.data.get(BATTERY_LOG_KEY) ?? '[]');
     expect(log).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -222,8 +236,8 @@ describe('minimum device-presence freshness', () => {
         detail: expect.objectContaining({ reason: 'missing_member_id_or_jwt' }),
       }),
       expect.objectContaining({
-        event: 'background_location_persisted',
-        detail: expect.objectContaining({ accuracy: 19, persisted: true }),
+        event: 'background_location_skipped',
+        detail: expect.objectContaining({ reason: 'obsolete_execution_or_owner' }),
       }),
     ]));
     expect(mockFinish).toHaveBeenCalledTimes(1);
@@ -339,16 +353,18 @@ describe('minimum device-presence freshness', () => {
 
     await Promise.resolve();
     const firstExecution = mockConfiguredHandler!('reused-task-id');
-    for (let i = 0; i < 5 && !mockGetCurrentPosition.mock.calls.length; i += 1) {
+    for (let i = 0; i < 200 && !mockGetCurrentPosition.mock.calls.length; i += 1) {
       await Promise.resolve();
     }
+    expect(mockGetCurrentPosition).toHaveBeenCalledTimes(1);
     await mockTimeoutHandler!('reused-task-id');
     expect(mockFinish).toHaveBeenCalledTimes(1);
 
     const secondExecution = mockConfiguredHandler!('reused-task-id');
-    for (let i = 0; i < 5 && mockGetCurrentPosition.mock.calls.length < 2; i += 1) {
+    for (let i = 0; i < 200 && mockGetCurrentPosition.mock.calls.length < 2; i += 1) {
       await Promise.resolve();
     }
+    expect(mockGetCurrentPosition).toHaveBeenCalledTimes(2);
 
     locationResolvers[0]({
       timestamp: '2026-09-14T19:14:13.000Z',

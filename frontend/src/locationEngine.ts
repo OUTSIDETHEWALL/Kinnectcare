@@ -65,20 +65,18 @@ import { Platform, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
-import { BACKGROUND_LOCATION_DISCLOSURE_TEXT } from './backgroundLocationDisclosure';
 import { readPermissionSnapshot, serializePermissionOperation } from './permissionCoordinator';
+import {
+  authorizeTrackingIntent, revokeTrackingIntent, trackingIntentEpoch,
+  recoverUnexpectedlyDisabledTracking,
+  BACKGROUND_PERMISSION_RATIONALE,
+} from './androidTrackingRecovery';
+import type { AuthorizedBatteryTransport } from './androidTrackingRecovery';
 import {
   LOCATION_UPLOAD_SUCCESS_KEY,
   getLocationUploadSuccessTs,
   recordLocationUploadSuccess,
 } from './locationUploadSuccess';
-
-const BACKGROUND_PERMISSION_RATIONALE = {
-  title: 'Location sharing in the background',
-  message: BACKGROUND_LOCATION_DISCLOSURE_TEXT,
-  positiveAction: 'Change to {backgroundPermissionOptionLabel}',
-  negativeAction: 'Not now',
-};
 
 // Lazy require so this module is safe to import on web (where the
 // native module is absent).
@@ -277,7 +275,9 @@ let headlessRegistered = false;
  * PATCH outside getCurrentPosition means presence freshness is not coupled to
  * GPS availability, timeout, or permission state.
  */
-async function patchHeadlessHeartbeatPresence(lib: any, event: any): Promise<boolean> {
+async function patchHeadlessHeartbeatPresence(
+  lib: any, event: any, transport?: AuthorizedBatteryTransport,
+): Promise<boolean> {
   const heartbeatLocation = event?.params?.location ?? event?.location;
   const battLevel: number | undefined = heartbeatLocation?.battery?.level;
   const battChargingRaw = heartbeatLocation?.battery?.is_charging;
@@ -300,12 +300,15 @@ async function patchHeadlessHeartbeatPresence(lib: any, event: any): Promise<boo
 
   try {
     const sdkState = await lib.getState();
-    const locationUrl: string = sdkState?.url ?? '';
-    const jwt: string = sdkState?.authorization?.accessToken ?? '';
+    const locationUrl: string = Platform.OS === 'android'
+      ? transport ? `${transport.baseUrl}/api/members/${transport.memberId}/location` : ''
+      : sdkState?.url ?? '';
+    const jwt: string = Platform.OS === 'android' ? transport?.token ?? ''
+      : sdkState?.authorization?.accessToken ?? '';
     const memberMatch = locationUrl.match(/\/members\/([^/]+)\/location/);
     const memberId = memberMatch?.[1] ?? '';
     const baseUrl = locationUrl.split('/api/members/')[0] ?? '';
-    if (!memberId || !jwt || !baseUrl) {
+    if (!memberId || !jwt || !baseUrl || (transport && !await transport.isCurrent())) {
       await logEvent('headless_battery_patch_skipped', {
         reason: 'missing_member_id_or_jwt',
         hasMemberId: !!memberId,
@@ -363,6 +366,7 @@ function registerHeadlessTaskOnce(): void {
   const HeadlessTask = async (event: any) => {
     try {
       const name = event?.name;
+      let authorizedTransport: AuthorizedBatteryTransport | undefined;
       // ── Headless diagnostic entry ─────────────────────────────────
       // This is our only window into the SDK running while the main JS
       // runtime is frozen (post-kill, post-boot, background heartbeat).
@@ -379,16 +383,27 @@ function registerHeadlessTaskOnce(): void {
       recordPipelineTs('headless_invoked');
       await logEvent('headless_task_invoked', { eventName: name ?? 'unknown' });
 
+      if (Platform.OS === 'android' && ['terminate', 'boot', 'heartbeat', 'motionchange', 'activitychange'].includes(name)) {
+        const recovery = await recoverFromIndependentWake(
+          `sdk-${name}`, () => true, transport => { authorizedTransport = transport; },
+        );
+        // A denied/revoked owner must not obtain and upload GPS through the
+        // old heartbeat/motion handler merely because a native event arrived.
+        if (!['already_enabled', 'restarted'].includes(recovery)
+          || (await lib.getState()).enabled !== true) return;
+      }
+
       if (name === 'heartbeat') {
         // Presence-first: the heartbeat already carries a last-known location
         // with a native battery snapshot. PATCH it before any GPS work so a
         // slow or failed getCurrentPosition cannot suppress device presence.
-        const presencePatched = await patchHeadlessHeartbeatPresence(lib, event);
+        const presencePatched = await patchHeadlessHeartbeatPresence(lib, event, authorizedTransport);
 
         // Force a fresh GPS fix; SDK persists and uploads via native
         // HTTP transport.  No-op if permission was revoked at the OS
         // level since we last started.
         try {
+          if (Platform.OS === 'android' && (!authorizedTransport || !await authorizedTransport.isCurrent())) return;
           const pos = await lib.getCurrentPosition({
             samples: 1,
             persist: true,
@@ -404,7 +419,7 @@ function registerHeadlessTaskOnce(): void {
           if (!presencePatched) {
             await patchHeadlessHeartbeatPresence(lib, {
               params: { location: pos },
-            });
+            }, authorizedTransport);
           }
         } catch (e: any) {
           await logEvent('headless_heartbeat_error', {
@@ -431,14 +446,8 @@ function registerHeadlessTaskOnce(): void {
         // with a fresh JWT, setConfig() applies the new token on top.
         try {
           const st = await lib.getState();
-          if (st?.enabled === false) {
+          if (Platform.OS !== 'android' && st?.enabled === false) {
             await logEvent('headless_engine_disabled_restart_attempted');
-            if (Platform.OS === 'android') {
-              // JS-controlled headless recovery must also override old native
-              // rationale text before start. This does not request permission
-              // or change locationAuthorizationRequest.
-              await lib.setConfig({ backgroundPermissionRationale: BACKGROUND_PERMISSION_RATIONALE });
-            }
             await lib.start();
             await logEvent('headless_engine_disabled_restart_ok');
           }
@@ -603,6 +612,7 @@ function registerHeadlessTaskOnce(): void {
             });
             try {
               await logEvent('getCurrentPosition_start', { source: 'headless' });
+              if (Platform.OS === 'android' && (!authorizedTransport || !await authorizedTransport.isCurrent())) return;
               const loc = await lib.getCurrentPosition({
                 samples: 1, persist: true, timeout: 30,
                 extras: { source: 'headless-motionchange' },
@@ -756,6 +766,8 @@ export async function clearEngineLog(): Promise<void> {
 }
 
 export type LocationEngineConfig = {
+  /** Authenticated owner, persisted only for authorized Android recovery. */
+  ownerUserId?: string;
   /** Caller's backend base URL (e.g. https://kinnship.up.railway.app). */
   backendBaseUrl: string;
   /** Member ID whose location this device uploads. */
@@ -1016,7 +1028,8 @@ async function pushDeviceSnapshotToBackend(
     // SDK state
     sdk_enabled:         sdkSt?.enabled      ?? null,
     sdk_is_moving:       sdkSt?.isMoving     ?? null,
-    sdk_tracking_mode:   sdkSt?.trackingMode ?? null,
+    // The native enum is numeric; the deployed backend contract is string.
+    sdk_tracking_mode:   sdkSt?.trackingMode == null ? null : String(sdkSt.trackingMode),
     // Per-stage pipeline ages (ms since last callback; null = never fired)
     activity_age_ms:     pts.activity           !== null ? now - pts.activity           : null,
     motion_age_ms:       pts.motion             !== null ? now - pts.motion             : null,
@@ -1490,6 +1503,7 @@ export function start(cfg: LocationEngineConfig): Promise<LocationStartupOutcome
 }
 
 async function startConfiguredEngine(cfg: LocationEngineConfig, generation: number): Promise<LocationStartupOutcome> {
+  const intentEpoch = trackingIntentEpoch();
   const ownsStart = () => Platform.OS !== 'android' || (
     generation === engineGeneration
     && (!cfg.isCurrent || cfg.isCurrent())
@@ -1523,6 +1537,27 @@ async function startConfiguredEngine(cfg: LocationEngineConfig, generation: numb
   let outcome: LocationStartupOutcome = 'background-ready';
   if (Platform.OS === 'android') {
     try {
+      // A local flag can be stale after restored storage or a failed write.
+      // Foreground startup already requires an authenticated member fetch;
+      // additionally honor the owner's authoritative sharing preference.
+      if (cfg.ownerUserId) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { api } = require('./api') as typeof import('./api');
+        const preference = await api.get('/me/preferences');
+        if (await stopIfObsolete()) return 'failed';
+        if (preference.data?.location_sharing_enabled !== true) {
+          await revokeTrackingIntent();
+          await lib.stop();
+          await logEvent('startup_outcome', { outcome: 'failed', reason: 'sharing_disabled' });
+          return 'failed';
+        }
+      }
+      if (await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1') {
+        await revokeTrackingIntent();
+        await lib.stop();
+        await logEvent('startup_outcome', { outcome: 'failed', reason: 'sharing_disabled' });
+        return 'failed';
+      }
       const permissions = await readPermissionSnapshot();
       if (permissions.foreground !== 'granted') {
         await lib.stop();
@@ -1699,6 +1734,12 @@ async function startConfiguredEngine(cfg: LocationEngineConfig, generation: numb
     await logEvent('startup_outcome', { outcome });
     if (await stopIfObsolete()) return 'failed';
     if (Platform.OS === 'android' && outcome !== 'denied') {
+      if (outcome === 'background-ready') {
+        await authorizeTrackingIntent(cfg, intentEpoch, ownsStart);
+      } else {
+        await revokeTrackingIntent();
+      }
+      if (await stopIfObsolete()) return 'failed';
       // Recovery owns the session, not the cancellable reconciliation effect.
       cachedConfig = { ...cfg, isCurrent: cfg.isOwnerCurrent ?? cfg.isCurrent };
       attachBatteryListeners();
@@ -1725,7 +1766,37 @@ export function stop(): Promise<void> {
   // callback or a permission disclosure is keeping the permission queue busy.
   engineGeneration += 1;
   cachedConfig = null;
-  return serializeEngineOperation(stopConfiguredEngine);
+  const revocation = revokeTrackingIntent();
+  return serializeEngineOperation(async () => {
+    // Still stop native tracking when durable storage cannot be written.
+    try { await revocation; } finally { await stopConfiguredEngine(); }
+  });
+}
+
+/** WorkManager and native boot/termination share the foreground lifecycle lock. */
+export function recoverFromIndependentWake(
+  trigger: string,
+  isCurrent: () => boolean = () => true,
+  onAuthorizedBattery?: (transport: AuthorizedBatteryTransport) => void,
+): Promise<string> {
+  if (Platform.OS !== 'android') return Promise.resolve('not_android');
+  const generation = engineGeneration;
+  return serializePermissionOperation(() => serializeEngineOperation(async () => {
+    const lib = bgGeo();
+    if (!lib) return 'native_unavailable';
+    try {
+      const result = await recoverUnexpectedlyDisabledTracking(
+        lib, () => generation === engineGeneration && isCurrent(), onAuthorizedBattery,
+      );
+      await logEvent('independent_tracking_recovery', { trigger, result });
+      return result;
+    } catch (error: unknown) {
+      await logEvent('independent_tracking_recovery', {
+        trigger, result: 'failed', error: String(error instanceof Error ? error.message : error),
+      });
+      return 'failed';
+    }
+  }));
 }
 
 async function stopConfiguredEngine(): Promise<void> {

@@ -1122,19 +1122,31 @@ function RootNav() {
   //  switching to a different user.id).  Idempotent re-runs are no-ops.
   const engineBootedForUserIdRef = useRef<string | null>(null);
   const [startupRevision, setStartupRevision] = useState(0);
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { subscribeToTrackingPolicy } = require('../src/androidTrackingRecovery') as typeof import('../src/androidTrackingRecovery');
+    return subscribeToTrackingPolicy(() => setStartupRevision(value => value + 1));
+  }, []);
   const engineSessionRef = useRef({ userId: user?.id });
   if (engineSessionRef.current.userId !== user?.id) {
     engineSessionRef.current = { userId: user?.id };
   }
   const androidStartupRevision = Platform.OS === 'android' ? startupRevision : 0;
+  const lastTrackingUserIdRef = useRef(user?.id);
   useEffect(() => {
     if (Platform.OS !== 'android') return;
-    return () => {
+    // UI teardown is not sign-out. Stop only when an authenticated session is
+    // actually replaced; a destroyed React surface must leave native tracking.
+    if (loading && !user?.id) return;
+    const previous = lastTrackingUserIdRef.current;
+    lastTrackingUserIdRef.current = user?.id;
+    if (previous && user?.id && previous !== user.id) {
       engineBootedForUserIdRef.current = null;
-      try { leonidas.stop(); } catch (_e) {}
+      try { leonidas.stop(); } catch {}
       void locationEngine.stop();
-    };
-  }, [user?.id]);
+    }
+  }, [user?.id, loading]);
   // Observe linkage for the whole session, including after the initial 90 s
   // wait expires. Settings/resume only READ permissions; never display UI.
   useEffect(() => {
@@ -1203,7 +1215,8 @@ function RootNav() {
 
     (async () => {
       if (!user?.id) {
-        // Genuine sign-out — tear everything down.
+        // Initial auth restoration is not a genuine sign-out.
+        if (Platform.OS === 'android' && loading) return;
         if (Platform.OS === 'android' || engineBootedForUserIdRef.current !== null) {
           try { leonidas.stop(); } catch (_e) {}
           await locationEngine.stop();
@@ -1298,6 +1311,7 @@ function RootNav() {
           memberId: me.id,
           jwt,
           ...(Platform.OS === 'android' ? {
+            ownerUserId: user.id,
             isCurrent: () => !cancelled && engineSessionRef.current === session
               && memberStore.getMyMember(user.id)?.id === me.id,
             isOwnerCurrent: () => engineSessionRef.current === session
@@ -1352,7 +1366,7 @@ function RootNav() {
       // noise we're eliminating in this build.  Real teardown happens
       // in the `!user?.id` branch above when sign-out is genuine.
     };
-  }, [user?.id, androidStartupBlocked, androidStartupRevision]);
+  }, [user?.id, loading, androidStartupBlocked, androidStartupRevision]);
 
   useEffect(() => {
     if (loading || !initialLinkChecked || !onboardingChecked || !appLockChecked || !disclaimerChecked

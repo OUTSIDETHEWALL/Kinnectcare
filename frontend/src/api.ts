@@ -89,9 +89,25 @@ export async function migrateTokenForBackgroundActions(): Promise<void> {
   });
 }
 export async function clearToken() {
-  if (Platform.OS === 'web') await AsyncStorage.removeItem(TOKEN_KEY);
-  else await SecureStore.deleteItemAsync(TOKEN_KEY);
-  notifyTokenChange(null);
+  try {
+    if (Platform.OS === 'android') {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { revokeTrackingIntent } = require('./androidTrackingRecovery') as typeof import('./androidTrackingRecovery');
+      await revokeTrackingIntent();
+    }
+  } finally {
+    try {
+      if (Platform.OS === 'web') await AsyncStorage.removeItem(TOKEN_KEY);
+      else await SecureStore.deleteItemAsync(TOKEN_KEY);
+    } finally {
+      notifyTokenChange(null);
+      if (Platform.OS === 'android') {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const engine = require('./locationEngine') as typeof import('./locationEngine');
+        await engine.stop();
+      }
+    }
+  }
 }
 
 export const api = axios.create({

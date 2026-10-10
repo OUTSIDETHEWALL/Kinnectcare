@@ -24,6 +24,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
+import type { AuthorizedBatteryTransport } from './androidTrackingRecovery';
 
 type BackgroundFetchModule = typeof import('react-native-background-fetch').default;
 
@@ -226,7 +227,18 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
   }
 
   let sdkState: Awaited<ReturnType<BackgroundGeolocationModule['getState']>> | null = null;
+  let recoveryAuthorized = Platform.OS !== 'android';
+  let authorizedTransport: AuthorizedBatteryTransport | null = null;
   try {
+    if (Platform.OS === 'android') {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { recoverFromIndependentWake } = require('./locationEngine') as typeof import('./locationEngine');
+      const result = await recoverFromIndependentWake(
+        'workmanager', () => isActiveExecution(execution),
+        transport => { authorizedTransport = transport; },
+      );
+      recoveryAuthorized = result === 'already_enabled' || result === 'restarted';
+    }
     sdkState = await BGL.getState();
   } catch (e: unknown) {
     const err = e instanceof Error ? e.message : String(e);
@@ -247,17 +259,25 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
   // read-modify-write and must remain serialized to avoid losing either result.
   const stationaryLocationRefresh: Promise<LocationOutcome | null> = Platform.OS !== 'android'
     ? Promise.resolve(null)
-    : sdkState?.enabled !== true
+    : sdkState?.enabled !== true || !recoveryAuthorized
       ? Promise.resolve({
           event: 'background_location_skipped',
           detail: {
             taskId,
             generation: execution.generation,
-            reason: sdkState ? 'tracking_disabled' : 'state_unavailable',
+            reason: !sdkState ? 'state_unavailable'
+              : sdkState.enabled !== true ? 'tracking_disabled' : 'recovery_not_authorized',
           },
         })
       : (async () => {
           try {
+             const transport = authorizedTransport as AuthorizedBatteryTransport | null;
+             if (!isActiveExecution(execution) || !transport || !await transport.isCurrent()) {
+               return {
+                 event: 'background_location_skipped' as const,
+                 detail: { taskId, generation: execution.generation, reason: 'obsolete_execution_or_owner' },
+               };
+             }
             const position = await BGL.getCurrentPosition({
               samples: 1,
               persist: true,
@@ -312,13 +332,20 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
 
       // Step 2 — Obtain member ID, JWT, and API base URL from the Transistor
       // SDK's persisted SQLite state. No shared main-runtime memory is needed.
-      const locationUrl: string = sdkState?.url ?? '';
-      const jwt: string = sdkState?.authorization?.accessToken ?? '';
+      // Android writes use current secure-session proof, not native cached JWT.
+      const transport = authorizedTransport as AuthorizedBatteryTransport | null;
+      const locationUrl: string = Platform.OS === 'android'
+        ? transport ? `${transport.baseUrl}/api/members/${transport.memberId}/location` : ''
+        : sdkState?.url ?? '';
+      const jwt: string = Platform.OS === 'android' ? transport?.token ?? ''
+        : sdkState?.authorization?.accessToken ?? '';
       const memberMatch = locationUrl.match(/\/members\/([^/]+)\/location/);
       const memberId = memberMatch?.[1] ?? '';
       const baseUrl = locationUrl.split('/api/members/')[0] ?? '';
 
-      if (!memberId || !jwt || !baseUrl) {
+      if (!memberId || !jwt || !baseUrl
+        || !isActiveExecution(execution)
+        || (transport && !await transport.isCurrent())) {
         await appendExecutionLog(execution, 'background_battery_skipped', {
           reason: 'missing_member_id_or_jwt',
           hasMemberId: !!memberId,

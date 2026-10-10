@@ -50,6 +50,20 @@ describe('Task 107 — caregiver battery row during a long stationary period', (
   });
 });
 
+jest.mock('../androidTrackingRecovery', () => ({
+  BACKGROUND_PERMISSION_RATIONALE: {},
+  authorizeTrackingIntent: jest.fn(),
+  revokeTrackingIntent: jest.fn(),
+  trackingIntentEpoch: () => 0,
+  recoverUnexpectedlyDisabledTracking: jest.fn(async (sdk, _current, authorized) => {
+    const state = await sdk.getState();
+    const member = state.url?.match(/\/members\/([^/]+)\/location/);
+    if (member) authorized?.({ memberId: member[1], baseUrl: state.url.split('/api/')[0],
+      token: state.authorization.accessToken, isCurrent: async () => true });
+    return 'already_enabled';
+  }),
+}));
+
 describe('Task 107 — headless heartbeat battery path', () => {
   afterEach(() => {
     jest.resetModules();
@@ -112,6 +126,9 @@ describe('Task 107 — headless heartbeat battery path', () => {
 
     expect(headlessTask).toBeDefined();
     await headlessTask!({ name: 'heartbeat' });
+    expect(JSON.parse(storage.get('@kinnship/location_engine_log_v1') ?? '[]').filter((entry: any) =>
+      entry.event === 'independent_tracking_recovery').map((entry: any) => entry.detail))
+      .toEqual([expect.objectContaining({ result: 'already_enabled' })]);
 
     expect(fetchMock).toHaveBeenCalledWith(
       'https://api.example.com/api/members/member-001/battery',
