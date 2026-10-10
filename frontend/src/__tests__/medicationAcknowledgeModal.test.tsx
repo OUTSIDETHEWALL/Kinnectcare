@@ -1,5 +1,6 @@
 import React from 'react';
 import { act, create } from 'react-test-renderer';
+import { acknowledgeMedicationOccurrence } from '../medicationAcknowledgment';
 
 const mockAlert = jest.fn();
 const mockPost = jest.fn();
@@ -71,6 +72,7 @@ describe('family medication acknowledgment modal', () => {
     mockAlert.mockReset();
     mockPost.mockReset().mockResolvedValue({ status: 200 });
     mockDismiss.mockReset().mockResolvedValue(undefined);
+    jest.mocked(acknowledgeMedicationOccurrence).mockReset().mockResolvedValue(true);
   });
 
   it('does not false-success or dismiss when alert_id is absent', async () => {
@@ -99,5 +101,23 @@ describe('family medication acknowledgment modal', () => {
     expect(mockPost).toHaveBeenCalledWith('/alerts/alert-1/ack');
     expect(mockDismiss).toHaveBeenCalledWith('notification-1');
     expect(findByTestID(renderer.root, 'notif-acknowledge')).toBeNull();
+  });
+
+  it('shows the recipient server conflict without dismissing or reporting success', async () => {
+    mockParams = { type: 'medication', reminder_id: 'reminder-1', stage: 'due' };
+    jest.mocked(acknowledgeMedicationOccurrence).mockRejectedValueOnce({
+      response: { status: 409, data: { detail: 'Medication occurrence was already marked missed' } },
+    });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<NotificationActionScreen />); });
+    await act(async () => {
+      await findByTestID(renderer.root, 'notif-acknowledge')?.props.onPress();
+    });
+    expect(mockAlert).toHaveBeenCalledWith(
+      'Could not acknowledge', 'Medication occurrence was already marked missed', [{ text: 'OK' }],
+    );
+    expect(mockDismiss).not.toHaveBeenCalled();
+    expect(findByTestID(renderer.root, 'notif-acknowledge')).not.toBeNull();
+    await act(async () => { renderer.unmount(); });
   });
 });

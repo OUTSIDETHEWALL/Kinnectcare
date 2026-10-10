@@ -405,7 +405,7 @@ def test_alert_acknowledgment_conflict_does_not_hide_due_alert(monkeypatch):
             "occurrence_id": occurrence_id, "reminder_id": "r1",
             "member_id": "m1", "slot_time": "14:00",
             "local_date": "2026-09-12", "acknowledged": False,
-            "family_claimed": True, "family_state": "sent",
+            "family_claimed": True, "family_state": "sending",
         })
         db.alerts.rows.append({
             "id": "due-alert", "family_group_id": "g1", "member_id": "m1",
@@ -708,17 +708,18 @@ def test_attempted_push_crash_finalizes_permanently_past_horizon(monkeypatch):
 
         monkeypatch.setattr(server, "db", db)
         monkeypatch.setattr(server, "_med_scheduler_ready", True)
-        with pytest.raises(HTTPException) as blocked:
-            await server.mark_reminder(
-                "r1",
-                server.ReminderMark(
-                    status="taken", slot_time="14:00",
-                    local_date="2026-09-12", occurrence_id=occurrence_id,
-                ),
-                {"id": "senior", "family_group_id": "g1", "timezone": "UTC"},
-            )
-        assert blocked.value.status_code == 409
-        assert db.medication_logs.rows == []
+        result = await server.mark_reminder(
+            "r1",
+            server.ReminderMark(
+                status="taken", slot_time="14:00",
+                local_date="2026-09-12", occurrence_id=occurrence_id,
+            ),
+            {"id": "senior", "family_group_id": "g1", "timezone": "UTC"},
+        )
+        assert result == {"ok": True, "status": "taken"}
+        assert len(db.medication_logs.rows) == 1
+        assert db.medication_occurrences.rows[0]["family_claimed"] is True
+        assert db.medication_occurrences.rows[0]["family_state"] == "sent"
 
     asyncio.run(scenario())
 
@@ -815,7 +816,7 @@ def test_startup_resets_readiness_and_does_not_start_without_indexes(monkeypatch
     asyncio.run(scenario())
 
 
-def test_acknowledgment_is_blocked_after_family_claim_finalization(monkeypatch):
+def test_acknowledgment_is_allowed_after_family_claim_finalization(monkeypatch):
     async def scenario():
         db = DB()
         occurrence_id = _occurrence()
@@ -834,20 +835,21 @@ def test_acknowledgment_is_blocked_after_family_claim_finalization(monkeypatch):
         })
         monkeypatch.setattr(server, "db", db)
         monkeypatch.setattr(server, "_med_scheduler_ready", True)
-        with pytest.raises(HTTPException) as blocked:
-            await server.mark_reminder(
-                "r1",
-                server.ReminderMark(
-                    status="taken", slot_time="14:00",
-                    local_date="2026-09-12", occurrence_id=occurrence_id,
-                ),
-                {"id": "senior", "family_group_id": "g1", "timezone": "UTC"},
-            )
-        assert blocked.value.status_code == 409
-        assert not db.medication_logs.rows
+        result = await server.mark_reminder(
+            "r1",
+            server.ReminderMark(
+                status="taken", slot_time="14:00",
+                local_date="2026-09-12", occurrence_id=occurrence_id,
+            ),
+            {"id": "senior", "family_group_id": "g1", "timezone": "UTC"},
+        )
+        assert result == {"ok": True, "status": "taken"}
+        assert len(db.medication_logs.rows) == 1
         reminder = await db.reminders.find_one({"id": "r1"})
-        assert reminder["taken"] is False
-        assert reminder["status"] == "pending"
+        assert reminder["taken"] is True
+        assert reminder["status"] == "taken"
+        assert db.medication_occurrences.rows[0]["family_claimed"] is True
+        assert db.medication_occurrences.rows[0]["family_state"] == "sent"
 
     asyncio.run(scenario())
 

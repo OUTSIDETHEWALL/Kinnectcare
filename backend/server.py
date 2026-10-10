@@ -4574,7 +4574,9 @@ async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> s
 
     Mongo's conditional update is the occurrence-level mutex shared with the
     scheduler.  ``duplicate`` means a retry of an already persisted mark;
-    ``blocked`` means the scheduler is currently sending the T+15 escalation.
+    ``blocked`` means escalation or a terminal manual miss still owns the
+    occurrence. A completed scheduler escalation is history, not a permanent
+    prohibition on the recipient subsequently taking the dose.
     """
     collection = getattr(db, "medication_occurrences", None)
     if collection is None:
@@ -4606,7 +4608,18 @@ async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> s
     result = await collection.update_one(
         {
             "occurrence_id": oid,
-            "family_claimed": {"$ne": True},
+            "acknowledged": {"$ne": True},
+            "$or": [
+                {"family_claimed": {"$ne": True}},
+                {
+                    "family_claimed": True,
+                    "family_state": "sent",
+                    # Manual misses use this same mutex. Excluding their
+                    # ownership closes the gap before their terminal log is
+                    # written, including a miss racing with this late mark.
+                    "family_purpose": {"$exists": False},
+                },
+            ],
         },
         {"$set": {"acknowledged": True, "acknowledged_at": now}},
     )
@@ -4614,10 +4627,10 @@ async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> s
         return "claimed"
 
     state = await collection.find_one({"occurrence_id": oid}, {"_id": 0})
-    if state and state.get("family_claimed"):
-        return "blocked"
     if state and state.get("acknowledged"):
         return "duplicate"
+    if state and state.get("family_claimed"):
+        return "blocked"
     # A concurrent update may have won between our conditional update and
     # read.  Treat that as a retry rather than creating a second mark.
     return "blocked"

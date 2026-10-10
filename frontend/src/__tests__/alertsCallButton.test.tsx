@@ -118,7 +118,7 @@ jest.mock('../api', () => ({
 
 import React from 'react';
 import { create, act } from 'react-test-renderer';
-import { Linking } from 'react-native';
+import { Linking, Alert as RNAlert } from 'react-native';
 
 // This is the REAL production component, not a copy or mirror.
 import Alerts from '../../app/(tabs)/alerts';
@@ -313,6 +313,22 @@ describe('Alerts screen — Call button (component-level)', () => {
     expect(Linking.openURL).toHaveBeenLastCalledWith('tel:+16025550199');
 
     expect(Linking.openURL).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a server conflict from medication acknowledgment instead of a connection warning', async () => {
+    const active = makeAlertDoc({ type: 'medication', severity: 'info' });
+    const renderer = await renderWithAlerts([active]);
+    mockApiPost.mockRejectedValueOnce({
+      response: { status: 409, data: { detail: 'Medication escalation is currently in progress' } },
+    });
+    await act(async () => {
+      await findByTestID(renderer.root, 'alert-ack-alert-001')?.props.onPress();
+    });
+    expect(RNAlert.alert).toHaveBeenCalledWith(
+      'Could not acknowledge', 'Medication escalation is currently in progress',
+    );
+    expect(findByTestID(renderer.root, 'alert-ack-alert-001')).not.toBeNull();
+    await act(async () => { renderer.unmount(); });
   });
 
   it('pressing a medication Acknowledge button posts the exact alert and refreshes after success', async () => {

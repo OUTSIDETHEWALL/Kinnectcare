@@ -28,6 +28,7 @@ jest.mock('expo-notifications', () => ({
 
 import {
   handleMedicationAction,
+  acknowledgeMedicationOccurrence,
   PENDING_MEDICATION_ACK_PREFIX,
 } from '../medicationAcknowledgment';
 
@@ -119,5 +120,38 @@ describe('medication notification acknowledgment reliability', () => {
     (family.notification.request.content.data as any).subtype = 'family_alert';
     await expect(handleMedicationAction(family)).resolves.toBe(false);
     expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the HTTP conflict to the foreground without consuming its durable action', async () => {
+    const conflict = { response: { status: 409, data: { detail: 'Escalation is in progress' } } };
+    mockPost.mockRejectedValueOnce(conflict).mockResolvedValueOnce({ status: 200 });
+    const data = response().notification.request.content.data;
+    await expect(acknowledgeMedicationOccurrence(data)).rejects.toBe(conflict);
+    expect(mockDismiss).not.toHaveBeenCalled();
+    expect(Array.from(mockStorage.keys()).filter(key =>
+      key.startsWith(PENDING_MEDICATION_ACK_PREFIX))).toHaveLength(1);
+    await expect(acknowledgeMedicationOccurrence(data)).resolves.toBe(true);
+    expect(mockPost).toHaveBeenCalledTimes(2);
+    expect(Array.from(mockStorage.keys()).filter(key =>
+      key.startsWith(PENDING_MEDICATION_ACK_PREFIX))).toHaveLength(0);
+  });
+
+  it('shares one in-flight request but preserves foreground errors and headless boolean results', async () => {
+    let reject!: (error: unknown) => void;
+    mockPost.mockImplementationOnce(() => new Promise((_resolve, rejectRequest) => {
+      reject = rejectRequest;
+    }));
+    const headless = handleMedicationAction(response());
+    // Allow storage preparation to reach the API call before the panel joins.
+    for (let i = 0; i < 20 && !reject; i++) await Promise.resolve();
+    const foreground = acknowledgeMedicationOccurrence(response().notification.request.content.data);
+    const conflict = { response: { status: 409 } };
+    const foregroundAssertion = expect(foreground).rejects.toBe(conflict);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    reject(conflict);
+    await expect(headless).resolves.toBe(false);
+    await foregroundAssertion;
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    expect(mockDismiss).not.toHaveBeenCalled();
   });
 });

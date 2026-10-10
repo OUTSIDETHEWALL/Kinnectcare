@@ -9,6 +9,7 @@ import * as Notifications from 'expo-notifications';
 import { Colors } from '../../src/theme';
 import { api } from '../../src/api';
 import { acknowledgeMedicationOccurrence } from '../../src/medicationAcknowledgment';
+import { acknowledgmentErrorMessage } from '../../src/acknowledgmentErrorMessage';
 
 /**
  * Full-screen acknowledge panel for elderly users.
@@ -100,7 +101,7 @@ export default function NotificationActionScreen() {
     } catch (e: any) {
       RNAlert.alert(
         'Could not acknowledge',
-        'Please try again. Your network may be offline.',
+        acknowledgmentErrorMessage(e),
         [{ text: 'OK' }],
       );
     } finally {

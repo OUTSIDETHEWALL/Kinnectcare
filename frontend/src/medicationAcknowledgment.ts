@@ -157,7 +157,8 @@ async function markCompleted(queueKey: string): Promise<void> {
   await AsyncStorage.setItem(storageKey(COMPLETED_MEDICATION_ACK_PREFIX, queueKey), '1');
 }
 
-const inFlight = new Map<string, Promise<boolean>>();
+type AcknowledgmentResult = { succeeded: true } | { succeeded: false; error: unknown };
+const inFlight = new Map<string, Promise<AcknowledgmentResult>>();
 
 async function dismissAcknowledgment(item: PendingAcknowledgment): Promise<void> {
   if (!item.notificationId) return;
@@ -168,16 +169,16 @@ async function dismissAcknowledgment(item: PendingAcknowledgment): Promise<void>
   }
 }
 
-async function processPending(item: PendingAcknowledgment): Promise<boolean> {
+async function processPending(item: PendingAcknowledgment): Promise<AcknowledgmentResult> {
   const current = inFlight.get(item.queue_key);
   if (current) return current;
 
-  const work = (async () => {
+  const work = (async (): Promise<AcknowledgmentResult> => {
     try {
       if (await isCompleted(item.queue_key)) {
         await removePending(item.queue_key);
         await dismissAcknowledgment(item);
-        return true;
+        return { succeeded: true };
       }
 
       const body = item.occurrence_id && item.member_id && item.slot_time && item.local_date
@@ -193,10 +194,10 @@ async function processPending(item: PendingAcknowledgment): Promise<boolean> {
       await markCompleted(item.queue_key);
       await removePending(item.queue_key);
       await dismissAcknowledgment(item);
-      return true;
-    } catch (_e) {
+      return { succeeded: true };
+    } catch (error) {
       // Keep the per-action record durable and do not consume the response.
-      return false;
+      return { succeeded: false, error };
     } finally {
       inFlight.delete(item.queue_key);
     }
@@ -209,7 +210,10 @@ async function processPending(item: PendingAcknowledgment): Promise<boolean> {
  * Returns true only after backend confirmation. Callers may consume/dismiss
  * the native action only when this resolves true.
  */
-export async function handleMedicationAction(input: any): Promise<boolean> {
+export async function handleMedicationAction(
+  input: any,
+  options: { throwOnError?: boolean } = {},
+): Promise<boolean> {
   const item = acknowledgmentFromResponse(input);
   if (!item) return false;
   if (await isCompleted(item.queue_key)) {
@@ -217,7 +221,12 @@ export async function handleMedicationAction(input: any): Promise<boolean> {
     return true;
   }
   await enqueuePending(item);
-  return processPending(item);
+  const result = await processPending(item);
+  // Native/headless callers retain their boolean contract. The interactive
+  // panel needs the actual HTTP error, including when joining headless work,
+  // rather than misreporting every rejected action as an offline phone.
+  if (!result.succeeded && options.throwOnError) throw result.error;
+  return result.succeeded;
 }
 
 /** Used by the foreground acknowledge panel, preserving the same retry path. */
@@ -231,7 +240,7 @@ export async function acknowledgeMedicationOccurrence(data: Record<string, any>)
       },
     },
   };
-  return handleMedicationAction(response);
+  return handleMedicationAction(response, { throwOnError: true });
 }
 
 /** Replay every durable action after authenticated startup. */

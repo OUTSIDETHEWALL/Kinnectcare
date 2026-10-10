@@ -5,6 +5,7 @@ import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
 import { api, Alert } from '../../src/api';
+import { acknowledgmentErrorMessage } from '../../src/acknowledgmentErrorMessage';
 import { formatRelativeLocal } from '../../src/timeFormat';
 import MemberMap from '../../src/MemberMap';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -129,8 +130,8 @@ export default function Alerts() {
     try {
       await api.post(`/alerts/${id}/ack`);
       load();
-    } catch (_e) {
-      RNAlert.alert('Could not acknowledge', 'Please check your connection and try again.');
+    } catch (error) {
+      RNAlert.alert('Could not acknowledge', acknowledgmentErrorMessage(error));
     }
   };
 
