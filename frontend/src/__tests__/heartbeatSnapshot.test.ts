@@ -120,7 +120,7 @@ describe('onHeartbeat → pushDeviceSnapshotToBackend (Task #56)', () => {
           }),
         },
       }));
-      jest.mock('../api', () => ({ api: { put: mockPut } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'fake-jwt-token'), api: { put: mockPut } }));
       jest.mock('expo-battery', () => ({
         addBatteryStateListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
         addBatteryLevelListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
@@ -207,7 +207,7 @@ describe('onHeartbeat → pushDeviceSnapshotToBackend (Task #56)', () => {
           }),
         },
       }));
-      jest.mock('../api', () => ({ api: { put: mockPut } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'fake-jwt-token'), api: { put: mockPut } }));
       jest.mock('expo-battery', () => ({
         addBatteryStateListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
         addBatteryLevelListener: jest.fn().mockReturnValue({ remove: jest.fn() }),

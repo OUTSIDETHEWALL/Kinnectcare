@@ -3,6 +3,10 @@ const BATTERY_LOG_KEY = '@kinnship/battery_task_log_v1';
 // These tests isolate transport/cadence after recovery authorization.
 // Real ownership, cold boot and independent-wake guards are covered separately.
 jest.mock('../androidTrackingRecovery', () => ({
+  trackingIsRevoked: jest.fn(async () => false),
+  trackingPolicyStamp: jest.fn(async () => null),
+  verifyWakeOwnership: jest.fn(async () => 'allowed'),
+  authorizeRevokedBatteryTransport: jest.fn(async () => null),
   BACKGROUND_PERMISSION_RATIONALE: {},
   authorizeTrackingIntent: jest.fn(),
   revokeTrackingIntent: jest.fn(),
@@ -16,6 +20,12 @@ jest.mock('../androidTrackingRecovery', () => ({
     });
     return 'already_enabled';
   }),
+}));
+jest.mock('../permissionCoordinator', () => ({
+  readPermissionSnapshot: jest.fn(async () => ({
+    foreground: 'granted', background: 'granted', notifications: 'granted',
+  })),
+  serializePermissionOperation: (operation: () => Promise<unknown>) => operation(),
 }));
 
 function storageMock() {
@@ -75,7 +85,7 @@ describe('minimum device-presence freshness', () => {
           getState: mockGetState,
         },
       }));
-      jest.mock('../api', () => ({ api: { put: jest.fn() } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'verified-test-session'), api: { put: jest.fn() } }));
       jest.mock('expo-battery', () => ({}));
       require('../locationEngine');
     });

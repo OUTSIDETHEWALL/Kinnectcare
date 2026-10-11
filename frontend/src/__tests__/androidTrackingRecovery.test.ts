@@ -35,7 +35,8 @@ describe('owned Android cold tracking recovery', () => {
     }));
     jest.doMock('../api', () => ({
       getCurrentToken: jest.fn(async () => token),
-      api: { get: jest.fn(async () => ({ data: { location_sharing_enabled: sharing } })) },
+      api: { get: jest.fn(async path => ({ data: path === '/auth/me' ? user
+        : path === '/members' ? members : { location_sharing_enabled: sharing } })) },
     }));
     jest.doMock('../backgroundLocationDisclosure', () => ({
       BACKGROUND_LOCATION_DISCLOSURE_TEXT: 'Kinnship background location disclosure',
@@ -55,7 +56,11 @@ describe('owned Android cold tracking recovery', () => {
       stop: jest.fn(async () => { enabled = false; }),
       registerHeadlessTask: jest.fn(),
       getCurrentPosition: jest.fn(async () => ({ timestamp: new Date().toISOString(), coords: { accuracy: 10 } })),
+      ready: jest.fn(async () => ({ enabled })),
     };
+    for (const name of ['onLocation', 'onMotionChange', 'onProviderChange', 'onHttp', 'onHeartbeat', 'onActivityChange']) {
+      sdk[name] = jest.fn(() => ({ remove: jest.fn() }));
+    }
     jest.doMock('react-native', () => ({
       Platform: { OS: 'android' }, AppState: {
         currentState: 'background', addEventListener: jest.fn(() => ({ remove: jest.fn() })),
@@ -96,7 +101,7 @@ describe('owned Android cold tracking recovery', () => {
     expect(await pending).toBe('late_start_stopped');
     await stopped;
     expect(enabled).toBe(false);
-    expect(await engine.recoverFromIndependentWake('boot')).toBe('no_current_intent');
+    expect(await engine.recoverFromIndependentWake('boot')).toBe('tracking_revoked');
   });
 
   it.each([false, true])('actual independent battery wake recovers safely (permission denial=%s)', async denied => {
@@ -147,7 +152,7 @@ describe('owned Android cold tracking recovery', () => {
     permissions[key as 'foreground' | 'background'] = 'denied';
     expect(await run()).toBe('permission_denied');
     expect(sdk.start).not.toHaveBeenCalled();
-    expect(store.has(recovery.TRACKING_INTENT_KEY)).toBe(false);
+    expect(await recovery.trackingIsRevoked()).toBe(true);
   });
   it('notification denial alone does not deny valid location recovery', async () => {
     expect(await run()).toBe('restarted');
@@ -164,23 +169,23 @@ describe('owned Android cold tracking recovery', () => {
     if (reason === 'removed member') members = [];
     expect(await run()).toBe('invalid_owner');
     expect(sdk.start).not.toHaveBeenCalled();
-    expect(store.has(recovery.TRACKING_INTENT_KEY)).toBe(false);
+    expect(await recovery.trackingIsRevoked()).toBe(true);
   });
   it('revoked intent cannot be recovered even if the native config remains', async () => {
     await recovery.revokeTrackingIntent();
-    expect(await run()).toBe('no_current_intent');
+    expect(await run()).toBe('tracking_revoked');
     expect(sdk.start).not.toHaveBeenCalled();
   });
   it('does not authorize a cancelled foreground owner', async () => {
     await recovery.revokeTrackingIntent();
     await recovery.authorizeTrackingIntent(config, recovery.trackingIntentEpoch(), () => false);
-    expect(await run()).toBe('no_current_intent');
+    expect(await run()).toBe('tracking_revoked');
   });
   it('does not authorize a start whose intent epoch predates sign-out', async () => {
     const epoch = recovery.trackingIntentEpoch();
     await recovery.revokeTrackingIntent();
     await recovery.authorizeTrackingIntent(config, epoch, () => true);
-    expect(await run()).toBe('no_current_intent');
+    expect(await run()).toBe('tracking_revoked');
   });
   it('honors a wake timeout/cancellation before starting', async () => {
     let current = true;
@@ -206,7 +211,7 @@ describe('owned Android cold tracking recovery', () => {
     });
     expect(await run()).toBe('late_start_stopped');
     expect(sdk.stop).toHaveBeenCalledTimes(1);
-    expect(store.has(recovery.TRACKING_INTENT_KEY)).toBe(false);
+    expect(await recovery.trackingIsRevoked()).toBe(true);
   });
   it('does not restart if permission changes during native configuration', async () => {
     sdk.setConfig.mockImplementation(async () => { permissions.background = 'denied'; });
@@ -237,7 +242,7 @@ describe('owned Android cold tracking recovery', () => {
     await expect(run()).rejects.toThrow('ownership_http_401');
     expect(sdk.start).not.toHaveBeenCalled();
     expect(sdk.stop).toHaveBeenCalled();
-    expect(store.has(recovery.TRACKING_INTENT_KEY)).toBe(false);
+    expect(await recovery.trackingIsRevoked()).toBe(true);
   });
   it('does not send session credentials to a substituted backend', async () => {
     process.env.EXPO_PUBLIC_BACKEND_URL = 'https://other.test';
@@ -262,7 +267,7 @@ describe('owned Android cold tracking recovery', () => {
     expect(proof).not.toHaveBeenCalled();
     token = 'wrong-session';
     user = { id: 'owner-b' };
-    expect(await recovery.recoverUnexpectedlyDisabledTracking(sdk, () => true, proof)).toBe('invalid_owner');
+    expect(await recovery.recoverUnexpectedlyDisabledTracking(sdk, () => true, proof)).toBe('tracking_revoked');
     expect(proof).not.toHaveBeenCalled();
   });
 
@@ -281,7 +286,7 @@ describe('owned Android cold tracking recovery', () => {
     expect(await engine.start({ ...config, jwt: token! })).toBe('failed');
     expect(sdk.start).not.toHaveBeenCalled();
     expect(sdk.stop).toHaveBeenCalled();
-    expect(store.has(recovery.TRACKING_INTENT_KEY)).toBe(false);
+    expect(await recovery.trackingIsRevoked()).toBe(true);
   });
 
   it.each([false, true])('local opt-out stops native tracking even if storage fails (%s)', async fails => {
@@ -298,7 +303,7 @@ describe('owned Android cold tracking recovery', () => {
     if (fails) await expect(location.setLocationSharingEnabled(false)).rejects.toThrow('storage unavailable');
     else await location.setLocationSharingEnabled(false);
     expect(stop).toHaveBeenCalledTimes(1);
-    expect(store.has(recovery.TRACKING_INTENT_KEY)).toBe(false);
+    expect(await recovery.trackingIsRevoked()).toBe(true);
     expect(changed).toHaveBeenCalledTimes(fails ? 0 : 1);
   });
 
@@ -319,7 +324,7 @@ describe('owned Android cold tracking recovery', () => {
     const api = require('../api') as typeof import('../api');
     await api.clearToken();
     expect(token).toBeNull();
-    expect(store.has(recovery.TRACKING_INTENT_KEY)).toBe(false);
+    expect(await recovery.trackingIsRevoked()).toBe(true);
     expect(sdk.stop).toHaveBeenCalled();
     expect(enabled).toBe(false);
     expect(sdk.start).not.toHaveBeenCalled();
@@ -336,5 +341,209 @@ describe('owned Android cold tracking recovery', () => {
     expect(await run()).toBe('obsolete_owner');
     expect(sdk.start).not.toHaveBeenCalled();
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  async function untilCalled(mock: jest.Mock) {
+    for (let i = 0; i < 600 && !mock.mock.calls.length; i++) await Promise.resolve();
+    expect(mock).toHaveBeenCalled();
+  }
+
+  it.each([
+    ['foreground ready', 'ready'], ['foreground start', 'start'],
+    ['recovery configuration', 'setConfig'], ['recovery start', 'start'],
+  ])('%s cannot block shutdown or resurrect after late completion', async (path, method) => {
+    const engine = require('../locationEngine') as typeof import('../locationEngine');
+    let finish!: (state: { enabled: boolean }) => void;
+    sdk[method].mockImplementationOnce(() => {
+      enabled = true; // Native effect occurred, but its bridge callback is lost.
+      return new Promise(resolve => { finish = resolve; });
+    });
+    const pending = path.startsWith('foreground')
+      ? engine.start({ ...config, jwt: token!, isOwnerCurrent: () => true })
+      : engine.recoverFromIndependentWake('workmanager');
+    await untilCalled(sdk[method]);
+    await engine.stop('signout'); // MUST finish while the old callback is absent.
+    expect(enabled).toBe(false);
+    expect(await recovery.trackingIsRevoked()).toBe(true);
+    const starts = sdk.start.mock.calls.length;
+    expect(await engine.recoverFromIndependentWake('boot')).toBe('tracking_revoked');
+    expect(await engine.recoverFromIndependentWake('terminate')).toBe('tracking_revoked');
+    expect(sdk.start).toHaveBeenCalledTimes(starts);
+    enabled = true; // Simulate an obsolete native effect at callback completion.
+    finish({ enabled: true });
+    await pending;
+    expect(enabled).toBe(false);
+    expect(sdk.registerHeadlessTask).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['signout', 'consent', 'foreground permission', 'background permission', 'removed member', 'different owner', 'remote consent'])(
+    'interrupts a never-returning recovery on %s', async reason => {
+      const engine = require('../locationEngine') as typeof import('../locationEngine');
+      let finish!: (state: { enabled: boolean }) => void;
+      sdk.start.mockImplementationOnce(() => {
+        enabled = true;
+        return new Promise(resolve => { finish = resolve; });
+      });
+      const pending = engine.recoverFromIndependentWake('workmanager');
+      await untilCalled(sdk.start);
+      if (reason === 'signout') {
+        jest.dontMock('../api');
+        jest.doMock('expo-secure-store', () => ({
+          getItemAsync: jest.fn(async () => token),
+          deleteItemAsync: jest.fn(async () => { token = null; }),
+        }));
+        await require('../api').clearToken();
+      } else if (reason === 'consent') {
+        jest.doMock('expo-location', () => ({}));
+        jest.doMock('expo-task-manager', () => ({ isTaskDefined: () => true, defineTask: jest.fn() }));
+        jest.doMock('expo-battery', () => ({}));
+        await require('../backgroundLocation').setLocationSharingEnabled(false);
+      } else {
+        if (reason === 'foreground permission') permissions.foreground = 'denied';
+        if (reason === 'background permission') permissions.background = 'denied';
+        if (reason === 'removed member') members = [];
+        if (reason === 'different owner') user = { id: 'owner-b' };
+        if (reason === 'remote consent') sharing = false;
+        await engine.recoverFromIndependentWake('heartbeat');
+      }
+      expect(enabled).toBe(false); // Old SDK promise is STILL unresolved.
+      expect(await recovery.trackingIsRevoked()).toBe(true);
+      for (const wake of ['boot', 'terminate', 'workmanager', 'heartbeat']) {
+        await engine.recoverFromIndependentWake(wake);
+      }
+      expect(sdk.start).toHaveBeenCalledTimes(1);
+      enabled = true;
+      finish({ enabled: true });
+      await pending;
+      expect(enabled).toBe(false);
+    },
+  );
+
+  it('preserves explicit revocation across module/process recreation with enabled SDK', async () => {
+    await recovery.revokeTrackingIntent('consent');
+    enabled = true;
+    jest.resetModules();
+    recovery = require('../androidTrackingRecovery');
+    expect(await run()).toBe('tracking_revoked');
+    expect(enabled).toBe(false);
+    expect(sdk.start).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('legacy absence is not revocation (native enabled=%s)', async legacyEnabled => {
+    store.delete(recovery.TRACKING_INTENT_KEY);
+    enabled = legacyEnabled;
+    expect(await run()).toBe('no_current_intent');
+    expect(await recovery.trackingIsRevoked()).toBe(false);
+    expect(sdk.stop).not.toHaveBeenCalled();
+    expect(sdk.start).not.toHaveBeenCalled();
+    expect(enabled).toBe(legacyEnabled);
+  });
+
+  it('does not stop valid tracking on a transient ownership lookup failure', async () => {
+    enabled = true;
+    (global.fetch as jest.Mock).mockRejectedValue(new Error('offline'));
+    const engine = require('../locationEngine') as typeof import('../locationEngine');
+    expect(await engine.recoverFromIndependentWake('workmanager')).toBe('ownership_unavailable');
+    expect(enabled).toBe(true);
+    expect(sdk.stop).not.toHaveBeenCalled();
+    expect(await recovery.trackingIsRevoked()).toBe(false);
+  });
+
+  it('foreground lookup failure preserves existing native tracking instead of inferring removal', async () => {
+    enabled = true;
+    const api = require('../api');
+    api.api.get.mockRejectedValue(new Error('offline'));
+    const engine = require('../locationEngine') as typeof import('../locationEngine');
+    expect(await engine.start({ ...config, jwt: token! })).toBe('failed');
+    expect(sdk.stop).not.toHaveBeenCalled();
+    expect(sdk.start).not.toHaveBeenCalled();
+    expect(enabled).toBe(true);
+  });
+
+  it('a stale foreground member cannot rearm a confirmed ownership removal', async () => {
+    await recovery.revokeTrackingIntent();
+    members = [];
+    enabled = true;
+    const engine = require('../locationEngine') as typeof import('../locationEngine');
+    expect(await engine.start({ ...config, jwt: token! })).toBe('failed');
+    expect(enabled).toBe(false);
+    expect(await recovery.trackingIsRevoked()).toBe(true);
+    expect(sdk.start).not.toHaveBeenCalled();
+  });
+
+  it('UI teardown during native startup retains a valid session/member owner', async () => {
+    const engine = require('../locationEngine') as typeof import('../locationEngine');
+    let mounted = true;
+    let finish!: (state: { enabled: boolean }) => void;
+    sdk.start.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const pending = engine.start({
+      ...config, jwt: token!, isCurrent: () => mounted, isOwnerCurrent: () => true,
+    });
+    await untilCalled(sdk.start);
+    mounted = false;
+    enabled = true;
+    finish({ enabled: true });
+    expect(await pending).toBe('background-ready');
+    expect(enabled).toBe(true);
+    expect(sdk.stop).not.toHaveBeenCalled();
+    expect(sdk.onLocation).toHaveBeenCalledTimes(1);
+  });
+
+  it('coalesces simultaneous shutdown commands without a wake/retry loop', async () => {
+    const engine = require('../locationEngine') as typeof import('../locationEngine');
+    let finish!: () => void;
+    sdk.stop.mockImplementationOnce(() => {
+      enabled = false;
+      return new Promise<void>(resolve => { finish = resolve; });
+    });
+    const stops = [engine.stop(), engine.stop(), engine.stop()];
+    expect(sdk.stop).toHaveBeenCalledTimes(1);
+    finish();
+    await Promise.all(stops);
+    expect(await recovery.trackingIsRevoked()).toBe(true);
+  });
+
+  it('late native completion reissues stop even if the first stop callback is still pending', async () => {
+    const engine = require('../locationEngine') as typeof import('../locationEngine');
+    let finishStart!: (state: { enabled: boolean }) => void;
+    let finishStop!: () => void;
+    sdk.start.mockImplementationOnce(() => {
+      enabled = true;
+      return new Promise(resolve => { finishStart = resolve; });
+    });
+    const pending = engine.recoverFromIndependentWake('workmanager');
+    await untilCalled(sdk.start);
+    sdk.stop.mockImplementationOnce(() => {
+      enabled = false;
+      return new Promise<void>(resolve => { finishStop = resolve; });
+    });
+    const stopped = engine.stop();
+    expect(enabled).toBe(false);
+    enabled = true;
+    finishStart({ enabled: true });
+    await pending;
+    expect(enabled).toBe(false);
+    expect(sdk.stop.mock.calls.length).toBeGreaterThan(1);
+    finishStop();
+    await stopped;
+  });
+
+  it.each(['{broken', '{}', '{"version":99}'])('does not mistake corrupt present policy %s for legacy absence', async raw => {
+    store.set(recovery.TRACKING_INTENT_KEY, raw);
+    enabled = true;
+    // Stop precedes parsing any optional battery descriptor.
+    try { await run(); } catch { /* corrupt battery binding is not usable */ }
+    expect(enabled).toBe(false);
+    expect(sdk.start).not.toHaveBeenCalled();
+  });
+
+  it('does not automatically rearm consent; explicit opt-in can reauthorize', async () => {
+    await recovery.revokeTrackingIntent('consent');
+    await recovery.authorizeTrackingIntent(config, recovery.trackingIntentEpoch(), () => true);
+    expect(await recovery.trackingIsRevoked()).toBe(true);
+    await recovery.rearmTrackingConsent();
+    await recovery.authorizeTrackingIntent(config, recovery.trackingIntentEpoch(), () => true);
+    expect(await recovery.trackingIsRevoked()).toBe(false);
+    expect(await run()).toBe('restarted');
   });
 });

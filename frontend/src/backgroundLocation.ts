@@ -45,15 +45,18 @@ export const LOCATION_SHARING_DISABLED_KEY = '@kinnship/location_sharing_off_v1'
 
 export async function setLocationSharingEnabled(enabled: boolean): Promise<void> {
   if (Platform.OS === 'android') {
-    try {
-      if (enabled) await AsyncStorage.removeItem(LOCATION_SHARING_DISABLED_KEY);
-      else await AsyncStorage.setItem(LOCATION_SHARING_DISABLED_KEY, '1');
-    } finally {
-      if (!enabled) {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const engine = require('./locationEngine') as typeof import('./locationEngine');
-        await engine.stop();
-      }
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const engine = require('./locationEngine') as typeof import('./locationEngine');
+    if (!enabled) {
+      await Promise.all([
+        engine.stop('consent'),
+        AsyncStorage.setItem(LOCATION_SHARING_DISABLED_KEY, '1'),
+      ]);
+    } else {
+      await AsyncStorage.removeItem(LOCATION_SHARING_DISABLED_KEY);
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { rearmTrackingConsent } = require('./androidTrackingRecovery') as typeof import('./androidTrackingRecovery');
+      await rearmTrackingConsent();
     }
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { notifyTrackingPolicyChanged } = require('./androidTrackingRecovery') as typeof import('./androidTrackingRecovery');

@@ -485,6 +485,30 @@ describe('Android permission gates and tracking lifecycle at the real navigation
     await act(async () => { renderer.unmount(); });
   });
 
+  it('90-second timeout does not stop native tracking on a transient session/member lookup failure', async () => {
+    me = null;
+    mockApiGet.mockRejectedValue(new Error('offline'));
+    const renderer = await mount();
+    await act(async () => { jest.advanceTimersByTime(91_000); });
+    await settle();
+    expect(engine.stop).not.toHaveBeenCalled();
+    expect(engine.start).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('90-second timeout stops tracking only after successful confirmed ownership absence', async () => {
+    me = null;
+    mockApiGet.mockImplementation(async (path: string) => ({
+      data: path === '/auth/me' ? { id: 'caregiver-001' } : [],
+    }));
+    const renderer = await mount();
+    await act(async () => { jest.advanceTimersByTime(91_000); });
+    await settle();
+    expect(engine.stop).toHaveBeenCalledTimes(1);
+    expect(engine.start).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
   it('starts when delayed member linkage arrives after the old wait expired', async () => {
     me = null;
     const renderer = await mount();

@@ -69,9 +69,11 @@ import { readPermissionSnapshot, serializePermissionOperation } from './permissi
 import {
   authorizeTrackingIntent, revokeTrackingIntent, trackingIntentEpoch,
   recoverUnexpectedlyDisabledTracking,
+  trackingIsRevoked, trackingPolicyStamp, authorizeRevokedBatteryTransport, verifyWakeOwnership,
   BACKGROUND_PERMISSION_RATIONALE,
 } from './androidTrackingRecovery';
-import type { AuthorizedBatteryTransport } from './androidTrackingRecovery';
+import type { AuthorizedBatteryTransport, RevocationReason } from './androidTrackingRecovery';
+import { fenceNativeSdk, interruptNativeTracking } from './androidNativeShutdown';
 import {
   LOCATION_UPLOAD_SUCCESS_KEY,
   getLocationUploadSuccessTs,
@@ -803,6 +805,38 @@ function serializeEngineOperation<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
+function interruptEngineStop(force = false): Promise<void> {
+  const lib = bgGeo();
+  if (!lib) return Promise.resolve();
+  const stopping = interruptNativeTracking(lib, force);
+  void logEvent('stop_invoked').catch(() => {});
+  void stopping.then(
+    () => logEvent('stop_ok'),
+    error => logEvent('stop_error', { error: String(error) }),
+  ).catch(() => {});
+  return stopping;
+}
+
+async function ownedNativeSdk(
+  lib: any, isCurrent: () => boolean, expectedEpoch: number, expectedToken: string | null,
+): Promise<any> {
+  const policy = await trackingPolicyStamp();
+  const baselinePermissions = await readPermissionSnapshot();
+  const synchronouslyCurrent = () => isCurrent() && trackingIntentEpoch() === expectedEpoch;
+  return fenceNativeSdk(lib, async () => {
+    if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch) return false;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getCurrentToken } = require('./api') as typeof import('./api');
+    const stamp = await trackingPolicyStamp();
+    const token = await getCurrentToken();
+    const permissions = await readPermissionSnapshot();
+    return isCurrent() && trackingIntentEpoch() === expectedEpoch
+      && stamp === policy && token === expectedToken
+      && !(baselinePermissions.foreground === 'granted' && permissions.foreground !== 'granted')
+      && !(baselinePermissions.background === 'granted' && permissions.background !== 'granted');
+  }, synchronouslyCurrent);
+}
+
 // ============================================================
 //  Device info injection (Task #21 — engine snapshot enrichment)
 // ============================================================
@@ -1504,9 +1538,10 @@ export function start(cfg: LocationEngineConfig): Promise<LocationStartupOutcome
 
 async function startConfiguredEngine(cfg: LocationEngineConfig, generation: number): Promise<LocationStartupOutcome> {
   const intentEpoch = trackingIntentEpoch();
+  let nativePhaseStarted = false;
   const ownsStart = () => Platform.OS !== 'android' || (
     generation === engineGeneration
-    && (!cfg.isCurrent || cfg.isCurrent())
+    && ((nativePhaseStarted && !!cfg.isOwnerCurrent) || !cfg.isCurrent || cfg.isCurrent())
     && (!cfg.isOwnerCurrent || cfg.isOwnerCurrent())
   );
   if (!ownsStart()) return 'failed';
@@ -1517,11 +1552,16 @@ async function startConfiguredEngine(cfg: LocationEngineConfig, generation: numb
     platform: Platform.OS,
   });
 
-  const lib = bgGeo();
-  if (!lib) {
+  const nativeLib = bgGeo();
+  if (!nativeLib) {
     await logEvent('start_skipped', { reason: 'native_module_unavailable' });
     return 'failed';
   }
+  if (Platform.OS === 'android' && await trackingIsRevoked(true)) {
+    await interruptEngineStop();
+    return 'failed';
+  }
+  let lib = nativeLib;
   // This runs inside the native lifecycle queue: no replacement start can
   // configure the SDK until this obsolete operation has stopped its service.
   const stopIfObsolete = async (): Promise<boolean> => {
@@ -1536,46 +1576,66 @@ async function startConfiguredEngine(cfg: LocationEngineConfig, generation: numb
   // Settings reconciliation is read-only and cannot open another dialog.
   let outcome: LocationStartupOutcome = 'background-ready';
   if (Platform.OS === 'android') {
+    let checkingPermissions = false;
     try {
       // A local flag can be stale after restored storage or a failed write.
       // Foreground startup already requires an authenticated member fetch;
       // additionally honor the owner's authoritative sharing preference.
       if (cfg.ownerUserId) {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { api } = require('./api') as typeof import('./api');
-        const preference = await api.get('/me/preferences');
+        const { api, getCurrentToken } = require('./api') as typeof import('./api');
+        if (await getCurrentToken() !== cfg.jwt) return 'failed';
+        const [preference, owner, members] = await Promise.all([
+          api.get('/me/preferences'), api.get('/auth/me'), api.get('/members'),
+        ]);
         if (await stopIfObsolete()) return 'failed';
-        if (preference.data?.location_sharing_enabled !== true) {
-          await revokeTrackingIntent();
-          await lib.stop();
+        if (await getCurrentToken() !== cfg.jwt) {
+          await interruptEngineStop();
+          return 'failed';
+        }
+        if (!owner.data?.id || !Array.isArray(members.data)) throw new Error('invalid_ownership_response');
+        if (owner.data.id !== cfg.ownerUserId || !members.data.some(
+          (member: any) => member.id === cfg.memberId && member.user_id === owner.data.id,
+        )) {
+          await stop();
+          await logEvent('startup_outcome', { outcome: 'failed', reason: 'ownership_lost' });
+          return 'failed';
+        }
+        if (preference.data?.location_sharing_enabled === false) {
+          await stop('consent');
           await logEvent('startup_outcome', { outcome: 'failed', reason: 'sharing_disabled' });
           return 'failed';
         }
+        if (preference.data?.location_sharing_enabled !== true) throw new Error('invalid_sharing_preference');
       }
       if (await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1') {
-        await revokeTrackingIntent();
-        await lib.stop();
+        await stop('consent');
         await logEvent('startup_outcome', { outcome: 'failed', reason: 'sharing_disabled' });
         return 'failed';
       }
+      checkingPermissions = true;
       const permissions = await readPermissionSnapshot();
       if (permissions.foreground !== 'granted') {
-        await lib.stop();
+        await stop('permission');
         await logEvent('startup_outcome', { outcome: 'denied' });
         return 'denied';
       }
       if (permissions.background !== 'granted') outcome = 'foreground-only';
     } catch (e: any) {
       cachedConfig = null;
-      await lib.stop();
+      // No native mutation yet: network failure does not prove member removal.
+      if (checkingPermissions) await interruptEngineStop();
+      else if (e?.response?.status === 401 || e?.response?.status === 403) await stop('signout');
       await logEvent('startup_outcome', { outcome: 'failed', error: String(e?.message || e) });
       return 'failed';
     }
   }
   if (await stopIfObsolete()) return 'failed';
+  nativePhaseStarted = true;
 
   // ----- Attach SDK event listeners (idempotent) -----
-  attachSdkListeners(lib);
+  // Long-lived diagnostic listeners are not owned by this UI reconciliation.
+  attachSdkListeners(nativeLib);
 
   const config = buildSdkConfig(lib, cfg);
   if (Platform.OS === 'android') {
@@ -1617,6 +1677,7 @@ async function startConfiguredEngine(cfg: LocationEngineConfig, generation: numb
   // ----- ready() / setConfig() ─────────────────────────────────────
   try {
     if (await stopIfObsolete()) return 'failed';
+    if (Platform.OS === 'android') lib = await ownedNativeSdk(nativeLib, ownsStart, intentEpoch, cfg.jwt);
     if (isReady) {
       await logEvent('setConfig_invoked');
       await lib.setConfig(config);
@@ -1760,17 +1821,17 @@ async function startConfiguredEngine(cfg: LocationEngineConfig, generation: numb
 }
 
 /** Stop the engine.  Logs the outcome. */
-export function stop(): Promise<void> {
+export function stop(reason: RevocationReason = 'stopped'): Promise<void> {
   if (Platform.OS !== 'android') return stopConfiguredEngine();
   // Invalidate synchronously, even when a native start is still awaiting its
   // callback or a permission disclosure is keeping the permission queue busy.
   engineGeneration += 1;
   cachedConfig = null;
-  const revocation = revokeTrackingIntent();
-  return serializeEngineOperation(async () => {
-    // Still stop native tracking when durable storage cannot be written.
-    try { await revocation; } finally { await stopConfiguredEngine(); }
-  });
+  const revocation = revokeTrackingIntent(reason);
+  // Deliberately do NOT enter either FIFO. Pending native startup remains
+  // quarantined, but shutdown takes effect now and its late completion is fenced.
+  const stopping = interruptEngineStop();
+  return Promise.all([revocation, stopping]).then(() => {});
 }
 
 /** WorkManager and native boot/termination share the foreground lifecycle lock. */
@@ -1781,12 +1842,41 @@ export function recoverFromIndependentWake(
 ): Promise<string> {
   if (Platform.OS !== 'android') return Promise.resolve('not_android');
   const generation = engineGeneration;
-  return serializePermissionOperation(() => serializeEngineOperation(async () => {
+  return (async () => {
+    const revoked = await trackingIsRevoked();
+    const permissions = await readPermissionSnapshot();
+    if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
+    if (revoked || permissions.foreground !== 'granted' || permissions.background !== 'granted') {
+      // A wake must enforce withdrawal even if another wake owns a stalled FIFO.
+      if (revoked) await interruptEngineStop();
+      else await stop('permission');
+      const shutdownGeneration = engineGeneration;
+      const transport = await authorizeRevokedBatteryTransport(
+        () => shutdownGeneration === engineGeneration && isCurrent(),
+      );
+      if (transport) onAuthorizedBattery?.(transport);
+      return revoked ? 'tracking_revoked' : 'permission_denied';
+    }
+    const ownership = await verifyWakeOwnership(() => generation === engineGeneration && isCurrent());
+    if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
+    if (ownership !== 'allowed') {
+      if (['no_session', 'invalid_owner', 'sharing_disabled'].includes(ownership)) {
+        await stop(ownership === 'sharing_disabled' ? 'consent'
+          : ownership === 'no_session' ? 'signout' : 'stopped');
+      }
+      return ownership;
+    }
+    return serializePermissionOperation(() => serializeEngineOperation(async () => {
     const lib = bgGeo();
     if (!lib) return 'native_unavailable';
     try {
+      const epoch = trackingIntentEpoch();
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getCurrentToken } = require('./api') as typeof import('./api');
+      const token = await getCurrentToken();
+      const owned = await ownedNativeSdk(lib, () => generation === engineGeneration && isCurrent(), epoch, token);
       const result = await recoverUnexpectedlyDisabledTracking(
-        lib, () => generation === engineGeneration && isCurrent(), onAuthorizedBattery,
+        owned, () => generation === engineGeneration && isCurrent(), onAuthorizedBattery,
       );
       await logEvent('independent_tracking_recovery', { trigger, result });
       return result;
@@ -1796,7 +1886,8 @@ export function recoverFromIndependentWake(
       });
       return 'failed';
     }
-  }));
+    }));
+  })();
 }
 
 async function stopConfiguredEngine(): Promise<void> {
@@ -1900,19 +1991,24 @@ export function setAuthToken(jwt: string): Promise<void> {
 }
 
 async function setAuthTokenConfigured(jwt: string, generation: number): Promise<void> {
-  const lib = bgGeo();
+  const nativeLib = bgGeo();
   if (Platform.OS === 'android' && (generation !== engineGeneration
     || (cachedConfig?.isCurrent && !cachedConfig.isCurrent()))) {
     await logEvent('setAuthToken_skipped', { reason: 'ownership_lost' });
     return;
   }
-  if (!lib || !cachedConfig) {
+  if (!nativeLib || !cachedConfig) {
     await logEvent('setAuthToken_skipped', {
-      hasLib: !!lib,
+      hasLib: !!nativeLib,
       hasCachedConfig: !!cachedConfig,
     });
     return;
   }
+  const lib = Platform.OS === 'android' ? await ownedNativeSdk(
+    nativeLib, () => generation === engineGeneration
+      && !!cachedConfig && (!cachedConfig.isCurrent || cachedConfig.isCurrent()),
+    trackingIntentEpoch(), jwt,
+  ) : nativeLib;
   cachedConfig.jwt = jwt;
   // Build 53 — record the JWT's exp claim so post-mortem investigation
   // can prove whether the SDK is holding a fresh vs expired token when

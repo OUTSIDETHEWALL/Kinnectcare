@@ -89,24 +89,21 @@ export async function migrateTokenForBackgroundActions(): Promise<void> {
   });
 }
 export async function clearToken() {
-  try {
-    if (Platform.OS === 'android') {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { revokeTrackingIntent } = require('./androidTrackingRecovery') as typeof import('./androidTrackingRecovery');
-      await revokeTrackingIntent();
-    }
-  } finally {
+  const clearStoredToken = async () => {
     try {
       if (Platform.OS === 'web') await AsyncStorage.removeItem(TOKEN_KEY);
       else await SecureStore.deleteItemAsync(TOKEN_KEY);
     } finally {
       notifyTokenChange(null);
-      if (Platform.OS === 'android') {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const engine = require('./locationEngine') as typeof import('./locationEngine');
-        await engine.stop();
-      }
     }
+  };
+  if (Platform.OS === 'android') {
+    // Invalidate/interrupt before waiting on either secure or ordinary storage.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const engine = require('./locationEngine') as typeof import('./locationEngine');
+    await Promise.all([engine.stop('signout'), clearStoredToken()]);
+  } else {
+    await clearStoredToken();
   }
 }
 

@@ -9,6 +9,7 @@ describe('Android permission/startup policy', () => {
   let store: typeof import('../permissionsStore');
   let engine: typeof import('../locationEngine');
   let platform: { OS: string };
+  let sessionToken: string | null;
 
   const config = { memberId: 'member', jwt: 'test-jwt', backendBaseUrl: 'https://example.test' };
   const grant = (status: string) => ({ status, granted: status === 'granted' });
@@ -16,6 +17,14 @@ describe('Android permission/startup policy', () => {
   beforeEach(() => {
     jest.resetModules();
     storage = new Map();
+    sessionToken = config.jwt;
+    jest.doMock('../api', () => ({
+      getCurrentToken: jest.fn(async () => sessionToken),
+      api: {
+        get: jest.fn(async () => ({ data: { location_sharing_enabled: true } })),
+        put: jest.fn(async () => ({})),
+      },
+    }));
     location = {
       getForegroundPermissionsAsync: jest.fn().mockResolvedValue(grant('granted')),
       getBackgroundPermissionsAsync: jest.fn().mockResolvedValue(grant('granted')),
@@ -157,11 +166,13 @@ describe('Android permission/startup policy', () => {
     await engine.start({ ...config, isOwnerCurrent: () => current });
     let resolveRefresh!: (value: any) => void;
     sdk.setConfig.mockImplementationOnce(() => new Promise(resolve => { resolveRefresh = resolve; }));
-    const refresh = engine.setAuthToken('refreshed-test-jwt');
+    sessionToken = 'refreshed-test-jwt';
+    const refresh = engine.setAuthToken(sessionToken);
     await untilCalled(sdk.setConfig);
     current = false;
     const stopped = engine.stop();
-    const replacement = engine.start({ ...config, memberId: 'replacement', jwt: 'replacement-test-jwt' });
+    sessionToken = 'replacement-test-jwt';
+    const replacement = engine.start({ ...config, memberId: 'replacement', jwt: sessionToken });
     resolveRefresh({ enabled: true });
     await refresh;
     await stopped;

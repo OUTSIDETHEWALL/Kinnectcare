@@ -1159,9 +1159,13 @@ function RootNav() {
       if (reading) return;
       reading = true;
       try {
-        const next = Platform.OS === 'android'
-          ? JSON.stringify(await readPermissionSnapshot()) : 'ios';
+        const snapshot = await readPermissionSnapshot();
+        const next = JSON.stringify(snapshot);
         if (disposed) return;
+        if (fingerprint !== null && fingerprint !== next
+          && (snapshot.foreground !== 'granted' || snapshot.background !== 'granted')) {
+          void locationEngine.stop('permission').catch(() => {});
+        }
         if ((fingerprint !== null && fingerprint !== next)
           || engineBootedForUserIdRef.current === null) {
           setStartupRevision(value => value + 1);
@@ -1261,10 +1265,10 @@ function RootNav() {
         //
         // WAIT_TIMEOUT_MS is set to 90 s: one full dashboard poll cycle
         // (60 s) plus a 30 s buffer.  A genuine caregiver-only device
-        // (no member row in the backend) waits at most 90 s before the
-        // engine stops normally — identical to the pre-fix outcome, just
-        // slightly delayed.  The device is otherwise fully functional
-        // during the wait; no UI is blocked.
+        // (no member row in the backend) gets a fresh ownership confirmation
+        // after 90 s. Lookup failure does not stop legitimate native tracking.
+        // The device is otherwise fully functional during the wait; no UI
+        // is blocked.
         if (!me) {
           const WAIT_TIMEOUT_MS = 90_000;
           me = await new Promise<any>((resolve) => {
@@ -1291,9 +1295,25 @@ function RootNav() {
         }
 
         if (!me) {
-          // Timed out — caregiver-only device or genuinely absent
-          // member row.  Stop the engine in case it was running from a
-          // previous session.
+          // fetchAll intentionally returns cached data on errors. A timeout
+          // alone is therefore not evidence that the owned member was removed.
+          // Require a fresh, successful authenticated lookup before stopping.
+          const lookupToken = await getCurrentToken();
+          if (!lookupToken || cancelled) return;
+          const [confirmed, confirmedUser] = await Promise.all([
+            api.get('/members'), api.get('/auth/me'),
+          ]);
+          const currentToken = await getCurrentToken();
+          if (cancelled || engineSessionRef.current !== session) return;
+          if (currentToken !== lookupToken || confirmedUser.data?.id !== user.id) return;
+          if (!Array.isArray(confirmed.data)
+            || confirmed.data.some((m: any) => !m || typeof m.id !== 'string' || !m.id)) {
+            throw new Error('invalid_member_lookup');
+          }
+          me = confirmed.data.find((m: any) => m.user_id === user.id) ?? null;
+          if (me) memberStore.upsertOne(me);
+        }
+        if (!me) {
           try { leonidas.stop(); } catch (_e) {}
           await locationEngine.stop();
           engineBootedForUserIdRef.current = null;

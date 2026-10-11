@@ -125,7 +125,7 @@ describe('triggerDeviceSnapshotNow', () => {
           onActivityChange: jest.fn().mockReturnValue({ remove: jest.fn() }),
         },
       }));
-      jest.mock('../api', () => ({ api: { put: mockPut } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'fake-jwt'), api: { put: mockPut } }));
       jest.mock('expo-battery', () => ({
         addBatteryStateListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
         addBatteryLevelListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
@@ -215,7 +215,7 @@ describe('triggerDeviceSnapshotNow', () => {
           onActivityChange: jest.fn().mockReturnValue({ remove: jest.fn() }),
         },
       }));
-      jest.mock('../api', () => ({ api: { put: mockPut } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'fake-jwt'), api: { put: mockPut } }));
       jest.mock('expo-battery', () => ({
         addBatteryStateListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
         addBatteryLevelListener: jest.fn().mockReturnValue({ remove: jest.fn() }),

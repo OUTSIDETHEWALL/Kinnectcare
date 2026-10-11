@@ -22,6 +22,10 @@ async function flushPromises(): Promise<void> {
 }
 
 jest.mock('../androidTrackingRecovery', () => ({
+  trackingIsRevoked: jest.fn(async () => false),
+  trackingPolicyStamp: jest.fn(async () => null),
+  verifyWakeOwnership: jest.fn(async () => 'allowed'),
+  authorizeRevokedBatteryTransport: jest.fn(async () => null),
   BACKGROUND_PERMISSION_RATIONALE: {},
   authorizeTrackingIntent: jest.fn(), revokeTrackingIntent: jest.fn(),
   trackingIntentEpoch: () => 0,
@@ -32,6 +36,12 @@ jest.mock('../androidTrackingRecovery', () => ({
       token: state.authorization.accessToken, isCurrent: async () => true });
     return 'already_enabled';
   }),
+}));
+jest.mock('../permissionCoordinator', () => ({
+  readPermissionSnapshot: jest.fn(async () => ({
+    foreground: 'granted', background: 'granted', notifications: 'granted',
+  })),
+  serializePermissionOperation: (operation: () => Promise<unknown>) => operation(),
 }));
 
 describe('Task 108 — headless charging recovery', () => {

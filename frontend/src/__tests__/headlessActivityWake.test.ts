@@ -5,6 +5,10 @@ async function flushPromises(): Promise<void> {
 }
 
 jest.mock('../androidTrackingRecovery', () => ({
+  trackingIsRevoked: jest.fn(async () => false),
+  trackingPolicyStamp: jest.fn(async () => null),
+  verifyWakeOwnership: jest.fn(async () => 'allowed'),
+  authorizeRevokedBatteryTransport: jest.fn(async () => null),
   BACKGROUND_PERMISSION_RATIONALE: {},
   authorizeTrackingIntent: jest.fn(), revokeTrackingIntent: jest.fn(),
   trackingIntentEpoch: () => 0,
@@ -13,6 +17,12 @@ jest.mock('../androidTrackingRecovery', () => ({
       token: 'verified-test-session', isCurrent: async () => true });
     return 'already_enabled';
   }),
+}));
+jest.mock('../permissionCoordinator', () => ({
+  readPermissionSnapshot: jest.fn(async () => ({
+    foreground: 'granted', background: 'granted', notifications: 'granted',
+  })),
+  serializePermissionOperation: (operation: () => Promise<unknown>) => operation(),
 }));
 
 describe('headless activity wake recovery', () => {
@@ -68,7 +78,7 @@ describe('headless activity wake recovery', () => {
           getCurrentPosition: mockGetCurrentPosition,
         },
       }));
-      jest.mock('../api', () => ({ api: { put: jest.fn() } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'verified-test-session'), api: { put: jest.fn() } }));
       jest.mock('expo-battery', () => ({}));
 
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -132,7 +142,7 @@ describe('headless activity wake recovery', () => {
           getCurrentPosition: mockGetCurrentPosition,
         },
       }));
-      jest.mock('../api', () => ({ api: { put: jest.fn() } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'verified-test-session'), api: { put: jest.fn() } }));
       jest.mock('expo-battery', () => ({}));
 
       // eslint-disable-next-line @typescript-eslint/no-require-imports
