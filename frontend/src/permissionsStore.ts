@@ -13,6 +13,13 @@ import { readPermissionSnapshot, PermissionSnapshot } from './permissionCoordina
 const KEY = '@kinnship/permissions_handled_v1';
 const DECISION_KEY = '@kinnship/permission_decision_v2';
 
+export class LocationPermissionDecisionChangedError extends Error {
+  constructor(public readonly current: PermissionSnapshot) {
+    super('Location permission changed while setup was pending');
+    this.name = 'LocationPermissionDecisionChangedError';
+  }
+}
+
 export function permissionDecisionStillApplies(
   decision: PermissionSnapshot,
   current: PermissionSnapshot,
@@ -49,16 +56,20 @@ export async function isPermissionsHandled(): Promise<boolean> {
   }
 }
 
-export async function markPermissionsHandled(): Promise<void> {
+export async function markPermissionsHandled(
+  expectedDecision?: Pick<PermissionSnapshot, 'foreground' | 'background'>,
+): Promise<void> {
   if (Platform.OS !== 'android') {
     try { await AsyncStorage.setItem(KEY, 'true'); } catch (_e) {}
     return;
   }
   // Surface persistence errors instead of navigating into a setup loop.
   if (Platform.OS === 'android') {
-    await AsyncStorage.setItem(DECISION_KEY, JSON.stringify(
-      await readPermissionSnapshot({ includeNotifications: false }),
-    ));
+    const current = await readPermissionSnapshot({ includeNotifications: false });
+    if (expectedDecision && !permissionDecisionStillApplies(
+      { ...expectedDecision, notifications: 'not-inspected' }, current, false,
+    )) throw new LocationPermissionDecisionChangedError(current);
+    await AsyncStorage.setItem(DECISION_KEY, JSON.stringify(current));
   }
   await AsyncStorage.setItem(KEY, 'true');
 }

@@ -61,7 +61,13 @@ describe('fresh onboarding location permission order', () => {
     jest.doMock('@react-native-async-storage/async-storage', () => storage);
     jest.doMock('expo-location', () => location);
     jest.doMock('expo-notifications', () => notifications);
-    jest.doMock('../permissionsStore', () => ({ markPermissionsHandled: markHandled }));
+    jest.doMock('../AuthContext', () => ({
+      useAuth: () => ({ user: { id: 'owner' }, loading: false }),
+    }));
+    jest.doMock('../permissionsStore', () => ({
+      markPermissionsHandled: markHandled,
+      LocationPermissionDecisionChangedError: jest.requireActual('../permissionsStore').LocationPermissionDecisionChangedError,
+    }));
     ensure = require('../backgroundLocationDisclosure').ensureBackgroundLocationDisclosure;
     Permissions = require('../../app/(auth)/permissions').default;
   });

@@ -21,6 +21,9 @@ describe('RootNav location recovery independent of notification onboarding', () 
   let stateListeners: Set<(state: string) => void>;
   let memberListeners: Set<() => void>;
   let router: any;
+  let realPermissionScreen: boolean;
+  let segments: string[];
+  let memberStoreApi: any;
   const originalFetch = global.fetch;
   const originalBase = process.env.EXPO_PUBLIC_BACKEND_URL;
   const base = 'https://example.test';
@@ -48,19 +51,32 @@ describe('RootNav location recovery independent of notification onboarding', () 
     ]);
     stateListeners = new Set();
     memberListeners = new Set();
-    router = { replace: jest.fn(), push: jest.fn() };
-    const segments = ['(tabs)', 'dashboard'];
-    const Stack = Object.assign(({ children }: any) => children, { Screen: () => null });
+    realPermissionScreen = false;
+    segments = ['(tabs)', 'dashboard'];
+    router = { replace: jest.fn((path: string) => {
+      if (!realPermissionScreen) return;
+      const next = path === '/(tabs)/dashboard' ? ['(tabs)', 'dashboard']
+        : path === '/(auth)/permissions' ? ['(auth)', 'permissions'] : ['index'];
+      if (next.join('/') === segments.join('/')) return;
+      segments = next;
+      tree?.update(<Root />);
+    }), push: jest.fn() };
+    const Stack = Object.assign(({ children }: any) => (
+      <>{children}{realPermissionScreen && segments[1] === 'permissions'
+        ? React.createElement(require('../../app/(auth)/permissions').default) : null}</>
+    ), { Screen: () => null });
     jest.doMock('expo-router', () => ({
       Stack, useRouter: () => router, useSegments: () => segments,
       usePathname: () => '/dashboard',
     }));
     jest.doMock('react-native-safe-area-context', () => ({
       SafeAreaProvider: ({ children }: any) => children,
+      SafeAreaView: 'SafeAreaView',
     }));
     jest.doMock('expo-status-bar', () => ({ StatusBar: () => null }));
     jest.doMock('react-native', () => ({
       Platform: { OS: 'android' }, View: 'View', ActivityIndicator: 'ActivityIndicator',
+      Text: 'Text', TouchableOpacity: 'TouchableOpacity',
       StyleSheet: { create: (value: any) => value },
       Alert: { alert: jest.fn() },
       Linking: {
@@ -110,14 +126,15 @@ describe('RootNav location recovery independent of notification onboarding', () 
         put: jest.fn(async () => ({})), post: jest.fn(async () => ({})),
       },
     }));
-    jest.doMock('../store/memberStore', () => ({
+    memberStoreApi = {
       fetchAll: jest.fn(async () => members),
       getMyMember: (userId: string) => members.find(member => member.user_id === userId),
       subscribeMember: (callback: () => void) => {
         memberListeners.add(callback); return () => memberListeners.delete(callback);
       },
       upsertOne: jest.fn(),
-    }));
+    };
+    jest.doMock('../store/memberStore', () => memberStoreApi);
     sdk = {
       registerHeadlessTask: jest.fn(), removeListeners: jest.fn(),
       ready: jest.fn(async () => ({ enabled, trackingMode: 1 })),
@@ -125,6 +142,7 @@ describe('RootNav location recovery independent of notification onboarding', () 
       getState: jest.fn(async () => ({
         enabled, trackingMode: 1, url: `${base}/api/members/member/location`,
         authorization: { accessToken: token },
+        stopOnTerminate: false, startOnBoot: true, enableHeadless: true,
       })),
       start: jest.fn(async () => { enabled = true; return { enabled }; }),
       stop: jest.fn(async () => { enabled = false; }),
@@ -190,7 +208,8 @@ describe('RootNav location recovery independent of notification onboarding', () 
     jest.clearAllTimers();
     jest.useRealTimers();
     global.fetch = originalFetch;
-    process.env.EXPO_PUBLIC_BACKEND_URL = originalBase;
+    if (originalBase === undefined) delete process.env.EXPO_PUBLIC_BACKEND_URL;
+    else process.env.EXPO_PUBLIC_BACKEND_URL = originalBase;
   });
   async function flush() {
     for (let i = 0; i < 8; i++) await act(async () => {
@@ -326,5 +345,177 @@ describe('RootNav location recovery independent of notification onboarding', () 
     expect(data.get('@kinnship/permissions_handled_v1')).toBe('true');
     expect(await require('../permissionsStore').isPermissionsHandled()).toBe(true);
     expect(enabled).toBe(true);
+  });
+
+  describe('real permissions screen → RootNav → native recovery', () => {
+    // Hold ownership-fetch completion until the real notification OS request
+    // has begun. Otherwise startup could win the race before the old queue was
+    // occupied and a test would falsely pass.
+    async function beginNotificationRequest(deniedLocation?: 'foreground' | 'background') {
+      global.fetch = jest.fn(async (url: any) => {
+        const payload = url === `${base}/api/auth/me` ? auth.user
+          : url === `${base}/api/members` ? members
+            : url === `${base}/api/me/preferences` ? { location_sharing_enabled: sharing } : undefined;
+        if (payload === undefined) throw new Error(`Unexpected offline URL: ${url}`);
+        return { ok: true, status: 200, json: async () => payload } as Response;
+      });
+      realPermissionScreen = true;
+      segments = ['(auth)', 'permissions'];
+      data.delete('@kinnship/permissions_handled_v1');
+      data.delete('@kinnship/background_location_disclosure_shown_v1');
+      grants.foreground = 'undetermined';
+      grants.background = 'undetermined';
+      const native = require('react-native');
+      native.Alert.alert.mockImplementation((_title: string, _body: string, buttons: any[]) => {
+        buttons.find(button => button.text === 'Continue')?.onPress();
+      });
+      location.requestForegroundPermissionsAsync.mockImplementation(async () => {
+        grants.foreground = deniedLocation === 'foreground' ? 'denied' : 'granted';
+        return { status: grants.foreground };
+      });
+      location.requestBackgroundPermissionsAsync.mockImplementation(async () => {
+        grants.background = deniedLocation === 'background' ? 'denied' : 'granted';
+        return { status: grants.background };
+      });
+      notifications.getPermissionsAsync.mockResolvedValue({ status: 'undetermined' });
+      let resolveRequest!: (value: any) => void;
+      let rejectRequest!: (error: Error) => void;
+      notifications.requestPermissionsAsync.mockImplementation(() => new Promise((resolve, reject) => {
+        resolveRequest = resolve; rejectRequest = reject;
+      }));
+      let releaseOwner!: (value: any) => void;
+      const ownerPromise = new Promise(resolve => { releaseOwner = resolve; });
+      memberStoreApi.fetchAll.mockImplementation(() => ownerPromise);
+      await mount();
+      await act(async () => { jest.advanceTimersByTime(900); });
+      await flush();
+      if (deniedLocation) await clickContinue();
+      expect(location.requestForegroundPermissionsAsync).toHaveBeenCalledTimes(1);
+      expect(location.requestBackgroundPermissionsAsync).toHaveBeenCalledTimes(deniedLocation === 'foreground' ? 0 : 1);
+      expect(notifications.requestPermissionsAsync).toHaveBeenCalledTimes(1);
+      expect(data.get('@kinnship/background_location_disclosure_shown_v1')).toBe('true');
+      expect(sdk.start).not.toHaveBeenCalled();
+      return {
+        resolveRequest, rejectRequest,
+        releaseOwner: async () => {
+          await act(async () => { releaseOwner(members); });
+          await flush();
+        },
+      };
+    }
+    async function clickContinue() {
+      const button = tree!.root.findAllByType('TouchableOpacity').find((node: any) =>
+        node.findAllByType('Text').some((text: any) => text.children.join('').includes('Continue')));
+      expect(button).toBeDefined();
+      await act(async () => { button!.props.onPress(); });
+      await flush();
+    }
+    it.each(['granted', 'denied', 'reject', 'never'])(
+      'starts and repairs while a real notification request is pending, then %s', async outcome => {
+        const request = await beginNotificationRequest();
+        await request.releaseOwner();
+        expect(sdk.start).toHaveBeenCalledTimes(1);
+        expect(enabled).toBe(true);
+        expect(await require('../permissionCoordinator').foregroundLocationForAutomaticCaller())
+          .toMatchObject({ status: 'granted' });
+        enabled = false; // Independently disabled native tracker, not revocation.
+        await act(async () => {
+          expect(await require('../locationEngine').recoverFromIndependentWake('workmanager'))
+            .toBe('restarted');
+        });
+        expect(enabled).toBe(true);
+        await act(async () => { await require('../locationEngine').restart(); });
+        expect(enabled).toBe(true);
+        const starts = sdk.start.mock.calls.length;
+        await act(async () => {
+          if (outcome === 'reject') request.rejectRequest(new Error('native request failed'));
+          else if (outcome !== 'never') request.resolveRequest({ status: outcome });
+        });
+        await flush();
+        expect(sdk.start).toHaveBeenCalledTimes(starts);
+        expect(enabled).toBe(true);
+        if (outcome !== 'granted') await clickContinue();
+        expect(data.get('@kinnship/permissions_handled_v1')).toBe('true');
+        expect(router.replace).toHaveBeenCalledWith('/(tabs)/dashboard');
+        expect((global.fetch as jest.Mock).mock.calls.every(([url]) => url.startsWith(base))).toBe(true);
+      },
+    );
+    it.each(['foreground', 'background', 'signout', 'consent', 'ownership'])(
+      'a pending and late-granted notification request cannot bypass %s withdrawal', async boundary => {
+        const request = await beginNotificationRequest();
+        await request.releaseOwner();
+        expect(enabled).toBe(true);
+        if (boundary === 'foreground' || boundary === 'background') {
+          grants[boundary] = 'denied'; await resume();
+        } else if (boundary === 'signout') {
+          auth = { user: null, loading: false }; token = null;
+          await act(async () => { tree!.update(<Root />); });
+        } else if (boundary === 'consent') {
+          await act(async () => {
+            await jest.requireActual('../backgroundLocation').setLocationSharingEnabled(false);
+          });
+        } else {
+          members = [{ id: 'member', user_id: 'another-owner' }];
+          await act(async () => { for (const callback of memberListeners) callback(); });
+          await act(async () => { jest.advanceTimersByTime(90_000); });
+        }
+        await flush();
+        expect(enabled).toBe(false);
+        const starts = sdk.start.mock.calls.length;
+        await act(async () => { request.resolveRequest({ status: 'granted' }); });
+        await flush();
+        await resume();
+        expect(enabled).toBe(false);
+        expect(sdk.start).toHaveBeenCalledTimes(starts);
+        if (boundary === 'foreground' || boundary === 'background' || boundary === 'signout') {
+          expect(data.get('@kinnship/permissions_handled_v1')).toBeUndefined();
+          expect(router.replace).not.toHaveBeenCalledWith('/(tabs)/dashboard');
+        }
+      },
+    );
+    it.each(['granted', 'denied', 'reject'])(
+      'ignores a late %s callback after Continue without notifications unmounts the screen', async outcome => {
+        const request = await beginNotificationRequest();
+        await request.releaseOwner();
+        await clickContinue();
+        expect(segments).toEqual(['(tabs)', 'dashboard']);
+        const routes = router.replace.mock.calls.length;
+        const starts = sdk.start.mock.calls.length;
+        const decision = data.get('@kinnship/permission_decision_v2');
+        await act(async () => {
+          if (outcome === 'reject') request.rejectRequest(new Error('late native failure'));
+          else request.resolveRequest({ status: outcome });
+        });
+        await flush();
+        expect(router.replace).toHaveBeenCalledTimes(routes);
+        expect(sdk.start).toHaveBeenCalledTimes(starts);
+        expect(data.get('@kinnship/permission_decision_v2')).toBe(decision);
+      },
+    );
+    it.each(['foreground', 'background'] as const)(
+      'a real notification request cannot authorize missing %s location access', async permission => {
+        const request = await beginNotificationRequest(permission);
+        await request.releaseOwner();
+        expect(sdk.start).not.toHaveBeenCalled();
+        expect(enabled).toBe(false);
+        await act(async () => { request.resolveRequest({ status: 'granted' }); });
+        await flush();
+        expect(sdk.start).not.toHaveBeenCalled();
+        expect(enabled).toBe(false);
+      },
+    );
+    it('control: restoring the old dialog dependency strands this exact real-screen startup', async () => {
+      const engine = require('../locationEngine');
+      const originalStart = engine.start;
+      const spy = jest.spyOn(engine, 'start').mockImplementation((cfg: any) =>
+        require('../permissionCoordinator').serializePermissionOperation(() => originalStart(cfg)));
+      try {
+        const request = await beginNotificationRequest();
+        await request.releaseOwner();
+        expect(engine.start).toHaveBeenCalled();
+        expect(sdk.start).not.toHaveBeenCalled();
+        expect(enabled).toBe(false);
+      } finally { spy.mockRestore(); }
+    });
   });
 });

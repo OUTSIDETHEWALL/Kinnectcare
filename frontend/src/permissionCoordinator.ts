@@ -9,8 +9,9 @@ function notificationApi(): typeof import('expo-notifications') {
   return require('expo-notifications');
 }
 
-// One queue for foreground permission UI. Automatic Android callers only
-// inspect permissions; onboarding (or an explicit user action) owns requests.
+// One queue for actual foreground permission dialogs, not passive inspection
+// or native location lifecycle work. A lost optional notification callback
+// keeps its dialog pending; it must never monopolize location recovery.
 let permissionQueue: Promise<unknown> = Promise.resolve();
 const locationPermissionListeners = new Set<() => void>();
 
@@ -102,9 +103,7 @@ export function requestOnboardingLocation(isCurrent: () => boolean = () => true)
 
 export function foregroundLocationForAutomaticCaller() {
   if (Platform.OS !== 'android') return location().requestForegroundPermissionsAsync();
-  return serializePermissionOperation(() => Platform.OS === 'android'
-    ? location().getForegroundPermissionsAsync()
-    : location().requestForegroundPermissionsAsync());
+  return location().getForegroundPermissionsAsync();
 }
 
 export function notificationPermission(
@@ -119,8 +118,8 @@ export function notificationPermission(
       return existing.status === 'granted' ? existing : Notifications.requestPermissionsAsync();
     })();
   }
-  // Optional state inspection must never own the location/disclosure queue.
-  // Only an actual interactive OS request shares that queue.
+  // Inspection is independent of the dialog queue. Actual OS dialogs remain
+  // serialized; automatic location startup/recovery never waits on this queue.
   return (async () => {
     const Notifications = notificationApi();
     const existing = await Notifications.getPermissionsAsync();

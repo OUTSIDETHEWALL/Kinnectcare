@@ -65,7 +65,7 @@ import { Platform, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
-import { readPermissionSnapshot, serializePermissionOperation } from './permissionCoordinator';
+import { readPermissionSnapshot } from './permissionCoordinator';
 import {
   authorizeTrackingIntent, revokeTrackingIntent, trackingIntentEpoch,
   recoverUnexpectedlyDisabledTracking,
@@ -1595,8 +1595,9 @@ export function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<stri
 export function start(cfg: LocationEngineConfig): Promise<LocationStartupOutcome> {
   if (Platform.OS !== 'android') return startConfiguredEngine(cfg, engineGeneration);
   const generation = ++engineGeneration;
-  return serializePermissionOperation(() =>
-    serializeEngineOperation(() => startConfiguredEngine(cfg, generation)));
+  // Android startup only inspects grants. Optional permission UI must not own
+  // the native lifecycle FIFO, even when its callback never returns.
+  return serializeEngineOperation(() => startConfiguredEngine(cfg, generation));
 }
 
 async function startConfiguredEngine(cfg: LocationEngineConfig, generation: number): Promise<LocationStartupOutcome> {
@@ -1943,7 +1944,7 @@ export function recoverFromIndependentWake(
       }
       return ownership;
     }
-    return serializePermissionOperation(() => serializeEngineOperation(async () => {
+    return serializeEngineOperation(async () => {
     const lib = bgGeo();
     if (!lib) return 'native_unavailable';
     try {
@@ -1967,7 +1968,7 @@ export function recoverFromIndependentWake(
       });
       return 'failed';
     }
-    }));
+    });
   })();
 }
 
@@ -2043,7 +2044,7 @@ async function stopConfiguredEngine(): Promise<void> {
 export async function restart(): Promise<void> {
   if (Platform.OS === 'android') {
     const generation = engineGeneration;
-    return serializePermissionOperation(() => serializeEngineOperation(async () => {
+    return serializeEngineOperation(async () => {
       await logEvent('restart_invoked');
       const cfg = cachedConfig;
       if (!cfg || generation !== engineGeneration || (cfg.isCurrent && !cfg.isCurrent())) {
@@ -2061,7 +2062,7 @@ export async function restart(): Promise<void> {
         throw new Error(`Location restart is not background-ready: ${outcome}`);
       }
       await logEvent('restart_completed', { outcome });
-    }));
+    });
   }
   await logEvent('restart_invoked');
   if (!cachedConfig) {

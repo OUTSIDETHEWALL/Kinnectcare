@@ -9,15 +9,20 @@ When validating a screen action after the app returns to the foreground, mount t
 
 **How to apply:** Assert that the coordinator installed lifecycle listeners, drive its background-to-active transition, then verify the intended route remains visible and the user action navigates exactly once.
 
-Location startup and repair tests must also include the real navigation-root
-permission gates, not merely call the engine directly.
+Location startup and repair tests must include the real navigation-root
+permission gates and the real requesting onboarding screen, not merely call
+the engine or stub permission inspection.
 
 **Why:** Independent review found that notification inspection could strand
 tracking before the repaired engine was ever reached, despite passing engine tests.
+A later review found that root-only tests still missed a lost interactive
+notification callback holding the shared dialog queue.
 
 **How to apply:** Mount the real application root with real authorization code.
-Exercise denied, rejected, and lost optional queries, plus session, ownership,
-location-permission and durable-revocation boundaries before asserting native startup.
+Exercise denied, rejected, and lost optional queries AND actual native requests,
+including late completion after withdrawal or screen disposal. Keep session,
+ownership, location-permission and durable-revocation checks real before
+asserting native startup.
 
 Also exercise a newly mounted navigation root inside an already-live Android JS process. A new screen tree does not imply fresh module state.
 
