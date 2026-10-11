@@ -46,6 +46,7 @@ type Intent = {
 export type RecoverySdk = {
   getState: () => Promise<{
     enabled?: boolean; url?: string; authorization?: { accessToken?: string };
+    stopOnTerminate?: boolean; startOnBoot?: boolean; enableHeadless?: boolean;
   }>;
   setConfig: (config: Record<string, unknown>) => Promise<unknown>;
   start: () => Promise<{ enabled?: boolean }>;
@@ -85,7 +86,9 @@ export async function trackingPolicyStamp(): Promise<string | null> {
 
 export async function trackingIsRevoked(consentOnly = false): Promise<boolean> {
   const raw = await trackingPolicyStamp();
-  return revokedStamp(raw, consentOnly);
+  if (revokedStamp(raw, consentOnly)) return true;
+  // Pre-intent installations already have a durable sharing withdrawal flag.
+  return await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1';
 }
 
 function revokedStamp(raw: string | null, consentOnly = false): boolean {
@@ -226,6 +229,70 @@ async function authenticatedGet(url: string, token: string): Promise<unknown> {
 }
 
 /**
+ * Absence is not consent. Migrate only an affirmative, matching legacy binding
+ * plus disclosure/native background policy, freshly verified session/ownership/
+ * sharing and OS permissions. Never use the SDK's retained JWT as authority.
+ * Caller serializes with engine startup; this function never starts native work.
+ */
+export async function migrateLegacyTrackingIntent(
+  sdk: Pick<RecoverySdk, 'getState'>, isCurrent: () => boolean,
+): Promise<boolean> {
+  const expectedEpoch = epoch;
+  if (await trackingPolicyStamp() !== null || !isCurrent()) return false;
+  const base = (process.env.EXPO_PUBLIC_BACKEND_URL || '').replace(/\/+$/, '');
+  if (!base.startsWith('https://')) return false;
+  const [ownerId, memberId, bgMemberId, disclosure, sharingOff, state] = await Promise.all([
+    AsyncStorage.getItem('kc_my_user_id_v1'),
+    AsyncStorage.getItem('kc_my_member_id_v1'),
+    AsyncStorage.getItem('@kinnship/bg_location_member_id_v1'),
+    AsyncStorage.getItem('@kinnship/background_location_disclosure_shown_v1'),
+    AsyncStorage.getItem('@kinnship/location_sharing_off_v1'),
+    sdk.getState(),
+  ]);
+  // Transistor exclusivity removes the old Expo-task member key. Absence is
+  // expected; a surviving conflicting binding is not.
+  if (!ownerId || !memberId || (bgMemberId !== null && memberId !== bgMemberId) || disclosure !== 'true'
+    || sharingOff === '1' || state.stopOnTerminate !== false
+    || state.startOnBoot !== true || state.enableHeadless !== true
+    || state.url !== `${base}/api/members/${encodeURIComponent(memberId)}/location`) return false;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getCurrentToken } = require('./api') as typeof import('./api');
+  const token = await getCurrentToken();
+  if (!token || !isCurrent() || epoch !== expectedEpoch) return false;
+  const [user, members, preferences, permissions] = await Promise.all([
+    authenticatedGet(`${base}/api/auth/me`, token),
+    authenticatedGet(`${base}/api/members`, token),
+    authenticatedGet(`${base}/api/me/preferences`, token),
+    readPermissionSnapshot({ includeNotifications: false }),
+  ]) as [{ id?: string }, { id: string; user_id: string }[],
+    { location_sharing_enabled?: boolean }, { foreground: string; background: string }];
+  if (user?.id !== ownerId || !Array.isArray(members)
+    || members.filter(member => member.user_id === ownerId).length !== 1
+    || !members.some(member => member.id === memberId && member.user_id === ownerId)
+    || preferences?.location_sharing_enabled !== true
+    || permissions.foreground !== 'granted' || permissions.background !== 'granted') return false;
+  let migrated = false;
+  await write(async () => {
+    const [stamp, latestToken, latestOwner, latestMember, latestBgMember, localOff] = await Promise.all([
+      trackingPolicyStamp(), getCurrentToken(),
+      AsyncStorage.getItem('kc_my_user_id_v1'), AsyncStorage.getItem('kc_my_member_id_v1'),
+      AsyncStorage.getItem('@kinnship/bg_location_member_id_v1'),
+      AsyncStorage.getItem('@kinnship/location_sharing_off_v1'),
+    ]);
+    if (epoch !== expectedEpoch || !isCurrent() || stamp !== null || latestToken !== token
+      || latestOwner !== ownerId || latestMember !== memberId || latestBgMember !== bgMemberId
+      || localOff === '1') return;
+    const intent: Intent = {
+      version: 1, ownerUserId: ownerId, memberId, backendBaseUrl: base,
+      nonce: `${Date.now()}-${Math.random()}`,
+    };
+    await AsyncStorage.setItem(TRACKING_INTENT_KEY, JSON.stringify(intent));
+    migrated = epoch === expectedEpoch && isCurrent();
+  });
+  return migrated;
+}
+
+/**
  * Caller holds the startup/reconfiguration FIFO; intentional stop bypasses it.
  * One attempt per wake, no listener registration, no timers that repeat.
  * Never authorize from the SDK's retained JWT: sign-out may have left it there.
@@ -237,11 +304,20 @@ export async function recoverUnexpectedlyDisabledTracking(
 ): Promise<string> {
   let expectedEpoch = epoch;
   let expectedStamp = await trackingPolicyStamp();
-  if (revokedStamp(expectedStamp)) {
+  if (revokedStamp(expectedStamp) || await trackingIsRevoked()) {
     await sdk.stop();
     const transport = await authorizeRevokedBatteryTransport(isCurrent);
     if (transport) onAuthorizedBattery?.(transport);
     return 'tracking_revoked';
+  }
+  if (expectedStamp === null) {
+    await migrateLegacyTrackingIntent(sdk, isCurrent);
+    expectedEpoch = epoch;
+    expectedStamp = await trackingPolicyStamp();
+    if (revokedStamp(expectedStamp)) {
+      await sdk.stop();
+      return 'tracking_revoked';
+    }
   }
   const intent = parseIntent(expectedStamp);
   const base = (process.env.EXPO_PUBLIC_BACKEND_URL || '').replace(/\/+$/, '');
@@ -279,14 +355,8 @@ export async function recoverUnexpectedlyDisabledTracking(
   const lastAttempt = Number(await AsyncStorage.getItem(ATTEMPT_KEY));
   const now = Date.now();
   const needsStart = sdkState.enabled !== true;
-  if (intent && needsStart && lastAttempt > 0 && lastAttempt <= now && now - lastAttempt < COOLDOWN_MS) {
-    const cache = verifiedOwner;
-    if (cache && cache.token === token && cache.nonce === expectedNonce
-      && cache.memberId === memberId && now >= cache.at && now - cache.at < 60_000) {
-      onAuthorizedBattery?.({ baseUrl: base, memberId, token, isCurrent: current });
-    }
-    return 'cooldown';
-  }
+  const coolingDown = intent && needsStart && lastAttempt > 0
+    && lastAttempt <= now && now - lastAttempt < COOLDOWN_MS;
   // Enabled transport can reuse a one-minute proof, never an unverified owner.
   // Disabled-engine restart ALWAYS revalidates with the server.
   const cache = verifiedOwner;
@@ -322,7 +392,7 @@ export async function recoverUnexpectedlyDisabledTracking(
     };
   }
   if (!await current()) { await sdk.stop(); return 'obsolete_owner'; }
-  const permissions = await readPermissionSnapshot();
+  const permissions = await readPermissionSnapshot({ includeNotifications: false });
   const sharingOff = !verifiedOwner?.sharing
     || await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1';
   const permissionDenied = permissions.foreground !== 'granted' || permissions.background !== 'granted';
@@ -340,6 +410,8 @@ export async function recoverUnexpectedlyDisabledTracking(
   }
   if (await current()) onAuthorizedBattery?.({ baseUrl: base, memberId, token, isCurrent: current });
   if (!intent) return 'no_current_intent';
+  // Limit GPS starts, not fresh ownership validation or legitimate battery work.
+  if (coolingDown) return 'cooldown';
   const locationUrl = `${base}/api/members/${encodeURIComponent(memberId)}/location`;
   if (sdkState.enabled === true && sdkState.url === locationUrl
     && sdkState.authorization?.accessToken === token) return 'already_enabled';
@@ -352,7 +424,7 @@ export async function recoverUnexpectedlyDisabledTracking(
     locationAuthorizationRequest: 'Always',
     disableLocationAuthorizationAlert: true,
   });
-  const latestPermissions = await readPermissionSnapshot();
+  const latestPermissions = await readPermissionSnapshot({ includeNotifications: false });
   if (!await current()) { await sdk.stop(); return 'obsolete_owner'; }
   if (latestPermissions.foreground !== 'granted' || latestPermissions.background !== 'granted'
     || await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1') {
@@ -361,7 +433,7 @@ export async function recoverUnexpectedlyDisabledTracking(
     return 'permission_denied';
   }
   const state = needsStart ? await sdk.start() : await sdk.getState();
-  const finalPermissions = await readPermissionSnapshot();
+  const finalPermissions = await readPermissionSnapshot({ includeNotifications: false });
   if (!await current() || finalPermissions.foreground !== 'granted'
     || finalPermissions.background !== 'granted'
     || await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1') {

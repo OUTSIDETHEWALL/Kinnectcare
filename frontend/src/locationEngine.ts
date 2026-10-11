@@ -70,6 +70,7 @@ import {
   authorizeTrackingIntent, revokeTrackingIntent, trackingIntentEpoch,
   recoverUnexpectedlyDisabledTracking,
   trackingIsRevoked, trackingPolicyStamp, authorizeRevokedBatteryTransport, verifyWakeOwnership,
+  migrateLegacyTrackingIntent,
   BACKGROUND_PERMISSION_RATIONALE,
 } from './androidTrackingRecovery';
 import type { AuthorizedBatteryTransport, RevocationReason } from './androidTrackingRecovery';
@@ -821,7 +822,7 @@ async function ownedNativeSdk(
   lib: any, isCurrent: () => boolean, expectedEpoch: number, expectedToken: string | null,
 ): Promise<any> {
   const policy = await trackingPolicyStamp();
-  const baselinePermissions = await readPermissionSnapshot();
+  const baselinePermissions = await readPermissionSnapshot({ includeNotifications: false });
   const synchronouslyCurrent = () => isCurrent() && trackingIntentEpoch() === expectedEpoch;
   return fenceNativeSdk(lib, async () => {
     if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch) return false;
@@ -829,7 +830,7 @@ async function ownedNativeSdk(
     const { getCurrentToken } = require('./api') as typeof import('./api');
     const stamp = await trackingPolicyStamp();
     const token = await getCurrentToken();
-    const permissions = await readPermissionSnapshot();
+    const permissions = await readPermissionSnapshot({ includeNotifications: false });
     return isCurrent() && trackingIntentEpoch() === expectedEpoch
       && stamp === policy && token === expectedToken
       && !(baselinePermissions.foreground === 'granted' && permissions.foreground !== 'granted')
@@ -937,13 +938,18 @@ async function readBatteryState(): Promise<{ level: number | null; isCharging: b
   }
 }
 
-export async function pushBatteryUpdate(source: string = 'unknown'): Promise<void> {
+export async function pushBatteryUpdate(
+  source: string = 'unknown', transport?: AuthorizedBatteryTransport,
+): Promise<void> {
+  const config = transport
+    ? { memberId: transport.memberId, backendBaseUrl: transport.baseUrl, jwt: transport.token }
+    : cachedConfig;
   // Step 1 — guard: cachedConfig must be set (i.e. start() was called).
-  if (!cachedConfig) {
+  if (!config || (transport && !await transport.isCurrent())) {
     void logEvent('battery_push_skipped', { reason: 'no_cached_config', source });
     return;
   }
-  void logEvent('battery_push_start', { source, memberId: cachedConfig.memberId });
+  void logEvent('battery_push_start', { source, memberId: config.memberId });
 
   // Step 2 — read battery state from expo-battery.
   const { level, isCharging } = await readBatteryState();
@@ -953,6 +959,8 @@ export async function pushBatteryUpdate(source: string = 'unknown'): Promise<voi
     void logEvent('battery_push_skipped', { reason: 'no_data_from_expo_battery', source });
     return;
   }
+  if (transport ? !await transport.isCurrent()
+    : cachedConfig !== config || (cachedConfig?.isCurrent && !cachedConfig.isCurrent())) return;
 
   // Step 3 — send PATCH to backend.
   try {
@@ -965,12 +973,33 @@ export async function pushBatteryUpdate(source: string = 'unknown'): Promise<voi
     if (level !== null)      body.battery_level = level;
     if (isCharging !== null) body.is_charging   = isCharging;
 
-    const url = `/members/${cachedConfig.memberId}/battery`;
+    const url = `/members/${config.memberId}/battery`;
     void logEvent('battery_patch_sent', { url, level, isCharging, ts });
 
-    const resp = await api.patch(url, body, {
-      headers: { 'X-Kinnship-Presence-Source': 'battery-event' },
-    });
+    // The shared API interceptor can substitute a newer account's token during
+    // an await. Cold telemetry must keep the exact verified owner/token binding.
+    let resp;
+    if (transport) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 6000);
+      try {
+        const response = await fetch(`${transport.baseUrl}/api${url}`, {
+          method: 'PATCH', signal: controller.signal,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Kinnship-Presence-Source': 'battery-event',
+            Authorization: `Bearer ${transport.token}`,
+          },
+          body: JSON.stringify(body),
+        });
+        if (!response.ok) throw new Error(`battery-http-${response.status}`);
+        resp = { status: response.status, data: await response.json() };
+      } finally { clearTimeout(timeout); }
+    } else {
+      resp = await api.patch(url, body, {
+        headers: { 'X-Kinnship-Presence-Source': 'battery-event' },
+      });
+    }
     const httpStatus: number = resp?.status ?? 0;
     const hasId = !!(resp?.data?.id);
 
@@ -1844,18 +1873,32 @@ export function recoverFromIndependentWake(
   const generation = engineGeneration;
   return (async () => {
     const revoked = await trackingIsRevoked();
-    const permissions = await readPermissionSnapshot();
     if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
-    if (revoked || permissions.foreground !== 'granted' || permissions.background !== 'granted') {
-      // A wake must enforce withdrawal even if another wake owns a stalled FIFO.
-      if (revoked) await interruptEngineStop();
-      else await stop('permission');
+    if (revoked) {
+      // Known withdrawal must reach native shutdown BEFORE permissions, network,
+      // battery work, or either FIFO. Invalidate any pending native completion.
+      engineGeneration += 1;
+      cachedConfig = null;
+      await interruptEngineStop();
+      if (await trackingPolicyStamp() === null) await revokeTrackingIntent('consent');
       const shutdownGeneration = engineGeneration;
       const transport = await authorizeRevokedBatteryTransport(
         () => shutdownGeneration === engineGeneration && isCurrent(),
       );
       if (transport) onAuthorizedBattery?.(transport);
-      return revoked ? 'tracking_revoked' : 'permission_denied';
+      return 'tracking_revoked';
+    }
+    const permissions = await readPermissionSnapshot({ includeNotifications: false });
+    if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
+    if (permissions.foreground !== 'granted' || permissions.background !== 'granted') {
+      // A wake must enforce withdrawal even if another wake owns a stalled FIFO.
+      await stop('permission');
+      const shutdownGeneration = engineGeneration;
+      const transport = await authorizeRevokedBatteryTransport(
+        () => shutdownGeneration === engineGeneration && isCurrent(),
+      );
+      if (transport) onAuthorizedBattery?.(transport);
+      return 'permission_denied';
     }
     const ownership = await verifyWakeOwnership(() => generation === engineGeneration && isCurrent());
     if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
@@ -1870,6 +1913,10 @@ export function recoverFromIndependentWake(
     const lib = bgGeo();
     if (!lib) return 'native_unavailable';
     try {
+      // Adopt legacy intent before capturing the native operation fence's policy
+      // stamp. The migration itself is read-only with respect to the SDK.
+      await migrateLegacyTrackingIntent(lib, () => generation === engineGeneration && isCurrent());
+      if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
       const epoch = trackingIntentEpoch();
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getCurrentToken } = require('./api') as typeof import('./api');
@@ -1888,6 +1935,46 @@ export function recoverFromIndependentWake(
     }
     }));
   })();
+}
+
+/** Cold push acquisition uses native persistence, never foreground-only caches. */
+export async function recoverAndRefreshFromIndependentWake(
+  trigger: string, shouldAcquire: () => Promise<boolean> = async () => true,
+): Promise<string> {
+  let transport: AuthorizedBatteryTransport | null = null;
+  const result = await recoverFromIndependentWake(trigger, () => true, value => { transport = value; });
+  const proof = transport as AuthorizedBatteryTransport | null;
+  // Preserve the existing refresh-push battery behavior, including for a
+  // verified owner with GPS consent withdrawn. Battery never gates shutdown/GPS.
+  const battery = proof ? pushBatteryUpdate('refresh-push', proof) : Promise.resolve();
+  if (!proof || !['already_enabled', 'restarted'].includes(result)) {
+    await battery;
+    return result;
+  }
+  const generation = engineGeneration;
+  const epoch = trackingIntentEpoch();
+  const location = serializeEngineOperation(async () => {
+    if (generation !== engineGeneration || epoch !== trackingIntentEpoch() || !await proof.isCurrent()) {
+      return 'obsolete_owner';
+    }
+    if (!await shouldAcquire()) return 'duplicate_refresh';
+    const lib = bgGeo();
+    if (!lib) return 'native_unavailable';
+    const owned = await ownedNativeSdk(
+      lib, () => generation === engineGeneration, epoch, proof.token,
+    );
+    await owned.getCurrentPosition({
+      samples: 1, persist: true, timeout: 20,
+      extras: { source: trigger },
+    });
+    if (generation !== engineGeneration || epoch !== trackingIntentEpoch() || !await proof.isCurrent()) {
+      return 'obsolete_owner';
+    }
+    await logEvent('independent_location_persisted', { trigger, uploadConfirmation: 'awaiting-native-http' });
+    return 'location_persisted';
+  });
+  const [outcome] = await Promise.all([location, battery]);
+  return outcome;
 }
 
 async function stopConfiguredEngine(): Promise<void> {

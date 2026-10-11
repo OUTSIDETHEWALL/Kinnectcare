@@ -28,6 +28,19 @@ describe('cold headless entry registration', () => {
       configure: jest.fn(),
     };
     const permissionDisclosure = jest.fn();
+    const notificationTask = jest.fn((_name, handler) => {
+      expect(typeof handler).toBe('function');
+      order.push('notification-registration');
+    });
+    jest.doMock('expo-task-manager', () => ({
+      isTaskDefined: () => false, defineTask: notificationTask,
+    }));
+    jest.doMock('expo-notifications', () => ({
+      setNotificationHandler: jest.fn(), registerTaskAsync: jest.fn(async () => {}),
+    }));
+    jest.doMock('expo-device', () => ({}));
+    jest.doMock('expo-constants', () => ({ expoConfig: {} }));
+    jest.doMock('../api', () => ({ migrateTokenForBackgroundActions: jest.fn(async () => {}) }));
     const storage = {
       getItem: jest.fn().mockResolvedValue(null),
       setItem: jest.fn().mockResolvedValue(undefined),
@@ -54,6 +67,7 @@ describe('cold headless entry registration', () => {
       if (platform !== 'web') {
         expect(sdk.registerHeadlessTask).toHaveBeenCalledTimes(1);
         expect(backgroundFetch.registerHeadlessTask).toHaveBeenCalledTimes(1);
+        expect(notificationTask).toHaveBeenCalledTimes(1);
       }
       order.push('router-entry');
       return {};
@@ -77,7 +91,7 @@ describe('cold headless entry registration', () => {
     platform => {
       const { order, sdk, backgroundFetch, permissionDisclosure } = loadEntry(platform);
       expect(order).toEqual([
-        'metro-runtime', 'location-registration', 'battery-registration', 'router-entry',
+        'metro-runtime', 'location-registration', 'battery-registration', 'notification-registration', 'router-entry',
       ]);
       expect(sdk.ready).not.toHaveBeenCalled();
       expect(sdk.start).not.toHaveBeenCalled();

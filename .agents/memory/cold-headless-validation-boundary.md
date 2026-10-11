@@ -19,3 +19,15 @@ intentional sign-out, permission and ownership shutdown boundaries.
 **How to apply:** Treat software regression coverage and physical cold-process/
 reboot acceptance as separate requirements; do not waive either based on a warm
 foreground recovery or successful battery telemetry.
+
+An upgrade introducing durable tracking intent must account for legitimately
+authorized legacy installations that lack the new record. Absence alone is
+neither consent nor revocation; ambiguous state must fail closed, but sufficient
+historical and current authorization evidence must allow independent recovery.
+
+**Why:** The user required safe legacy recovery after physical diagnostics proved
+that battery wakes survived a disabled tracker and only foregrounding repaired GPS.
+
+**How to apply:** Include a legacy, already-disabled, UI-absent acceptance case.
+Do not quietly substitute one foreground startup under the new update for that
+case, or treat battery contact as evidence of fresh GPS.

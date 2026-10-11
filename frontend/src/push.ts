@@ -10,6 +10,7 @@ import {
   handleMedicationAction,
   replayPendingMedicationAcknowledgments,
 } from './medicationAcknowledgment';
+import { handleSilentLocationRecoveryPush } from './locationRecoveryPush';
 
 // Hardcoded fallback in case Constants.expoConfig is unavailable (this happens
 // in some standalone build configurations). Keep in sync with app.json →
@@ -47,7 +48,9 @@ if (Platform.OS !== 'web') {
     console.warn('[push] Could not upgrade notification-action token access', error);
   });
   if (!TaskManager.isTaskDefined(WELFARE_CHECK_TASK)) {
-    TaskManager.defineTask(WELFARE_CHECK_TASK, async ({ data }: any) => {
+    TaskManager.defineTask(WELFARE_CHECK_TASK, async ({ data, error }: any) => {
+      if (error) return;
+      if (await handleSilentLocationRecoveryPush(data)) return;
       // Expo has delivered both a direct NotificationResponse and a wrapped
       // { response } shape across SDK/OEM combinations.  Keep welfare and
       // medication actions in this one registered task, while sharing only
@@ -1175,25 +1178,23 @@ export function useNotificationListeners(onAlert?: (data: any) => void) {
           // Trigger the refresh BEFORE dismissing — never block work
           // on the cosmetic cleanup.
           if (isSilentRefresh) {
-            // Imported lazily to avoid a hot-path cycle with locationRefresh.
-            // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
-            const { refreshLocationIfStale } = require('./locationRefresh');
-            (global as any).__kc_force_loc_refresh = true;
-            // eslint-disable-next-line no-console
-            console.log(`[refresh-pipeline] STAGE=gps_triggered request_id=${reqId}`);
-            refreshLocationIfStale('pull-request').catch((e: any) => {
-              // eslint-disable-next-line no-console
-              console.log(`[refresh-pipeline] STAGE=gps_error request_id=${reqId} error=${e?.message || e}`);
-            });
-            // Emergency context: also push battery so caregivers see the
-            // freshest level + charging state alongside the location fix.
-            // Reuses the existing battery pipeline — no new timers or polling.
-            // Only fires when a backend-initiated silent push wakes this device
-            // (SOS fanout or "Are You OK?" request), so zero cost during normal
-            // operation.
-            // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
-            const { pushBatteryUpdate } = require('./locationEngine');
-            void (pushBatteryUpdate as (src: string) => Promise<void>)('refresh-push');
+            if (Platform.OS === 'android') {
+              void handleSilentLocationRecoveryPush(n).catch((error: unknown) => {
+                console.warn('[refresh-pipeline] guarded recovery failed', String(error));
+              });
+            } else {
+              // Preserve the existing iOS foreground refresh and battery path.
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { refreshLocationIfStale } = require('./locationRefresh');
+              (global as any).__kc_force_loc_refresh = true;
+              console.log(`[refresh-pipeline] STAGE=gps_triggered request_id=${reqId}`);
+              refreshLocationIfStale('pull-request').catch((e: any) => {
+                console.log(`[refresh-pipeline] STAGE=gps_error request_id=${reqId} error=${e?.message || e}`);
+              });
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { pushBatteryUpdate } = require('./locationEngine');
+              void (pushBatteryUpdate as (src: string) => Promise<void>)('refresh-push');
+            }
           }
           // Dismiss the just-arrived tray entry.  Fire-and-forget;
           // any failure here is purely cosmetic.

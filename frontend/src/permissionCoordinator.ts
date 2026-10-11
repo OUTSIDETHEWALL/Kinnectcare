@@ -25,13 +25,16 @@ export type PermissionSnapshot = {
   notifications: string;
 };
 
-export async function readPermissionSnapshot(): Promise<PermissionSnapshot> {
+export async function readPermissionSnapshot(
+  options: { includeNotifications?: boolean } = {},
+): Promise<PermissionSnapshot> {
   const Location = location();
-  const Notifications = notificationApi();
   const [foreground, background, notifications] = await Promise.all([
     Location.getForegroundPermissionsAsync(),
     Location.getBackgroundPermissionsAsync(),
-    Notifications.getPermissionsAsync(),
+    options.includeNotifications === false
+      ? Promise.resolve({ status: 'not-inspected' })
+      : notificationApi().getPermissionsAsync(),
   ]);
   return {
     foreground: foreground.status,

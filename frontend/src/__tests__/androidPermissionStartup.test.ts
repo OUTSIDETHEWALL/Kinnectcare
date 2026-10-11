@@ -78,6 +78,27 @@ describe('Android permission/startup policy', () => {
     expect(await store.isPermissionsHandled()).toBe(false);
   });
 
+  it('location-only permission inspection does not wait for notification permission', async () => {
+    notifications.getPermissionsAsync.mockImplementation(() => new Promise(() => {}));
+    expect(await coordinator.readPermissionSnapshot({ includeNotifications: false })).toMatchObject({
+      foreground: 'granted', background: 'granted', notifications: 'not-inspected',
+    });
+    expect(notifications.getPermissionsAsync).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 1, null])('sends native tracking mode %s using the deployed snapshot string contract', async mode => {
+    await engine.start(config);
+    sdk.getState.mockResolvedValue({ enabled: true, trackingMode: mode });
+    const api = require('../api').api;
+    api.put.mockClear();
+    expect(await engine.triggerDeviceSnapshotNow()).toEqual({ ok: true });
+    expect(api.put).toHaveBeenCalledWith(
+      '/members/member/device-snapshot',
+      expect.objectContaining({ sdk_tracking_mode: mode === null ? null : String(mode) }),
+      expect.anything(),
+    );
+  });
+
   it('preserves best-effort iOS setup persistence', async () => {
     platform.OS = 'ios';
     const nativeStorage = require('@react-native-async-storage/async-storage');

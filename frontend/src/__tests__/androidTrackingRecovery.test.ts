@@ -36,7 +36,9 @@ describe('owned Android cold tracking recovery', () => {
     jest.doMock('../api', () => ({
       getCurrentToken: jest.fn(async () => token),
       api: { get: jest.fn(async path => ({ data: path === '/auth/me' ? user
-        : path === '/members' ? members : { location_sharing_enabled: sharing } })) },
+        : path === '/members' ? members : { location_sharing_enabled: sharing } })),
+        patch: jest.fn(async () => ({ status: 200 })),
+      },
     }));
     jest.doMock('../backgroundLocationDisclosure', () => ({
       BACKGROUND_LOCATION_DISCLOSURE_TEXT: 'Kinnship background location disclosure',
@@ -50,6 +52,7 @@ describe('owned Android cold tracking recovery', () => {
       getState: jest.fn(async () => ({
         enabled, url: 'https://example.test/api/members/member-a/location',
         authorization: { accessToken: token },
+        stopOnTerminate: false, startOnBoot: true, enableHeadless: true,
       })),
       setConfig: jest.fn(async () => {}),
       start: jest.fn(async () => { enabled = true; return { enabled }; }),
@@ -78,6 +81,14 @@ describe('owned Android cold tracking recovery', () => {
   const run = (current = () => true) =>
     recovery.recoverUnexpectedlyDisabledTracking(sdk, current);
 
+  function seedLegacy() {
+    store.delete(recovery.TRACKING_INTENT_KEY);
+    store.set('kc_my_user_id_v1', 'owner-a');
+    store.set('kc_my_member_id_v1', 'member-a');
+    store.set('@kinnship/bg_location_member_id_v1', 'member-a');
+    store.set('@kinnship/background_location_disclosure_shown_v1', 'true');
+  }
+
   it.each(['boot', 'terminate'])('restarts from the real %s headless handler without mounting UI', async name => {
     require('../locationEngine');
     const handler = sdk.registerHeadlessTask.mock.calls[0][0];
@@ -104,7 +115,9 @@ describe('owned Android cold tracking recovery', () => {
     expect(await engine.recoverFromIndependentWake('boot')).toBe('tracking_revoked');
   });
 
-  it.each([false, true])('actual independent battery wake recovers safely (permission denial=%s)', async denied => {
+  it.each([[false, false], [true, false], [false, true], [true, true]])(
+    'actual independent battery wake recovers safely (permission denial=%s, legacy=%s)', async (denied, legacy) => {
+    if (legacy) seedLegacy();
     let handler!: (id: string) => Promise<void>;
     const finish = jest.fn();
     jest.doMock('react-native-background-fetch', () => ({ default: {
@@ -126,6 +139,191 @@ describe('owned Android cold tracking recovery', () => {
     const log = JSON.parse(store.get('@kinnship/battery_task_log_v1') || '[]');
     expect(log.some((entry: any) => entry.event === 'background_battery_ok')).toBe(true);
     expect(log.some((entry: any) => entry.event === 'background_location_persisted')).toBe(!denied);
+  });
+
+  it.each([
+    ['rejects', false], ['never resolves', false], ['rejects', true], ['never resolves', true],
+  ])('enforces durable revocation before permission query %s (legacy flag=%s)', async (behavior, legacy) => {
+    enabled = true;
+    if (legacy) {
+      store.delete(recovery.TRACKING_INTENT_KEY);
+      store.set('@kinnship/location_sharing_off_v1', '1');
+    } else await recovery.revokeTrackingIntent('consent');
+    token = null; // Optional battery authorization is not needed.
+    const permissionsApi = require('../permissionCoordinator');
+    permissionsApi.readPermissionSnapshot.mockImplementation(() => behavior === 'rejects'
+      ? Promise.reject(new Error('permission bridge unavailable'))
+      : new Promise(() => {}));
+    const engine = require('../locationEngine') as typeof import('../locationEngine');
+    for (const wake of ['workmanager', 'boot', 'silent-refresh-push']) {
+      expect(await engine.recoverFromIndependentWake(wake)).toBe('tracking_revoked');
+      expect(enabled).toBe(false);
+    }
+    expect(permissionsApi.readPermissionSnapshot).not.toHaveBeenCalled();
+    expect(sdk.start).not.toHaveBeenCalled();
+  });
+
+  it('migrates an authorized disabled legacy phone without UI and retains intent across process recreation', async () => {
+    seedLegacy();
+    store.delete('@kinnship/bg_location_member_id_v1'); // Normal Transistor-exclusive installation.
+    const engine = require('../locationEngine') as typeof import('../locationEngine');
+    expect(await engine.recoverFromIndependentWake('workmanager')).toBe('restarted');
+    const intent = JSON.parse(store.get(recovery.TRACKING_INTENT_KEY)!);
+    expect(intent).toMatchObject(config);
+    expect(enabled).toBe(true);
+    expect(sdk.start).toHaveBeenCalledTimes(1);
+    jest.resetModules();
+    recovery = require('../androidTrackingRecovery');
+    expect(await require('../locationEngine').recoverFromIndependentWake('boot')).toBe('already_enabled');
+    expect(sdk.start).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    'missing user', 'conflicting member', 'missing disclosure', 'local opt-out',
+    'native background policy', 'substituted backend', 'wrong owner', 'missing session',
+    'server opt-out', 'permission revoked', 'durable revocation', 'malformed intent',
+  ])('does not migrate ambiguous/revoked legacy state: %s', async reason => {
+    seedLegacy();
+    if (reason === 'missing user') store.delete('kc_my_user_id_v1');
+    if (reason === 'conflicting member') store.set('@kinnship/bg_location_member_id_v1', 'member-b');
+    if (reason === 'missing disclosure') store.delete('@kinnship/background_location_disclosure_shown_v1');
+    if (reason === 'local opt-out') store.set('@kinnship/location_sharing_off_v1', '1');
+    if (reason === 'native background policy') sdk.getState.mockResolvedValue({
+      enabled, url: 'https://example.test/api/members/member-a/location', stopOnTerminate: true,
+    });
+    if (reason === 'substituted backend') process.env.EXPO_PUBLIC_BACKEND_URL = 'https://other.test';
+    if (reason === 'wrong owner') user = { id: 'owner-b' };
+    if (reason === 'missing session') token = null;
+    if (reason === 'server opt-out') sharing = false;
+    if (reason === 'permission revoked') permissions.background = 'denied';
+    if (reason === 'durable revocation') await recovery.revokeTrackingIntent('consent');
+    if (reason === 'malformed intent') store.set(recovery.TRACKING_INTENT_KEY, '{invalid');
+    expect(await recovery.migrateLegacyTrackingIntent(sdk, () => true)).toBe(false);
+    expect(sdk.start).not.toHaveBeenCalled();
+    expect(sdk.setConfig).not.toHaveBeenCalled();
+  });
+
+  it.each(['revocation', 'token replacement', 'member replacement'])(
+    'legacy migration rejects authorization changed during server lookup: %s', async change => {
+      seedLegacy();
+      const original = global.fetch;
+      global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const result = await original(input, init);
+        if (String(input).endsWith('/auth/me')) {
+          if (change === 'revocation') await recovery.revokeTrackingIntent('consent');
+          if (change === 'token replacement') token = 'different-session';
+          if (change === 'member replacement') store.set('kc_my_member_id_v1', 'member-b');
+        }
+        return result;
+      }) as any;
+      expect(await recovery.migrateLegacyTrackingIntent(sdk, () => true)).toBe(false);
+      expect(sdk.start).not.toHaveBeenCalled();
+    },
+  );
+
+  function coldNotificationTask() {
+    let handler!: (event: { data: unknown; error?: unknown }) => Promise<void>;
+    jest.doMock('expo-task-manager', () => ({
+      isTaskDefined: () => false,
+      defineTask: jest.fn((_name, callback) => { handler = callback; }),
+    }));
+    jest.doMock('expo-notifications', () => ({
+      setNotificationHandler: jest.fn(), registerTaskAsync: jest.fn(async () => {}),
+      dismissNotificationAsync: jest.fn(async () => {}),
+    }));
+    jest.doMock('expo-device', () => ({ isDevice: true }));
+    jest.doMock('expo-constants', () => ({ expoConfig: {} }));
+    require('../api').migrateTokenForBackgroundActions = jest.fn(async () => {});
+    jest.doMock('expo-battery', () => ({
+      BatteryState: { CHARGING: 2, FULL: 5 },
+      getBatteryLevelAsync: jest.fn(async () => 0.8),
+      getBatteryStateAsync: jest.fn(async () => 2),
+    }));
+    require('../push');
+    return handler;
+  }
+
+  const silentPayload = (id = 'recovery-request') => ({
+    notification: null,
+    data: { dataString: JSON.stringify({
+      type: 'request_location_refresh', _requestId: id, member_id: 'untrusted-payload-member',
+    }) },
+  });
+
+  it('real cold notification task migrates/restarts a disabled legacy SDK and persists GPS without UI', async () => {
+    seedLegacy();
+    await coldNotificationTask()({ data: silentPayload() });
+    expect(sdk.start).toHaveBeenCalledTimes(1);
+    expect(sdk.getCurrentPosition).toHaveBeenCalledWith(expect.objectContaining({
+      persist: true, extras: { source: 'silent-refresh-push' },
+    }));
+    expect(sdk.setConfig).toHaveBeenCalledWith(expect.objectContaining({
+      url: 'https://example.test/api/members/member-a/location',
+    }));
+    expect(sdk.onLocation).not.toHaveBeenCalled();
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://example.test/api/members/member-a/battery',
+      expect.objectContaining({ method: 'PATCH', headers: expect.objectContaining({
+        Authorization: 'Bearer current-app-session',
+      }) }),
+    );
+  });
+
+  it.each(['revoked', 'no session', 'wrong owner', 'permission', 'consent', 'ambiguous legacy'])(
+    'cold silent push cannot bypass %s', async reason => {
+      if (reason === 'revoked') await recovery.revokeTrackingIntent('consent');
+      if (reason === 'no session') token = null;
+      if (reason === 'wrong owner') members[0].user_id = 'owner-b';
+      if (reason === 'permission') permissions.background = 'denied';
+      if (reason === 'consent') sharing = false;
+      if (reason === 'ambiguous legacy') store.delete(recovery.TRACKING_INTENT_KEY);
+      await coldNotificationTask()({ data: silentPayload() });
+      expect(sdk.start).not.toHaveBeenCalled();
+      expect(sdk.getCurrentPosition).not.toHaveBeenCalled();
+    },
+  );
+
+  it('cold and foreground duplicate deliveries share one native start/GPS acquisition, including a module reload', async () => {
+    const task = coldNotificationTask();
+    const push = require('../locationRecoveryPush');
+    await Promise.all([
+      task({ data: silentPayload() }),
+      push.handleSilentLocationRecoveryPush({
+        request: { content: { data: { type: 'request_location_refresh', _requestId: 'recovery-request' } } },
+      }),
+    ]);
+    expect(sdk.start).toHaveBeenCalledTimes(1);
+    expect(sdk.getCurrentPosition).toHaveBeenCalledTimes(1);
+    jest.resetModules();
+    await coldNotificationTask()({ data: silentPayload() });
+    expect(sdk.start).toHaveBeenCalledTimes(1);
+    expect(sdk.getCurrentPosition).toHaveBeenCalledTimes(1);
+    expect(sdk.onLocation).not.toHaveBeenCalled();
+  });
+
+  it('duplicate silent push still enforces later durable revocation', async () => {
+    const task = coldNotificationTask();
+    await task({ data: silentPayload() });
+    await recovery.revokeTrackingIntent('consent');
+    await task({ data: silentPayload() });
+    expect(enabled).toBe(false);
+    expect(sdk.start).toHaveBeenCalledTimes(1);
+    expect(sdk.getCurrentPosition).toHaveBeenCalledTimes(1);
+  });
+
+  it('a lost/late cold push GPS callback cannot prevent shutdown or resurrect tracking', async () => {
+    let finish!: (value: unknown) => void;
+    sdk.getCurrentPosition.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const pending = coldNotificationTask()({ data: silentPayload() });
+    await untilCalled(sdk.getCurrentPosition);
+    const engine = require('../locationEngine') as typeof import('../locationEngine');
+    await engine.stop('consent');
+    expect(enabled).toBe(false);
+    enabled = true;
+    finish({ timestamp: new Date().toISOString() });
+    await pending;
+    expect(enabled).toBe(false);
+    expect(await recovery.trackingIsRevoked()).toBe(true);
   });
 
   it('recovers from an independent authenticated wake with no heartbeat', async () => {
@@ -226,15 +424,28 @@ describe('owned Android cold tracking recovery', () => {
   it.each(['local', 'server'])('honors %s location-sharing opt-out', async source => {
     if (source === 'local') store.set('@kinnship/location_sharing_off_v1', '1');
     else sharing = false;
-    expect(await run()).toBe('sharing_disabled');
+    expect(await run()).toBe(source === 'local' ? 'tracking_revoked' : 'sharing_disabled');
     expect(sdk.start).not.toHaveBeenCalled();
+    expect(sdk.stop).toHaveBeenCalled();
   });
   it('caps repeated failed starts without a retry loop', async () => {
     sdk.start.mockResolvedValue({ enabled: false });
     expect(await run()).toBe('start_not_enabled');
     expect(await run()).toBe('cooldown');
     expect(sdk.start).toHaveBeenCalledTimes(1);
-    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(global.fetch).toHaveBeenCalledTimes(6);
+  });
+
+  it('a cold wake in the failed-start cooldown still validates and authorizes battery', async () => {
+    sdk.start.mockResolvedValue({ enabled: false });
+    expect(await run()).toBe('start_not_enabled');
+    jest.resetModules();
+    recovery = require('../androidTrackingRecovery');
+    const receipt = jest.fn();
+    expect(await recovery.recoverUnexpectedlyDisabledTracking(sdk, () => true, receipt)).toBe('cooldown');
+    expect(receipt).toHaveBeenCalledTimes(1);
+    expect(await receipt.mock.calls[0][0].isCurrent()).toBe(true);
+    expect(sdk.start).toHaveBeenCalledTimes(1);
   });
   it('fails closed when the server cannot verify ownership', async () => {
     enabled = true;

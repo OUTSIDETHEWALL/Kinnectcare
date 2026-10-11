@@ -28,7 +28,7 @@ export function interruptNativeTracking(sdk: NativeSdk, force = false): Promise<
 export function fenceNativeSdk<T extends NativeSdk>(
   sdk: T, current: () => Promise<boolean>, synchronouslyCurrent: () => boolean = () => true,
 ): T {
-  const guarded = new Set(['ready', 'setConfig', 'start', 'getState']);
+  const guarded = new Set(['ready', 'setConfig', 'start', 'getState', 'getCurrentPosition']);
   return new Proxy(sdk, {
     get(target, key) {
       const value = Reflect.get(target, key);

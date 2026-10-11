@@ -7,6 +7,7 @@ jest.mock('../androidTrackingRecovery', () => ({
   trackingPolicyStamp: jest.fn(async () => null),
   verifyWakeOwnership: jest.fn(async () => 'allowed'),
   authorizeRevokedBatteryTransport: jest.fn(async () => null),
+  migrateLegacyTrackingIntent: jest.fn(async () => false),
   BACKGROUND_PERMISSION_RATIONALE: {},
   authorizeTrackingIntent: jest.fn(),
   revokeTrackingIntent: jest.fn(),
