@@ -15,6 +15,12 @@ export const BACKGROUND_LOCATION_DISCLOSURE_TEXT =
 const DISCLOSURE_SHOWN_KEY = '@kinnship/background_location_disclosure_shown_v1';
 let pendingDisclosure: Promise<void> | null = null;
 
+/** Read-only location eligibility; never show UI during automatic repair. */
+export async function isBackgroundLocationDisclosureAcknowledged(): Promise<boolean> {
+  return Platform.OS !== 'android'
+    || await AsyncStorage.getItem(DISCLOSURE_SHOWN_KEY) === 'true';
+}
+
 function showDisclosureAlert(): Promise<void> {
   return new Promise((resolve) => {
     Alert.alert(

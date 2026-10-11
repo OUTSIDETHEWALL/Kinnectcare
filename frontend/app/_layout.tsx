@@ -42,7 +42,8 @@ import {
   isInviteConsumed,
 } from '../src/pendingInvite';
 import { isPermissionsHandled } from '../src/permissionsStore';
-import { readPermissionSnapshot } from '../src/permissionCoordinator';
+import { readPermissionSnapshot, subscribeLocationPermissionChanges } from '../src/permissionCoordinator';
+import { isBackgroundLocationDisclosureAcknowledged } from '../src/backgroundLocationDisclosure';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { logStartupEvent } from '../src/startupDiagnostics';
 import { recordNativeStartupCheckpoint } from '../src/nativeStartupRecorder';
@@ -71,6 +72,9 @@ function RootNav() {
   // notification dialogs with emotional, family-focused context.
   const [permissionsChecked, setPermissionsChecked] = useState(false);
   const [needsPermissions, setNeedsPermissions] = useState(false);
+  // Notification onboarding can remain open without withholding independently
+  // authorized location recovery.
+  const [androidLocationReady, setAndroidLocationReady] = useState(false);
   // Cold-start deep links must be resolved before RootNav makes its first
   // route decision. Otherwise the generic onboarding/disclaimer gates can
   // navigate away while the invite token is still being persisted.
@@ -640,7 +644,7 @@ function RootNav() {
 
   const androidPushBlocked = Platform.OS === 'android' && (!permissionsChecked || needsPermissions);
   const androidStartupBlocked = Platform.OS === 'android'
-    && (loading || !permissionsChecked || needsPermissions);
+    && (loading || !androidLocationReady);
   useEffect(() => {
     if (user && !androidPushBlocked) {
       registerForPushNotifications().catch(() => {});
@@ -1155,15 +1159,23 @@ function RootNav() {
     let memberId = memberStore.getMyMember(user.id)?.id ?? null;
     let fingerprint: string | null = null;
     let reading = false;
+    let reread = false;
     const reconcile = async () => {
-      if (reading) return;
+      if (reading) { reread = true; return; }
       reading = true;
       try {
-        const snapshot = await readPermissionSnapshot();
-        const next = JSON.stringify(snapshot);
+        const snapshot = await readPermissionSnapshot({ includeNotifications: false });
+        const disclosed = await isBackgroundLocationDisclosureAcknowledged();
+        const granted = snapshot.foreground === 'granted' && snapshot.background === 'granted';
+        // Preserve a recorded Continue Anyway choice for foreground-only
+        // operation. Losing a previously granted location permission does not
+        // satisfy that decision and must stop the tracker.
+        const decisionApplies = granted || await isPermissionsHandled();
+        const ready = disclosed && snapshot.foreground === 'granted' && decisionApplies;
+        const next = JSON.stringify({ ...snapshot, disclosed, decisionApplies });
         if (disposed) return;
-        if (fingerprint !== null && fingerprint !== next
-          && (snapshot.foreground !== 'granted' || snapshot.background !== 'granted')) {
+        setAndroidLocationReady(ready);
+        if (!ready && (fingerprint === null || fingerprint !== next)) {
           void locationEngine.stop('permission').catch(() => {});
         }
         if ((fingerprint !== null && fingerprint !== next)
@@ -1173,10 +1185,21 @@ function RootNav() {
         fingerprint = next;
       } catch (_e) {
         // A failed lookup cannot certify background readiness.
-        if (!disposed) void locationEngine.logEvent('permission_reconciliation_failed');
-      } finally { reading = false; }
+        if (!disposed) {
+          setAndroidLocationReady(false);
+          void locationEngine.stop('permission').catch(() => {});
+          void locationEngine.logEvent('permission_reconciliation_failed');
+        }
+      } finally {
+        reading = false;
+        if (reread && !disposed) {
+          reread = false;
+          void reconcile();
+        }
+      }
     };
     void reconcile();
+    const unsubscribeLocationPermissions = subscribeLocationPermissionChanges(() => { void reconcile(); });
     const unsubscribe = memberStore.subscribeMember(() => {
       const nextId = memberStore.getMyMember(user.id)?.id ?? null;
       if (nextId !== memberId) {
@@ -1195,6 +1218,7 @@ function RootNav() {
     });
     return () => {
       disposed = true;
+      unsubscribeLocationPermissions();
       unsubscribe();
       subscription.remove();
     };

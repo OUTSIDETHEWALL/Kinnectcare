@@ -16,10 +16,14 @@ const DECISION_KEY = '@kinnship/permission_decision_v2';
 export function permissionDecisionStillApplies(
   decision: PermissionSnapshot,
   current: PermissionSnapshot,
+  includeNotifications = true,
 ): boolean {
   // Losing a previously granted OS permission invalidates restored setup.
   // A deliberate denial/Continue Anyway remains valid: no prompt loop.
-  return (['foreground', 'background', 'notifications'] as const).every(
+  const keys = includeNotifications
+    ? ['foreground', 'background', 'notifications'] as const
+    : ['foreground', 'background'] as const;
+  return keys.every(
     key => decision[key] !== 'granted' || current[key] === 'granted',
   );
 }
@@ -29,15 +33,17 @@ export async function isPermissionsHandled(): Promise<boolean> {
     const raw = await AsyncStorage.getItem(KEY);
     if (raw !== 'true') return false;
     if (Platform.OS !== 'android') return true;
-    const current = await readPermissionSnapshot();
-    if (Object.values(current).every(status => status === 'granted')) return true;
+    // Notification functionality is optional, not location authorization or
+    // grounds to reopen completed setup after notification denial/failure.
+    const current = await readPermissionSnapshot({ includeNotifications: false });
+    if (current.foreground === 'granted' && current.background === 'granted') return true;
     const stored = await AsyncStorage.getItem(DECISION_KEY);
     if (!stored) return false; // Legacy boolean alone is not Android evidence.
     const decision = JSON.parse(stored);
-    if (!decision || !['foreground', 'background', 'notifications'].every(
+    if (!decision || !['foreground', 'background'].every(
       key => ['granted', 'denied', 'undetermined'].includes(decision[key]),
     )) return false;
-    return permissionDecisionStillApplies(decision, current);
+    return permissionDecisionStillApplies(decision, current, false);
   } catch (_e) {
     return false;
   }
@@ -50,7 +56,9 @@ export async function markPermissionsHandled(): Promise<void> {
   }
   // Surface persistence errors instead of navigating into a setup loop.
   if (Platform.OS === 'android') {
-    await AsyncStorage.setItem(DECISION_KEY, JSON.stringify(await readPermissionSnapshot()));
+    await AsyncStorage.setItem(DECISION_KEY, JSON.stringify(
+      await readPermissionSnapshot({ includeNotifications: false }),
+    ));
   }
   await AsyncStorage.setItem(KEY, 'true');
 }

@@ -12,6 +12,12 @@ function notificationApi(): typeof import('expo-notifications') {
 // One queue for foreground permission UI. Automatic Android callers only
 // inspect permissions; onboarding (or an explicit user action) owns requests.
 let permissionQueue: Promise<unknown> = Promise.resolve();
+const locationPermissionListeners = new Set<() => void>();
+
+export function subscribeLocationPermissionChanges(listener: () => void): () => void {
+  locationPermissionListeners.add(listener);
+  return () => { locationPermissionListeners.delete(listener); };
+}
 
 export function serializePermissionOperation<T>(operation: () => Promise<T>): Promise<T> {
   const result = permissionQueue.then(operation);
@@ -83,6 +89,11 @@ export function requestOnboardingLocation(isCurrent: () => boolean = () => true)
     if (!current()) return null;
     return { foreground: foreground.status, background: background.status };
   }).finally(() => {
+    // The location decision is complete even if subsequent notification
+    // onboarding hangs. RootNav may now inspect actual grants and disclosure.
+    for (const listener of locationPermissionListeners) {
+      try { listener(); } catch {}
+    }
     if (onboardingLocation === operation) onboardingLocation = null;
   });
   onboardingLocation = operation;

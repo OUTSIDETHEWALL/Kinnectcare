@@ -57,7 +57,9 @@ export default function Permissions() {
       const resumed = next === 'active' && previous !== 'active';
       previous = next;
       if (!resumed) return;
-      void readPermissionSnapshot().then(p => {
+      void readPermissionSnapshot({
+        includeNotifications: stage === 'notification-denied',
+      }).then(p => {
         if (cancelled) return;
         if (stage === 'notification-denied' && p.notifications === 'granted') {
           void finish();
@@ -285,6 +287,11 @@ export default function Permissions() {
           <Text style={styles.hint}>
             You can adjust this in Settings at any time.
           </Text>
+          {Platform.OS === 'android' && (
+            <TouchableOpacity style={styles.secondaryBtn} onPress={() => { void finish(); }}>
+              <Text style={styles.secondaryBtnText}>Continue without notifications</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </SafeAreaView>
     );

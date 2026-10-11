@@ -278,6 +278,10 @@ jest.mock('../permissionsStore', () => ({
 
 jest.mock('../permissionCoordinator', () => ({
   readPermissionSnapshot: jest.fn(async () => ({ ...mockPermissionSnapshot })),
+  subscribeLocationPermissionChanges: jest.fn(() => jest.fn()),
+}));
+jest.mock('../backgroundLocationDisclosure', () => ({
+  isBackgroundLocationDisclosureAcknowledged: jest.fn(async () => true),
 }));
 
 import React from 'react';
@@ -461,13 +465,21 @@ describe('Android permission gates and tracking lifecycle at the real navigation
   it.each(['clean install', 'restored app data', 'invited/new member', 'returning/rejoining member'])(
     'holds automatic tracking/push for %s until setup is handled', async () => {
       permissions.isPermissionsHandled.mockResolvedValue(false);
+      mockPermissionSnapshot.foreground = 'undetermined';
+      mockPermissionSnapshot.background = 'undetermined';
       const renderer = await mount();
       expect(engine.start).not.toHaveBeenCalled();
       expect(push.registerForPushNotifications).not.toHaveBeenCalled();
       expect(mockRouterReplace).toHaveBeenCalledWith('/(auth)/permissions');
       permissions.isPermissionsHandled.mockResolvedValue(true);
+      mockPermissionSnapshot.foreground = 'granted';
+      mockPermissionSnapshot.background = 'granted';
       mockSegments = ['(tabs)'];
       await act(async () => { renderer.update(<RootLayout />); });
+      await act(async () => {
+        for (const listener of [...mockAppStateListeners]) listener('background');
+        for (const listener of [...mockAppStateListeners]) listener('active');
+      });
       await settle();
       expect(engine.start).toHaveBeenCalledTimes(1);
       expect(leonidas.start).toHaveBeenCalledTimes(1);
@@ -611,7 +623,9 @@ describe('Android permission gates and tracking lifecycle at the real navigation
     const renderer = await mount();
     expect(push.setAppReadyForDeepLink).not.toHaveBeenCalledWith(true);
     expect(mockPendingNotification?.occurrence_id).toBe('exact-occurrence');
-    expect(engine.start).not.toHaveBeenCalled();
+    // Location grants/disclosure are already satisfied. Notification UI still
+    // withholds medication navigation, not independently authorized tracking.
+    expect(engine.start).toHaveBeenCalledTimes(1);
     permissions.isPermissionsHandled.mockResolvedValue(true);
     mockSegments = ['(tabs)'];
     await act(async () => { renderer.update(<RootLayout />); });
