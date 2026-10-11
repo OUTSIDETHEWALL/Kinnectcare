@@ -1122,19 +1122,31 @@ function RootNav() {
   //  switching to a different user.id).  Idempotent re-runs are no-ops.
   const engineBootedForUserIdRef = useRef<string | null>(null);
   const [startupRevision, setStartupRevision] = useState(0);
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { subscribeToTrackingPolicy } = require('../src/androidTrackingRecovery') as typeof import('../src/androidTrackingRecovery');
+    return subscribeToTrackingPolicy(() => setStartupRevision(value => value + 1));
+  }, []);
   const engineSessionRef = useRef({ userId: user?.id });
   if (engineSessionRef.current.userId !== user?.id) {
     engineSessionRef.current = { userId: user?.id };
   }
   const androidStartupRevision = Platform.OS === 'android' ? startupRevision : 0;
+  const lastTrackingUserIdRef = useRef(user?.id);
   useEffect(() => {
     if (Platform.OS !== 'android') return;
-    return () => {
+    // UI teardown is not sign-out. Stop only when an authenticated session is
+    // actually replaced; a destroyed React surface must leave native tracking.
+    if (loading && !user?.id) return;
+    const previous = lastTrackingUserIdRef.current;
+    lastTrackingUserIdRef.current = user?.id;
+    if (previous && user?.id && previous !== user.id) {
       engineBootedForUserIdRef.current = null;
-      try { leonidas.stop(); } catch (_e) {}
+      try { leonidas.stop(); } catch {}
       void locationEngine.stop();
-    };
-  }, [user?.id]);
+    }
+  }, [user?.id, loading]);
   // Observe linkage for the whole session, including after the initial 90 s
   // wait expires. Settings/resume only READ permissions; never display UI.
   useEffect(() => {
@@ -1147,9 +1159,13 @@ function RootNav() {
       if (reading) return;
       reading = true;
       try {
-        const next = Platform.OS === 'android'
-          ? JSON.stringify(await readPermissionSnapshot()) : 'ios';
+        const snapshot = await readPermissionSnapshot();
+        const next = JSON.stringify(snapshot);
         if (disposed) return;
+        if (fingerprint !== null && fingerprint !== next
+          && (snapshot.foreground !== 'granted' || snapshot.background !== 'granted')) {
+          void locationEngine.stop('permission').catch(() => {});
+        }
         if ((fingerprint !== null && fingerprint !== next)
           || engineBootedForUserIdRef.current === null) {
           setStartupRevision(value => value + 1);
@@ -1203,7 +1219,8 @@ function RootNav() {
 
     (async () => {
       if (!user?.id) {
-        // Genuine sign-out — tear everything down.
+        // Initial auth restoration is not a genuine sign-out.
+        if (Platform.OS === 'android' && loading) return;
         if (Platform.OS === 'android' || engineBootedForUserIdRef.current !== null) {
           try { leonidas.stop(); } catch (_e) {}
           await locationEngine.stop();
@@ -1248,10 +1265,10 @@ function RootNav() {
         //
         // WAIT_TIMEOUT_MS is set to 90 s: one full dashboard poll cycle
         // (60 s) plus a 30 s buffer.  A genuine caregiver-only device
-        // (no member row in the backend) waits at most 90 s before the
-        // engine stops normally — identical to the pre-fix outcome, just
-        // slightly delayed.  The device is otherwise fully functional
-        // during the wait; no UI is blocked.
+        // (no member row in the backend) gets a fresh ownership confirmation
+        // after 90 s. Lookup failure does not stop legitimate native tracking.
+        // The device is otherwise fully functional during the wait; no UI
+        // is blocked.
         if (!me) {
           const WAIT_TIMEOUT_MS = 90_000;
           me = await new Promise<any>((resolve) => {
@@ -1278,9 +1295,25 @@ function RootNav() {
         }
 
         if (!me) {
-          // Timed out — caregiver-only device or genuinely absent
-          // member row.  Stop the engine in case it was running from a
-          // previous session.
+          // fetchAll intentionally returns cached data on errors. A timeout
+          // alone is therefore not evidence that the owned member was removed.
+          // Require a fresh, successful authenticated lookup before stopping.
+          const lookupToken = await getCurrentToken();
+          if (!lookupToken || cancelled) return;
+          const [confirmed, confirmedUser] = await Promise.all([
+            api.get('/members'), api.get('/auth/me'),
+          ]);
+          const currentToken = await getCurrentToken();
+          if (cancelled || engineSessionRef.current !== session) return;
+          if (currentToken !== lookupToken || confirmedUser.data?.id !== user.id) return;
+          if (!Array.isArray(confirmed.data)
+            || confirmed.data.some((m: any) => !m || typeof m.id !== 'string' || !m.id)) {
+            throw new Error('invalid_member_lookup');
+          }
+          me = confirmed.data.find((m: any) => m.user_id === user.id) ?? null;
+          if (me) memberStore.upsertOne(me);
+        }
+        if (!me) {
           try { leonidas.stop(); } catch (_e) {}
           await locationEngine.stop();
           engineBootedForUserIdRef.current = null;
@@ -1298,6 +1331,7 @@ function RootNav() {
           memberId: me.id,
           jwt,
           ...(Platform.OS === 'android' ? {
+            ownerUserId: user.id,
             isCurrent: () => !cancelled && engineSessionRef.current === session
               && memberStore.getMyMember(user.id)?.id === me.id,
             isOwnerCurrent: () => engineSessionRef.current === session
@@ -1352,7 +1386,7 @@ function RootNav() {
       // noise we're eliminating in this build.  Real teardown happens
       // in the `!user?.id` branch above when sign-out is genuine.
     };
-  }, [user?.id, androidStartupBlocked, androidStartupRevision]);
+  }, [user?.id, loading, androidStartupBlocked, androidStartupRevision]);
 
   useEffect(() => {
     if (loading || !initialLinkChecked || !onboardingChecked || !appLockChecked || !disclaimerChecked

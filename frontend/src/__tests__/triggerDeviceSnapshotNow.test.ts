@@ -111,7 +111,7 @@ describe('triggerDeviceSnapshotNow', () => {
       jest.mock('react-native-background-geolocation', () => ({
         default: {
           registerHeadlessTask: jest.fn(),
-          getState: jest.fn().mockResolvedValue({ enabled: true, isMoving: false }),
+          getState: jest.fn().mockResolvedValue({ enabled: true, isMoving: false, trackingMode: 1 }),
           ready: jest.fn().mockResolvedValue({ enabled: true }),
           setConfig: jest.fn().mockResolvedValue(undefined),
           requestPermission: jest.fn().mockResolvedValue(3),
@@ -125,7 +125,7 @@ describe('triggerDeviceSnapshotNow', () => {
           onActivityChange: jest.fn().mockReturnValue({ remove: jest.fn() }),
         },
       }));
-      jest.mock('../api', () => ({ api: { put: mockPut } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'fake-jwt'), api: { put: mockPut } }));
       jest.mock('expo-battery', () => ({
         addBatteryStateListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
         addBatteryLevelListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
@@ -171,6 +171,7 @@ describe('triggerDeviceSnapshotNow', () => {
     expect(body).toHaveProperty('sdk_enabled');
     expect(body).toHaveProperty('sdk_is_moving');
     expect(body).toHaveProperty('sdk_tracking_mode');
+    expect(body.sdk_tracking_mode).toBe('1');
     // App-state
     expect(body).toHaveProperty('app_state');
     expect(body).toHaveProperty('listeners_attached');
@@ -214,7 +215,7 @@ describe('triggerDeviceSnapshotNow', () => {
           onActivityChange: jest.fn().mockReturnValue({ remove: jest.fn() }),
         },
       }));
-      jest.mock('../api', () => ({ api: { put: mockPut } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'fake-jwt'), api: { put: mockPut } }));
       jest.mock('expo-battery', () => ({
         addBatteryStateListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
         addBatteryLevelListener: jest.fn().mockReturnValue({ remove: jest.fn() }),

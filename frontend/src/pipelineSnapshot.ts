@@ -42,7 +42,7 @@ export type StaleLocationPipelineSnapshot = {
   upload_timestamp: string;
   upload_timestamp_source: string;
   backend_receive_timestamp: string;
-  mongo_write_timestamp: string;
+  mongo_write_timestamp: string | null;
   members_response_timestamp: string | null;
   dashboard_response_timestamp: string | null;
   dashboard_store_timestamp: string;
@@ -107,7 +107,7 @@ export function isPipelineSnapshot(value: unknown): value is StaleLocationPipeli
     && typeof snapshot.upload_timestamp === 'string'
     && typeof snapshot.upload_timestamp_source === 'string'
     && typeof snapshot.backend_receive_timestamp === 'string'
-    && typeof snapshot.mongo_write_timestamp === 'string'
+    && isNullableString(snapshot.mongo_write_timestamp)
     && isNullableString(snapshot.members_response_timestamp)
     && isNullableString(snapshot.dashboard_response_timestamp)
     && typeof snapshot.dashboard_store_timestamp === 'string'
