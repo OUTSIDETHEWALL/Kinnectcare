@@ -4,9 +4,32 @@ async function flushPromises(): Promise<void> {
   for (let i = 0; i < 30; i++) await Promise.resolve();
 }
 
+jest.mock('../androidTrackingRecovery', () => ({
+  trackingIsRevoked: jest.fn(async () => false),
+  trackingPolicyStamp: jest.fn(async () => null),
+  verifyWakeOwnership: jest.fn(async () => 'allowed'),
+  authorizeRevokedBatteryTransport: jest.fn(async () => null),
+  migrateLegacyTrackingIntent: jest.fn(async () => false),
+  BACKGROUND_PERMISSION_RATIONALE: {},
+  authorizeTrackingIntent: jest.fn(), revokeTrackingIntent: jest.fn(),
+  trackingIntentEpoch: () => 0,
+  recoverUnexpectedlyDisabledTracking: jest.fn(async (_sdk, _current, authorized) => {
+    authorized?.({ memberId: 'member-1', baseUrl: 'https://api.example',
+      token: 'verified-test-session', isCurrent: async () => true });
+    return 'already_enabled';
+  }),
+}));
+jest.mock('../permissionCoordinator', () => ({
+  readPermissionSnapshot: jest.fn(async () => ({
+    foreground: 'granted', background: 'granted', notifications: 'granted',
+  })),
+  serializePermissionOperation: (operation: () => Promise<unknown>) => operation(),
+}));
+
 describe('headless activity wake recovery', () => {
   afterEach(() => {
     jest.resetModules();
+    jest.restoreAllMocks();
   });
 
   it.each([
@@ -22,7 +45,9 @@ describe('headless activity wake recovery', () => {
     let headlessTask: ((event: any) => Promise<void>) | undefined;
     const mockGetCurrentPosition = jest.fn().mockResolvedValue({
       coords: { latitude: 47.6, longitude: -122.3, accuracy: 8 },
+      timestamp: '2026-10-11T21:00:00.000Z',
     });
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200 } as Response);
     const storage = new Map<string, string>();
     const mockAsyncStorage = {
       getItem: jest.fn((key: string) => Promise.resolve(storage.get(key) ?? null)),
@@ -53,10 +78,11 @@ describe('headless activity wake recovery', () => {
       jest.mock('react-native-background-geolocation', () => ({
         default: {
           registerHeadlessTask: jest.fn((task) => { headlessTask = task; }),
+          getState: jest.fn(async () => ({ enabled: true })),
           getCurrentPosition: mockGetCurrentPosition,
         },
       }));
-      jest.mock('../api', () => ({ api: { put: jest.fn() } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'verified-test-session'), api: { put: jest.fn() } }));
       jest.mock('expo-battery', () => ({}));
 
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -71,8 +97,8 @@ describe('headless activity wake recovery', () => {
     await flushPromises();
 
     expect(mockGetCurrentPosition).toHaveBeenCalledWith(expect.objectContaining({
-      persist: true,
-      extras: { source: 'headless-motionchange' },
+      persist: false,
+      extras: expect.objectContaining({ source: 'headless-motionchange' }),
     }));
     const entries = JSON.parse(storage.get(LOG_KEY) ?? '[]');
     expect(entries).toEqual(expect.arrayContaining([
@@ -120,7 +146,7 @@ describe('headless activity wake recovery', () => {
           getCurrentPosition: mockGetCurrentPosition,
         },
       }));
-      jest.mock('../api', () => ({ api: { put: jest.fn() } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'verified-test-session'), api: { put: jest.fn() } }));
       jest.mock('expo-battery', () => ({}));
 
       // eslint-disable-next-line @typescript-eslint/no-require-imports

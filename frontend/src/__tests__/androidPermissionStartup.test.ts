@@ -9,6 +9,7 @@ describe('Android permission/startup policy', () => {
   let store: typeof import('../permissionsStore');
   let engine: typeof import('../locationEngine');
   let platform: { OS: string };
+  let sessionToken: string | null;
 
   const config = { memberId: 'member', jwt: 'test-jwt', backendBaseUrl: 'https://example.test' };
   const grant = (status: string) => ({ status, granted: status === 'granted' });
@@ -16,6 +17,14 @@ describe('Android permission/startup policy', () => {
   beforeEach(() => {
     jest.resetModules();
     storage = new Map();
+    sessionToken = config.jwt;
+    jest.doMock('../api', () => ({
+      getCurrentToken: jest.fn(async () => sessionToken),
+      api: {
+        get: jest.fn(async () => ({ data: { location_sharing_enabled: true } })),
+        put: jest.fn(async () => ({})),
+      },
+    }));
     location = {
       getForegroundPermissionsAsync: jest.fn().mockResolvedValue(grant('granted')),
       getBackgroundPermissionsAsync: jest.fn().mockResolvedValue(grant('granted')),
@@ -67,6 +76,84 @@ describe('Android permission/startup policy', () => {
 
   it('requires setup for a clean install', async () => {
     expect(await store.isPermissionsHandled()).toBe(false);
+  });
+  it.each([{ sample: true }, { extras: { kc_guarded_one_shot: true } }])(
+    'foreground observer ignores uncommitted one-shot sampling: %j', async flags => {
+      expect(await engine.start(config)).toBe('background-ready');
+      sdk.onLocation.mock.calls[0][0]({
+        coords: { latitude: 35, longitude: -114 }, ...flags,
+      });
+      for (let i = 0; i < 30; i++) await Promise.resolve();
+      const log = JSON.parse(storage.get('@kinnship/location_engine_log_v1') ?? '[]');
+      expect(log.filter((row: any) => row.event === 'sdk_onLocation')).toHaveLength(0);
+    },
+  );
+
+  it.each(['normal', 'rejects', 'never'])(
+    'foreground repair ignores notification permission that %s', async behavior => {
+      sdk.getState.mockResolvedValue({ enabled: false, trackingMode: 1 });
+      if (behavior === 'rejects') notifications.getPermissionsAsync.mockRejectedValue(new Error('bridge failed'));
+      if (behavior === 'never') notifications.getPermissionsAsync.mockImplementation(() => new Promise(() => {}));
+      void coordinator.notificationPermission(false).catch(() => {});
+      expect(await engine.start(config)).toBe('background-ready');
+      expect(sdk.start).toHaveBeenCalledTimes(1);
+      expect(notifications.getPermissionsAsync).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['normal', 'rejects', 'never'].flatMap(behavior =>
+    ['no-session', 'denied-location', 'lost-member'].map(boundary => [behavior, boundary])))(
+    '%s notification inspection cannot authorize foreground startup after %s',
+    async (behavior, boundary) => {
+      if (behavior === 'rejects') notifications.getPermissionsAsync.mockRejectedValue(new Error('bridge failed'));
+      if (behavior === 'never') notifications.getPermissionsAsync.mockImplementation(() => new Promise(() => {}));
+      void coordinator.notificationPermission(false).catch(() => {});
+      const cfg = { ...config };
+      if (boundary === 'no-session') sessionToken = null;
+      if (boundary === 'denied-location') location.getForegroundPermissionsAsync.mockResolvedValue(grant('denied'));
+      if (boundary === 'lost-member') {
+        Object.assign(cfg, { ownerUserId: 'owner' });
+        require('../api').api.get.mockImplementation(async (path: string) => ({
+          data: path === '/auth/me' ? { id: 'owner' }
+            : path === '/members' ? [] : { location_sharing_enabled: true },
+        }));
+      }
+      expect(['failed', 'denied']).toContain(await engine.start(cfg));
+      expect(sdk.start).not.toHaveBeenCalled();
+      expect(notifications.requestPermissionsAsync).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['normal', 'rejects', 'never'])(
+    'revoked/unauthorized foreground remains stopped with notification query %s', async behavior => {
+      await engine.stop('consent');
+      if (behavior === 'rejects') notifications.getPermissionsAsync.mockRejectedValue(new Error('bridge failed'));
+      if (behavior === 'never') notifications.getPermissionsAsync.mockImplementation(() => new Promise(() => {}));
+      void coordinator.notificationPermission(false).catch(() => {});
+      expect(await engine.start(config)).toBe('failed');
+      expect(sdk.start).not.toHaveBeenCalled();
+      expect(notifications.getPermissionsAsync).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('location-only permission inspection does not wait for notification permission', async () => {
+    notifications.getPermissionsAsync.mockImplementation(() => new Promise(() => {}));
+    expect(await coordinator.readPermissionSnapshot({ includeNotifications: false })).toMatchObject({
+      foreground: 'granted', background: 'granted', notifications: 'not-inspected',
+    });
+    expect(notifications.getPermissionsAsync).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 1, null])('sends native tracking mode %s using the deployed snapshot string contract', async mode => {
+    await engine.start(config);
+    sdk.getState.mockResolvedValue({ enabled: true, trackingMode: mode });
+    const api = require('../api').api;
+    api.put.mockClear();
+    expect(await engine.triggerDeviceSnapshotNow()).toEqual({ ok: true });
+    expect(api.put).toHaveBeenCalledWith(
+      '/members/member/device-snapshot',
+      expect.objectContaining({ sdk_tracking_mode: mode === null ? null : String(mode) }),
+      expect.anything(),
+    );
   });
 
   it('preserves best-effort iOS setup persistence', async () => {
@@ -157,11 +244,13 @@ describe('Android permission/startup policy', () => {
     await engine.start({ ...config, isOwnerCurrent: () => current });
     let resolveRefresh!: (value: any) => void;
     sdk.setConfig.mockImplementationOnce(() => new Promise(resolve => { resolveRefresh = resolve; }));
-    const refresh = engine.setAuthToken('refreshed-test-jwt');
+    sessionToken = 'refreshed-test-jwt';
+    const refresh = engine.setAuthToken(sessionToken);
     await untilCalled(sdk.setConfig);
     current = false;
     const stopped = engine.stop();
-    const replacement = engine.start({ ...config, memberId: 'replacement', jwt: 'replacement-test-jwt' });
+    sessionToken = 'replacement-test-jwt';
+    const replacement = engine.start({ ...config, memberId: 'replacement', jwt: sessionToken });
     resolveRefresh({ enabled: true });
     await refresh;
     await stopped;

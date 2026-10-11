@@ -1,6 +1,6 @@
 ---
 name: Resume navigation test boundary
-description: How to test route behavior after an operating-system background/resume transition.
+description: Test startup and resume at the application boundary, not only the destination screen or location engine.
 ---
 
 When validating a screen action after the app returns to the foreground, mount the app-level lifecycle coordinator (or the exact coordinator that registers the operating-system lifecycle listeners) alongside the destination route.
@@ -8,6 +8,21 @@ When validating a screen action after the app returns to the foreground, mount t
 **Why:** A detail screen can remain mounted while the app-level resume handlers fetch data or navigate. Dispatching a lifecycle event against an isolated screen that registered no listener exercises nothing and can produce a false regression guard.
 
 **How to apply:** Assert that the coordinator installed lifecycle listeners, drive its background-to-active transition, then verify the intended route remains visible and the user action navigates exactly once.
+
+Location startup and repair tests must include the real navigation-root
+permission gates and the real requesting onboarding screen, not merely call
+the engine or stub permission inspection.
+
+**Why:** Independent review found that notification inspection could strand
+tracking before the repaired engine was ever reached, despite passing engine tests.
+A later review found that root-only tests still missed a lost interactive
+notification callback holding the shared dialog queue.
+
+**How to apply:** Mount the real application root with real authorization code.
+Exercise denied, rejected, and lost optional queries AND actual native requests,
+including late completion after withdrawal or screen disposal. Keep session,
+ownership, location-permission and durable-revocation checks real before
+asserting native startup.
 
 Also exercise a newly mounted navigation root inside an already-live Android JS process. A new screen tree does not imply fresh module state.
 

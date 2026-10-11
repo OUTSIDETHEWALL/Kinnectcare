@@ -5,5 +5,7 @@ import '@expo/metro-runtime';
 // Load the existing registration side effects before Router/UI initialization.
 import './src/locationEngine';
 import './src/batteryTask';
+// Register Expo's existing notification task even when no UI listener mounts.
+import './src/push';
 
 import 'expo-router/entry';

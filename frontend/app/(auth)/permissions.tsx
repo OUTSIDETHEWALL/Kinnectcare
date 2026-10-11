@@ -21,7 +21,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Colors } from '../../src/theme';
-import { markPermissionsHandled } from '../../src/permissionsStore';
+import { markPermissionsHandled, LocationPermissionDecisionChangedError } from '../../src/permissionsStore';
+import { useAuth } from '../../src/AuthContext';
 import { notificationPermission, readPermissionSnapshot, requestOnboardingLocation } from '../../src/permissionCoordinator';
 
 type PermissionStage =
@@ -36,6 +37,10 @@ type PermissionStage =
 
 export default function Permissions() {
   const router = useRouter();
+  const { user } = useAuth();
+  const owner = useRef(user?.id);
+  owner.current = user?.id;
+  const locationDecision = useRef<{ foreground: string; background: string } | null>(null);
   const [stage, setStage] = useState<PermissionStage>('loading');
   const [locationGranted, setLocationGranted] = useState(false);
   const fired = useRef(false);
@@ -57,11 +62,14 @@ export default function Permissions() {
       const resumed = next === 'active' && previous !== 'active';
       previous = next;
       if (!resumed) return;
-      void readPermissionSnapshot().then(p => {
+      void readPermissionSnapshot({
+        includeNotifications: stage === 'notification-denied',
+      }).then(p => {
         if (cancelled) return;
         if (stage === 'notification-denied' && p.notifications === 'granted') {
           void finish();
         } else if (stage !== 'notification-denied' && p.foreground === 'granted') {
+          locationDecision.current = { foreground: p.foreground, background: p.background };
           setLocationGranted(true);
           fired.current = false;
           setStage(Platform.OS === 'android' && p.background !== 'granted'
@@ -93,6 +101,7 @@ export default function Permissions() {
       try {
         const result = await requestOnboardingLocation(() => !cancelled);
         if (cancelled) return;
+        locationDecision.current = result;
         if (result?.foreground === 'granted') {
           setLocationGranted(true);
           fired.current = false; // reset so notification effect can fire
@@ -120,17 +129,20 @@ export default function Permissions() {
     if (fired.current) return;
     fired.current = true;
     let cancelled = false;
+    const requestingOwner = owner.current;
+    const current = () => !cancelled && (Platform.OS !== 'android'
+      || (!!requestingOwner && owner.current === requestingOwner));
     (async () => {
       try {
-        const { status } = await notificationPermission(true, () => !cancelled);
-        if (cancelled) return;
+        const { status } = await notificationPermission(true, current);
+        if (!current()) return;
         if (status === 'granted') {
           finish();
         } else {
           setStage('notification-denied');
         }
       } catch (_e) {
-        if (!cancelled) {
+        if (current()) {
           if (Platform.OS === 'android') setStage('notification-denied');
           else void finish();
         }
@@ -150,9 +162,18 @@ export default function Permissions() {
     if (saving.current) return;
     saving.current = true;
     try {
-      await markPermissionsHandled();
+      await markPermissionsHandled(locationDecision.current ?? undefined);
     } catch (_e) {
       if (!mounted.current) return;
+      if (_e instanceof LocationPermissionDecisionChangedError) {
+        // A late notification grant is not an explicit location-denial choice.
+        // Keep completion unsaved until the user reviews the changed grants.
+        locationDecision.current = _e.current;
+        setLocationGranted(_e.current.foreground === 'granted');
+        fired.current = false;
+        setStage(_e.current.foreground === 'granted' ? 'background-denied' : 'location-denied');
+        return;
+      }
       setStage('save-failed');
       Alert.alert('Setup could not be saved', 'Please try Continue again.');
       return;
@@ -285,6 +306,11 @@ export default function Permissions() {
           <Text style={styles.hint}>
             You can adjust this in Settings at any time.
           </Text>
+          {Platform.OS === 'android' && (
+            <TouchableOpacity style={styles.secondaryBtn} onPress={() => { void finish(); }}>
+              <Text style={styles.secondaryBtnText}>Continue without notifications</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </SafeAreaView>
     );

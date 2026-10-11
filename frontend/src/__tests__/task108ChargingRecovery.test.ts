@@ -21,6 +21,30 @@ async function flushPromises(): Promise<void> {
   }
 }
 
+jest.mock('../androidTrackingRecovery', () => ({
+  trackingIsRevoked: jest.fn(async () => false),
+  trackingPolicyStamp: jest.fn(async () => null),
+  verifyWakeOwnership: jest.fn(async () => 'allowed'),
+  authorizeRevokedBatteryTransport: jest.fn(async () => null),
+  migrateLegacyTrackingIntent: jest.fn(async () => false),
+  BACKGROUND_PERMISSION_RATIONALE: {},
+  authorizeTrackingIntent: jest.fn(), revokeTrackingIntent: jest.fn(),
+  trackingIntentEpoch: () => 0,
+  recoverUnexpectedlyDisabledTracking: jest.fn(async (sdk, _current, authorized) => {
+    const state = await sdk.getState();
+    const member = state.url?.match(/\/members\/([^/]+)\/location/);
+    if (member) authorized?.({ memberId: member[1], baseUrl: state.url.split('/api/')[0],
+      token: state.authorization.accessToken, isCurrent: async () => true });
+    return 'already_enabled';
+  }),
+}));
+jest.mock('../permissionCoordinator', () => ({
+  readPermissionSnapshot: jest.fn(async () => ({
+    foreground: 'granted', background: 'granted', notifications: 'granted',
+  })),
+  serializePermissionOperation: (operation: () => Promise<unknown>) => operation(),
+}));
+
 describe('Task 108 — headless charging recovery', () => {
   beforeEach(() => {
     jest.useFakeTimers();
@@ -47,7 +71,7 @@ describe('Task 108 — headless charging recovery', () => {
         return Promise.resolve();
       }),
     };
-    const fetchMock = jest.fn().mockResolvedValue({ status: 200 });
+    const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
     (globalThis as { fetch?: unknown }).fetch = fetchMock;
 
     let headlessTask:
@@ -55,6 +79,8 @@ describe('Task 108 — headless charging recovery', () => {
       | undefined;
     const getCurrentPosition = jest.fn().mockResolvedValue({
       battery: { level: 0.18, is_charging: true },
+      timestamp: '2026-08-24T12:21:00.000Z',
+      coords: { latitude: 35, longitude: -114 },
     });
     const registerHeadlessTask = jest.fn((task: typeof headlessTask) => {
       headlessTask = task;
@@ -119,8 +145,8 @@ describe('Task 108 — headless charging recovery', () => {
     expect(getCurrentPosition).toHaveBeenCalledWith(
       expect.objectContaining({
         samples: 1,
-        persist: true,
-        extras: { source: 'headless-heartbeat' },
+        persist: false,
+        extras: expect.objectContaining({ source: 'headless-heartbeat' }),
       }),
     );
 

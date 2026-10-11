@@ -50,6 +50,31 @@ describe('Task 107 — caregiver battery row during a long stationary period', (
   });
 });
 
+jest.mock('../androidTrackingRecovery', () => ({
+  trackingIsRevoked: jest.fn(async () => false),
+  trackingPolicyStamp: jest.fn(async () => null),
+  verifyWakeOwnership: jest.fn(async () => 'allowed'),
+  authorizeRevokedBatteryTransport: jest.fn(async () => null),
+  migrateLegacyTrackingIntent: jest.fn(async () => false),
+  BACKGROUND_PERMISSION_RATIONALE: {},
+  authorizeTrackingIntent: jest.fn(),
+  revokeTrackingIntent: jest.fn(),
+  trackingIntentEpoch: () => 0,
+  recoverUnexpectedlyDisabledTracking: jest.fn(async (sdk, _current, authorized) => {
+    const state = await sdk.getState();
+    const member = state.url?.match(/\/members\/([^/]+)\/location/);
+    if (member) authorized?.({ memberId: member[1], baseUrl: state.url.split('/api/')[0],
+      token: state.authorization.accessToken, isCurrent: async () => true });
+    return 'already_enabled';
+  }),
+}));
+jest.mock('../permissionCoordinator', () => ({
+  readPermissionSnapshot: jest.fn(async () => ({
+    foreground: 'granted', background: 'granted', notifications: 'granted',
+  })),
+  serializePermissionOperation: (operation: () => Promise<unknown>) => operation(),
+}));
+
 describe('Task 107 — headless heartbeat battery path', () => {
   afterEach(() => {
     jest.resetModules();
@@ -71,7 +96,7 @@ describe('Task 107 — headless heartbeat battery path', () => {
       }),
     };
     let headlessTask: ((event: { name: string }) => Promise<void>) | undefined;
-    const fetchMock = jest.fn().mockResolvedValue({ status: 200 });
+    const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
     (globalThis as { fetch?: unknown }).fetch = fetchMock;
 
     jest.isolateModules(() => {
@@ -95,6 +120,8 @@ describe('Task 107 — headless heartbeat battery path', () => {
           }),
           getCurrentPosition: jest.fn().mockResolvedValue({
             battery: { level: 0.82, is_charging: 0 },
+            timestamp: '2026-10-11T21:00:00.000Z',
+            coords: { latitude: 35, longitude: -114 },
           }),
           getState: jest.fn().mockResolvedValue({
             enabled: true,
@@ -112,6 +139,9 @@ describe('Task 107 — headless heartbeat battery path', () => {
 
     expect(headlessTask).toBeDefined();
     await headlessTask!({ name: 'heartbeat' });
+    expect(JSON.parse(storage.get('@kinnship/location_engine_log_v1') ?? '[]').filter((entry: any) =>
+      entry.event === 'independent_tracking_recovery').map((entry: any) => entry.detail))
+      .toEqual([expect.objectContaining({ result: 'already_enabled' })]);
 
     expect(fetchMock).toHaveBeenCalledWith(
       'https://api.example.com/api/members/member-001/battery',

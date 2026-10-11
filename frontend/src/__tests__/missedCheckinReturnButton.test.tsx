@@ -278,6 +278,10 @@ jest.mock('../permissionsStore', () => ({
 
 jest.mock('../permissionCoordinator', () => ({
   readPermissionSnapshot: jest.fn(async () => ({ ...mockPermissionSnapshot })),
+  subscribeLocationPermissionChanges: jest.fn(() => jest.fn()),
+}));
+jest.mock('../backgroundLocationDisclosure', () => ({
+  isBackgroundLocationDisclosureAcknowledged: jest.fn(async () => true),
 }));
 
 import React from 'react';
@@ -430,16 +434,52 @@ describe('Android permission gates and tracking lifecycle at the real navigation
     });
   }
 
+  it('ordinary root/activity destruction does not stop native location tracking', async () => {
+    const renderer = await mount();
+    expect(engine.start).toHaveBeenCalled();
+    engine.stop.mockClear();
+    await act(async () => { renderer.unmount(); });
+    expect(engine.stop).not.toHaveBeenCalled();
+  });
+
+  it('confirmed sign-out still stops native tracking', async () => {
+    const renderer = await mount();
+    engine.stop.mockClear();
+    mockAuthUser = null;
+    mockAuthLoading = false;
+    await act(async () => { renderer.update(<RootLayout />); });
+    await settle();
+    expect(engine.stop).toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('does not interpret initial authentication restoration as sign-out', async () => {
+    mockAuthUser = null;
+    mockAuthLoading = true;
+    engine.stop.mockClear();
+    const renderer = await mount();
+    expect(engine.stop).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
   it.each(['clean install', 'restored app data', 'invited/new member', 'returning/rejoining member'])(
     'holds automatic tracking/push for %s until setup is handled', async () => {
       permissions.isPermissionsHandled.mockResolvedValue(false);
+      mockPermissionSnapshot.foreground = 'undetermined';
+      mockPermissionSnapshot.background = 'undetermined';
       const renderer = await mount();
       expect(engine.start).not.toHaveBeenCalled();
       expect(push.registerForPushNotifications).not.toHaveBeenCalled();
       expect(mockRouterReplace).toHaveBeenCalledWith('/(auth)/permissions');
       permissions.isPermissionsHandled.mockResolvedValue(true);
+      mockPermissionSnapshot.foreground = 'granted';
+      mockPermissionSnapshot.background = 'granted';
       mockSegments = ['(tabs)'];
       await act(async () => { renderer.update(<RootLayout />); });
+      await act(async () => {
+        for (const listener of [...mockAppStateListeners]) listener('background');
+        for (const listener of [...mockAppStateListeners]) listener('active');
+      });
       await settle();
       expect(engine.start).toHaveBeenCalledTimes(1);
       expect(leonidas.start).toHaveBeenCalledTimes(1);
@@ -454,6 +494,30 @@ describe('Android permission gates and tracking lifecycle at the real navigation
     await settle();
     expect(engine.start).not.toHaveBeenCalled();
     expect(leonidas.start).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('90-second timeout does not stop native tracking on a transient session/member lookup failure', async () => {
+    me = null;
+    mockApiGet.mockRejectedValue(new Error('offline'));
+    const renderer = await mount();
+    await act(async () => { jest.advanceTimersByTime(91_000); });
+    await settle();
+    expect(engine.stop).not.toHaveBeenCalled();
+    expect(engine.start).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('90-second timeout stops tracking only after successful confirmed ownership absence', async () => {
+    me = null;
+    mockApiGet.mockImplementation(async (path: string) => ({
+      data: path === '/auth/me' ? { id: 'caregiver-001' } : [],
+    }));
+    const renderer = await mount();
+    await act(async () => { jest.advanceTimersByTime(91_000); });
+    await settle();
+    expect(engine.stop).toHaveBeenCalledTimes(1);
+    expect(engine.start).not.toHaveBeenCalled();
     await act(async () => { renderer.unmount(); });
   });
 
@@ -559,7 +623,9 @@ describe('Android permission gates and tracking lifecycle at the real navigation
     const renderer = await mount();
     expect(push.setAppReadyForDeepLink).not.toHaveBeenCalledWith(true);
     expect(mockPendingNotification?.occurrence_id).toBe('exact-occurrence');
-    expect(engine.start).not.toHaveBeenCalled();
+    // Location grants/disclosure are already satisfied. Notification UI still
+    // withholds medication navigation, not independently authorized tracking.
+    expect(engine.start).toHaveBeenCalledTimes(1);
     permissions.isPermissionsHandled.mockResolvedValue(true);
     mockSegments = ['(tabs)'];
     await act(async () => { renderer.update(<RootLayout />); });

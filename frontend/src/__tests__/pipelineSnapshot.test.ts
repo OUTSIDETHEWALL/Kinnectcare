@@ -13,6 +13,7 @@ import {
   observeStoreCommit,
   readPipelineSnapshots,
   stampMembersResponse,
+  isPipelineSnapshot,
 } from '../pipelineSnapshot';
 
 const old = { latitude: 35.1000, longitude: -114.6000 };
@@ -77,6 +78,21 @@ describe('stale-location pipeline snapshot', () => {
     const saved = await readPipelineSnapshots();
     expect(saved).toHaveLength(1);
     expect(saved[0].trace_id).toBe('trace-1');
+  });
+
+  it('persists and reads a legitimate null Mongo write timestamp after a cold reload', async () => {
+    const m = member();
+    m.location_pipeline.mongo_write_at = null;
+    observeStoreCommit(m, m, member(old));
+    observeMapProps('member-001', old.latitude, old.longitude);
+    const emitted = observeMapRendered('member-001', old.latitude, old.longitude, 'trace-1');
+    expect(emitted?.mongo_write_timestamp).toBeNull();
+    expect(isPipelineSnapshot(emitted)).toBe(true);
+    expect(await readPipelineSnapshots()).toHaveLength(1);
+    jest.resetModules();
+    const reloaded = require('../pipelineSnapshot') as typeof import('../pipelineSnapshot');
+    expect(await reloaded.readPipelineSnapshots()).toEqual([emitted]);
+    expect(isPipelineSnapshot({ ...emitted, mongo_write_timestamp: 123 })).toBe(false);
   });
 
   it('does not emit when the moving coordinate reaches the map', async () => {
