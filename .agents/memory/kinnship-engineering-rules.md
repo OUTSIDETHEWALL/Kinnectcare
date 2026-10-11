@@ -68,3 +68,17 @@ Priority order: Critical → High → Medium → Low. Polish backlog is addresse
 - Communicate for a business owner and product partner, not only for developers
 - Move correctly rather than quickly
 - No force-pushing, no merging without approval
+
+## Asynchronous location publication
+
+The user requires authorization generation to be captured before asynchronous
+GPS acquisition and revalidated after completion, before any persistence,
+upload, or other publication. A post-callback JavaScript check must never be
+presented as undoing native persistence/upload performed before that callback.
+
+**Why:** The user explicitly identified this as a privacy blocker, not merely
+a missing diagnostic check.
+
+**How to apply:** Review all acquisition paths, including independent Android
+WorkManager/headless paths. Prefer discarding an obsolete one-shot result to
+retaining it for later replay; prove unchanged-valid acquisition still works.

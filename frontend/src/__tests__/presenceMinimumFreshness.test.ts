@@ -126,10 +126,11 @@ describe('minimum device-presence freshness', () => {
     let mockConfiguredHandler: ((taskId: string) => Promise<void>) | undefined;
     const mockStorage = storageMock();
     const mockFinish = jest.fn();
-    const fetchMock = jest.fn().mockResolvedValue({ ok: false, status: 401 });
+    const fetchMock = jest.fn(async (_url, request) => request?.method === 'PATCH'
+      ? { ok: false, status: 401 } : { ok: true, status: 200 });
     const mockGetCurrentPosition = jest.fn().mockResolvedValue({
       timestamp: '2026-09-14T19:14:13.577Z',
-      coords: { accuracy: 10 },
+      coords: { latitude: 35, longitude: -114, accuracy: 10 },
     });
     (global as any).fetch = fetchMock;
 
@@ -181,14 +182,14 @@ describe('minimum device-presence freshness', () => {
       }),
       expect.objectContaining({
         event: 'background_location_persisted',
-        detail: expect.objectContaining({ persisted: true }),
+        detail: expect.objectContaining({ persisted: false, uploadConfirmation: 'http-accepted' }),
       }),
     ]));
     expect(mockGetCurrentPosition).toHaveBeenCalledWith({
       samples: 1,
-      persist: true,
+      persist: false,
       timeout: 20,
-      extras: { source: 'workmanager-stationary-refresh' },
+      extras: { source: 'workmanager-stationary-refresh', kc_guarded_one_shot: true },
     });
     expect(mockFinish).toHaveBeenCalledWith('presence-refresh');
   });
@@ -318,14 +319,14 @@ describe('minimum device-presence freshness', () => {
     let mockTimeoutHandler: ((taskId: string) => Promise<void>) | undefined;
     const locationResolvers: ((value: {
       timestamp: string;
-      coords: { accuracy: number };
+      coords: { latitude: number; longitude: number; accuracy: number };
     }) => void)[] = [];
     const mockStorage = storageMock();
     const mockFinish = jest.fn();
     const mockGetCurrentPosition = jest.fn(() => new Promise((resolve) => {
       locationResolvers.push(resolve);
     }));
-    (global as any).fetch = jest.fn().mockResolvedValue({ status: 200 });
+    (global as any).fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
 
     jest.isolateModules(() => {
       jest.mock('react-native', () => ({ Platform: { OS: 'android' } }));
@@ -372,22 +373,21 @@ describe('minimum device-presence freshness', () => {
     expect(mockFinish).toHaveBeenCalledTimes(1);
 
     const secondExecution = mockConfiguredHandler!('reused-task-id');
-    for (let i = 0; i < 200 && mockGetCurrentPosition.mock.calls.length < 2; i += 1) {
+    locationResolvers[0]({
+      timestamp: '2026-09-14T19:14:13.000Z',
+      coords: { latitude: 35, longitude: -114, accuracy: 11 },
+    });
+    await firstExecution;
+    for (let i = 0; i < 400 && mockGetCurrentPosition.mock.calls.length < 2; i += 1) {
       await Promise.resolve();
     }
     expect(mockGetCurrentPosition).toHaveBeenCalledTimes(2);
-
-    locationResolvers[0]({
-      timestamp: '2026-09-14T19:14:13.000Z',
-      coords: { accuracy: 11 },
-    });
-    await firstExecution;
 
     expect(mockFinish).toHaveBeenCalledTimes(1);
 
     locationResolvers[1]({
       timestamp: '2026-09-14T19:14:45.000Z',
-      coords: { accuracy: 9 },
+      coords: { latitude: 35, longitude: -114, accuracy: 9 },
     });
     await secondExecution;
 

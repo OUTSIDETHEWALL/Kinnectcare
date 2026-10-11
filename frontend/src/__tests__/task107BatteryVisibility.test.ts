@@ -96,7 +96,7 @@ describe('Task 107 — headless heartbeat battery path', () => {
       }),
     };
     let headlessTask: ((event: { name: string }) => Promise<void>) | undefined;
-    const fetchMock = jest.fn().mockResolvedValue({ status: 200 });
+    const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
     (globalThis as { fetch?: unknown }).fetch = fetchMock;
 
     jest.isolateModules(() => {
@@ -120,6 +120,8 @@ describe('Task 107 — headless heartbeat battery path', () => {
           }),
           getCurrentPosition: jest.fn().mockResolvedValue({
             battery: { level: 0.82, is_charging: 0 },
+            timestamp: '2026-10-11T21:00:00.000Z',
+            coords: { latitude: 35, longitude: -114 },
           }),
           getState: jest.fn().mockResolvedValue({
             enabled: true,

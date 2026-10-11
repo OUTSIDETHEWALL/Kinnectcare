@@ -58,7 +58,9 @@ describe('owned Android cold tracking recovery', () => {
       start: jest.fn(async () => { enabled = true; return { enabled }; }),
       stop: jest.fn(async () => { enabled = false; }),
       registerHeadlessTask: jest.fn(),
-      getCurrentPosition: jest.fn(async () => ({ timestamp: new Date().toISOString(), coords: { accuracy: 10 } })),
+      getCurrentPosition: jest.fn(async () => ({
+        timestamp: new Date().toISOString(), coords: { latitude: 35, longitude: -114, accuracy: 10 },
+      })),
       ready: jest.fn(async () => ({ enabled })),
     };
     for (const name of ['onLocation', 'onMotionChange', 'onProviderChange', 'onHttp', 'onHeartbeat', 'onActivityChange']) {
@@ -255,7 +257,7 @@ describe('owned Android cold tracking recovery', () => {
     await coldNotificationTask()({ data: silentPayload() });
     expect(sdk.start).toHaveBeenCalledTimes(1);
     expect(sdk.getCurrentPosition).toHaveBeenCalledWith(expect.objectContaining({
-      persist: true, extras: { source: 'silent-refresh-push' },
+      persist: false, extras: expect.objectContaining({ source: 'silent-refresh-push' }),
     }));
     expect(sdk.setConfig).toHaveBeenCalledWith(expect.objectContaining({
       url: 'https://example.test/api/members/member-a/location',
@@ -321,7 +323,7 @@ describe('owned Android cold tracking recovery', () => {
     expect(enabled).toBe(false);
     enabled = true;
     finish({ timestamp: new Date().toISOString() });
-    await pending;
+    await expect(pending).rejects.toThrow('gps_authorization_obsolete');
     expect(enabled).toBe(false);
     expect(await recovery.trackingIsRevoked()).toBe(true);
   });

@@ -77,6 +77,63 @@ describe('Android permission/startup policy', () => {
   it('requires setup for a clean install', async () => {
     expect(await store.isPermissionsHandled()).toBe(false);
   });
+  it.each([{ sample: true }, { extras: { kc_guarded_one_shot: true } }])(
+    'foreground observer ignores uncommitted one-shot sampling: %j', async flags => {
+      expect(await engine.start(config)).toBe('background-ready');
+      sdk.onLocation.mock.calls[0][0]({
+        coords: { latitude: 35, longitude: -114 }, ...flags,
+      });
+      for (let i = 0; i < 30; i++) await Promise.resolve();
+      const log = JSON.parse(storage.get('@kinnship/location_engine_log_v1') ?? '[]');
+      expect(log.filter((row: any) => row.event === 'sdk_onLocation')).toHaveLength(0);
+    },
+  );
+
+  it.each(['normal', 'rejects', 'never'])(
+    'foreground repair ignores notification permission that %s', async behavior => {
+      sdk.getState.mockResolvedValue({ enabled: false, trackingMode: 1 });
+      if (behavior === 'rejects') notifications.getPermissionsAsync.mockRejectedValue(new Error('bridge failed'));
+      if (behavior === 'never') notifications.getPermissionsAsync.mockImplementation(() => new Promise(() => {}));
+      void coordinator.notificationPermission(false).catch(() => {});
+      expect(await engine.start(config)).toBe('background-ready');
+      expect(sdk.start).toHaveBeenCalledTimes(1);
+      expect(notifications.getPermissionsAsync).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['normal', 'rejects', 'never'].flatMap(behavior =>
+    ['no-session', 'denied-location', 'lost-member'].map(boundary => [behavior, boundary])))(
+    '%s notification inspection cannot authorize foreground startup after %s',
+    async (behavior, boundary) => {
+      if (behavior === 'rejects') notifications.getPermissionsAsync.mockRejectedValue(new Error('bridge failed'));
+      if (behavior === 'never') notifications.getPermissionsAsync.mockImplementation(() => new Promise(() => {}));
+      void coordinator.notificationPermission(false).catch(() => {});
+      const cfg = { ...config };
+      if (boundary === 'no-session') sessionToken = null;
+      if (boundary === 'denied-location') location.getForegroundPermissionsAsync.mockResolvedValue(grant('denied'));
+      if (boundary === 'lost-member') {
+        Object.assign(cfg, { ownerUserId: 'owner' });
+        require('../api').api.get.mockImplementation(async (path: string) => ({
+          data: path === '/auth/me' ? { id: 'owner' }
+            : path === '/members' ? [] : { location_sharing_enabled: true },
+        }));
+      }
+      expect(['failed', 'denied']).toContain(await engine.start(cfg));
+      expect(sdk.start).not.toHaveBeenCalled();
+      expect(notifications.requestPermissionsAsync).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['normal', 'rejects', 'never'])(
+    'revoked/unauthorized foreground remains stopped with notification query %s', async behavior => {
+      await engine.stop('consent');
+      if (behavior === 'rejects') notifications.getPermissionsAsync.mockRejectedValue(new Error('bridge failed'));
+      if (behavior === 'never') notifications.getPermissionsAsync.mockImplementation(() => new Promise(() => {}));
+      void coordinator.notificationPermission(false).catch(() => {});
+      expect(await engine.start(config)).toBe('failed');
+      expect(sdk.start).not.toHaveBeenCalled();
+      expect(notifications.getPermissionsAsync).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('location-only permission inspection does not wait for notification permission', async () => {
     notifications.getPermissionsAsync.mockImplementation(() => new Promise(() => {}));

@@ -75,6 +75,7 @@ import {
 } from './androidTrackingRecovery';
 import type { AuthorizedBatteryTransport, RevocationReason } from './androidTrackingRecovery';
 import { fenceNativeSdk, interruptNativeTracking } from './androidNativeShutdown';
+import { acquireAndUploadAndroidPosition, GUARDED_POSITION_MARKER } from './androidLocationAcquisition';
 import {
   LOCATION_UPLOAD_SUCCESS_KEY,
   getLocationUploadSuccessTs,
@@ -369,6 +370,8 @@ function registerHeadlessTaskOnce(): void {
   const HeadlessTask = async (event: any) => {
     try {
       const name = event?.name;
+      if (Platform.OS === 'android' && (event?.params?.sample === true
+        || event?.params?.extras?.[GUARDED_POSITION_MARKER])) return;
       let authorizedTransport: AuthorizedBatteryTransport | undefined;
       // ── Headless diagnostic entry ─────────────────────────────────
       // This is our only window into the SDK running while the main JS
@@ -402,17 +405,16 @@ function registerHeadlessTaskOnce(): void {
         // slow or failed getCurrentPosition cannot suppress device presence.
         const presencePatched = await patchHeadlessHeartbeatPresence(lib, event, authorizedTransport);
 
-        // Force a fresh GPS fix; SDK persists and uploads via native
-        // HTTP transport.  No-op if permission was revoked at the OS
-        // level since we last started.
+        // Android samples without native persistence, then revalidates and
+        // explicitly uploads. iOS retains its existing native transport.
         try {
           if (Platform.OS === 'android' && (!authorizedTransport || !await authorizedTransport.isCurrent())) return;
-          const pos = await lib.getCurrentPosition({
+          const pos = await acquireGuardedPosition(lib, {
             samples: 1,
             persist: true,
             timeout: 30,
             extras: { source: 'headless-heartbeat' },
-          });
+          }, authorizedTransport);
           recordPipelineTs('headless_heartbeat');
           await logEvent('headless_heartbeat_ok');
           // Compatibility fallback for older SDK heartbeat payloads that omit
@@ -616,12 +618,12 @@ function registerHeadlessTaskOnce(): void {
             try {
               await logEvent('getCurrentPosition_start', { source: 'headless' });
               if (Platform.OS === 'android' && (!authorizedTransport || !await authorizedTransport.isCurrent())) return;
-              const loc = await lib.getCurrentPosition({
+              const loc = await acquireGuardedPosition(lib, {
                 samples: 1, persist: true, timeout: 30,
                 extras: { source: 'headless-motionchange' },
-              });
-              // GPS fix received — coordinates available, SDK will auto-upload
-              // because persist:true.  Round to 0.01° (~1.1 km) for privacy.
+              }, authorizedTransport);
+              // Android returned only after a fenced HTTP acceptance; iOS
+              // retains native autoSync. Round diagnostic coordinates.
               await logEvent('gps_fix_received', {
                 source: 'headless',
                 lat: round01(loc?.coords?.latitude),
@@ -629,13 +631,15 @@ function registerHeadlessTaskOnce(): void {
                 accuracy: typeof loc?.coords?.accuracy === 'number'
                   ? Math.round(loc.coords.accuracy) : null,
               });
-              // Native HTTP transport will fire the PUT automatically via
-              // autoSync — we cannot observe the exact moment the socket
-              // opens, but persist:true guarantees it will happen.
-              await logEvent('upload_queued', { source: 'headless', persist: true });
+              // Preserve the historical instrumentation event name, but do not
+              // claim Android's one-shot result entered the native queue.
+              await logEvent('upload_queued', {
+                source: 'headless', persist: Platform.OS !== 'android',
+                uploadConfirmation: Platform.OS === 'android' ? 'http-accepted' : 'awaiting-native-http',
+              });
               recordPipelineTs('headless_heartbeat');
               // Keep the existing drive-test success marker: Diagnostics uses
-              // this event to prove a headless wake reached a persisted GPS
+               // this event to prove a headless wake reached an accepted GPS
               // sample, whether the wake began as heartbeat, motionchange, or
               // the activitychange fallback above.
               await logEvent('headless_heartbeat_ok', { trigger: name });
@@ -816,6 +820,34 @@ function interruptEngineStop(force = false): Promise<void> {
     error => logEvent('stop_error', { error: String(error) }),
   ).catch(() => {});
   return stopping;
+}
+
+async function acquireGuardedPosition(
+  lib: any, options: any, transport?: AuthorizedBatteryTransport,
+): Promise<any> {
+  if (Platform.OS !== 'android') return lib.getCurrentPosition(options);
+  const generation = engineGeneration;
+  let proof = transport;
+  if (!proof) {
+    const result = await recoverFromIndependentWake(
+      'js-position', () => generation === engineGeneration, receipt => { proof = receipt; },
+    );
+    if (!['already_enabled', 'restarted'].includes(result)) throw new Error('gps_not_authorized');
+  }
+  if (!proof) throw new Error('gps_not_authorized');
+  return acquireAuthorizedAndroidPosition(lib, proof, options, () => generation === engineGeneration);
+}
+
+/** All Android one-shot native requests share the quarantined lifecycle FIFO. */
+export function acquireAuthorizedAndroidPosition(
+  lib: any, proof: AuthorizedBatteryTransport, options: any,
+  executionCurrent: () => boolean = () => true,
+): Promise<any> {
+  const generation = engineGeneration;
+  return serializeEngineOperation(() => acquireAndUploadAndroidPosition(
+    lib, proof, options, () => generation === engineGeneration && executionCurrent(),
+    reason => stop(reason),
+  ));
 }
 
 async function ownedNativeSdk(
@@ -1141,6 +1173,8 @@ function attachSdkListeners(lib: any): void {
   try {
     lib.onLocation(
       (loc: any) => {
+        if (Platform.OS === 'android' && (loc?.sample === true
+          || loc?.extras?.[GUARDED_POSITION_MARKER])) return;
         recordPipelineTs('location');
         void logEvent('sdk_onLocation', {
           // Round to 0.01 deg for privacy in logs.  Real PUT uses full
@@ -1188,7 +1222,7 @@ function attachSdkListeners(lib: any): void {
           });
           try {
             void logEvent('getCurrentPosition_start', { source: 'js' });
-            const loc = await lib.getCurrentPosition({
+            const loc = await acquireGuardedPosition(lib, {
               samples: 1, persist: true, timeout: 30,
               extras: { source: 'js-motionchange' },
             });
@@ -1330,7 +1364,7 @@ function attachSdkListeners(lib: any): void {
       // force a single fresh GPS sample so the family dashboard
       // stays current without waiting for the headless engine.
       try {
-        await lib.getCurrentPosition({
+        await acquireGuardedPosition(lib, {
           samples: 1,
           persist: true,
           timeout: 30,
@@ -1560,7 +1594,7 @@ export function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<stri
  */
 export function start(cfg: LocationEngineConfig): Promise<LocationStartupOutcome> {
   if (Platform.OS !== 'android') return startConfiguredEngine(cfg, engineGeneration);
-  const generation = engineGeneration;
+  const generation = ++engineGeneration;
   return serializePermissionOperation(() =>
     serializeEngineOperation(() => startConfiguredEngine(cfg, generation)));
 }
@@ -1643,7 +1677,7 @@ async function startConfiguredEngine(cfg: LocationEngineConfig, generation: numb
         return 'failed';
       }
       checkingPermissions = true;
-      const permissions = await readPermissionSnapshot();
+      const permissions = await readPermissionSnapshot({ includeNotifications: false });
       if (permissions.foreground !== 'granted') {
         await stop('permission');
         await logEvent('startup_outcome', { outcome: 'denied' });
@@ -1815,7 +1849,7 @@ async function startConfiguredEngine(cfg: LocationEngineConfig, generation: numb
       return 'failed';
     }
     if (Platform.OS === 'android') {
-      const permissions = await readPermissionSnapshot();
+      const permissions = await readPermissionSnapshot({ includeNotifications: false });
       outcome = permissions.foreground !== 'granted' ? 'denied'
         : permissions.background === 'granted' ? 'background-ready' : 'foreground-only';
       if (outcome === 'denied') await lib.stop();
@@ -1937,7 +1971,7 @@ export function recoverFromIndependentWake(
   })();
 }
 
-/** Cold push acquisition uses native persistence, never foreground-only caches. */
+/** Cold push acquisition uses a receipt-bound upload, never foreground caches. */
 export async function recoverAndRefreshFromIndependentWake(
   trigger: string, shouldAcquire: () => Promise<boolean> = async () => true,
 ): Promise<string> {
@@ -1960,17 +1994,14 @@ export async function recoverAndRefreshFromIndependentWake(
     if (!await shouldAcquire()) return 'duplicate_refresh';
     const lib = bgGeo();
     if (!lib) return 'native_unavailable';
-    const owned = await ownedNativeSdk(
-      lib, () => generation === engineGeneration, epoch, proof.token,
-    );
-    await owned.getCurrentPosition({
-      samples: 1, persist: true, timeout: 20,
+    await acquireAndUploadAndroidPosition(lib, proof, {
+      samples: 1, timeout: 20,
       extras: { source: trigger },
-    });
+    }, () => generation === engineGeneration, reason => stop(reason));
     if (generation !== engineGeneration || epoch !== trackingIntentEpoch() || !await proof.isCurrent()) {
       return 'obsolete_owner';
     }
-    await logEvent('independent_location_persisted', { trigger, uploadConfirmation: 'awaiting-native-http' });
+    await logEvent('independent_location_persisted', { trigger, uploadConfirmation: 'http-accepted', nativePersisted: false });
     return 'location_persisted';
   });
   const [outcome] = await Promise.all([location, battery]);
@@ -2150,7 +2181,7 @@ export async function getState(): Promise<LocationEngineState> {
       trackingMode: state?.trackingMode === 1 ? 'location-and-geofences'
         : state?.trackingMode === 0 ? 'geofences-only' : 'unknown',
       authorization: Platform.OS === 'android'
-        ? await readPermissionSnapshot().then(p => p.foreground !== 'granted' ? 'denied' as const
+        ? await readPermissionSnapshot({ includeNotifications: false }).then(p => p.foreground !== 'granted' ? 'denied' as const
           : p.background === 'granted' ? 'background' as const : 'foreground-only' as const)
         : undefined,
       isMoving: state?.isMoving ?? null,
@@ -2189,7 +2220,7 @@ export async function requestFreshLocation(): Promise<void> {
   }
   await logEvent('requestFreshLocation_invoked');
   try {
-    await lib.getCurrentPosition({
+    await acquireGuardedPosition(lib, {
       samples: 1,
       persist: true,
       timeout: 30,

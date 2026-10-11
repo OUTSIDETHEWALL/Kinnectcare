@@ -191,6 +191,7 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
   });
 
   type BackgroundGeolocationModule = {
+    stop: () => Promise<unknown>;
     getState: () => Promise<{
       enabled?: boolean;
       url?: string;
@@ -278,12 +279,13 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
                  detail: { taskId, generation: execution.generation, reason: 'obsolete_execution_or_owner' },
                };
              }
-            const position = await BGL.getCurrentPosition({
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { acquireAuthorizedAndroidPosition } = require('./locationEngine') as typeof import('./locationEngine');
+            const position = await acquireAuthorizedAndroidPosition(BGL, transport, {
               samples: 1,
-              persist: true,
               timeout: 20,
               extras: { source: 'workmanager-stationary-refresh' },
-            });
+            }, () => isActiveExecution(execution));
             return {
               event: 'background_location_persisted',
               detail: {
@@ -293,8 +295,8 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
                 accuracy: typeof position?.coords?.accuracy === 'number'
                   ? Math.round(position.coords.accuracy)
                   : null,
-                persisted: true,
-                uploadConfirmation: 'awaiting-native-http',
+                persisted: false,
+                uploadConfirmation: 'http-accepted',
               },
             };
           } catch (e: unknown) {

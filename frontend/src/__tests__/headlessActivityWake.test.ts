@@ -29,6 +29,7 @@ jest.mock('../permissionCoordinator', () => ({
 describe('headless activity wake recovery', () => {
   afterEach(() => {
     jest.resetModules();
+    jest.restoreAllMocks();
   });
 
   it.each([
@@ -44,7 +45,9 @@ describe('headless activity wake recovery', () => {
     let headlessTask: ((event: any) => Promise<void>) | undefined;
     const mockGetCurrentPosition = jest.fn().mockResolvedValue({
       coords: { latitude: 47.6, longitude: -122.3, accuracy: 8 },
+      timestamp: '2026-10-11T21:00:00.000Z',
     });
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200 } as Response);
     const storage = new Map<string, string>();
     const mockAsyncStorage = {
       getItem: jest.fn((key: string) => Promise.resolve(storage.get(key) ?? null)),
@@ -94,8 +97,8 @@ describe('headless activity wake recovery', () => {
     await flushPromises();
 
     expect(mockGetCurrentPosition).toHaveBeenCalledWith(expect.objectContaining({
-      persist: true,
-      extras: { source: 'headless-motionchange' },
+      persist: false,
+      extras: expect.objectContaining({ source: 'headless-motionchange' }),
     }));
     const entries = JSON.parse(storage.get(LOG_KEY) ?? '[]');
     expect(entries).toEqual(expect.arrayContaining([

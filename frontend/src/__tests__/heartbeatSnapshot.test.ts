@@ -38,7 +38,7 @@ const HTTP_OK_TS_KEY = 'kc_pts_http_ok';
  * multiple `await Promise.resolve()` hops drain the microtask queue.
  */
 async function flushPromises(): Promise<void> {
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 200; i++) {
     await Promise.resolve();
   }
 }
@@ -62,6 +62,30 @@ jest.mock('../permissionCoordinator', () => ({
     foreground: 'granted', background: 'granted', notifications: 'granted',
   })),
   serializePermissionOperation: (operation: () => Promise<unknown>) => operation(),
+}));
+
+// These cases isolate snapshot timing, not GPS authorization/publication.
+// Real WorkManager/headless/foreground fences are exercised in the recovery
+// and Android publication suites. Never contact a live service from this unit.
+jest.mock('../androidLocationAcquisition', () => ({
+  GUARDED_POSITION_MARKER: 'kc_guarded_one_shot',
+  acquireAndUploadAndroidPosition: jest.fn(async () => ({})),
+}));
+jest.mock('../androidTrackingRecovery', () => ({
+  trackingIsRevoked: jest.fn(async () => false),
+  trackingPolicyStamp: jest.fn(async () => null),
+  trackingIntentEpoch: () => 0,
+  verifyWakeOwnership: jest.fn(async () => 'allowed'),
+  authorizeRevokedBatteryTransport: jest.fn(async () => null),
+  migrateLegacyTrackingIntent: jest.fn(async () => false),
+  BACKGROUND_PERMISSION_RATIONALE: {},
+  authorizeTrackingIntent: jest.fn(),
+  revokeTrackingIntent: jest.fn(),
+  recoverUnexpectedlyDisabledTracking: jest.fn(async (_sdk, _current, authorize) => {
+    authorize?.({ memberId: 'member-001', baseUrl: 'https://api.example.com',
+      token: 'fake-jwt-token', isCurrent: async () => true });
+    return 'already_enabled';
+  }),
 }));
 
 describe('onHeartbeat → pushDeviceSnapshotToBackend (Task #56)', () => {

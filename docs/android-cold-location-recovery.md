@@ -72,6 +72,43 @@ No new scheduler, native module, dependency, or location transport is introduced
 
 ## Verification limitations and review
 
+### Correction of the two remaining review blockers
+
+Android WorkManager, SDK-headless heartbeat/motion/activity, silent recovery,
+and JS-alive one-shot callers now acquire with `persist:false`. The installed
+SDK contract says this disables SQLite persistence; a JS check after
+`persist:true` cannot undo a write or native HTTP enqueue that already happened.
+No `insertLocation`, `sync`, or native offline-queue insertion is used for these
+one-shot results. Existing autonomous native tracking and iOS transport remain
+unchanged.
+
+Before acquisition, a verified receipt, durable policy stamp, and authorization/
+execution generation are captured. All Android one-shot native calls share the
+existing quarantined lifecycle FIFO; shutdown still bypasses it. After the fix,
+the client rechecks session, location permissions, revocation, policy stamp,
+generation, and fresh server ownership/sharing. Confirmed server withdrawal
+invokes the existing shutdown/revocation path. Only then can an explicit PUT
+start, using the receipt's exact token/member and the original GPS capture
+timestamp. Sampling/marked native observer events cannot publish coordinates
+into the JS diagnostic buffers before that fence.
+
+Foreground location inspection excludes notifications. Optional Android
+notification inspection also runs outside the location/disclosure queue, so a
+rejected or lost query cannot strand repair. Actual interactive permission
+requests retain their existing shared UI-request serialization; location,
+disclosure, consent, session, ownership and revocation checks remain mandatory.
+An Android startup request supersedes the acquisition generation before queuing.
+
+Tradeoffs/limits: a one-shot upload that fails offline is discarded, not queued
+for a potentially different future owner. Future authorized wakes may sample
+again; autonomous native tracking keeps its existing queue. Once an authorized
+HTTP request has been dispatched, JS cannot retroactively undo server acceptance
+if withdrawal occurs in flight. This change fences results completing after
+withdrawal, not a distributed atomic consent transaction. Native SDK internals,
+sampling-event metadata and real Build 68 behavior still require separately
+authorized physical acceptance. No new native module, dependency, build setting,
+runtime version, notification payload or backend endpoint was introduced.
+
 Unit tests simulate root unmount, module reload, boot/termination handlers,
 WorkManager wakes, consent/ownership rejection and late native callbacks. They
 do not prove Android cold React-context startup, legal foreground-service startup,
@@ -120,7 +157,8 @@ health/freshness correction; this patch does not redesign caregiver status UI.
    Force stop: it intentionally suppresses background execution. Observe both
    locked/pre-first-unlock behavior and recovery after unlock.
 5. Keep the UI closed. Capture native process identity, SDK state, headless or
-   independent-wake recovery result, fresh persisted GPS and backend HTTP success.
+   independent-wake recovery result, fresh authorized GPS and backend HTTP success
+   (one-shot samples must not enter native SQLite before their authorization fence).
    Battery success alone and warm-process uploads do not pass this test.
 6. Exercise sign-out while a recovery start is pending, permission queries that
    reject or never return, both permission-denial

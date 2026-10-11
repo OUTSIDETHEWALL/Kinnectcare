@@ -108,11 +108,14 @@ export function notificationPermission(
       return existing.status === 'granted' ? existing : Notifications.requestPermissionsAsync();
     })();
   }
-  return serializePermissionOperation(async () => {
+  // Optional state inspection must never own the location/disclosure queue.
+  // Only an actual interactive OS request shares that queue.
+  return (async () => {
     const Notifications = notificationApi();
     const existing = await Notifications.getPermissionsAsync();
     if (!isCurrent() || existing.status === 'granted') return existing;
     if (Platform.OS === 'android' && !interactive) return existing;
-    return Notifications.requestPermissionsAsync();
-  });
+    return serializePermissionOperation(() =>
+      isCurrent() ? Notifications.requestPermissionsAsync() : Promise.resolve(existing));
+  })();
 }
