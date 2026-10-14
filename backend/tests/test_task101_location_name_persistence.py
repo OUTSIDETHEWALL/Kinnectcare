@@ -55,7 +55,24 @@ class _MembersCollection:
 
     @staticmethod
     def _matches(document, filter_doc):
-        return all(document.get(key) == value for key, value in filter_doc.items())
+        for key, value in filter_doc.items():
+            if key == "$and":
+                if not all(_MembersCollection._matches(document, clause) for clause in value):
+                    return False
+            elif key == "$or":
+                if not any(_MembersCollection._matches(document, clause) for clause in value):
+                    return False
+            elif isinstance(value, dict):
+                for op, operand in value.items():
+                    if op == "$exists" and (key in document) != operand:
+                        return False
+                    if op == "$lt" and (key not in document or not document[key] < operand):
+                        return False
+                    if op not in ("$exists", "$lt"):
+                        raise AssertionError(f"Unsupported predicate: {op}")
+            elif document.get(key) != value:
+                return False
+        return True
 
     async def _find_one(self, filter_doc, *_args, **_kwargs):
         if self._matches(self.document, filter_doc):
@@ -116,6 +133,7 @@ def _member_document():
         "phone": "+15550001234",
         "gender": "female",
         "role": "senior",
+        "location_sharing_enabled": True,
         "status": "healthy",
         "last_seen": datetime.now(timezone.utc),
         "created_at": datetime.now(timezone.utc),

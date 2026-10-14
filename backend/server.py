@@ -368,6 +368,12 @@ class FamilyMember(BaseModel):
         return _to_utc_iso(v)
 
 
+class LocationWriteResponse(FamilyMember):
+    """Additive receipt fields; never persisted on the member document."""
+    location_write_accepted: bool
+    location_write_rejection_reason: Optional[str] = None
+
+
 class CheckinSettings(BaseModel):
     daily_checkin_time: Optional[str] = None
     # Interval mode: one of {2,4,6,8,12} hours. When set, daily_checkin_time
@@ -2307,7 +2313,6 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
         # and syncs to a second device on the same account.
         set_doc["location_sharing_enabled"] = bool(data.location_sharing_enabled)
     if set_doc:
-        await db.users.update_one({"id": current["id"]}, {"$set": set_doc})
         # Build #56 — CRITICAL PRIVACY FIX.  When a user flips location
         # sharing OFF we must also:
         #   1. Mirror the flag onto their own member doc so family
@@ -2370,7 +2375,7 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
             try:
                 result = await db.members.update_many(
                     {"user_id": current["id"]},
-                    {"$set": member_update},
+                    {"$set": member_update, "$inc": {"location_consent_generation": 1}},
                 )
                 logger.info(
                     f"[privacy] location_sharing={enabled} propagated to "
@@ -2378,6 +2383,9 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
                 )
             except Exception as e:
                 logger.error(f"[privacy] Failed to mirror location_sharing to member docs: {e}")
+                # Do not confirm withdrawal while the atomic publication fence
+                # remains open. Member consent is changed before the user mirror.
+                raise HTTPException(status_code=503, detail="Location sharing update failed; retry.") from e
         await db.users.update_one({"id": current["id"]}, {"$set": set_doc})
     return await get_my_preferences(current)
 
@@ -3534,7 +3542,7 @@ async def check_low_battery(
     )
 
 
-@api_router.put("/members/{member_id}/location", response_model=FamilyMember)
+@api_router.put("/members/{member_id}/location", response_model=LocationWriteResponse)
 async def update_member_location(member_id: str, data: LocationUpdate, current=Depends(get_current_user)):
     # ============================================================
     #  Defense-in-depth: only the member's OWNER device can write
@@ -3556,11 +3564,15 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # ============================================================
     target = await db.members.find_one(
         {"id": member_id, "family_group_id": current["family_group_id"]},
-        {"_id": 0, "id": 1, "user_id": 1},
+        {"_id": 0, "id": 1, "user_id": 1, "location_sharing_enabled": 1,
+         "location_consent_generation": 1},
     )
     if not target:
         raise HTTPException(status_code=404, detail="Member not found")
     is_self = bool(target.get("user_id")) and target["user_id"] == current["id"]
+    # Capture before any asynchronous consent work. OFF -> ON must not revive
+    # a request admitted under the previous consent lifetime.
+    consent_generation = target.get("location_consent_generation", 0)
     is_owner = current.get("family_group_role") == "owner"
     if not (is_self or is_owner):
         logger.warning(
@@ -3601,9 +3613,26 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 logger.warning("device_presence failed after privacy-suppressed location upload", exc_info=True)
             # Re-read after the best-effort stamp so the response includes it.
             doc = await db.members.find_one({"id": member_id}, {"_id": 0})
-            return FamilyMember(**doc) if doc else FamilyMember(
+            return LocationWriteResponse(**doc, location_write_accepted=False,
+                location_write_rejection_reason="sharing_disabled") if doc else LocationWriteResponse(
                 id=member_id, owner_id=current["id"], name="", age=0,
-                phone="", gender="", role="family",
+                phone="", gender="", role="family", location_write_accepted=False,
+                location_write_rejection_reason="sharing_disabled",
+            )
+    if "location_sharing_enabled" not in target:
+        # Legacy rows predate the member mirror. Preserve the documented default
+        # ON only after a successful policy read, initializing without coordinates.
+        # A concurrent toggle creates the flag/generation and makes this CAS fail.
+        legacy_user = await db.users.find_one(
+            {"id": target.get("user_id") or current["id"]},
+            {"_id": 0, "location_sharing_enabled": 1},
+        )
+        if legacy_user is not None and legacy_user.get("location_sharing_enabled", True) is True:
+            await db.members.update_one(
+                {"id": member_id, "family_group_id": current["family_group_id"],
+                 "location_sharing_enabled": {"$exists": False},
+                 "location_consent_generation": {"$exists": False}},
+                {"$set": {"location_sharing_enabled": True}},
             )
     # Build 53 — Location Ingest diagnostic.  Capture the exact
     # before/after last_seen + captured_at values so we can prove
@@ -3861,6 +3890,14 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         # No GPS timestamp — unconditional write (pre-Build-60 path)
         filter_doc = {"id": member_id, "family_group_id": current["family_group_id"]}
 
+    # Consent and ordering are one atomic publication decision. Missing generation
+    # is legacy generation zero, NOT an exemption from affirmative sharing.
+    generation_filter = [{"location_consent_generation": consent_generation}]
+    if consent_generation == 0:
+        generation_filter.append({"location_consent_generation": {"$exists": False}})
+    filter_doc["location_sharing_enabled"] = True
+    filter_doc["$and"] = [{"$or": generation_filter}]
+
     mongo_update: Dict[str, Any] = {"$set": update}
     if "location_pipeline" in update:
         # MongoDB supplies this timestamp atomically in the same write as the
@@ -3872,24 +3909,19 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     rejection_reason: Optional[str]
 
     if r.matched_count == 0:
-        if incoming_captured_at is not None:
-            # Guard fired: member exists but the incoming GPS fix is not
-            # newer than the stored one.  This is the normal / expected
-            # outcome for every buffered historical point during a replay.
-            # Return the current member doc without raising a 404.
-            write_accepted   = False
-            rejection_reason = "older_timestamp"
-            # Still update last_seen so Leonidas knows the device is alive
-            await db.members.update_one(
-                {"id": member_id, "family_group_id": current["family_group_id"]},
-                {"$set": {"last_seen": server_now}},
-            )
-            doc = await db.members.find_one({"id": member_id}, {"_id": 0})
-            if not doc:
-                raise HTTPException(status_code=404, detail="Member not found")
-        else:
-            # Unconditional path, no match → member genuinely not found
+        doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+        if not doc:
             raise HTTPException(status_code=404, detail="Member not found")
+        write_accepted = False
+        rejection_reason = ("sharing_disabled" if doc.get("location_sharing_enabled") is not True
+            else "consent_changed" if doc.get("location_consent_generation", 0) != consent_generation
+            else "older_timestamp")
+        # Presence is not coordinate freshness and cannot restore the tuple.
+        await db.members.update_one(
+            {"id": member_id, "family_group_id": current["family_group_id"]},
+            {"$set": {"last_seen": server_now}},
+        )
+        doc = await db.members.find_one({"id": member_id}, {"_id": 0})
     else:
         write_accepted   = True
         rejection_reason = "replay_suppressed" if coord_suppressed else None
@@ -4013,7 +4045,8 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         refreshed_doc = await db.members.find_one({"id": member_id}, {"_id": 0})
         if refreshed_doc:
             doc = refreshed_doc
-    return FamilyMember(**doc)
+    return LocationWriteResponse(**doc, location_write_accepted=write_accepted and not coord_suppressed,
+        location_write_rejection_reason=rejection_reason)
 
 
 # ---------------------------------------------------------------------------

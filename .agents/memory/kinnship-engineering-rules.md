@@ -119,3 +119,14 @@ or before a delayed storage write arrives; either can destroy the valid replacem
 **How to apply:** Revalidate after reads, then use expected-authority revocation.
 Persist the conditional decision and sticky consent natively; test negative SDK,
 generation, owner, health-state and intent-write side effects, not only return values.
+
+Backend coordinate publication must atomically require both current affirmative
+consent and the consent lifetime captured by the request. OFF then ON must not
+revive a request admitted before withdrawal.
+
+**Why:** Request-start consent can become stale during asynchronous processing.
+A boolean-only final guard also permits old requests after explicit re-enable.
+
+**How to apply:** Bind consent and coordinate ordering to one database mutation;
+withdrawal clears the visible tuple and changes its consent lifetime atomically.
+Test stored coordinates and capture time, not only the HTTP response.

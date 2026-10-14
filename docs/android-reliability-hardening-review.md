@@ -3,8 +3,8 @@
 **Status: STOP BEFORE MERGE. Draft review only; no release authorization.**
 
 This is the initial implementation record for head
-`3bc5a29f1d4f65303ed4eeb4179ddc146a4ee94e`, followed by the B1 correction
-supplement below. The initial record is not independent approval. A resumed
+`3bc5a29f1d4f65303ed4eeb4179ddc146a4ee94e`, followed by the B1 and backend consent
+correction supplements below. The initial record is not independent approval. A resumed
 adversarial review is required on the corrected delivery commit.
 
 Severity: **Critical** (tracking reliability, privacy, and caregiver freshness truth).
@@ -476,3 +476,119 @@ process-death proof**. A normal new Android binary is still required.
 No merge, deployment, OTA, production build/release, Play or Railway/production
 mutation is part of this correction. The resumed adversarial verdict is reported
 separately against the corrected commit; passing B1 tests do not make the PR GREEN.
+
+---
+
+# Backend consent/write race correction supplement
+
+## Root cause, confidence and scope
+
+Critical privacy issue; high confidence from actual committed-function replay
+and deterministic endpoint tests. An admitted upload checked consent before
+asynchronous work, then wrote using a timestamp-only predicate. Withdrawal could
+clear the pin first, and the old request subsequently restored it. This missing
+fence predates this PR; it was not introduced by B1.
+
+The blocked-head replay used the actual committed endpoint functions and a
+predicate-enforcing offline DB model: sharing remained false while latitude,
+longitude and coordinate_captured_at were restored. No HTTP service or database
+was contacted.
+
+Six correction files:
+
+```text
+.agents/memory/kinnship-engineering-rules.md
+backend/server.py
+backend/tests/test_location_consent_write_race.py
+backend/tests/test_task101_location_name_persistence.py
+backend/tests/test_task107_stationary_battery.py
+docs/android-reliability-hardening-review.md
+```
+
+Cumulative PR: 46 files (43 previously, plus the new race suite and two existing
+backend fixture files newly touched). No frontend, native, dependency, SDK or scheduling changes.
+
+## Atomic publication contract
+
+The location endpoint captures the member's consent generation before async
+work. Its final coordinate write requires affirmative member sharing AND that
+same generation, in addition to the unchanged identity/timestamp/replay filters.
+Preference changes atomically mirror the sharing flag, increment generation,
+and clear the displayed coordinate tuple when disabled. This fence is written
+before the user preference mirror; propagation failure returns 503 rather than
+claiming success. Old requests cannot revive after OFF -> ON; only a request
+admitted under the new generation may publish.
+
+Legacy missing generations mean zero. A missing member sharing flag is initialized
+without coordinates only after a successful read of the existing legacy policy
+(whose documented unset default is ON). Initialization requires both flag and
+generation still absent; a concurrent toggle prevents it. Lookup failure is not
+treated as proof for this initialization. Existing explicit member consent is
+always required by the final publication predicate.
+
+Latitude, longitude and coordinate_captured_at remain in the same guarded write.
+Neither rejected consent nor replay advances the visible coordinate timestamp.
+Rejected uploads may record device presence/last_seen, not location freshness.
+
+## Response compatibility
+
+The location endpoint still returns HTTP 200 and the current FamilyMember-shaped
+record for a consent/timestamp rejection; genuinely missing members remain 404.
+An endpoint-specific response subtype adds location_write_accepted and
+location_write_rejection_reason without persisting them or changing other routes.
+Withdrawal rejection returns false/sharing_disabled; generation mismatch after
+re-enable returns false/consent_changed. Replay returns false/replay_suppressed;
+older timestamp returns false/older_timestamp. Successful coordinate publication
+returns true. Older clients can continue reading the existing member fields.
+
+## Deterministic tests and verification
+
+New race suite: 11 cases through real endpoint functions and an offline atomic
+predicate model. It covers fresh and timestampless requests paused at the final
+mutation, actual preference withdrawal, stored tuple clearing, receipt rejection,
+normal writes, timestamp order, replay, already-off requests, OFF -> ON both with
+and without a new upload, legacy initialization racing withdrawal, and propagation
+failure. Assertions inspect DB effects, not only response codes.
+
+Commands/results:
+
+- python -m pytest -q backend/tests/test_location_consent_write_race.py
+  backend/tests/test_coordinate_capture_integrity.py
+  backend/tests/test_task101_location_name_persistence.py:
+  **19 passed**, exit 0.
+- Selected existing offline backend tests run file-by-file, including stationary
+  battery and medication occurrence: **192 passed** in 16 files. Together with
+  the new 11 cases: **203 distinct passing backend tests** in 17 files.
+- Combined attempt including stationary tests: **19 passed / 3 failed** due to
+  legacy ambient-event-loop absence. Stationary suite alone: **3 passed**.
+  This is not reported as a passing combined suite.
+- Full backend: **UNVERIFIED**, not run. Legacy integration tests perform external
+  API/database mutations and are outside the no-production-mutation authorization.
+- python -m py_compile backend/server.py and git diff --check: passed.
+- Frontend B1/location regression command targeting trackingRevocationAuthority,
+  androidTrackingRecovery, androidLocationPublication and trackingReliabilityHardening:
+  **207 passed**, 4 suites, exit 0.
+- Frontend medication/check-in regressions: **44 passed**, 2 suites.
+- Frontend SOS/medication acknowledgment/routing regressions: **17 passed**, 4 suites.
+- No frontend edits; TypeScript/lint not rerun. Prior results are historical, not
+  claimed as new verification.
+- New DB tests are models, not validation against live MongoDB.
+
+The geocoding flag is enabled in these location tests, matching the existing
+coordinate tests and documented production configuration. The already-documented
+disabled-geocoding logging bug remains out of scope and untouched.
+
+## Read-only inventory and review boundary
+
+Other member-coordinate writers include create_checkin and
+respond_to_checkin_request (also reached through the member welfare-check adapter).
+Their final member updates lack the location endpoint's atomic consent fence.
+They remain unchanged and must be adjudicated by the resumed independent review.
+Member editing does not accept coordinate fields; SOS/diagnostic/history coordinates
+are not the displayed member tuple. Preference withdrawal/startup sweeps clear,
+rather than restore, member coordinates.
+
+Passing this correction does not clear these other paths or the interrupted
+adversarial review. STOP on the next confirmed independent blocker.
+No merge, Railway deployment, production mutation, OTA, Android production build/
+release or Play submission is authorized or performed.
