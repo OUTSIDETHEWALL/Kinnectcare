@@ -3892,11 +3892,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
 
     # Consent and ordering are one atomic publication decision. Missing generation
     # is legacy generation zero, NOT an exemption from affirmative sharing.
-    generation_filter = [{"location_consent_generation": consent_generation}]
-    if consent_generation == 0:
-        generation_filter.append({"location_consent_generation": {"$exists": False}})
-    filter_doc["location_sharing_enabled"] = True
-    filter_doc["$and"] = [{"$or": generation_filter}]
+    filter_doc.update(_location_consent_condition(consent_generation))
 
     mongo_update: Dict[str, Any] = {"$set": update}
     if "location_pipeline" in update:
@@ -5306,6 +5302,40 @@ async def member_history(member_id: str, days: int = 7, current=Depends(get_curr
 
 
 # ========== Check-ins ==========
+def _location_consent_condition(generation):
+    """Same atomic consent lifetime for every live member-location writer."""
+    versions = [{"location_consent_generation": generation}]
+    if generation == 0:
+        versions.append({"location_consent_generation": {"$exists": False}})
+    return {"location_sharing_enabled": True, "$and": [{"$or": versions}]}
+
+
+async def _publish_checkin_member_location(member, data):
+    """Publish only against the affirmative consent snapshot read at entry.
+
+    Check-ins supply no trusted capture timestamp, so an accepted complete tuple
+    remains unknown-age. Neither presence nor a rejected write changes tuple time.
+    Location-free receipts/pushes avoid a second, unfenced publication surface.
+    """
+    if member.get("location_sharing_enabled") is not True:
+        return False
+    update = {}
+    if data.location_name:
+        update["location_name"] = data.location_name
+    if data.latitude is not None and data.longitude is not None:
+        update.update(latitude=data.latitude, longitude=data.longitude,
+                      coordinate_captured_at=None)
+    if not update:
+        return False
+    query = {
+        "id": member["id"], "family_group_id": member["family_group_id"],
+        "user_id": member["user_id"],
+        **_location_consent_condition(member.get("location_consent_generation", 0)),
+    }
+    result = await db.members.update_one(query, {"$set": update})
+    return result.matched_count == 1
+
+
 @api_router.post("/checkins", response_model=CheckIn)
 async def create_checkin(data: CheckInCreate, current=Depends(get_current_user)):
     member = await db.members.find_one({"id": data.member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
@@ -5320,18 +5350,17 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
         )
     ci = CheckIn(
         owner_id=current["id"], family_group_id=current["family_group_id"], member_id=data.member_id, member_name=member["name"],
-        location_name=data.location_name, latitude=data.latitude, longitude=data.longitude,
+        # Receipts/history are location-free. Consent on a member document cannot
+        # atomically authorize a separate collection insert or a later push.
         confirmed_by=member["name"], source="self",
     )
     await db.checkins.insert_one(ci.model_dump())
     update = {"last_seen": datetime.now(timezone.utc), "status": "healthy"}
-    if data.location_name:
-        update["location_name"] = data.location_name
-    if data.latitude is not None and data.longitude is not None:
-        update["coordinate_captured_at"] = None
-        update["latitude"] = data.latitude
-        update["longitude"] = data.longitude
-    await db.members.update_one({"id": data.member_id}, {"$set": update})
+    await db.members.update_one(
+        {"id": member["id"], "family_group_id": current["family_group_id"],
+         "user_id": current["id"]}, {"$set": update},
+    )
+    await _publish_checkin_member_location(member, data)
     # Ack today's missed-checkin alerts (using user tz)
     tz = user_tz(current)
     now_local = datetime.now(tz)
@@ -5352,8 +5381,7 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
         await push_to_family_group(
             current["family_group_id"],
             f"✅ {member['name']} checked in",
-            (member["name"] + " is safe — just checked in"
-                + (f" from {data.location_name}" if data.location_name else "")),
+            member["name"] + " is safe — just checked in",
             {"type": "checkin", "member_id": data.member_id, "checkin_id": ci.id},
             exclude_user_id=current["id"],  # don't ping the senior themselves
         )
@@ -5514,9 +5542,11 @@ async def respond_to_checkin_request(
                 await deliver_welfare_response_notification(
                     req_doc,
                     existing["id"],
-                    existing.get("location_name"),
+                    None,
                 )
-            return CheckIn(**existing)
+            return CheckIn(**existing).model_copy(update={
+                "latitude": None, "longitude": None, "location_name": None,
+            })
 
     # Claim the request before creating any side effects. Notification actions
     # may reach both Expo's background task and the foreground listener.
@@ -5550,7 +5580,9 @@ async def respond_to_checkin_request(
                 {"_id": 0},
             )
             if existing:
-                return CheckIn(**existing)
+                return CheckIn(**existing).model_copy(update={
+                    "latitude": None, "longitude": None, "location_name": None,
+                })
         raise HTTPException(status_code=409, detail="Check-in response is already being processed")
 
     async def run_claimed_write(operation):
@@ -5582,9 +5614,7 @@ async def respond_to_checkin_request(
         family_group_id=current["family_group_id"],
         member_id=req_doc["member_id"],
         member_name=member["name"],
-        location_name=data.location_name,
-        latitude=data.latitude,
-        longitude=data.longitude,
+        # Keep the durable welfare receipt location-free, just like daily check-in.
         confirmed_by=member["name"],
         source="request_response",
     )
@@ -5616,19 +5646,19 @@ async def respond_to_checkin_request(
                 },
             )
             raise
-        ci = CheckIn(**existing)
+        ci = CheckIn(**existing).model_copy(update={
+            "latitude": None, "longitude": None, "location_name": None,
+        })
 
-    # Update member last_seen + location.
+    # Presence/check-in success does not require location publication.
     update: dict = {"last_seen": datetime.now(timezone.utc), "status": "healthy"}
-    if data.location_name:
-        update["location_name"] = data.location_name
-    if data.latitude is not None and data.longitude is not None:
-        update["coordinate_captured_at"] = None
-        update["latitude"] = data.latitude
-        update["longitude"] = data.longitude
     await run_claimed_write(
-        db.members.update_one({"id": req_doc["member_id"]}, {"$set": update})
+        db.members.update_one(
+            {"id": member["id"], "family_group_id": current["family_group_id"],
+             "user_id": current["id"]}, {"$set": update},
+        )
     )
+    await run_claimed_write(_publish_checkin_member_location(member, data))
 
     # Ack any missed-checkin alerts for today.
     tz = user_tz(current)
@@ -5666,7 +5696,7 @@ async def respond_to_checkin_request(
     await deliver_welfare_response_notification(
         req_doc,
         ci.id,
-        data.location_name,
+        None,
     )
 
     return ci

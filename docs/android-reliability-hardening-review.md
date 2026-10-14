@@ -580,10 +580,11 @@ disabled-geocoding logging bug remains out of scope and untouched.
 
 ## Read-only inventory and review boundary
 
-Other member-coordinate writers include create_checkin and
+At the upload-correction delivery head, other member-coordinate writers included create_checkin and
 respond_to_checkin_request (also reached through the member welfare-check adapter).
 Their final member updates lack the location endpoint's atomic consent fence.
-They remain unchanged and must be adjudicated by the resumed independent review.
+They were unchanged at that head; the resumed review confirmed the independent
+check-in blocker addressed by the next supplement.
 Member editing does not accept coordinate fields; SOS/diagnostic/history coordinates
 are not the displayed member tuple. Preference withdrawal/startup sweeps clear,
 rather than restore, member coordinates.
@@ -592,3 +593,143 @@ Passing this correction does not clear these other paths or the interrupted
 adversarial review. STOP on the next confirmed independent blocker.
 No merge, Railway deployment, production mutation, OTA, Android production build/
 release or Play submission is authorized or performed.
+
+---
+
+# Check-in / "I'm OK" consent correction supplement
+
+## Evidence, scope and exact writers
+
+Critical privacy issue, high confidence. Actual functions extracted from blocked
+head 359a11b429957eda386e19163e4c64734ab35eca reproduced both already-OFF and
+withdrawal-at-final-write failures offline for daily check-in and welfare response:
+sharing stayed false, but member coordinates and receipt coordinates were stored.
+The missing fences predate this PR.
+
+- POST /checkins, create_checkin, backend/server.py: same-family lookup and self-only
+  authorization; previously direct id-only member mutation of location_name,
+  latitude, longitude and coordinate_captured_at=None.
+- POST /checkin-requests/{request_id}/respond, respond_to_checkin_request:
+  same-family request/member lookups, self-only authorization, processing claim,
+  canonical receipt/idempotency and retry release; previously the same id-only
+  location mutation through run_claimed_write (a failure wrapper, not consent).
+- POST /members/{member_id}/welfare-check-response is an adapter to that response
+  endpoint, not a third independent writer.
+- Neither writer had sharing/version conditions. Both could race withdrawal and
+  OFF -> ON. Raw location was also copied into receipt rows and confirmation text.
+
+Four correction files:
+
+```text
+.agents/memory/kinnship-engineering-rules.md
+backend/server.py
+backend/tests/test_checkin_location_consent.py
+docs/android-reliability-hardening-review.md
+```
+
+Cumulative PR: 47 files. No frontend/native/dependency/SDK/scheduling changes.
+
+## Architecture and contract
+
+_location_consent_condition extracts the previous upload predicate without changing
+it: affirmative member sharing plus captured generation; missing generation is
+zero. The normal upload retains all timestamp/replay/identity conditions.
+_publish_checkin_member_location uses the request-entry member snapshot, requires
+affirmative entry consent, and atomically checks current sharing, that generation,
+member id, family id and linked user id when updating location. It also guards
+location_name-only writes. Missing member consent is not affirmative authority;
+check-ins do not initialize legacy consent or grant it from OS GPS permission.
+
+Presence/status are independent writes, with member/family/self identity filters.
+A consent mismatch is a location no-op, not a failed check-in. Both actions still
+save the check-in, acknowledge missed alerts, complete welfare processing and
+retain the existing notification/idempotency behavior without location text.
+No location receipt fields or breaking status changes are introduced.
+
+OFF -> ON changes generation through the unchanged preference endpoint. Old
+requests cannot publish, even after a new authorized check-in publishes first.
+New requests read the new affirmative snapshot and may publish normally.
+
+An accepted complete check-in tuple writes latitude/longitude and
+coordinate_captured_at=None atomically: the payload has no trusted capture time,
+so no freshness is invented. Rejected location writes touch neither tuple time,
+coordinates nor label; presence does not imply fresh GPS.
+
+New receipt rows, check-in return values and confirmation messages are location-free
+even while sharing is ON. This is deliberate: a consent fence on members cannot
+atomically fence a different collection insert or later push. The consented live
+member tuple is the sole location publication for these features. Legacy welfare
+receipt recovery returns a location-free copy and sends no location text. Existing
+historical rows are not migrated/deleted; unrelated history readers are unchanged.
+No product exception for check-in location is invented.
+
+## Read-only coordinate-writer inventory
+
+| Class | Production path | Consent/version and freshness behavior |
+|---|---|---|
+| Normal location | update_member_location | Atomic member consent/generation plus existing timestamp/replay guards; rejected tuples cannot restore cleared coordinates. |
+| Check-in | create_checkin -> _publish_checkin_member_location | Same consent lifetime; absent entry authority fails closed; accepted tuple age unknown. |
+| Welfare | respond_to_checkin_request, member adapter | Same helper; claimed processing does not itself grant location authority. |
+| SOS/emergency | trigger_sos | Stores supplied coordinates in emergency Alert and sends emergency push/SMS location, without ordinary sharing/generation fence. Does not write the live member tuple. Existing deliberate emergency trigger; no new privacy contract inferred and no change made. |
+| Geocoding | list_members, get_member | Writes location_name only, conditional on unchanged coordinates and null label. No consent-generation predicate; cannot match the ordinary OFF-cleared tuple. In-flight response semantics need independent review. |
+| Preference/internal | update_my_preferences; startup sharing backfill/sync/heal | Preference OFF atomically clears tuple and increments generation. Backfill initializes flags; sync clears tuple; heal can turn a flag ON without versioning. Read-only review target, not repaired here. |
+| Creation/profile | create_member; backend/family_group.py self-member creation | New rows have no coordinates. Profile-update schema does not accept coordinate fields. |
+| Diagnostics/history | update_member_location ingest log and quality-history inserts; device snapshot | Separate storage surfaces, not live tuple writes. Ingest includes supplied raw GPS even for final-write rejection; quality history follows earlier acceptance, not a new consent CAS. Snapshot is diagnostic metadata. No changes; independent privacy review required. |
+| Test-only/inactive | backend/tests; stale root backend copy | Tests use offline mocks; root copy is not the documented active Railway backend. Not repaired or treated as active production evidence. |
+
+No additional live-tuple writer was found by the read-only search of active backend
+source. Above unfenced ancillary storage and startup consent mutation are explicitly
+not cleared by passing this correction.
+
+## Deterministic tests and current verification
+
+25 new cases exercise the actual daily, welfare and member-adapter functions:
+already-OFF success, withdrawal at final atomic mutation, OFF -> ON with old request
+finishing before/after new publication, valid ON, missing affirmative entry consent,
+legacy generation zero, location-name-only suppression, and legacy canonical/repeated
+welfare receipt recovery. Assertions inspect persisted tuples/labels, unchanged
+generation except intentional toggles, location-free durable rows/responses/pushes,
+missed-alert acknowledgment and welfare responded state.
+
+Commands/results:
+
+- python -m pytest -q --disable-warnings backend/tests/test_checkin_location_consent.py:
+  **25 passed**.
+- python -m pytest -q --disable-warnings backend/tests/test_checkin_location_consent.py
+  backend/tests/test_location_consent_write_race.py backend/tests/test_task123_welfare_check.py
+  backend/tests/test_coordinate_capture_integrity.py backend/tests/test_task101_location_name_persistence.py:
+  **50 passed**, exit 0 (25 new + 11 upload privacy + 6 welfare + 6 capture + 2 label).
+- Sixteen existing files run individually with python -m pytest -q --disable-warnings
+  backend/tests/NAME.py: **192 passed**, all exit 0:
+  test_authoritative_escalation_completion (18), test_battery_alert_lifecycle (48),
+  test_battery_atomic_state (6), test_battery_dedup_concurrent (9),
+  test_billing_webhook_reconciliation (6), test_build48_alert_phone_backfill (12),
+  test_call_button_phone_field (10), test_coordinate_capture_integrity (6),
+  test_device_presence (11), test_device_snapshot_tracking_mode_contract (5),
+  test_family_member_removal (3), test_jwt_secret_config (10),
+  test_missed_medication_summary (9), test_task101_location_name_persistence (2),
+  test_medication_occurrence_reliability (34), test_task107_stationary_battery (3).
+  Distinct isolated total including upload privacy, welfare and new suite:
+  **234 passed across 19 files**; duplicates between commands are not added twice.
+- Combined upload/capture/label/stationary command remains **19 passed / 3 failed**
+  with identical legacy "no current event loop" failures. Stationary individually:
+  **3 passed**. Full backend **UNVERIFIED**, not run; existing check-in integration
+  test_iter3_features.py creates external accounts/data and is deliberately not run.
+- cd frontend && npm test -- --runInBand --forceExit trackingRevocationAuthority
+  androidTrackingRecovery androidLocationPublication trackingReliabilityHardening
+  missedCheckinReturnButton pushMedicationReliability sosDeliveryAcknowledgment
+  medicationNotificationAck notificationResponseRouting: **251 passed**, 6 suites.
+  Only six matching suites exist; the latter unmatched patterns do not prove coverage.
+  B1/location contributes 207, medication/check-in contributes 44.
+- cd frontend && npm test -- --runInBand --forceExit sosPermissionRegression
+  medicationAcknowledgment medicationAcknowledgeModal medicationNotificationRoute:
+  **17 passed**, 4 suites.
+- python -m py_compile backend/server.py; git diff --check: passed.
+- Frontend unchanged; TypeScript/lint not rerun. Native compilation, real MongoDB
+  concurrency, signed-in UI and physical Android remain unverified.
+
+Review resumes only after the correction is committed/pushed and remote/PR status
+verified. Passing tests are not a GREEN verdict. STOP on the next independent
+Critical/High release blocker; do not automatically repair it.
+No merge, Railway deployment, production mutation, OTA, Android production
+build/release or Google Play submission is part of this correction.

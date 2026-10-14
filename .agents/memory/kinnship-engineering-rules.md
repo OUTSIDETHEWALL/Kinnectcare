@@ -130,3 +130,15 @@ A boolean-only final guard also permits old requests after explicit re-enable.
 **How to apply:** Bind consent and coordinate ordering to one database mutation;
 withdrawal clears the visible tuple and changes its consent lifetime atomically.
 Test stored coordinates and capture time, not only the HTTP response.
+
+Location-sharing OFF applies to check-in and "I'm OK" member-location
+publication too. Those actions must still perform their non-location job.
+Do not invent a separate privacy exception, or silently change SOS semantics.
+
+**Why:** The user explicitly requires "LOCATION SHARING OFF MEANS LOCATION
+SHARING OFF" regardless of which feature possesses the location.
+
+**How to apply:** Keep receipt/history and delayed check-in confirmation messages
+location-free unless a separately authorized design can enforce consent at their
+own storage/delivery boundary. A guarded member write does not authorize another
+collection insert or a later notification; initial consent alone is insufficient.
