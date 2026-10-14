@@ -49,6 +49,7 @@ object TrackingReliability {
   fun authorize(context: Context, owner: String, expectedGeneration: Long): String = synchronized(lock) {
     val s = state(context)
     if (s.getLong("generation") != expectedGeneration) return@synchronized s.toString()
+    if (s.optBoolean("revoked", true) && s.optString("reason") == "consent") return@synchronized s.toString()
     if (s.optBoolean("shutdownPending", false)) return@synchronized s.toString()
     if (s.has("pendingMutation")) return@synchronized s.toString()
     if ((s.optJSONObject("shutdowns")?.length() ?: 0) > 0) return@synchronized s.toString()
@@ -62,22 +63,54 @@ object TrackingReliability {
   }
 
   fun revoke(context: Context, reason: String): String = synchronized(lock) {
+    revokeState(context, reason).toString()
+  }
+
+  /** Compare, invalidate and reserve shutdown in ONE cross-runtime critical section. */
+  fun revokeIfCurrent(context: Context, owner: String, generation: Long, reason: String,
+    operation: String): Boolean = synchronized(lock) {
+    val s = state(context)
+    if (s.getLong("generation") != generation || s.optString("owner") != owner) return@synchronized false
+    revokeState(context, reason, operation)
+    true
+  }
+
+  fun rearmConsent(context: Context, generation: Long): Boolean = synchronized(lock) {
+    val s = state(context)
+    if (s.getLong("generation") != generation || !s.optBoolean("revoked", true)) return@synchronized false
+    if (s.optString("reason") == "consent") {
+      s.put("reason", "stopped")
+      save(context, s)
+    }
+    true
+  }
+
+  private fun revokeState(context: Context, reason: String, operation: String? = null): JSONObject {
     val old = state(context)
     val generation = old.getLong("generation") + 1
     // Freshness, movement and cooldown belong to the revoked owner, not whoever
     // authorizes next. Retain history only in the separate diagnostic journal.
     val s = JSONObject().put("generation", generation).put("revoked", true)
       .put("shutdownPending", true).put("owner", "")
+      .put("reason", if (old.optString("reason") == "consent") "consent" else reason)
+      .put("revokedOwner", old.optString("owner"))
     if (old.has("pendingMutation")) {
       s.put("pendingMutation", old.get("pendingMutation")).put("mutationProcess", processIncarnation)
     }
     if (old.has("shutdowns")) s.put("shutdowns", old.get("shutdowns"))
+    if (operation != null) {
+      val shutdowns = s.optJSONObject("shutdowns") ?: JSONObject()
+      shutdowns.put(operation, processIncarnation)
+      s.put("shutdowns", shutdowns)
+    }
     // Disk failure must not resurrect publication rights in another live JS
     // runtime. Failed persistence stays explicit and new authorization fails closed.
     failedRevocation = s.toString()
     save(context, s)
-    record(context, "stop_intent", JSONObject().put("reason", reason).put("generation", s.getLong("generation")).toString())
-    s.toString()
+    try {
+      record(context, "stop_intent", JSONObject().put("reason", reason).put("generation", s.getLong("generation")).toString())
+    } catch (_: Exception) { /* diagnostic failure cannot interrupt reserved shutdown */ }
+    return s
   }
 
   fun shutdownComplete(context: Context, generation: Long) = synchronized(lock) {

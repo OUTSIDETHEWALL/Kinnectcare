@@ -25,6 +25,7 @@ import {
 import { configureBatteryTask, BATTERY_OPT_PROMPTED_KEY } from '../src/batteryTask';
 import { refreshLocationIfStale, setMyMemberId, setMyUserId } from '../src/locationRefresh';
 import * as locationEngine from '../src/locationEngine';
+import { readTrackingAuthority } from '../src/trackingReliability';
 import * as leonidas from '../src/leonidas';
 import * as memberStore from '../src/store/memberStore';
 import { api, getCurrentToken, subscribeToTokenChanges } from '../src/api';
@@ -1148,7 +1149,10 @@ function RootNav() {
     if (previous && user?.id && previous !== user.id) {
       engineBootedForUserIdRef.current = null;
       try { leonidas.stop(); } catch {}
-      void locationEngine.stop('stopped', 'confirmed_user_replacement');
+      const expected = readTrackingAuthority();
+      if (expected && (!expected.owner || expected.owner.split(':')[0] === previous)) {
+        void locationEngine.stop('stopped', 'confirmed_user_replacement', expected);
+      }
     }
   }, [user?.id, loading]);
   // Observe linkage for the whole session, including after the initial 90 s
@@ -1163,6 +1167,7 @@ function RootNav() {
     const reconcile = async () => {
       if (reading) { reread = true; return; }
       reading = true;
+      const expected = readTrackingAuthority();
       try {
         const snapshot = await readPermissionSnapshot({ includeNotifications: false });
         const disclosed = await isBackgroundLocationDisclosureAcknowledged();
@@ -1177,7 +1182,7 @@ function RootNav() {
         setAndroidLocationReady(ready);
         if ((snapshot.foreground === 'denied' || snapshot.background === 'denied')
           && (fingerprint === null || fingerprint !== next)) {
-          void locationEngine.stop('permission', 'reconcile_os_withdrawal').catch(() => {});
+          if (expected) void locationEngine.stop('permission', 'reconcile_os_withdrawal', expected).catch(() => {});
         }
         if ((fingerprint !== null && fingerprint !== next)
           || engineBootedForUserIdRef.current === null) {
@@ -1321,11 +1326,13 @@ function RootNav() {
           if (cancelled) return;
         }
 
+        let removalAuthority = readTrackingAuthority();
         if (!me) {
           // fetchAll intentionally returns cached data on errors. A timeout
           // alone is therefore not evidence that the owned member was removed.
           // Require a fresh, successful authenticated lookup before stopping.
           const lookupToken = await getCurrentToken();
+          removalAuthority = readTrackingAuthority();
           if (!lookupToken || cancelled) return;
           const [confirmed, confirmedUser] = await Promise.all([
             api.get('/members'), api.get('/auth/me'),
@@ -1342,7 +1349,7 @@ function RootNav() {
         }
         if (!me) {
           try { leonidas.stop(); } catch (_e) {}
-          await locationEngine.stop('stopped', 'confirmed_member_removal');
+          if (removalAuthority) await locationEngine.stop('stopped', 'confirmed_member_removal', removalAuthority);
           engineBootedForUserIdRef.current = null;
           return;
         }

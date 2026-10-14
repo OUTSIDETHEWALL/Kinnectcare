@@ -83,7 +83,7 @@ jest.mock('../androidTrackingRecovery', () => ({
   authorizeTrackingIntent: jest.fn(async (cfg) => {
     // These tests isolate snapshot timing with an already-verified owner.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    require('../__mocks__/trackingNative').trackingNative.trackingAuthorize(`snapshot:${cfg.memberId}`, 0);
+    require('../__mocks__/trackingNative').trackingNative.trackingAuthorize(`${cfg.ownerUserId}:${cfg.memberId}`, 0);
   }),
   revokeTrackingIntent: jest.fn(),
   recoverUnexpectedlyDisabledTracking: jest.fn(async (_sdk, _current, authorize) => {

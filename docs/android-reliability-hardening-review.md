@@ -2,6 +2,11 @@
 
 **Status: STOP BEFORE MERGE. Draft review only; no release authorization.**
 
+This is the initial implementation record for head
+`3bc5a29f1d4f65303ed4eeb4179ddc146a4ee94e`, followed by the B1 correction
+supplement below. The initial record is not independent approval. A resumed
+adversarial review is required on the corrected delivery commit.
+
 Severity: **Critical** (tracking reliability, privacy, and caregiver freshness truth).
 Confidence: high in the exercised JavaScript contracts and offline coordinate update
 logic; **not established** for Kotlin compilation or real Android background behavior.
@@ -384,3 +389,90 @@ The explicit missing-extension guard is not a substitute for that binary.
 
 **No merge, backend deployment, OTA, production build/release, Play submission,
 or production mutation is authorized or performed by this delivery.**
+
+---
+
+# B1 correction supplement
+
+## Scope and corrected behavior
+
+The adversarial review found that permission/consent evidence obtained by A
+could unconditionally revoke replacement B after an await. This correction
+addresses that ownership race, without changing SDK/dependencies or scheduling.
+
+The native `trackingRevokeIfCurrent` Function compares owner and generation under
+the process-wide lock, invalidates only a match, and reserves a shutdown token
+in the same critical section. A mismatch returns false without changing authority,
+health, generation or shutdown state. A successful CAS reserves the barrier
+before the lock is released, so another runtime cannot rebind between revocation
+and SDK stop/purge. Conditional revocation persists reason and revoked owner in
+native state; it deliberately queues **no revoked-intent AsyncStorage write**
+that could arrive late against a replacement.
+
+Native consent remains sticky until explicit, generation-conditional rearm.
+Revoked battery transport can still authenticate the prior binding without
+treating GPS consent as battery consent. Explicit signout remains supported.
+
+Acquisition, owned-SDK permission callbacks, recovery initial/late/final consent
+checks, and analogous startup/reconciliation/refresh-token withdrawal decisions
+carry the captured authority into the conditional stop boundary. Recovery uses
+an immutable local verification record rather than converting absent mutable
+verification into consent-off or dereferencing a cleared cache.
+
+## Exact B1 changed files (relative to the blocked head)
+
+```text
+.agents/memory/kinnship-engineering-rules.md
+docs/android-reliability-hardening-review.md
+frontend/app/_layout.tsx
+frontend/modules/startup-diagnostics/android/src/main/java/expo/modules/startupdiagnostics/StartupDiagnosticsModule.kt
+frontend/modules/startup-diagnostics/android/src/main/java/expo/modules/startupdiagnostics/TrackingReliability.kt
+frontend/src/__mocks__/trackingNative.ts
+frontend/src/__tests__/heartbeatSnapshot.test.ts
+frontend/src/__tests__/trackingRevocationAuthority.test.ts
+frontend/src/__tests__/withAndroidStartupRecorder.test.ts
+frontend/src/androidLocationAcquisition.ts
+frontend/src/androidTrackingRecovery.ts
+frontend/src/locationEngine.ts
+frontend/src/trackingReliability.ts
+```
+
+13 correction files; cumulative PR includes the original 42 files plus the new
+race-test file (43 total). The heartbeat fixture's native owner now matches its
+authenticated owner; assertions were not removed. Native Function inventory
+assertion reflects the two supporting synchronous Functions.
+
+## Deterministic race evidence
+
+New suite: 16 tests. Covers delayed acquisition denial, delayed acquisition
+consent, recovery denial with verification present/cleared, three recovery consent
+phases, verification cache replacement, actual ownedNativeSdk permission callback,
+replacement at the last instant before native CAS, four legitimate withdrawal
+reasons, sticky consent/rearm and static native lock/lease placement.
+
+Separate isolated JS policy modules share one native-contract model and storage.
+Tests assert B's entire authority/health snapshot and intent remain unchanged,
+tracker remains enabled, no stop/purge occurs, and no revoked-intent write occurs.
+The acquisition consent case additionally asserts no upload after replacement.
+The original delayed-denial sequence now rejects without touching B.
+
+These are JS/model/static tests, **not Kotlin compilation or native concurrency/
+process-death proof**. A normal new Android binary is still required.
+
+## Verification
+
+- Focused: **336 passed**, 8 suites, exit 0.
+- Full frontend: **925 passed, 1 failed**, 926 tests, 72 suites (71 passed);
+  exit 1 solely for the unchanged legacy repository-audit failure.
+- TypeScript: `npx tsc --noEmit`, exit 0.
+- Lint: exit 1, **1 error / 511 warnings**. Same baseline display-name error;
+  blocked head also had 511 warnings, main baseline had 512.
+- Medication/SOS-containing frontend regression suites pass in the full run.
+  Physical delivery/routing remains unverified.
+- Backend unchanged by B1; no backend rerun claimed. Initial isolated offline
+  result remains 215 passing tests; full backend suite remains unverified.
+- Android native compilation and physical lifecycle acceptance: not performed.
+
+No merge, deployment, OTA, production build/release, Play or Railway/production
+mutation is part of this correction. The resumed adversarial verdict is reported
+separately against the corrected commit; passing B1 tests do not make the PR GREEN.

@@ -9,6 +9,8 @@ export type TrackingAuthority = {
   ordinaryDeliveryAt?: number; moving?: boolean; movementAt?: number;
   operation?: string;
   shutdownPending?: boolean;
+  reason?: string;
+  revokedOwner?: string;
 };
 export type OperationalRecoveryReport = {
   configurationResult: string;
@@ -27,6 +29,8 @@ type ReliabilityModule = {
   trackingRead(): string;
   trackingAuthorize(owner: string, expectedGeneration: number): string;
   trackingRevoke(reason: string): string;
+  trackingRevokeIfCurrent(owner: string, generation: number, reason: string, operation: string): boolean;
+  trackingRearmConsent(generation: number): boolean;
   trackingClaim(owner: string, generation: number, operation: string, now: number): boolean;
   trackingClaimConfiguration(owner: string, generation: number, operation: string, now: number): boolean;
   trackingComplete(operation: string, outcome: string, capturedAt: number, moving: boolean): void;
@@ -63,15 +67,54 @@ export function revokeNativeTracking(reason: string): void {
   native()?.trackingRevoke(reason);
 }
 
+export function rearmNativeTrackingConsent(generation: number): void {
+  native()?.trackingRearmConsent(generation);
+}
+
+/**
+ * Native CAS reserves shutdown before releasing the cross-runtime lock. No
+ * AsyncStorage revocation write may arrive later and poison a replacement.
+ */
+export async function withExpectedTrackingRevocation(
+  expected: TrackingAuthority, reason: string, shutdown: () => Promise<unknown>,
+): Promise<boolean> {
+  const module = native();
+  if (!module?.trackingRevokeIfCurrent) return false;
+  const operation = `conditional-shutdown-${Date.now()}-${Math.random()}`;
+  let accepted: boolean;
+  try {
+    accepted = module.trackingRevokeIfCurrent(expected.owner, expected.generation, reason, operation);
+  } catch (error) {
+    // commit() failure keeps a fail-closed live native snapshot. Still stop,
+    // but preserve a failed shutdown barrier and propagate the persistence error.
+    const failed = JSON.parse(module.trackingRead());
+    if (!failed.revoked || failed.generation !== expected.generation + 1
+      || !failed.shutdowns?.[operation]) throw error;
+    try { await shutdown(); } finally { module.trackingShutdownEnd(operation, false); }
+    throw error;
+  }
+  if (!accepted) return false;
+  let success = false;
+  try {
+    await shutdown();
+    success = true;
+    return true;
+  } finally {
+    module.trackingShutdownEnd(operation, success);
+  }
+}
+
 export function completeNativeTrackingShutdown(generation: number): void {
   native()?.trackingShutdownComplete(generation);
 }
 
 /** Keep every outstanding destructive native promise behind the rebind barrier. */
-export async function withConfirmedTrackingShutdown<T>(action: () => Promise<T>): Promise<T> {
+export async function withConfirmedTrackingShutdown<T>(
+  action: () => Promise<T>, expected?: TrackingAuthority,
+): Promise<T> {
   const module = native();
   if (!module) return action(); // New binding is already blocked without the extension.
-  const authority = readTrackingAuthority();
+  const authority = expected ?? readTrackingAuthority();
   const operation = `shutdown-${Date.now()}-${Math.random()}`;
   if (!authority || !module.trackingShutdownBegin(authority.generation, operation)) {
     throw new Error('tracking_shutdown_obsolete');

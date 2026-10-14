@@ -26,6 +26,12 @@ class StartupDiagnosticsModule : Module() {
     Function("trackingRevoke") { reason: String ->
       TrackingReliability.revoke(requireNotNull(appContext.reactContext), reason)
     }
+    Function("trackingRevokeIfCurrent") { owner: String, generation: Long, reason: String, operation: String ->
+      TrackingReliability.revokeIfCurrent(requireNotNull(appContext.reactContext), owner, generation, reason, operation)
+    }
+    Function("trackingRearmConsent") { generation: Long ->
+      TrackingReliability.rearmConsent(requireNotNull(appContext.reactContext), generation)
+    }
     Function("trackingClaim") { owner: String, generation: Long, operation: String, now: Long ->
       TrackingReliability.claim(requireNotNull(appContext.reactContext), owner, generation, operation, now)
     }

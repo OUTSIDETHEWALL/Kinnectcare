@@ -9,6 +9,7 @@ import { fenceNativeSdk } from './androidNativeShutdown';
 import {
   readTrackingAuthority, claimTrackingAcquisition, completeTrackingAcquisition, recordTrackingEvidence,
 } from './trackingReliability';
+import type { TrackingAuthority } from './trackingReliability';
 
 export const GUARDED_POSITION_MARKER = 'kc_guarded_one_shot';
 type PositionOptions = { samples?: number; timeout?: number; extras?: Record<string, unknown> };
@@ -25,7 +26,7 @@ type PositionSdk = {
 export async function acquireAndUploadAndroidPosition(
   sdk: PositionSdk, transport: AuthorizedBatteryTransport, options: PositionOptions,
   executionCurrent: () => boolean,
-  withdraw: (reason: RevocationReason) => Promise<void>,
+  withdraw: (reason: RevocationReason, expected: TrackingAuthority) => Promise<unknown>,
 ): Promise<any> {
   const epoch = trackingIntentEpoch();
   const stamp = await trackingPolicyStamp();
@@ -39,17 +40,19 @@ export async function acquireAndUploadAndroidPosition(
     if (!executionCurrent() || epoch !== trackingIntentEpoch()) return false;
     if (await trackingIsRevoked() || !await transport.isCurrent()) return false;
     const permission = await readPermissionSnapshot({ includeNotifications: false });
+    if (!executionCurrent() || epoch !== trackingIntentEpoch()) return false;
     if (permission.foreground === 'denied' || permission.background === 'denied') {
-      await withdraw('permission');
+      await withdraw('permission', authority);
       return false;
     }
     if (permission.foreground !== 'granted' || permission.background !== 'granted') return false;
     if (freshOwnership) {
       const ownership = await verifyWakeOwnership(executionCurrent);
+      if (!executionCurrent() || epoch !== trackingIntentEpoch()) return false;
       if (ownership !== 'allowed') {
         if (['session_rejected', 'invalid_owner', 'sharing_disabled'].includes(ownership)) {
           await withdraw(ownership === 'sharing_disabled' ? 'consent'
-            : ownership === 'session_rejected' ? 'signout' : 'stopped');
+            : ownership === 'session_rejected' ? 'signout' : 'stopped', authority);
         }
         return false;
       }

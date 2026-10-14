@@ -108,3 +108,14 @@ finished; rebinding earlier permits an old stop or purge to affect the new owner
 
 **How to apply:** Keep mutation and shutdown barriers independent of GPS timeouts;
 model tests are not proof of native cross-runtime or process-death behavior.
+
+Async withdrawal evidence belongs to the captured owner/generation. Compare and
+revoke atomically in native code, reserving shutdown in the same critical section.
+Do not queue a conditional revoked-intent write in AsyncStorage after this mutation.
+
+**Why:** Another runtime can replace authority between a JS check and mutation,
+or before a delayed storage write arrives; either can destroy the valid replacement.
+
+**How to apply:** Revalidate after reads, then use expected-authority revocation.
+Persist the conditional decision and sticky consent natively; test negative SDK,
+generation, owner, health-state and intent-write side effects, not only return values.

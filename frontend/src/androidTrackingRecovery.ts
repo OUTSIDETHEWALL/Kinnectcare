@@ -4,7 +4,9 @@ import { BACKGROUND_LOCATION_DISCLOSURE_TEXT } from './backgroundLocationDisclos
 import {
   authorizeNativeTracking, readTrackingAuthority, revokeNativeTracking, recordTrackingEvidence,
   completeNativeTrackingShutdown, observeAcceptedTrackingLocation, withConfirmedTrackingShutdown,
+  withExpectedTrackingRevocation, rearmNativeTrackingConsent,
 } from './trackingReliability';
+import type { TrackingAuthority } from './trackingReliability';
 
 export type AuthorizationVerdict = {
   state: 'AUTHORIZED' | 'UNKNOWN' | 'REVOKED';
@@ -86,8 +88,10 @@ export type RecoverySdk = {
   destroyLocations?: () => Promise<unknown>;
 };
 
-function shutdownConfirmedRevocation(sdk: RecoverySdk, caller: string): Promise<unknown> {
-  const authority = readTrackingAuthority();
+function shutdownConfirmedRevocation(
+  sdk: RecoverySdk, caller: string, expected?: TrackingAuthority | null,
+): Promise<unknown> {
+  const authority = expected ?? readTrackingAuthority();
   if (authority && !authority.revoked) return Promise.resolve();
   recordTrackingEvidence('stop_requested', { caller, authorization: 'REVOKED',
     generation: authority?.generation, reason: 'confirmed_revocation' });
@@ -95,7 +99,7 @@ function shutdownConfirmedRevocation(sdk: RecoverySdk, caller: string): Promise<
     await sdk.stop();
     if (sdk.destroyLocations) await sdk.destroyLocations();
     if (authority) completeNativeTrackingShutdown(authority.generation);
-  });
+  }, authority ?? undefined);
 }
 
 export function trackingIntentEpoch(): number { return readTrackingAuthority()?.generation ?? epoch; }
@@ -128,6 +132,19 @@ export function revokeTrackingIntent(reason: RevocationReason = 'stopped', bindi
   });
 }
 
+/** Async evidence can revoke only the authority that requested it. */
+export function revokeTrackingIntentIfCurrent(
+  expected: TrackingAuthority, reason: RevocationReason, shutdown: () => Promise<unknown>,
+): Promise<boolean> {
+  return withExpectedTrackingRevocation(expected, reason, async () => {
+    epoch += 1;
+    verifiedOwner = null;
+    recordTrackingEvidence('authorization', { authorization: 'REVOKED', reason,
+      generation: expected.generation, owner: expected.owner });
+    await shutdown();
+  });
+}
+
 export async function trackingPolicyStamp(): Promise<string | null> {
   return AsyncStorage.getItem(TRACKING_INTENT_KEY);
 }
@@ -136,7 +153,8 @@ export async function trackingIsRevoked(consentOnly = false): Promise<boolean> {
   const raw = await trackingPolicyStamp();
   if (revokedStamp(raw, consentOnly)) return true;
   const authority = readTrackingAuthority();
-  if (!consentOnly && authority?.revoked && authority.generation > 0) return true;
+  if (authority?.revoked && authority.generation > 0
+    && (!consentOnly || authority.reason === 'consent')) return true;
   // Pre-intent installations already have a durable sharing withdrawal flag.
   return await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1';
 }
@@ -153,6 +171,8 @@ function revokedStamp(raw: string | null, consentOnly = false): boolean {
 /** Only explicit opt-in may remove a sticky consent revocation. */
 export function rearmTrackingConsent(): Promise<void> {
   verifiedOwner = null;
+  const authority = readTrackingAuthority();
+  if (authority) rearmNativeTrackingConsent(authority.generation);
   return write(async () => {
     const raw = await trackingPolicyStamp();
     const value = raw ? JSON.parse(raw) : null;
@@ -208,9 +228,11 @@ export async function authorizeRevokedBatteryTransport(
 ): Promise<AuthorizedBatteryTransport | null> {
   const stamp = await trackingPolicyStamp();
   const value = stamp ? JSON.parse(stamp) : null;
-  const binding: Binding | undefined = value?.revoked === true ? value.binding : undefined;
+  const nativeRevoked = readTrackingAuthority()?.revoked === true;
+  const binding: Binding | undefined = value?.revoked === true ? value.binding
+    : nativeRevoked && value?.ownerUserId ? value : undefined;
   const base = (process.env.EXPO_PUBLIC_BACKEND_URL || '').replace(/\/+$/, '');
-  if (value?.revoked !== true || (binding && binding.backendBaseUrl !== base)
+  if ((value?.revoked !== true && !nativeRevoked) || (binding && binding.backendBaseUrl !== base)
     || !base.startsWith('https://')) return null;
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getCurrentToken } = require('./api') as typeof import('./api');
@@ -375,11 +397,17 @@ export async function recoverUnexpectedlyDisabledTracking(
   onAuthorizedBattery?: (transport: AuthorizedBatteryTransport) => void,
 ): Promise<string> {
   let expectedEpoch = trackingIntentEpoch();
+  let expectedAuthority = readTrackingAuthority();
   let expectedStamp = await trackingPolicyStamp();
   if (revokedStamp(expectedStamp) || await trackingIsRevoked()) {
-    const native = readTrackingAuthority();
-    if (native && !native.revoked) await revokeTrackingIntent('consent');
-    await shutdownConfirmedRevocation(sdk, 'recovery_durable_revocation');
+    if (!expectedAuthority || !isCurrent() || trackingIntentEpoch() !== expectedEpoch) return 'obsolete_owner';
+    if (!expectedAuthority.revoked) {
+      const applied = await revokeTrackingIntentIfCurrent(expectedAuthority, 'consent', async () => {
+        await sdk.stop();
+        if (sdk.destroyLocations) await sdk.destroyLocations();
+      });
+      if (!applied) return 'obsolete_owner';
+    } else await shutdownConfirmedRevocation(sdk, 'recovery_durable_revocation', expectedAuthority);
     const transport = await authorizeRevokedBatteryTransport(isCurrent);
     if (transport) onAuthorizedBattery?.(transport);
     return 'tracking_revoked';
@@ -389,7 +417,7 @@ export async function recoverUnexpectedlyDisabledTracking(
     expectedEpoch = trackingIntentEpoch();
     expectedStamp = await trackingPolicyStamp();
     if (revokedStamp(expectedStamp)) {
-      await shutdownConfirmedRevocation(sdk, 'recovery_migration_revocation');
+      await shutdownConfirmedRevocation(sdk, 'recovery_migration_revocation', expectedAuthority);
       return 'tracking_revoked';
     }
   }
@@ -413,6 +441,9 @@ export async function recoverUnexpectedlyDisabledTracking(
   if (!token) return 'no_session';
   let expectedNonce = intent?.nonce;
   const current = async () => {
+    const nativeAuthority = readTrackingAuthority();
+    if (!expectedAuthority || !nativeAuthority || nativeAuthority.owner !== expectedAuthority.owner
+      || nativeAuthority.generation !== expectedAuthority.generation) return false;
     if (trackingIntentEpoch() !== expectedEpoch || !isCurrent()) return false;
     const nonce = (await readIntent())?.nonce;
     const stamp = await trackingPolicyStamp();
@@ -421,6 +452,16 @@ export async function recoverUnexpectedlyDisabledTracking(
     // does not protect a late stale read from authorizing native work.
     return trackingIntentEpoch() === expectedEpoch && isCurrent()
       && nonce === expectedNonce && stamp === expectedStamp && currentToken === token;
+  };
+  const withdrawCurrent = async (reason: RevocationReason, caller: string): Promise<boolean> => {
+    if (!expectedAuthority || !await current()) return false;
+    const authority = expectedAuthority;
+    return revokeTrackingIntentIfCurrent(authority, reason, async () => {
+      recordTrackingEvidence('stop_requested', { caller, reason, authorization: 'REVOKED',
+        generation: authority.generation });
+      await sdk.stop();
+      if (sdk.destroyLocations) await sdk.destroyLocations();
+    });
   };
   if (!await current()) return 'obsolete_owner';
   const lastAttempt = Number(await AsyncStorage.getItem(ATTEMPT_KEY));
@@ -444,8 +485,7 @@ export async function recoverUnexpectedlyDisabledTracking(
       ]);
     } catch (error) {
       if (String(error).includes('session_rejected') && await current()) {
-        await revokeTrackingIntent('signout');
-        await shutdownConfirmedRevocation(sdk, 'recovery_confirmed_session_rejection');
+        await withdrawCurrent('signout', 'recovery_confirmed_session_rejection');
       }
       throw error;
     }
@@ -460,8 +500,7 @@ export async function recoverUnexpectedlyDisabledTracking(
     }
     if ((intent && user.id !== intent.ownerUserId)
       || !members.some(member => member.id === memberId && member.user_id === user.id)) {
-      await revokeTrackingIntent();
-      await shutdownConfirmedRevocation(sdk, 'recovery_confirmed_owner_loss');
+      if (!await withdrawCurrent('stopped', 'recovery_confirmed_owner_loss')) return 'obsolete_owner';
       return 'invalid_owner';
     }
     if (preferences?.location_sharing_enabled !== true && preferences?.location_sharing_enabled !== false) {
@@ -473,23 +512,23 @@ export async function recoverUnexpectedlyDisabledTracking(
     };
   }
   if (!await current()) return 'obsolete_owner';
+  const verification = verifiedOwner;
+  if (!verification) return 'ownership_unavailable';
   const permissions = await readPermissionSnapshot({ includeNotifications: false });
-  const sharingOff = !verifiedOwner?.sharing
+  if (!await current()) return 'obsolete_owner';
+  const sharingOff = verification.sharing === false
     || await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1';
+  if (!await current()) return 'obsolete_owner';
   const permissionDenied = permissions.foreground === 'denied' || permissions.background === 'denied';
   if (!permissionDenied && (permissions.foreground !== 'granted' || permissions.background !== 'granted')) {
     return 'permission_unverified';
   }
   if (sharingOff || permissionDenied) {
-    await revokeTrackingIntent(sharingOff ? 'consent' : 'permission', {
-      ownerUserId: verifiedOwner!.ownerUserId, memberId, backendBaseUrl: base,
-    });
-    expectedEpoch = trackingIntentEpoch();
-    expectedNonce = undefined;
-    expectedStamp = await trackingPolicyStamp();
-    await shutdownConfirmedRevocation(sdk, 'recovery_confirmed_consent_or_permission');
+    if (!await withdrawCurrent(sharingOff ? 'consent' : 'permission',
+      'recovery_confirmed_consent_or_permission')) return 'obsolete_owner';
     // Battery contact is not GPS consent. Still require the verified app session.
-    if (await current()) onAuthorizedBattery?.({ baseUrl: base, memberId, token, isCurrent: current });
+    const transport = await authorizeRevokedBatteryTransport(isCurrent);
+    if (transport) onAuthorizedBattery?.(transport);
     return sharingOff ? 'sharing_disabled' : 'permission_denied';
   }
   if (await current()) onAuthorizedBattery?.({ baseUrl: base, memberId, token, isCurrent: current });
@@ -498,7 +537,7 @@ export async function recoverUnexpectedlyDisabledTracking(
   if (native && native.generation === 0 && native.revoked) {
     // One-time adoption requires the same affirmative server/permission proof
     // as legacy intent migration. Never reopen an actual native revocation.
-    authorizeNativeTracking(`${intent.ownerUserId}:${intent.memberId}`, 0);
+    expectedAuthority = authorizeNativeTracking(`${intent.ownerUserId}:${intent.memberId}`, 0);
   }
   // Limit GPS starts, not fresh ownership validation or legitimate battery work.
   if (coolingDown) return 'cooldown';
@@ -516,10 +555,11 @@ export async function recoverUnexpectedlyDisabledTracking(
   });
   const latestPermissions = await readPermissionSnapshot({ includeNotifications: false });
   if (!await current()) return 'obsolete_owner';
-  if (latestPermissions.foreground === 'denied' || latestPermissions.background === 'denied'
-    || await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1') {
-    await revokeTrackingIntent('permission');
-    await shutdownConfirmedRevocation(sdk, 'recovery_late_permission_withdrawal');
+  const lateSharingOff = await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1';
+  if (!await current()) return 'obsolete_owner';
+  if (latestPermissions.foreground === 'denied' || latestPermissions.background === 'denied' || lateSharingOff) {
+    if (!await withdrawCurrent(lateSharingOff ? 'consent' : 'permission',
+      'recovery_late_permission_withdrawal')) return 'obsolete_owner';
     return 'permission_denied';
   }
   const state = needsStart ? await sdk.start() : await sdk.getState();
@@ -534,11 +574,11 @@ export async function recoverUnexpectedlyDisabledTracking(
     }
     return 'obsolete_owner';
   }
-  if (finalPermissions.foreground === 'denied'
-    || finalPermissions.background === 'denied'
-    || await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1') {
-    await revokeTrackingIntent('permission');
-    await shutdownConfirmedRevocation(sdk, 'recovery_final_permission_withdrawal');
+  const finalSharingOff = await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1';
+  if (!await current()) return 'obsolete_owner';
+  if (finalPermissions.foreground === 'denied' || finalPermissions.background === 'denied' || finalSharingOff) {
+    if (!await withdrawCurrent(finalSharingOff ? 'consent' : 'permission',
+      'recovery_final_permission_withdrawal')) return 'obsolete_owner';
     return 'late_start_stopped';
   }
   return state.enabled === true ? needsStart ? 'restarted' : 'already_enabled' : 'start_not_enabled';

@@ -5,6 +5,7 @@ export const trackingNative = {
   trackingRead: () => JSON.stringify(state),
   trackingAuthorize(owner: string, generation: number) {
     if (!state.pendingMutation && !state.shutdownPending && !Object.keys(state.shutdowns ?? {}).length
+      && !(state.revoked && state.reason === 'consent')
       && generation === state.generation && (!state.owner || state.owner === owner)) {
       state = { ...state, owner, revoked: false };
     }
@@ -12,9 +13,21 @@ export const trackingNative = {
   },
   trackingRevoke(reason: string) {
     state = { generation: state.generation + 1, owner: '', revoked: true, shutdownPending: true,
+      reason: state.reason === 'consent' ? 'consent' : reason, revokedOwner: state.owner,
       pendingMutation: state.pendingMutation, shutdowns: state.shutdowns };
     records.push({ event: 'stop_intent', reason });
     return JSON.stringify(state);
+  },
+  trackingRevokeIfCurrent(owner: string, generation: number, reason: string, operation: string) {
+    if (state.owner !== owner || state.generation !== generation) return false;
+    trackingNative.trackingRevoke(reason);
+    state.shutdowns = { ...state.shutdowns, [operation]: true };
+    return true;
+  },
+  trackingRearmConsent(generation: number) {
+    if (state.generation !== generation || !state.revoked) return false;
+    if (state.reason === 'consent') state.reason = 'stopped';
+    return true;
   },
   trackingClaim(owner: string, generation: number, operation: string, now: number, configurationOnly = false): boolean {
     if (state.revoked || state.owner !== owner || state.generation !== generation) return false;
