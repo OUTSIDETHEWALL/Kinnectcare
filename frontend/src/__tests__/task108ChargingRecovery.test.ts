@@ -22,6 +22,7 @@ async function flushPromises(): Promise<void> {
 }
 
 jest.mock('../androidTrackingRecovery', () => ({
+  evaluateWakeAuthorization: jest.fn(async () => ({ state: 'AUTHORIZED', source: 'test_owner' })),
   trackingIsRevoked: jest.fn(async () => false),
   trackingPolicyStamp: jest.fn(async () => null),
   verifyWakeOwnership: jest.fn(async () => 'allowed'),
@@ -33,6 +34,8 @@ jest.mock('../androidTrackingRecovery', () => ({
   recoverUnexpectedlyDisabledTracking: jest.fn(async (sdk, _current, authorized) => {
     const state = await sdk.getState();
     const member = state.url?.match(/\/members\/([^/]+)\/location/);
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    if (member) require('../__mocks__/trackingNative').trackingNative.trackingAuthorize(`test:${member[1]}`, 0);
     if (member) authorized?.({ memberId: member[1], baseUrl: state.url.split('/api/')[0],
       token: state.authorization.accessToken, isCurrent: async () => true });
     return 'already_enabled';
@@ -71,7 +74,12 @@ describe('Task 108 — headless charging recovery', () => {
         return Promise.resolve();
       }),
     };
-    const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+    const fetchMock = jest.fn(async (_url, options: any) => {
+      const body = options?.body ? JSON.parse(options.body) : {};
+      return { ok: true, status: 200, json: async () => ({
+        latitude: body.latitude, longitude: body.longitude, coordinate_captured_at: body.timestamp,
+      }) };
+    });
     (globalThis as { fetch?: unknown }).fetch = fetchMock;
 
     let headlessTask:
@@ -79,7 +87,7 @@ describe('Task 108 — headless charging recovery', () => {
       | undefined;
     const getCurrentPosition = jest.fn().mockResolvedValue({
       battery: { level: 0.18, is_charging: true },
-      timestamp: '2026-08-24T12:21:00.000Z',
+      timestamp: new Date().toISOString(),
       coords: { latitude: 35, longitude: -114 },
     });
     const registerHeadlessTask = jest.fn((task: typeof headlessTask) => {
@@ -151,7 +159,7 @@ describe('Task 108 — headless charging recovery', () => {
     );
 
     const batteryPatch = fetchMock.mock.calls.find(
-      ([url]: [string]) => url === BATTERY_URL,
+      ([url]) => url === BATTERY_URL,
     );
     expect(batteryPatch).toBeDefined();
     const patchBody = JSON.parse(batteryPatch![1].body as string) as {

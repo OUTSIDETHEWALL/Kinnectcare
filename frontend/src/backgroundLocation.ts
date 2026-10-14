@@ -49,7 +49,7 @@ export async function setLocationSharingEnabled(enabled: boolean): Promise<void>
     const engine = require('./locationEngine') as typeof import('./locationEngine');
     if (!enabled) {
       await Promise.all([
-        engine.stop('consent'),
+        engine.stop('consent', 'settings_sharing_off'),
         AsyncStorage.setItem(LOCATION_SHARING_DISABLED_KEY, '1'),
       ]);
     } else {

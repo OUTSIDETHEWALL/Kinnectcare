@@ -16,6 +16,7 @@ function member(overrides: Partial<Member> = {}): Member {
     role: 'senior',
     status: 'healthy',
     last_seen: ago(1),
+    coordinate_captured_at: ago(1),
     device_presence_at: ago(1),
     is_moving: false,
     battery_level: 0.82,
@@ -42,10 +43,10 @@ function issue(kind: 'battery' | 'device', title: string): NeedsAttentionIssue {
 describe('Family card caregiver presentation', () => {
   it('shows a healthy device with current battery and location', () => {
     expect(getFamilyCardStatus(member(), [], NOW)).toMatchObject({
-      device: { label: 'Tracking Healthy' },
-      contactLabel: 'Last update 1 min ago',
+      device: { label: 'Device communicating' },
+      contactLabel: 'Last contact 1 min ago',
       locationLabel: 'Location',
-      locationAgeLabel: 'Updated 1 min ago',
+      locationAgeLabel: 'Last location captured 1 min ago',
       battery: { statusText: 'Battery 82%' },
       hasActiveProblem: false,
     });
@@ -90,7 +91,7 @@ describe('Family card caregiver presentation', () => {
       device: { label: 'Update Delayed' },
       contactLabel: 'Last contact 11 min ago',
       locationLabel: 'Location',
-      locationAgeLabel: 'Updated 1 min ago',
+      locationAgeLabel: 'Last location captured 1 min ago',
       battery: { statusText: 'Last known battery: 72%' },
     });
   });
@@ -99,11 +100,12 @@ describe('Family card caregiver presentation', () => {
     expect(getFamilyCardStatus(member({
       device_presence_at: ago(1),
       last_seen: ago(241),
+      coordinate_captured_at: ago(241),
     }), [], NOW)).toMatchObject({
-      device: { label: 'Tracking Healthy' },
-      contactLabel: 'Last update 1 min ago',
+      device: { label: 'Device communicating' },
+      contactLabel: 'Last contact 1 min ago',
       locationLabel: 'Last known location',
-      locationAgeLabel: 'Last location update 4 hrs ago',
+      locationAgeLabel: 'Last location captured 4 hrs ago',
     });
   });
 
@@ -153,11 +155,12 @@ describe('Family card caregiver presentation', () => {
     expect(getFamilyCardStatus(member({
       device_presence_at: future,
       last_seen: future,
+      coordinate_captured_at: future,
     }), [], NOW)).toMatchObject({
       device: { label: 'Device Status Unknown' },
       contactLabel: null,
       locationLabel: 'Last known location',
-      locationAgeLabel: null,
+      locationAgeLabel: 'Capture time unavailable',
     });
   });
 
@@ -182,7 +185,7 @@ describe('Family card caregiver presentation', () => {
     expect(stopped.hasActiveProblem).toBe(true);
 
     const resumed = getFamilyCardStatus(member({ is_moving: true, device_presence_at: ago(1) }), [], NOW);
-    expect(resumed.device.label).toBe('Tracking Healthy');
+    expect(resumed.device.label).toBe('Device communicating');
     expect(resumed.hasActiveProblem).toBe(false);
   });
 
@@ -194,7 +197,7 @@ describe('Family card caregiver presentation', () => {
     ));
     expect(cards).toHaveLength(8);
     expect(cards.filter(card => card.hasActiveProblem)).toHaveLength(1);
-    expect(cards.every(card => card.device.label === 'Tracking Healthy')).toBe(true);
+    expect(cards.every(card => card.device.label === 'Device communicating')).toBe(true);
   });
 
   it('highlights every current issue kind represented by Needs Attention', () => {

@@ -6,6 +6,9 @@ import type { RevocationReason } from './androidTrackingRecovery';
 import { readPermissionSnapshot } from './permissionCoordinator';
 import { recordLocationUploadSuccess } from './locationUploadSuccess';
 import { fenceNativeSdk } from './androidNativeShutdown';
+import {
+  readTrackingAuthority, claimTrackingAcquisition, completeTrackingAcquisition, recordTrackingEvidence,
+} from './trackingReliability';
 
 export const GUARDED_POSITION_MARKER = 'kc_guarded_one_shot';
 type PositionOptions = { samples?: number; timeout?: number; extras?: Record<string, unknown> };
@@ -26,17 +29,27 @@ export async function acquireAndUploadAndroidPosition(
 ): Promise<any> {
   const epoch = trackingIntentEpoch();
   const stamp = await trackingPolicyStamp();
+  const authority = readTrackingAuthority();
+  const operation = `gps-${Date.now()}-${Math.random()}`;
+  if (!authority || authority.revoked) throw new Error('tracking_native_authority_unavailable');
   const current = async (freshOwnership = false) => {
+    const latestAuthority = readTrackingAuthority();
+    if (!latestAuthority || latestAuthority.revoked || latestAuthority.generation !== authority.generation
+      || latestAuthority.owner !== authority.owner) return false;
     if (!executionCurrent() || epoch !== trackingIntentEpoch()) return false;
     if (await trackingIsRevoked() || !await transport.isCurrent()) return false;
     const permission = await readPermissionSnapshot({ includeNotifications: false });
+    if (permission.foreground === 'denied' || permission.background === 'denied') {
+      await withdraw('permission');
+      return false;
+    }
     if (permission.foreground !== 'granted' || permission.background !== 'granted') return false;
     if (freshOwnership) {
       const ownership = await verifyWakeOwnership(executionCurrent);
       if (ownership !== 'allowed') {
-        if (['no_session', 'invalid_owner', 'sharing_disabled'].includes(ownership)) {
+        if (['session_rejected', 'invalid_owner', 'sharing_disabled'].includes(ownership)) {
           await withdraw(ownership === 'sharing_disabled' ? 'consent'
-            : ownership === 'no_session' ? 'signout' : 'stopped');
+            : ownership === 'session_rejected' ? 'signout' : 'stopped');
         }
         return false;
       }
@@ -47,14 +60,28 @@ export async function acquireAndUploadAndroidPosition(
   };
   const owned = fenceNativeSdk(sdk, () => current(),
     () => executionCurrent() && epoch === trackingIntentEpoch());
-  const position = await owned.getCurrentPosition({
-    ...options, persist: false,
+  if (!await current()) throw new Error('gps_authorization_unverified');
+  if (!claimTrackingAcquisition(authority.owner, authority.generation, operation)) throw new Error('gps_recovery_not_due');
+   recordTrackingEvidence('acquisition_attempt', { operation, generation: authority.generation, owner: authority.owner,
+     source: typeof options.extras?.source === 'string' ? options.extras.source : 'UNKNOWN' });
+  let settled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+  const position = await Promise.race([owned.getCurrentPosition({
+    ...options, timeout: Math.min(options.timeout ?? 20, 20), persist: false,
     extras: { ...options.extras, [GUARDED_POSITION_MARKER]: true },
-  });
+  }), new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('gps_acquisition_408_timeout')), Math.min(options.timeout ?? 20, 20) * 1000);
+  })]);
+  if (timer) clearTimeout(timer);
   if (!await current(true)) throw new Error('gps_authorization_obsolete');
   const { latitude, longitude } = position?.coords ?? {};
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !position?.timestamp) {
     throw new Error('gps_invalid_position');
+  }
+  const capturedAt = new Date(position.timestamp).getTime();
+  if (!Number.isFinite(capturedAt) || capturedAt > Date.now() + 5000 || Date.now() - capturedAt > 60000) {
+    throw new Error('gps_capture_not_fresh');
   }
   // No await between the final synchronous generation fence and fetch dispatch.
   // An already-dispatched HTTP request cannot be retroactively undone by JS;
@@ -63,6 +90,7 @@ export async function acquireAndUploadAndroidPosition(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
   try {
+    recordTrackingEvidence('upload_attempt', { operation, generation: authority.generation, capturedAt });
     const response = await fetch(
       `${transport.baseUrl}/api/members/${encodeURIComponent(transport.memberId)}/location`,
       {
@@ -77,14 +105,37 @@ export async function acquireAndUploadAndroidPosition(
       },
     );
     if (!response.ok) throw new Error(`gps_upload_http_${response.status}`);
+    const accepted = await response.json();
+    // HTTP 2xx can represent an older/replay-suppressed GPS fix. It is contact,
+    // not fresh coordinate delivery. The response tuple must identify our fix.
+    const coordinateAccepted = new Date(accepted?.coordinate_captured_at ?? '').getTime() === capturedAt
+      && accepted.latitude === latitude && accepted.longitude === longitude;
+    recordTrackingEvidence('upload_result', { operation, httpAccepted: true, coordinateAccepted, capturedAt });
+    if (!coordinateAccepted) throw new Error('gps_coordinates_not_accepted');
     // Do not publish coordinates to callers/diagnostics after a later boundary.
-    if (!executionCurrent() || epoch !== trackingIntentEpoch() || !await transport.isCurrent()) {
+    if (!await current()) {
       throw new Error('gps_authorization_obsolete');
     }
     await recordLocationUploadSuccess();
-    if (!await transport.isCurrent() || !executionCurrent() || epoch !== trackingIntentEpoch()) {
+    if (!await current()) {
       throw new Error('gps_authorization_obsolete');
     }
+    completeTrackingAcquisition(operation, 'fresh_fix_delivered', capturedAt, position.is_moving === true);
+    settled = true;
     return position;
   } finally { clearTimeout(timeout); }
+  } catch (error) {
+    const text = String(error);
+    const fgsDenied = /ForegroundServiceStartNotAllowed|foreground.service.*not.allowed/i.test(text);
+    const outcome = /obsolete|unverified/.test(text) ? 'operation_discarded'
+      : fgsDenied ? 'background_start_blocked' : 'degraded';
+    const reason = /408|timeout/.test(text) ? 'gps_timeout'
+      : /http_/.test(text) ? 'http_error' : /capture_not_fresh/.test(text) ? 'stale_capture'
+        : /coordinates_not_accepted/.test(text) ? 'coordinate_rejected'
+          : outcome === 'operation_discarded' ? 'authorization_obsolete'
+            : fgsDenied ? 'fgs_denied' : 'unclassified';
+    recordTrackingEvidence('acquisition_failed', { operation, outcome, fgsDenied, reason });
+    if (!settled) completeTrackingAcquisition(operation, outcome);
+    throw error;
+  } finally { if (timer) clearTimeout(timer); }
 }

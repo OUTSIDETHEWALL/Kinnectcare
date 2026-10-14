@@ -315,8 +315,8 @@ export default function AlertDetail() {
   // freshness stamp — NOT any live memberStore timestamp (which would
   // otherwise make us claim "healthy" for the wrong data source).
   const effectiveLastSeen: string | null | undefined = usingLiveCoords
-    ? liveMember?.last_seen
-    : alert.created_at;
+    ? liveMember?.coordinate_captured_at
+    : null; // Alert creation time is not a GPS capture timestamp.
   const address = liveMember?.location_name || null;
   const memberPhone = liveMember?.emergency_contact_phone
     || (params.member_phone as string | undefined)

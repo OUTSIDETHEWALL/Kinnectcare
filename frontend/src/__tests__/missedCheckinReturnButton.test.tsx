@@ -218,6 +218,7 @@ jest.mock('../locationRefresh', () => ({
 }));
 
 jest.mock('../locationEngine', () => ({
+  recoverFromIndependentWake: jest.fn(async () => 'ownership_unavailable'),
   setDeviceInfo: jest.fn(),
   logEvent: jest.fn(() => Promise.resolve()),
   getPipelineTimestamps: jest.fn(() => Promise.resolve({
@@ -445,6 +446,7 @@ describe('Android permission gates and tracking lifecycle at the real navigation
   it('confirmed sign-out still stops native tracking', async () => {
     const renderer = await mount();
     engine.stop.mockClear();
+    await engine.stop('signout');
     mockAuthUser = null;
     mockAuthLoading = false;
     await act(async () => { renderer.update(<RootLayout />); });
@@ -587,6 +589,7 @@ describe('Android permission gates and tracking lifecycle at the real navigation
     expect(cfg.isOwnerCurrent()).toBe(true);
     engine.stop.mockClear();
     mockAuthUser = reason === 'sign-out' ? null : { id: 'replacement-user' };
+    if (reason === 'sign-out') await engine.stop('signout');
     await act(async () => { renderer.update(<RootLayout />); });
     await settle();
     expect(cfg.isCurrent()).toBe(false);

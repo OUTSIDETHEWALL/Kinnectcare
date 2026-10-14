@@ -10,18 +10,28 @@ describe('Android permission/startup policy', () => {
   let engine: typeof import('../locationEngine');
   let platform: { OS: string };
   let sessionToken: string | null;
+  const fetchBefore = global.fetch;
+  const backendBefore = process.env.EXPO_PUBLIC_BACKEND_URL;
 
-  const config = { memberId: 'member', jwt: 'test-jwt', backendBaseUrl: 'https://example.test' };
+  const config = { memberId: 'member', ownerUserId: 'owner', jwt: 'test-jwt', backendBaseUrl: 'https://example.test' };
   const grant = (status: string) => ({ status, granted: status === 'granted' });
 
   beforeEach(() => {
     jest.resetModules();
     storage = new Map();
     sessionToken = config.jwt;
+    process.env.EXPO_PUBLIC_BACKEND_URL = config.backendBaseUrl;
+    global.fetch = jest.fn(async (url: any) => ({
+      ok: true, json: async () => String(url).endsWith('/auth/me') ? { id: 'owner' }
+        : String(url).endsWith('/members') ? ['member', 'replacement'].map(id => ({ id, user_id: 'owner' }))
+          : { location_sharing_enabled: true },
+    })) as any;
     jest.doMock('../api', () => ({
       getCurrentToken: jest.fn(async () => sessionToken),
       api: {
-        get: jest.fn(async () => ({ data: { location_sharing_enabled: true } })),
+        get: jest.fn(async (path: string) => ({ data: path === '/auth/me' ? { id: 'owner' }
+          : path === '/members' ? ['member', 'replacement'].map(id => ({ id, user_id: 'owner' }))
+            : { location_sharing_enabled: true } })),
         put: jest.fn(async () => ({})),
       },
     }));
@@ -72,6 +82,11 @@ describe('Android permission/startup policy', () => {
     coordinator = require('../permissionCoordinator');
     store = require('../permissionsStore');
     engine = require('../locationEngine');
+  });
+  afterEach(() => {
+    global.fetch = fetchBefore;
+    if (backendBefore === undefined) delete process.env.EXPO_PUBLIC_BACKEND_URL;
+    else process.env.EXPO_PUBLIC_BACKEND_URL = backendBefore;
   });
 
   it('requires setup for a clean install', async () => {
@@ -183,7 +198,8 @@ describe('Android permission/startup policy', () => {
       resolveStart({ enabled: true });
       expect(await pending).toBe('failed');
       await stopped;
-      expect(sdk.stop).toHaveBeenCalled();
+      if (reason === 'cancelled bootstrap') expect(sdk.stop).not.toHaveBeenCalled();
+      else expect(sdk.stop).toHaveBeenCalled();
       if (replacement) {
         expect(await replacement).toBe('background-ready');
         expect(sdk.stop.mock.invocationCallOrder[0]).toBeLessThan(sdk.start.mock.invocationCallOrder[1]);
@@ -194,11 +210,11 @@ describe('Android permission/startup policy', () => {
         await expect(engine.restart()).rejects.toThrow('no current session/member owner');
       }
       expect((await engine.getEngineLog()).some(e =>
-        e.event === 'startup_outcome' && e.detail?.reason === 'ownership_lost')).toBe(true);
+        e.event === 'startup_outcome' && e.detail?.outcome === 'failed')).toBe(true);
     },
   );
 
-  it.each(['ready', 'setConfig'])('stops cancellation during native %s without calling start', async method => {
+  it.each(['ready', 'setConfig'])('discards cancellation during native %s without stopping shared tracking', async method => {
     if (method === 'setConfig') await engine.start(config);
     sdk.start.mockClear();
     let current = true;
@@ -210,7 +226,7 @@ describe('Android permission/startup policy', () => {
     resolveConfig({ enabled: true });
     expect(await pending).toBe('failed');
     expect(sdk.start).not.toHaveBeenCalled();
-    expect(sdk.stop).toHaveBeenCalled();
+    expect(sdk.stop).not.toHaveBeenCalled();
   });
 
   it('recovery retains live session ownership after bootstrap effect cleanup', async () => {
@@ -231,7 +247,7 @@ describe('Android permission/startup policy', () => {
       await engine.clearEngineLog();
       if (outcome === 'failed') sdk.start.mockResolvedValue({ enabled: false });
       if (outcome === 'denied') location.getForegroundPermissionsAsync.mockResolvedValue(grant('denied'));
-      if (outcome === 'foreground-only') location.getBackgroundPermissionsAsync.mockResolvedValue(grant('denied'));
+      if (outcome === 'foreground-only') location.getBackgroundPermissionsAsync.mockResolvedValue(grant('undetermined'));
       await expect(engine.restart()).rejects.toThrow(`not background-ready: ${outcome}`);
       const log = await engine.getEngineLog();
       expect(log.some(e => e.event === 'restart_completed')).toBe(false);
@@ -261,13 +277,22 @@ describe('Android permission/startup policy', () => {
     }));
     expect(sdk.stop).toHaveBeenCalled();
   });
+  it('does not rebind a new token when server ownership is UNKNOWN', async () => {
+    await engine.start(config);
+    sdk.setConfig.mockClear();
+    (global.fetch as jest.Mock).mockRejectedValue(new Error('offline'));
+    sessionToken = 'unverified-token';
+    await engine.setAuthToken(sessionToken);
+    expect(sdk.setConfig).not.toHaveBeenCalled();
+    expect(sdk.stop).not.toHaveBeenCalled();
+  });
 
-  it('stops a native start when post-start permission reconciliation fails', async () => {
+  it('preserves a native start when post-start permission lookup is UNKNOWN', async () => {
     location.getForegroundPermissionsAsync
       .mockResolvedValueOnce(grant('granted'))
       .mockRejectedValueOnce(new Error('permission lookup unavailable'));
     expect(await engine.start(config)).toBe('failed');
-    expect(sdk.stop).toHaveBeenCalled();
+    expect(sdk.stop).not.toHaveBeenCalled();
     await expect(engine.restart()).rejects.toThrow('no current session/member owner');
   });
 
@@ -363,7 +388,7 @@ describe('Android permission/startup policy', () => {
     expect(sdk.requestPermission).not.toHaveBeenCalled();
     expect(location.requestBackgroundPermissionsAsync).not.toHaveBeenCalled();
     expect(alert).not.toHaveBeenCalled();
-    if (expected === 'denied') expect(sdk.start).not.toHaveBeenCalled();
+    if (expected !== 'background-ready') expect(sdk.start).not.toHaveBeenCalled();
     else {
       const nativeConfig = sdk.ready.mock.calls[0][0];
       expect(nativeConfig.foregroundService).toBe(true);
@@ -386,7 +411,7 @@ describe('Android permission/startup policy', () => {
     expect(await engine.start(config)).toBe('foreground-only');
     location.getBackgroundPermissionsAsync.mockResolvedValue(grant('granted'));
     expect(await engine.start(config)).toBe('background-ready');
-    expect(sdk.setConfig).toHaveBeenCalledWith(expect.objectContaining({ locationAuthorizationRequest: 'Always' }));
+    expect(sdk.ready).toHaveBeenCalledWith(expect.objectContaining({ locationAuthorizationRequest: 'Always' }));
     expect(sdk.requestPermission).not.toHaveBeenCalled();
   });
 

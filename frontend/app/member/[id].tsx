@@ -414,9 +414,16 @@ export default function MemberDetail() {
                     <Text style={styles.locLastKnown}>Last known location</Text>
                     <Text style={styles.locName}>{member.location_name || 'Unknown location'}</Text>
                     {presenceTimestamp ? (
+                      <>
                       <Text style={styles.locFreshness}>
-                        Updated {formatLastSeenAge(presenceTimestamp)}
+                        Device contact {formatLastSeenAge(presenceTimestamp)}
                       </Text>
+                      <Text style={styles.locFreshness}>
+                        {member.coordinate_captured_at
+                          ? `Last location captured ${formatLastSeenAge(member.coordinate_captured_at)}`
+                          : 'Capture time unavailable'}
+                      </Text>
+                      </>
                     ) : null}
                   </View>
                 </View>

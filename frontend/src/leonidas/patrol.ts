@@ -86,9 +86,10 @@ async function findLastUploadAt(): Promise<number | null> {
     const myMemberId = await AsyncStorage.getItem('kc_my_member_id_v1');
     if (myMemberId) {
       const me = memberStore.getMemberById(myMemberId);
-      if (me?.last_seen) {
-        const t = new Date(me.last_seen).getTime();
-        if (Number.isFinite(t)) return t;
+      const evidence = Platform.OS === 'android' ? me?.coordinate_captured_at : me?.last_seen;
+      if (evidence) {
+        const t = new Date(evidence).getTime();
+        if (Number.isFinite(t) && (Platform.OS !== 'android' || t <= Date.now() + 5000)) return t;
       }
     }
   } catch (_e) {}
@@ -197,21 +198,19 @@ export async function runOnePatrol(): Promise<HealthSnapshot> {
     });
 
     let result: RecoveryResult = 'failure';
-    let restartSucceeded = false;
 
     // Restart path (critical only) — least intrusive recovery FIRST,
     // restart is the exception not the rule.
-    if (verdict.action === 'restart-engine' || verdict.action === 'restart-engine+request-fresh-location') {
+    if (Platform.OS !== 'android' && (verdict.action === 'restart-engine' || verdict.action === 'restart-engine+request-fresh-location')) {
       await logRecovery('engine-restart-attempted', verdict.state);
       try {
         // Leonidas v1.1 — complete the stop→start cycle.
         // v1.0 called locationEngine.stop() only, leaving the engine
         // stopped and deferring restart to "next auth lifecycle event"
         // which never arrives during a continuous session.
-        // locationEngine.restart() now encapsulates stop() + start()
-        // using the cached config, so recovery is fully autonomous.
+        // This branch is iOS-only; Android uses receipt-bound one-shot recovery
+        // below and never tears down the service to force a restart.
         await locationEngine.restart();
-        restartSucceeded = true;
         await logRecovery('engine-restart-succeeded', verdict.state);
       } catch (e: any) {
         await logRecovery('engine-restart-failed', verdict.state, {
@@ -222,8 +221,13 @@ export async function runOnePatrol(): Promise<HealthSnapshot> {
 
     // Fresh-fix request — primary recovery for both degraded and
     // restart-then-refresh cases.
-    if (verdict.action === 'request-fresh-location' || verdict.action === 'restart-engine+request-fresh-location') {
+    if (Platform.OS === 'android' || verdict.action === 'request-fresh-location' || verdict.action === 'restart-engine+request-fresh-location') {
       try {
+        if (Platform.OS === 'android') {
+          const outcome = await locationEngine.recoverAndRefreshFromIndependentWake('patrol');
+          result = outcome === 'location_persisted' ? 'success' : 'failure';
+          await logRecovery('recovery-invoked', verdict.state, { outcome, sustainedTracking: 'unverified' });
+        } else {
         await locationEngine.requestFreshLocation();
         // Verify by polling the engine log for a new sdk_onHttp success
         // within RECOVERY_VERIFY_TIMEOUT_SECONDS.
@@ -236,6 +240,7 @@ export async function runOnePatrol(): Promise<HealthSnapshot> {
             break;
           }
         }
+        }
       } catch (e: any) {
         await logRecovery('recovery-failed', verdict.state, {
           error: String(e?.message || e),
@@ -245,7 +250,7 @@ export async function runOnePatrol(): Promise<HealthSnapshot> {
     } else {
       // Restart-only (no fresh-fix request) — declare success/failure
       // based on engine state alone.
-      result = (Platform.OS === 'android' ? restartSucceeded : engine_enabled) ? 'success' : 'failure';
+      result = engine_enabled ? 'success' : 'failure';
     }
 
     snapshot.recovery_result = result;

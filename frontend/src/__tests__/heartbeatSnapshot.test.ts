@@ -23,6 +23,7 @@
  */
 
 const FAKE_CFG = {
+  ownerUserId: 'snapshot-owner',
   memberId: 'member-001',
   jwt: 'fake-jwt-token',
   backendBaseUrl: 'https://api.example.com',
@@ -79,7 +80,11 @@ jest.mock('../androidTrackingRecovery', () => ({
   authorizeRevokedBatteryTransport: jest.fn(async () => null),
   migrateLegacyTrackingIntent: jest.fn(async () => false),
   BACKGROUND_PERMISSION_RATIONALE: {},
-  authorizeTrackingIntent: jest.fn(),
+  authorizeTrackingIntent: jest.fn(async (cfg) => {
+    // These tests isolate snapshot timing with an already-verified owner.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('../__mocks__/trackingNative').trackingNative.trackingAuthorize(`snapshot:${cfg.memberId}`, 0);
+  }),
   revokeTrackingIntent: jest.fn(),
   recoverUnexpectedlyDisabledTracking: jest.fn(async (_sdk, _current, authorize) => {
     authorize?.({ memberId: 'member-001', baseUrl: 'https://api.example.com',
@@ -144,7 +149,12 @@ describe('onHeartbeat → pushDeviceSnapshotToBackend (Task #56)', () => {
           }),
         },
       }));
-      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'fake-jwt-token'), api: { put: mockPut } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'fake-jwt-token'), api: {
+        put: mockPut,
+        get: jest.fn(async (path: string) => ({ data: path === '/auth/me' ? { id: 'snapshot-owner' }
+          : path === '/members' ? [{ id: 'member-001', user_id: 'snapshot-owner' }]
+            : { location_sharing_enabled: true } })),
+      } }));
       jest.mock('expo-battery', () => ({
         addBatteryStateListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
         addBatteryLevelListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
@@ -231,7 +241,12 @@ describe('onHeartbeat → pushDeviceSnapshotToBackend (Task #56)', () => {
           }),
         },
       }));
-      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'fake-jwt-token'), api: { put: mockPut } }));
+      jest.mock('../api', () => ({ getCurrentToken: jest.fn(async () => 'fake-jwt-token'), api: {
+        put: mockPut,
+        get: jest.fn(async (path: string) => ({ data: path === '/auth/me' ? { id: 'snapshot-owner' }
+          : path === '/members' ? [{ id: 'member-001', user_id: 'snapshot-owner' }]
+            : { location_sharing_enabled: true } })),
+      } }));
       jest.mock('expo-battery', () => ({
         addBatteryStateListener: jest.fn().mockReturnValue({ remove: jest.fn() }),
         addBatteryLevelListener: jest.fn().mockReturnValue({ remove: jest.fn() }),

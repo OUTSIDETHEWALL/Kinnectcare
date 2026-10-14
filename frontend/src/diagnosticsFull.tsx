@@ -32,6 +32,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import { captureDiagnosticSource, readNativeSdkEvidence, shareFullDiagnostics } from '../src/fullDiagnosticsExport';
+import { readTrackingEvidence } from './trackingReliability';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
 import { getNotificationLog, clearNotificationLog } from '../src/notificationLog';
@@ -1508,6 +1509,7 @@ function DiagnosticsContent() {
           permissions,
           startupEvidence,
           nativeStartupEvidence,
+          trackingReliability: readTrackingEvidence(),
           cardRenderEvents: cardEvents,
           liveLogs,
           storageEvidence,

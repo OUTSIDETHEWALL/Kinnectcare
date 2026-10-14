@@ -101,7 +101,7 @@ export async function clearToken() {
     // Invalidate/interrupt before waiting on either secure or ordinary storage.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const engine = require('./locationEngine') as typeof import('./locationEngine');
-    await Promise.all([engine.stop('signout'), clearStoredToken()]);
+    await Promise.all([engine.stop('signout', 'clear_session_token'), clearStoredToken()]);
   } else {
     await clearStoredToken();
   }
@@ -262,6 +262,8 @@ export type Member = {
   role: 'family' | 'senior';
   status: 'healthy' | 'warning' | 'critical';
   last_seen: string;
+  /** Capture time atomically associated with the displayed coordinates. */
+  coordinate_captured_at?: string | null;
   /** Latest authenticated activity reported by this member's device. */
   device_presence_at?: string | null;
   location_name?: string;

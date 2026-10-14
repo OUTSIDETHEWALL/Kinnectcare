@@ -82,3 +82,29 @@ a missing diagnostic check.
 **How to apply:** Review all acquisition paths, including independent Android
 WorkManager/headless paths. Prefer discarding an obsolete one-shot result to
 retaining it for later replay; prove unchanged-valid acquisition still works.
+
+## Tracker lifetime and truthful health
+
+UNKNOWN authorization is neither permission to start tracking for an unverified
+owner nor evidence to stop an already-authorized shared tracker. Operation
+cancellation is not owner revocation. SDK enabled state, device contact, one-shot
+GPS delivery and sustained tracking are separate claims.
+
+**Why:** The product owner requires these distinctions after physical movement
+failed to recover a closed-app tracker while device communication continued.
+The original stop initiator remains unresolved; do not turn that uncertainty
+into an attribution claim.
+
+**How to apply:** Destructive tracking shutdown requires confirmed revocation
+or replacement. Discard stale operations without stopping a valid owner. Never
+infer location freshness from battery/contact or sustained recovery from one fix.
+
+Native lifecycle quarantine covers the whole mutation, including post-callback
+authorization checks and confirmed-revocation cleanup. All outstanding destructive
+shutdown groups must settle before rebinding a shared SDK.
+
+**Why:** Native promise completion alone does not mean late-callback cleanup has
+finished; rebinding earlier permits an old stop or purge to affect the new owner.
+
+**How to apply:** Keep mutation and shutdown barriers independent of GPS timeouts;
+model tests are not proof of native cross-runtime or process-death behavior.

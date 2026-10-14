@@ -1148,7 +1148,7 @@ function RootNav() {
     if (previous && user?.id && previous !== user.id) {
       engineBootedForUserIdRef.current = null;
       try { leonidas.stop(); } catch {}
-      void locationEngine.stop();
+      void locationEngine.stop('stopped', 'confirmed_user_replacement');
     }
   }, [user?.id, loading]);
   // Observe linkage for the whole session, including after the initial 90 s
@@ -1175,8 +1175,9 @@ function RootNav() {
         const next = JSON.stringify({ ...snapshot, disclosed, decisionApplies });
         if (disposed) return;
         setAndroidLocationReady(ready);
-        if (!ready && (fingerprint === null || fingerprint !== next)) {
-          void locationEngine.stop('permission').catch(() => {});
+        if ((snapshot.foreground === 'denied' || snapshot.background === 'denied')
+          && (fingerprint === null || fingerprint !== next)) {
+          void locationEngine.stop('permission', 'reconcile_os_withdrawal').catch(() => {});
         }
         if ((fingerprint !== null && fingerprint !== next)
           || engineBootedForUserIdRef.current === null) {
@@ -1187,7 +1188,6 @@ function RootNav() {
         // A failed lookup cannot certify background readiness.
         if (!disposed) {
           setAndroidLocationReady(false);
-          void locationEngine.stop('permission').catch(() => {});
           void locationEngine.logEvent('permission_reconciliation_failed');
         }
       } finally {
@@ -1205,8 +1205,9 @@ function RootNav() {
       if (nextId !== memberId) {
         memberId = nextId;
         engineBootedForUserIdRef.current = null;
-        try { leonidas.stop(); } catch (_e) {}
-        void locationEngine.stop();
+        // Store disappearance/replacement is not authoritative removal. The
+        // startup lookup below verifies ownership before a destructive action.
+        void locationEngine.recoverFromIndependentWake('member-store-reconcile').catch(() => {});
         setStartupRevision(value => value + 1);
       }
     });
@@ -1244,10 +1245,12 @@ function RootNav() {
     (async () => {
       if (!user?.id) {
         // Initial auth restoration is not a genuine sign-out.
-        if (Platform.OS === 'android' && loading) return;
-        if (Platform.OS === 'android' || engineBootedForUserIdRef.current !== null) {
+        // Android clearToken() already performs explicit/confirmed sign-out
+        // shutdown. A missing React auth value is not revocation evidence.
+        if (Platform.OS === 'android') return;
+        if (engineBootedForUserIdRef.current !== null) {
           try { leonidas.stop(); } catch (_e) {}
-          await locationEngine.stop();
+          await locationEngine.stop('signout', 'confirmed_session_end');
           engineBootedForUserIdRef.current = null;
         }
         return;
@@ -1339,7 +1342,7 @@ function RootNav() {
         }
         if (!me) {
           try { leonidas.stop(); } catch (_e) {}
-          await locationEngine.stop();
+          await locationEngine.stop('stopped', 'confirmed_member_removal');
           engineBootedForUserIdRef.current = null;
           return;
         }

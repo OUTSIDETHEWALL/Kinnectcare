@@ -43,10 +43,14 @@ describe('owned Android cold tracking recovery', () => {
     jest.doMock('../backgroundLocationDisclosure', () => ({
       BACKGROUND_LOCATION_DISCLOSURE_TEXT: 'Kinnship background location disclosure',
     }));
-    global.fetch = jest.fn(async url => ({
+    global.fetch = jest.fn(async (url, options) => ({
       ok: true,
       json: async () => String(url).endsWith('/auth/me') ? user
-        : String(url).endsWith('/members') ? members : { location_sharing_enabled: sharing },
+        : String(url).endsWith('/members') ? members
+          : options?.method === 'PUT' ? (() => {
+              const p = JSON.parse(options.body);
+              return { latitude: p.latitude, longitude: p.longitude, coordinate_captured_at: p.timestamp };
+            })() : { location_sharing_enabled: sharing },
     })) as any;
     sdk = {
       getState: jest.fn(async () => ({
@@ -111,7 +115,7 @@ describe('owned Android cold tracking recovery', () => {
     const stopped = engine.stop();
     enabled = true;
     finish({ enabled: true });
-    expect(await pending).toBe('late_start_stopped');
+    expect(await pending).toBe('failed');
     await stopped;
     expect(enabled).toBe(false);
     expect(await engine.recoverFromIndependentWake('boot')).toBe('tracking_revoked');
@@ -323,8 +327,10 @@ describe('owned Android cold tracking recovery', () => {
     expect(enabled).toBe(false);
     enabled = true;
     finish({ timestamp: new Date().toISOString() });
-    await expect(pending).rejects.toThrow('gps_authorization_obsolete');
-    expect(enabled).toBe(false);
+    await expect(pending).rejects.toThrow(/authorization_obsolete|operation_obsolete/);
+    // A non-persisting one-shot completion is discarded, not another SDK stop.
+    // The genuine revocation already issued shutdown above.
+    expect(sdk.stop).toHaveBeenCalled();
     expect(await recovery.trackingIsRevoked()).toBe(true);
   });
 
@@ -452,7 +458,7 @@ describe('owned Android cold tracking recovery', () => {
   it('fails closed when the server cannot verify ownership', async () => {
     enabled = true;
     (global.fetch as jest.Mock).mockResolvedValue({ ok: false, status: 401 });
-    await expect(run()).rejects.toThrow('ownership_http_401');
+    await expect(run()).rejects.toThrow('session_rejected');
     expect(sdk.start).not.toHaveBeenCalled();
     expect(sdk.stop).toHaveBeenCalled();
     expect(await recovery.trackingIsRevoked()).toBe(true);
@@ -480,7 +486,7 @@ describe('owned Android cold tracking recovery', () => {
     expect(proof).not.toHaveBeenCalled();
     token = 'wrong-session';
     user = { id: 'owner-b' };
-    expect(await recovery.recoverUnexpectedlyDisabledTracking(sdk, () => true, proof)).toBe('tracking_revoked');
+    expect(await recovery.recoverUnexpectedlyDisabledTracking(sdk, () => true, proof)).toBe('invalid_owner');
     expect(proof).not.toHaveBeenCalled();
   });
 
@@ -744,14 +750,16 @@ describe('owned Android cold tracking recovery', () => {
   it.each(['{broken', '{}', '{"version":99}'])('does not mistake corrupt present policy %s for legacy absence', async raw => {
     store.set(recovery.TRACKING_INTENT_KEY, raw);
     enabled = true;
-    // Stop precedes parsing any optional battery descriptor.
+    // Corrupt storage is UNKNOWN, not permission to start or evidence to stop.
     try { await run(); } catch { /* corrupt battery binding is not usable */ }
-    expect(enabled).toBe(false);
+    expect(enabled).toBe(true);
+    expect(sdk.stop).not.toHaveBeenCalled();
     expect(sdk.start).not.toHaveBeenCalled();
   });
 
   it('does not automatically rearm consent; explicit opt-in can reauthorize', async () => {
     await recovery.revokeTrackingIntent('consent');
+    await recovery.recoverUnexpectedlyDisabledTracking(sdk, () => true);
     await recovery.authorizeTrackingIntent(config, recovery.trackingIntentEpoch(), () => true);
     expect(await recovery.trackingIsRevoked()).toBe(true);
     await recovery.rearmTrackingConsent();

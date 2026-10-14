@@ -5,6 +5,7 @@ async function flushPromises(): Promise<void> {
 }
 
 jest.mock('../androidTrackingRecovery', () => ({
+  evaluateWakeAuthorization: jest.fn(async () => ({ state: 'AUTHORIZED', source: 'test_owner' })),
   trackingIsRevoked: jest.fn(async () => false),
   trackingPolicyStamp: jest.fn(async () => null),
   verifyWakeOwnership: jest.fn(async () => 'allowed'),
@@ -14,6 +15,8 @@ jest.mock('../androidTrackingRecovery', () => ({
   authorizeTrackingIntent: jest.fn(), revokeTrackingIntent: jest.fn(),
   trackingIntentEpoch: () => 0,
   recoverUnexpectedlyDisabledTracking: jest.fn(async (_sdk, _current, authorized) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('../__mocks__/trackingNative').trackingNative.trackingAuthorize('test:member-1', 0);
     authorized?.({ memberId: 'member-1', baseUrl: 'https://api.example',
       token: 'verified-test-session', isCurrent: async () => true });
     return 'already_enabled';
@@ -45,9 +48,14 @@ describe('headless activity wake recovery', () => {
     let headlessTask: ((event: any) => Promise<void>) | undefined;
     const mockGetCurrentPosition = jest.fn().mockResolvedValue({
       coords: { latitude: 47.6, longitude: -122.3, accuracy: 8 },
-      timestamp: '2026-10-11T21:00:00.000Z',
+      timestamp: new Date().toISOString(),
     });
-    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200 } as Response);
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, options: any) => {
+      const body = options?.body ? JSON.parse(options.body) : {};
+      return { ok: true, status: 200, json: async () => ({
+        latitude: body.latitude, longitude: body.longitude, coordinate_captured_at: body.timestamp,
+      }) } as Response;
+    });
     const storage = new Map<string, string>();
     const mockAsyncStorage = {
       getItem: jest.fn((key: string) => Promise.resolve(storage.get(key) ?? null)),

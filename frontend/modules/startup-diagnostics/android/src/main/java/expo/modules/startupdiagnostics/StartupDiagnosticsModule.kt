@@ -17,6 +17,46 @@ class StartupDiagnosticsModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("StartupDiagnostics")
 
+    Function("trackingRead") {
+      TrackingReliability.read(requireNotNull(appContext.reactContext))
+    }
+    Function("trackingAuthorize") { owner: String, generation: Long ->
+      TrackingReliability.authorize(requireNotNull(appContext.reactContext), owner, generation)
+    }
+    Function("trackingRevoke") { reason: String ->
+      TrackingReliability.revoke(requireNotNull(appContext.reactContext), reason)
+    }
+    Function("trackingClaim") { owner: String, generation: Long, operation: String, now: Long ->
+      TrackingReliability.claim(requireNotNull(appContext.reactContext), owner, generation, operation, now)
+    }
+    Function("trackingClaimConfiguration") { owner: String, generation: Long, operation: String, now: Long ->
+      TrackingReliability.claim(requireNotNull(appContext.reactContext), owner, generation, operation, now, true)
+    }
+    Function("trackingComplete") { operation: String, outcome: String, capturedAt: Long, moving: Boolean ->
+      TrackingReliability.complete(requireNotNull(appContext.reactContext), operation, outcome, capturedAt, moving)
+    }
+    Function("trackingRecord") { event: String, detail: String ->
+      TrackingReliability.record(requireNotNull(appContext.reactContext), event, detail)
+    }
+    Function("trackingEvidence") {
+      TrackingReliability.evidence(requireNotNull(appContext.reactContext))
+    }
+    Function("trackingObserve") { owner: String, generation: Long, capturedAt: Long, moving: Boolean ->
+      TrackingReliability.observe(requireNotNull(appContext.reactContext), owner, generation, capturedAt, moving)
+    }
+    Function("trackingMovement") { owner: String, generation: Long, moving: Boolean ->
+      TrackingReliability.movement(requireNotNull(appContext.reactContext), owner, generation, moving)
+    }
+    Function("trackingShutdownComplete") { generation: Long ->
+      TrackingReliability.shutdownComplete(requireNotNull(appContext.reactContext), generation)
+    }
+    Function("trackingShutdownBegin") { generation: Long, operation: String ->
+      TrackingReliability.shutdownBegin(requireNotNull(appContext.reactContext), generation, operation)
+    }
+    Function("trackingShutdownEnd") { operation: String, success: Boolean ->
+      TrackingReliability.shutdownEnd(requireNotNull(appContext.reactContext), operation, success)
+    }
+
     Function("record") { event: String, metadataJson: String? ->
       val context = appContext.reactContext ?: return@Function false
       StartupDiagnosticsRecorder.record(context, event, metadataJson)

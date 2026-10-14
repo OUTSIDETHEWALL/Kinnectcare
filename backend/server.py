@@ -327,6 +327,8 @@ class FamilyMember(BaseModel):
     # fix was captured recently".  None for rows created before this
     # field was introduced; populated on the next successful upload.
     captured_at: Optional[datetime] = None
+    # Capture time of the displayed coordinate tuple, never device contact.
+    coordinate_captured_at: Optional[datetime] = None
     # Build 64 — SDK movement state from the Transistor upload payload.
     # True when the SDK was in MOVING mode at the time of the last upload.
     # Exposed in /members so TrackingStatusPill can apply movement-aware
@@ -361,7 +363,7 @@ class FamilyMember(BaseModel):
     # device presence was introduced continue to deserialize unchanged.
     device_presence_at: Optional[datetime] = None
 
-    @field_serializer("last_seen", "created_at", "checkin_interval_started_at", "captured_at", "battery_updated_at", "device_presence_at", when_used='json')
+    @field_serializer("last_seen", "created_at", "checkin_interval_started_at", "captured_at", "coordinate_captured_at", "battery_updated_at", "device_presence_at", when_used='json')
     def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
         return _to_utc_iso(v)
 
@@ -2329,6 +2331,7 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
                 member_update.update({
                     "latitude": None,
                     "longitude": None,
+                    "coordinate_captured_at": None,
                     "location_name": "Location Sharing Off",
                     # Deliberately keep `last_seen` untouched — we don't
                     # want to reset engagement timers or make the
@@ -3699,6 +3702,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     update: Dict[str, Any] = {
         "latitude":  data.latitude,
         "longitude": data.longitude,
+        "coordinate_captured_at": incoming_captured_at,
         "last_seen": server_now,
     }
     if incoming_captured_at is not None:
@@ -3813,6 +3817,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         update.pop("latitude", None)
         update.pop("longitude", None)
         update.pop("location_name", None)
+        update.pop("coordinate_captured_at", None)
 
     # A single immutable trace joins this accepted moving fix to the
     # caregiver's /members → store → map evidence.  The SDK payload does not
@@ -5290,6 +5295,7 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
     if data.location_name:
         update["location_name"] = data.location_name
     if data.latitude is not None and data.longitude is not None:
+        update["coordinate_captured_at"] = None
         update["latitude"] = data.latitude
         update["longitude"] = data.longitude
     await db.members.update_one({"id": data.member_id}, {"$set": update})
@@ -5584,6 +5590,7 @@ async def respond_to_checkin_request(
     if data.location_name:
         update["location_name"] = data.location_name
     if data.latitude is not None and data.longitude is not None:
+        update["coordinate_captured_at"] = None
         update["latitude"] = data.latitude
         update["longitude"] = data.longitude
     await run_claimed_write(
@@ -8466,6 +8473,7 @@ async def _sync_user_sharing_pref_to_members():
                     "location_sharing_enabled": False,
                     "latitude": None,
                     "longitude": None,
+                    "coordinate_captured_at": None,
                     "location_name": "Location Sharing Off",
                 }},
             )
