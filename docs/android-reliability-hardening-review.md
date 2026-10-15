@@ -1,10 +1,10 @@
 # Android reliability hardening — pre-merge review
 
-**Latest verdict: RED — NEW RELEASE BLOCKER FOUND.**
-IOS CONFIRMED-REMOVAL SHUTDOWN BLOCKER: CLEARED, verified and pushed.
-Resumed review proved a separate reachable SOS dependency on a pending optional
-GPS/settings result. SOS source remains unchanged; review stopped.
-Read the final supplement; earlier verdicts are historical evidence.
+**Latest correction: SOS OPTIONAL-GPS BLOCKER CLEARED.**
+The authorized bounded-location correction and deterministic regressions pass.
+The iOS shutdown correction remains cleared. Remaining source review resumes
+after the SOS correction push. Read the final supplement for the final verdict;
+earlier verdicts are historical evidence.
 
 **Status: STOP BEFORE MERGE. Draft review only; no release authorization.**
 
@@ -2465,3 +2465,64 @@ Real MongoDB concurrency, Android process-death/across-runtime, Android
 compile/build, physical acceptance, burn-in and road tests remain NOT STARTED.
 No merge, Railway deployment, production mutation, OTA, Android build/release,
 Play submission or force-push occurred.
+
+## Authorized SOS optional-location correction
+
+**SOS OPTIONAL-GPS BLOCKER: CLEARED.**
+
+Starting HEAD was daf93ba234eb99ee5b021c4e96d75cccfaa07067, verified against
+the remote branch and open/unmerged PR before source edits; tree was clean.
+
+The existing screen owns a single POST and the existing post-acceptance dialer.
+SOSRequest already permits omitted/null coordinates, and no existing
+post-send coordinate-enrichment API was found. No cached family GPS is copied.
+The correction therefore uses a short **1,500 ms total permission-plus-GPS
+budget**, after the unchanged 350 ms screen-settling pause. Prompt location
+still enriches the original SOS POST. Denied/rejected/unavailable or pending
+permission/location/settings degrades to the same locationless POST.
+
+The deadline bounds both native requests together, not each separately.
+Late permission completion cannot launch a new GPS/settings request. Late GPS
+settlement cannot send or mutate another operation; rejections remain caught.
+Per-screen operation identity, unmount invalidation and an in-flight guard prevent
+obsolete work or rapid repeated retry from posting/dialing a second time.
+Deliberate retry after server failure remains available.
+
+Success still requires the existing server acceptance. The number remains
+tel:911; missing/rejected dialer retains the manual-call warning. Post-send
+location boost is preserved but no longer awaited before dialer/UI completion;
+optional success haptics likewise do not gate the core path. No visuals changed.
+
+### Deterministic verification
+
+Real SOS screen suite: **16 passed**, previously 3; 13 added cases.
+Checks pending GPS and reachable settings/provider wait past budget; pending
+permission including late grant; prompt GPS payload; denied/rejected permission;
+GPS rejection; late GPS resolution/rejection; rapid duplicate retry after a failed
+POST; old GPS after unmount/new SOS; rerender duplication; pending location boost;
+server rejection; and unavailable/rejected dialer.
+Payload, single POST/dialer, confirmation/error UI and location preservation
+are asserted. The formerly failing pending-GPS scenario now proceeds.
+
+Requested frontend selection: **320 passed / 0 failed**, 12 suites, exit 0.
+That is previous 307 + 13 SOS cases. iOS root remains 39 passing cases;
+B1/location, medication notification/acknowledgment and routing remain passing.
+All 17 push-medication tests pass this run. Historical timing failures retain
+their prior classification and counts.
+
+New isolated backend SOS tests: **6 passed**, exit 0. Actual trigger_sos with
+all delivery/storage mocked verifies omitted, null and prompt coordinates,
+unchanged authenticated family/recipient scope and fanout. Actual HTTP tests
+verify coordinate-free/coordinate-bearing responses and rejection without auth.
+No backend production source changed. Prior 507 passing tests across 27 files
+remain baseline evidence, not newly rerun tests. Full backend is UNVERIFIED.
+
+TypeScript npx tsc --noEmit: exit 0. git diff --check: exit 0.
+No ordinary sharing, background-tracking authority, medication, recipient or
+native-module implementation changed. Location semantics remain explicit SOS,
+not ordinary background-sharing suppression.
+
+Only the SOS screen, its existing regression suite, the new offline backend
+contract suite and directly relevant review/engineering guidance change.
+No live alarm, real GPS, external SMS/push or production mutation was performed.
+Broader source-review result follows after push.

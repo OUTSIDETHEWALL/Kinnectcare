@@ -222,3 +222,17 @@ provided a native authority that real iOS installations do not have.
 **How to apply:** Preserve Android expected-authority CAS protection, but check
 shared lifecycle changes on iOS with the Android extension genuinely absent.
 Keep confirmed loss distinct from timeout, unavailable identity and UI teardown.
+
+## SOS alert-first contract
+
+SOS delivery must not depend on optional GPS completing. Location is valuable
+enrichment, not permission to delay the emergency alert or its intended dialer.
+Preserve prompt coordinates, explicit emergency location semantics and retries;
+late/stale location must not duplicate or contaminate another SOS.
+
+**Why:** The user explicitly requires pending GPS, permission or settings to
+degrade safely to locationless SOS, not a pending emergency alert.
+
+**How to apply:** Bound all optional location preparation together, keep optional
+post-send enrichment off the dialer path, and verify pending/late native results
+with the real sending screen. Ordinary-sharing OFF is not an SOS suppression rule.
