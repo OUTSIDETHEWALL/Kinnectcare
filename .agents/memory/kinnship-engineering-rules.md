@@ -143,6 +143,21 @@ location-free unless a separately authorized design can enforce consent at their
 own storage/delivery boundary. A guarded member write does not authorize another
 collection insert or a later notification; initial consent alone is insufficient.
 
+## Location-history privacy contract
+
+Ordinary sharing OFF denies other family accounts precise history as well as
+the live map tuple. Linked self-diagnostics may retain own history while OFF;
+caregiver/creator/group ownership is not ownership of another person's GPS.
+Retention is separate from disclosure: do not delete history merely to hide it.
+
+**Why:** The user explicitly authorized preserving safely distinguished self
+diagnostics while closing family history disclosure, without redesigning retention.
+
+**How to apply:** Never grant new family-publication authority to old diagnostic
+work or unverified legacy history. Bind family access to the original consent
+lifetime and current linked identity; do not refresh timestamps or backfill old
+records into a newer consent lifetime.
+
 ## Self-member creation consent
 
 New helper-created self-member rows deliberately start sharing OFF. A current

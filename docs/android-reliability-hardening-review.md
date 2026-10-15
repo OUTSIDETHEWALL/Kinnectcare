@@ -1102,3 +1102,135 @@ Real MongoDB and Android process-death/across-runtime validation remain deferred
 and unstarted. No Android compile/build or physical validation performed.
 No merge, Railway deployment, production mutation, OTA, production Android
 release/build or Play submission performed or authorized.
+
+---
+
+# Location-history privacy correction and focused inventory
+
+## Correction and exact privacy contract
+
+The pre-existing location-history write/read paths lacked a consent lifetime:
+an upload accepted before withdrawal could insert history afterward, and any
+same-family account could read that or previously retained precise history while
+sharing was OFF. The live member CAS alone did not protect this second collection.
+
+New accepted-upload history records carry the ORIGINAL request's captured member
+consent generation and linked subject_user_id. These are never refreshed from a
+later read. Family history reads require an affirmative current member flag and
+valid generation, filter records by that exact generation/subject, then revalidate
+the member's identity/family/state/generation after asynchronous cursor fetching.
+Withdrawal atomically advances the existing member generation, invalidating every
+earlier record's family visibility. OFF -> ON cannot revive old pending inserts.
+
+This is a generation-scoped publication mechanism, NOT a claim that the separate
+collection insert and member mutation form a MongoDB transaction. A delayed insert
+may remain PRIVATE owner diagnostic evidence; it can never inherit a new consent
+lifetime merely because the boolean is ON again. The authoritative member check
+is the final family-disclosure decision, not a second pre-insert policy read.
+
+Self diagnostics are explicitly distinguished by linked member.user_id matching
+the authenticated user. Caregiver/creator/group-owner status is NOT self identity.
+Self reads preserve own prior/legacy history even while sharing is OFF; explicit
+records for a different linked subject are excluded. Self identity/family is also
+revalidated after cursor fetch. Legacy untagged history is never backfilled into
+current affirmative family authority, and remains available only to linked self.
+
+Denied family access returns an empty list, not redacted entries containing other
+precise labels/maps/nested GPS fields. Different-family and unauthenticated access
+remain denied. Normal current-lifetime family history remains available while ON.
+No records are deleted, TTL timestamps refreshed, retention extended, or frontend/
+native/SOS behavior changed.
+
+## Complete direct history inventory and secondary precise-data candidates
+
+The targeted source search covered active backend Python and frontend history
+calls plus equivalent GPS-history/secondary precise-location storage. Direct
+location_history collection usage has one producer and one API reader.
+
+| Writer / storage | Authority, async boundary, visibility and audit result |
+|---|---|
+| update_member_location -> location_history | Accepted live member CAS; original generation/linked subject now stamped immutably. Async history insertion may race withdrawal, but stale records are self-only, never family-visible under a later lifetime. Corrected. |
+| update_member_location -> location_ingest_log | Raw precise diagnostic coordinates including rejected/replay evidence; writer/group/member identifiers; 24h configured TTL. Separate diagnostic storage, not returned by the history API. No normal family reader of this collection found in targeted search. Not deleted or changed. |
+| update_member_location -> members.location_pipeline | Atomic live member write stores native/stored coordinates as a diagnostic echo. Withdrawal clears root tuple but not this nested object; member response paths return it. Separate confirmed privacy blocker; unchanged. |
+| _trace_record_gps -> _REFRESH_TRACE_LOG | Precise last-GPS evidence attached to in-memory refresh entries; diagnostic family-reader candidate. Not changed; independent stop-rule review must explicitly classify this alongside metadata disclosure. |
+| Check-in/welfare -> checkins | Current corrected writes/receipts contain no location; guarded member publication is separate. Legacy retained receipt readers are not implicitly cleared by this history correction. |
+| SOS -> alerts / emergency fanout | Explicit emergency location path, not silently redefined as ordinary history. Existing semantics untouched; remaining SOS source assessment not claimed complete. |
+| Lazy geocoding -> geocode_cache | Generic coordinate/address cache, not member history; conditional member label persistence. No direct family history API for this cache found. Broader async member-response assessment stopped. |
+| Logs / client-local diagnostics | Server ingest/trace logging and client-local GPS/pipeline diagnostics are additional copies, not this API's family-publication authority. Local diagnostics/export does not authorize another account's server access. |
+
+| Reader / consumer | Identity, consent and audit result |
+|---|---|
+| GET /members/{id}/location-history | Existing family scope preserved. Linked self may read own retained evidence; every OTHER family account requires current affirmative exact-lifetime authority, including final post-fetch check. Corrected. |
+| frontend/src/diagnosticsFull.tsx | Uses the device's stored own member id to call that API; no role/creator fallback introduced. Read-only inspection confirmed existing self-diagnostic product use. |
+| GET /members and GET /members/{id} | Return typed location_pipeline including retained nested coordinates. Root sharing-OFF clear does not remove this echo. Separate release blocker, not fixed under history authorization. |
+| diagnostics_refresh_traces | Family-authorized in-memory GPS trace reader; consent/identity-lifetime behavior remains a separate audit target at STOP. |
+| diagnostics_my_members / diagnostics_family_snapshot | Additional member/diagnostic readers identified during inventory; not blanket-cleared beyond collection/projection inspection. |
+| list_member_checkins / list_recent_checkins / welfare recovery | Current check-in receipts are location-free; legacy historical payload privacy is not fully cleared after STOP. |
+| Alert/SOS readers and emergency delivery | Emergency semantics unchanged, not used as an ordinary-history privacy exception. Full review remains incomplete. |
+| Account reset/deletion, retention/index handlers | Delete/count/index direct history data; do not return precise history to ordinary family accounts. Existing retention/delete behavior unchanged. |
+| Root stale server copy / offline tests / investigation scripts | Not counted as active production backend history routes; not executed against production. |
+
+This inventory enumerates direct history writers/readers and the secondary
+coordinate copies found in the targeted search. It is not full safety clearance
+of all related diagnostics, legacy records or remaining source. The pipeline
+disclosure triggers RED/STOP after completing this authorized correction.
+
+## Verification
+
+32 new tests in backend/tests/test_location_history_consent.py passed:
+
+- Existing ON family history followed by real withdrawal: family empty, self
+  history preserved, stored records/timestamps unchanged.
+- Six upload/history races: pause before payload construction or at final insert,
+  with missing/zero/nonzero initial generation. Inspect retained old-scope records
+  AND denied family responses, not just upload return values.
+- Two OFF/ON cycling cases: old insert cannot inherit current authority; fresh
+  upload is visible under the new generation; self retains both diagnostic epochs.
+- Four post-fetch family races: OFF, OFF/ON, relinking and family movement.
+- Two post-fetch self identity/family races.
+- Five nonaffirmative sharing cases including metadata/creator-owner spoofing.
+- Four unverified generation cases, all family-fail-closed.
+- Valid BSON Int64 generation remains readable under current affirmative consent.
+- Legacy self-only history and explicit foreign-subject exclusion.
+- Unrelated family / missing requester identity; actual no-token HTTP denial.
+- Rejected live upload creates no history.
+- Three limit/order/serialization/unchanged-timestamp cases; static seven-day TTL
+  configuration assertion (NOT a claim about a real MongoDB index).
+
+Focused command:
+
+```text
+python -m pytest -q --disable-warnings
+ backend/tests/test_location_history_consent.py
+ backend/tests/test_self_member_consent_creation.py
+ backend/tests/test_family_member_removal.py
+ backend/tests/test_startup_sync_consent_race.py
+ backend/tests/test_startup_repair_consent_race.py
+ backend/tests/test_checkin_location_consent.py
+ backend/tests/test_location_consent_write_race.py
+ backend/tests/test_task123_welfare_check.py
+ backend/tests/test_coordinate_capture_integrity.py
+ backend/tests/test_task101_location_name_persistence.py
+```
+
+**165 passed**, exit 0: 32 history + 32 self-member + 3 family + 26 sync +
+22 heal + 25 check-in/welfare + 11 upload + 6 welfare + 6 tuple + 2 label cases.
+
+The same sixteen isolated backend files enumerated in the preceding supplement
+were rerun: **192 passed**, all exit 0. Distinct total without duplicate counting:
+**346 isolated backend tests across 23 files**. Full backend **UNVERIFIED**.
+Previous combined evidence remains 19 passed / 3 legacy event-loop failures;
+that combined command was not rerun. Stationary separately passed again.
+
+Frontend command (same ten patterns as preceding supplements): **268 passed /
+10 suites**, exit 0: 207 B1/location + 44 medication/check-in + 17 SOS/routing.
+Python compilation and git diff --check passed. Frontend/TypeScript/lint/native
+compilation and physical/process-death validation are not claimed.
+
+The history privacy correction, directly required tests, this supplement and
+narrow privacy-contract memory update are the only changes authorized here.
+After commit/push verification, return the actual read-only audit verdict and
+precise remaining blocker; do not finish with only a review-resumption statement.
+Real MongoDB concurrency and Android process-death follow-ups remain deferred,
+unstarted. No merge, Railway deployment, production mutation, OTA, production
+Android build/release or Play submission performed or authorized.

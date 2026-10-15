@@ -3990,6 +3990,12 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 "captured_at":      incoming_captured_at,
                 "member_id":        member_id,
                 "family_group_id":  current["family_group_id"],
+                # Immutable request authority, captured before asynchronous work.
+                # This separate collection is private diagnostic evidence unless
+                # its exact lifetime is still current at a family read. An old
+                # insert after OFF (or OFF -> ON) cannot acquire newer authority.
+                "location_consent_generation": consent_generation,
+                "subject_user_id": target.get("user_id"),
                 "latitude":         data.latitude,
                 "longitude":        data.longitude,
                 "accuracy":         raw_accuracy,
@@ -4164,23 +4170,62 @@ async def get_location_history(
     discarded before this build.  Intended for use on the Diagnostics screen
     to reconstruct GPS behaviour around observed anomalies.
 
-    Access is limited to members within the same family group.
+    Linked self diagnostics may include prior consent lifetimes. Other family
+    accounts receive only records from the current affirmative consent lifetime.
+    Legacy untagged records are self-only; never guess/backfill their authority.
     `limit` is capped at 100; default 50.
     """
+    if not current.get("id"):
+        raise HTTPException(status_code=403, detail="Authenticated user required")
     member = await db.members.find_one(
         {"id": member_id, "family_group_id": current["family_group_id"]},
-        {"_id": 0, "id": 1},
+        {"_id": 0, "id": 1, "user_id": 1,
+         "location_sharing_enabled": 1, "location_consent_generation": 1},
     )
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
 
+    # Creator/group ownership is not ownership of someone else's coordinates.
+    is_self = bool(member.get("user_id")) and member["user_id"] == current["id"]
+    generation = member.get("location_consent_generation", 0)
+    history_filter = {
+        "member_id": member_id, "family_group_id": current["family_group_id"],
+    }
+    if is_self:
+        # Preserve existing own legacy diagnostics, but never return a new record
+        # explicitly belonging to another linked user after an identity change.
+        history_filter["$or"] = [
+            {"subject_user_id": current["id"]},
+            {"subject_user_id": {"$exists": False}},
+        ]
+    else:
+        if (member.get("location_sharing_enabled") is not True
+                or not isinstance(generation, int) or isinstance(generation, bool)
+                or generation < 0):
+            return []
+        history_filter.update({
+            "location_consent_generation": generation,
+            "subject_user_id": member.get("user_id"),
+        })
+
     limit = max(1, min(limit, 100))
     docs = await db.location_history.find(
-        {"member_id": member_id, "family_group_id": current["family_group_id"]},
+        history_filter,
         {"_id": 0},
         sort=[("accepted_at", -1)],
         limit=limit,
     ).to_list(length=limit)
+
+    # Fetching a history cursor is asynchronous. Do not disclose data admitted
+    # before withdrawal, generation cycling, relinking, or a family move.
+    final_authority = {
+        "id": member_id, "family_group_id": current["family_group_id"],
+        "user_id": member.get("user_id"),
+    }
+    if not is_self:
+        final_authority.update(_location_consent_condition(generation))
+    if not await db.members.find_one(final_authority, {"_id": 0, "id": 1}):
+        return []
 
     # Serialise datetimes to ISO-8601 strings for JSON transport.
     def _ser(d: dict) -> dict:
