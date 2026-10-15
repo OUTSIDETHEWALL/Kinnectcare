@@ -1817,3 +1817,135 @@ No live MongoDB concurrency or Android process-death validation, Android build/
 compile, physical acceptance, merge, Railway deployment, production mutation,
 OTA or Play submission occurred. Read-only diagnostic audit follows commit/push;
 its actual verdict is recorded separately, not assumed from test success.
+
+## Post-push family-readable diagnostic audit: CLEARED
+
+The narrow correction was pushed as ef00d26748470c58e87a71a4c90b97227b038f03
+before continuing this read-only audit. Remote ref independently matched after
+a notebook capture reset; no blind second ref write or force-push.
+
+The active backend's diagnostic GET routes and equivalent location projections
+were inventoried, including additional router registration in family_group.py.
+No additional ordinary-family diagnostic GPS reader was established:
+
+| Writer/storage -> reader | Authority / precise payload / verdict |
+|---|---|
+| DeviceSnapshotUpdate -> members.device_snapshot -> diagnostics_family_snapshot | New input ignores extras; existing raw bags always get the explicit scalar health schema. ON is not raw-extra permission. Corrected, 51 tests. |
+| Accepted/private GPS recorder -> process trace ring -> diagnostics_refresh_traces | Status separate from GPS. Original subject/family/generation and accepted publication plus final current authority required for family GPS; attributed linked self distinct. 32 preserved tests. |
+| Coordinate upload -> members.location_pipeline -> ordinary member list/single and write receipt | Whole-object family fence plus exact subject/generation/final authority; no raw arbitrary pipeline escape. 40 preserved tests. |
+| Coordinate upload -> location_history -> location-history API | Exact lifetime and final authority; legacy/private self distinction retained. 32 preserved tests. |
+| Member roots -> diagnostics_my_members | Explicit authenticated user_id=self query. Own coordinates can be diagnostic evidence, not arbitrary-family disclosure. No raw device snapshot forwarded. |
+| Geocoding configuration -> diagnostics_health | Boolean health/key-presence and key-source NAME only, not GPS or credential value. |
+| Ingest/native/provider evidence -> location_ingest_log, server logs, geocode cache | Internal retained coordinates, but no ordinary family-facing reader established in active routes. Storage alone is not a release blocker. |
+| Family membership -> family-group public projections | Deliberate account/group fields, not raw member location/diagnostic bags. |
+| Medication history/summary projections | Counts, compliance, receipt/contact times and operational details, not raw check-in GPS payloads. Distinct check-in readers reviewed next. |
+| Client-local diagnostic/cached copies | Not a new OFF-state server disclosure by themselves; no claim that retained local data can be retroactively revoked. |
+| SOS/emergency evidence -> incident/alert flows | Separate intentionally authorized emergency semantics, untouched. No mechanical ordinary-sharing rule imposed. |
+
+**FAMILY-READABLE DIAGNOSTIC LOCATION AUDIT CLEARED.**
+This is the targeted diagnostic/metadata audit, not a claim that the entire
+family API or full Critical/High source review is clear.
+
+## Next boundary: legacy check-in readers — CONFIRMED Critical / STOP
+
+**RED — NEW RELEASE BLOCKER FOUND.**
+
+Current location-free check-in/welfare writes protect new receipts but retained
+old check-ins still have two real ordinary-family readers with no current
+location-sharing/lifetime redaction:
+
+- backend/server.py list_member_checkins(), GET /api/checkins/member/{member_id}:
+  query scopes family/member, then returns CheckIn(**d).
+- list_recent_checkins(), GET /api/checkins/recent:
+  query scopes family/current local day, then returns CheckIn(**d).
+
+CheckIn explicitly serializes latitude, longitude and location_name.
+Thus response-model validation does NOT remove these precise fields.
+
+### Actual deterministic reproduction, not a hypothetical retained record
+
+An offline replay AST-loaded the exact create_checkin function body from the
+supplied base (decorator removed solely to avoid registering an old route), using
+the compatible current model and predicate-enforcing CheckinHarness. DB/push
+services were isolated; neither production nor MongoDB was contacted.
+
+1. Linked subject sharing ON calls that actual pre-PR writer with valid precise
+   coordinates and a precise location label.
+2. Real legacy writer inserts the actual CheckIn receipt in db.checkins.
+3. Current update_my_preferences() performs actual OFF. Root location clears and
+   current generation advances. Saved check-in remains unchanged.
+4. A DIFFERENT current family principal calls each current reader above.
+5. Both JSON-model-serialized responses retain the exact latitude, longitude and
+   precise location_name from that record.
+6. Unrelated-family control returns no record, proving this is same-family
+   field-level disclosure rather than a mock that ignores tenant predicates.
+
+The storage was produced by the real old writer, NOT manually seeded. This
+reproduces retained data that is genuinely accepted by the supplied production
+base. Production prevalence was not measured. No claim is made that the newly
+corrected current writer emits location-bearing receipts.
+
+Violated invariant: another family account must not obtain retained ordinary
+precise location after current withdrawal through check-in history/recent APIs.
+Non-location check-in success, time, source and confirmation remain legitimate.
+
+Provenance: base already has that coordinate-bearing writer and the two
+unredacted readers. The PR's new-write privacy correction did not sanitize
+those readers. It predates this snapshot correction.
+
+Confidence HIGH: actual old write -> actual current OFF -> both actual current
+readers, with exact complete serialized coordinate/label assertions.
+
+Welfare assessment reached: current daily/welfare receipts are location-free,
+and both daily/welfare history use the shared CheckIn storage/read model.
+The executed legacy reproduction used the daily writer; a separate old welfare
+writer was not executed or claimed after the stop condition was established.
+
+### Smallest conceptual correction — separate approval required
+
+Protect existing retained records at BOTH family read paths. Prefer an explicit
+non-location family receipt projection that preserves check-in history, times,
+source and confirmation while withholding ordinary precise coordinates/labels
+from other family accounts. Any self-only historical detail needs verified
+linked subject identity, not role/creator/requester privileges.
+
+Do not delete receipt history, change SOS semantics, or backfill old records with
+a new consent generation. Fixing only future writes is already known insufficient.
+
+Required deterministic regression: reproduce a legacy daily/welfare record with
+valid precise data, call actual OFF, then inspect complete JSON from both readers
+as another family account. Cover ON/OFF/OFF->ON legacy handling, safe fresh
+location-free receipts, useful status/time/source preservation, linked-self
+semantics if explicitly retained, unrelated-family/authentication, and final
+authority boundaries if any family precise-history exception is retained.
+
+No check-in reader, historical store, or other independent source was changed.
+Review STOPPED immediately after confirming this path; no further independent
+source investigation or automatic repair.
+
+## Actual final review/validation boundary
+
+The family-snapshot blocker is fixed and the targeted family-readable diagnostic
+location audit is clear. Overall verdict is RED because retained legacy check-in
+coordinates/labels are still disclosed by ordinary family readers.
+
+Next review boundary after a separately approved repair: finish remaining
+legacy request/history readers, remaining location writers/readers, native
+lifecycle/authorization, FGS/recovery, native static correctness,
+medication/SOS/iOS, cumulative scope and original incident replay.
+Do not infer completion of those areas from the snapshot tests.
+
+Frontend's two isolated notification-listener readiness failures remain unresolved
+verification concerns, not silently converted into passes or a production defect.
+Existing open handles/--forceExit, legacy backend loop failures and unchanged
+diagnostics UI copy are non-blocking debt absent an actual Critical/High path.
+
+Web preview was restored and the public disclaimer rendered after an initial
+capture disconnect; no frontend/code/config workaround was introduced.
+Signed-in Diagnostics UI was NOT visually verified. Offline endpoint/schema and
+27 Device Comparison frontend tests are not physical-device validation.
+
+No real MongoDB concurrency or Android process-death/across-runtime validation
+started. No Android compile/build or physical acceptance occurred.
+No merge, Railway deployment, production mutation, OTA, Android release or
+Google Play submission occurred.
