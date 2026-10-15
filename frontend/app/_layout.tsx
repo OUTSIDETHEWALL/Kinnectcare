@@ -1331,6 +1331,7 @@ function RootNav() {
           // fetchAll intentionally returns cached data on errors. A timeout
           // alone is therefore not evidence that the owned member was removed.
           // Require a fresh, successful authenticated lookup before stopping.
+          const linkedMemberBeforeLookup = memberStore.getMyMember(user.id)?.id;
           const lookupToken = await getCurrentToken();
           removalAuthority = readTrackingAuthority();
           if (!lookupToken || cancelled) return;
@@ -1344,12 +1345,21 @@ function RootNav() {
             || confirmed.data.some((m: any) => !m || typeof m.id !== 'string' || !m.id)) {
             throw new Error('invalid_member_lookup');
           }
+          // A relink delivered while this lookup was pending supersedes its
+          // absence result. Android additionally fences shutdown natively.
+          const linkedMemberNow = memberStore.getMyMember(user.id);
+          if (Platform.OS !== 'android' && linkedMemberNow?.user_id === user.id
+            && linkedMemberNow.id && linkedMemberNow.id !== linkedMemberBeforeLookup) return;
           me = confirmed.data.find((m: any) => m.user_id === user.id) ?? null;
           if (me) memberStore.upsertOne(me);
         }
         if (!me) {
           try { leonidas.stop(); } catch (_e) {}
-          if (removalAuthority) await locationEngine.stop('stopped', 'confirmed_member_removal', removalAuthority);
+          if (Platform.OS !== 'android') {
+            await locationEngine.stop('stopped', 'confirmed_member_removal');
+          } else if (removalAuthority) {
+            await locationEngine.stop('stopped', 'confirmed_member_removal', removalAuthority);
+          }
           engineBootedForUserIdRef.current = null;
           return;
         }

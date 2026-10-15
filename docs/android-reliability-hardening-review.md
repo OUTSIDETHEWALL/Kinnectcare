@@ -1,8 +1,8 @@
 # Android reliability hardening — pre-merge review
 
-**Latest verdict: RED — NEW RELEASE BLOCKER FOUND.** Legacy check-in readers
-are corrected and their related audit is cleared. Resumed review reproduced an
-independent High iOS confirmed-removal shutdown regression, left unfixed.
+**Latest correction: IOS CONFIRMED-REMOVAL SHUTDOWN BLOCKER CLEARED.**
+The separately authorized platform-aware correction and deterministic regressions
+pass. Broader Critical/High review resumes after this narrow correction is pushed.
 Read the final continuation supplement; earlier supplements are historical
 evidence, not current release approval.
 
@@ -2256,3 +2256,78 @@ Android compile/build and physical acceptance remain NOT STARTED.
 No merge, Railway deployment, production mutation, OTA, Android build/release,
 or Google Play submission occurred. Recommended next step is separate approval
 for the narrow iOS confirmed-member-removal shutdown correction, not release.
+
+## Authorized iOS confirmed-member-removal correction
+
+**IOS CONFIRMED-REMOVAL SHUTDOWN BLOCKER: CLEARED.**
+
+The root now explicitly separates platform stop contracts only after the existing
+successful, authenticated, same-session/token ownership-absence checks:
+
+- Non-Android invokes the existing locationEngine.stop implementation without
+  requiring Android authority.
+- Android still requires the captured removal authority and passes it unchanged
+  into the protected stop/CAS path. No unconditional Android fallback was added.
+- A non-Android linkage that changes during the pending lookup supersedes the
+  old absence result. A captured pre-lookup member ID is compared to the current
+  linked member before accepting the absence. Existing cancellation, session,
+  identity, token and response-shape checks are retained.
+
+No SDK implementation, native module, authority format, consent path, backend,
+medication or SOS application source changed.
+
+### Deterministic regressions
+
+The real root harness now includes 12 additional cases (39 total in that file):
+
+- iOS, Android extension genuinely absent, previously enabled modeled SDK:
+  patrol stops once; real locationEngine.stop reaches mocked native SDK stop once,
+  and the SDK enabled model becomes false.
+- Existing Android confirmed-removal case additionally verifies the exact valid
+  owner/generation argument.
+- Android missing authority: no unconditional engine/native stop.
+- Android captured stale authority: actual engine/CAS cannot revoke a replacement
+  native owner, and no SDK stop occurs.
+- iOS network failure, unknown response, non-list response and malformed member:
+  no engine or patrol shutdown.
+- iOS pending absence followed by account replacement, cancellation/unmount,
+  token replacement or newer linkage: no stale native stop.
+- iOS fresh positive linkage: normal bootstrap, no destructive stop.
+
+The native SDK is mocked; this proves invocation/ordering and state-model
+behavior, not physical iOS or Android execution.
+
+### Verification
+
+Same eleven requested frontend patterns, 12 suites:
+**307 passed / 0 failed**, exit 0 (295 established + 12 new cases).
+Includes existing signout/consent/permission/replacement authority, root startup,
+B1/location, medication notification/acknowledgment and SOS/routing regressions.
+All 17 push-medication cases passed in this invocation. Earlier timing-sensitive
+failures remain historical evidence; no medication implementation was changed.
+
+TypeScript: npx tsc --noEmit, exit 0. git diff --check, exit 0.
+The native authority extension remains Android-only. Non-Android stop still
+delegates to stopConfiguredEngine/lib.stop; no fake native authority was added.
+
+Development failures were isolated test setup, not additional production bugs:
+malformed /members fixtures initially also reached unrelated alert consumers;
+replacement-authority setup initially attempted to authorize over a live owner,
+then needed to clear its native model before subsequent root tests. Only test
+setup was corrected. Final assertions retain all requested shutdown guarantees.
+
+Backend source did not change: preserve the prior 507 distinct passing tests
+across 27 isolated files, including 38 legacy-reader and 34 medication cases.
+No unrelated backend rerun. Full backend remains UNVERIFIED.
+
+Exact correction files:
+
+```text
+frontend/app/_layout.tsx
+frontend/src/__tests__/missedCheckinReturnButton.test.tsx
+docs/android-reliability-hardening-review.md
+```
+
+No merge, deploy, production mutation, OTA, Android compilation/build/release,
+Play submission, real MongoDB concurrency, process-death or device testing.
+Broader source-review verdict follows after the narrow correction push.
