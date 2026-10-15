@@ -1,0 +1,54 @@
+# Exact undecorated writer from backend/server.py at supplied production base
+# 247c93ffa4ec8a3406de8bacb2ba99b7542a7c19. Execute only with isolated services.
+async def create_checkin(data: CheckInCreate, current=Depends(get_current_user)):
+    member = await db.members.find_one({"id": data.member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found")
+    # Build XX — self-only enforcement.  A check-in must be performed by
+    # the member themselves.  Caregivers use POST /checkin-requests instead.
+    if member.get("user_id") != current["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only check yourself in. To prompt another member, use 'Are You OK?'.",
+        )
+    ci = CheckIn(
+        owner_id=current["id"], family_group_id=current["family_group_id"], member_id=data.member_id, member_name=member["name"],
+        location_name=data.location_name, latitude=data.latitude, longitude=data.longitude,
+        confirmed_by=member["name"], source="self",
+    )
+    await db.checkins.insert_one(ci.model_dump())
+    update = {"last_seen": datetime.now(timezone.utc), "status": "healthy"}
+    if data.location_name:
+        update["location_name"] = data.location_name
+    if data.latitude is not None and data.longitude is not None:
+        update["latitude"] = data.latitude
+        update["longitude"] = data.longitude
+    await db.members.update_one({"id": data.member_id}, {"$set": update})
+    # Ack today's missed-checkin alerts (using user tz)
+    tz = user_tz(current)
+    now_local = datetime.now(tz)
+    day_start_utc = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz).astimezone(timezone.utc)
+    await db.alerts.update_many(
+        {"family_group_id": current["family_group_id"], "member_id": data.member_id,
+         "type": "missed_checkin", "created_at": {"$gte": day_start_utc}},
+        {"$set": {"acknowledged": True}}
+    )
+    # Fan out check-in confirmation to the rest of the family (P1 of
+    # the beta stabilization sprint).  Previously the endpoint saved
+    # the row + acked outstanding missed-checkin alerts but never
+    # surfaced the success to anyone but the senior — caregivers
+    # were left wondering whether the check-in went through.  The
+    # push is non-blocking (best-effort); a failure here MUST NOT
+    # roll back the saved check-in.
+    try:
+        await push_to_family_group(
+            current["family_group_id"],
+            f"✅ {member['name']} checked in",
+            (member["name"] + " is safe — just checked in"
+                + (f" from {data.location_name}" if data.location_name else "")),
+            {"type": "checkin", "member_id": data.member_id, "checkin_id": ci.id},
+            exclude_user_id=current["id"],  # don't ping the senior themselves
+        )
+    except Exception as e:
+        logger.warning(f"checkin push fanout failed (non-fatal): {e}")
+    return ci

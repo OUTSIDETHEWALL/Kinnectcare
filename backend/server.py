@@ -5525,12 +5525,28 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
     return ci
 
 
+def _checkin_history_receipt(doc):
+    """History exposes the event, never retained ordinary location.
+
+    Legacy receipts have no trustworthy consent-lifetime evidence. Neither
+    current sharing nor re-enabling it grants that old GPS family authority.
+    These receipt endpoints deliberately have no private-self location exception.
+    Select safe fields rather than copying a stored bag and deleting known GPS.
+    """
+    return CheckIn(**{
+        key: doc[key] for key in (
+            "id", "owner_id", "family_group_id", "member_id", "member_name",
+            "confirmed_by", "source", "created_at",
+        ) if key in doc
+    })
+
+
 @api_router.get("/checkins/member/{member_id}", response_model=List[CheckIn])
 async def list_member_checkins(member_id: str, current=Depends(get_current_user)):
     docs = await db.checkins.find(
         {"family_group_id": current["family_group_id"], "member_id": member_id}, {"_id": 0}
     ).sort("created_at", -1).to_list(100)
-    return [CheckIn(**d) for d in docs]
+    return [_checkin_history_receipt(d) for d in docs]
 
 
 @api_router.get("/checkins/recent")
@@ -5541,7 +5557,7 @@ async def list_recent_checkins(current=Depends(get_current_user)):
     docs = await db.checkins.find(
         {"family_group_id": current["family_group_id"], "created_at": {"$gte": day_start_utc}}, {"_id": 0}
     ).sort("created_at", -1).to_list(200)
-    return [CheckIn(**d) for d in docs]
+    return [_checkin_history_receipt(d) for d in docs]
 
 
 # ========== Checkin Requests ("Are You OK?") ==========

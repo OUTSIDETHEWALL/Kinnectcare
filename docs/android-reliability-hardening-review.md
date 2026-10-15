@@ -1,5 +1,10 @@
 # Android reliability hardening — pre-merge review
 
+**Latest continuation:** Legacy check-in history reader correction below is
+verified and authorized for the existing unmerged PR only. Read the final
+continuation supplement for the latest audit verdict; earlier supplements are
+historical evidence, not current release approval.
+
 **Status: STOP BEFORE MERGE. Draft review only; no release authorization.**
 
 This is the initial implementation record for head
@@ -2035,3 +2040,85 @@ those passing checks. Static compilation/diff checks remain as recorded.
 Remaining source-review boundary and all prohibited/deferred actions are
 unchanged. No real MongoDB or Android validation, build, merge, deployment,
 production mutation, OTA, release or Play submission was started.
+
+---
+
+# Legacy check-in history reader correction
+
+## Evidence, severity, and narrow correction
+
+Critical ordinary-location privacy defect, high confidence. The exact supplied
+base writer persisted latitude, longitude and a precise location_name in
+db.checkins. Real withdrawal cleared the member but neither family history
+reader redacted the retained receipt. No race was necessary.
+
+Both list_member_checkins and list_recent_checkins now call the same deliberate
+safe projection. Only id, owner_id, family_group_id, member_id, member_name,
+confirmed_by, source and created_at are copied from storage. CheckIn retains its
+existing response shape, with latitude/longitude/location_name always null.
+Unknown stored fields, maps, aliases and nested GPS are never copied.
+
+This applies while ON, OFF and OFF->ON. No current consent generation is
+assigned to legacy GPS. These receipt endpoints intentionally expose no private
+linked-self location detail either: self receives the same useful location-free
+event. No caregiver, creator or owner exception is introduced. A separate
+private location-history API is not created or redesigned here.
+
+Family query predicates, authentication, ordering, limits (member 100, recent
+200), local-day filtering and useful event semantics remain unchanged.
+Stored records, timestamps and configured 90-day retention are unchanged.
+No migration, deletion, production query or prevalence claim is involved.
+Current daily/welfare writes and all notification/SOS semantics are untouched.
+
+## Exact narrow correction files
+
+```text
+backend/server.py
+backend/tests/test_checkin_history_privacy.py
+backend/tests/fixtures/legacy_create_checkin.py.txt
+docs/android-reliability-hardening-review.md
+```
+
+The fixture is the exact undecorated create_checkin function from supplied base
+247c93ffa4ec8a3406de8bacb2ba99b7542a7c19, executed only with isolated services.
+Its AST was independently compared to git show of that base and matched exactly.
+It is not an invented raw database insert or a dependency on production access.
+
+## Current correction verification
+
+New reader regressions: **38 passed**, exit 0. Cover historical writer -> real
+withdrawal -> both readers, ON/OFF/OFF->ON, equal endpoint behavior, self and
+privileged-family fail-closed behavior, current daily/welfare/adapter receipts,
+complete JSON field/value inspection, nested arbitrary extras, unrelated family,
+missing HTTP authentication, both actual HTTP serializations, order/limits,
+local-day filtering and unchanged stored history.
+
+The first development invocation had 34 pass/4 fail because the new test looked
+up welfare receipts by their public ID rather than the existing harness's
+canonical MongoDB key. Only that test lookup was corrected; no welfare production
+change or weakened privacy assertion was made. The completed new suite is 38/38.
+
+All previously selected 26 backend files were rerun separately, each exit 0:
+**469 distinct passing tests**, plus new 38 = **507 / 27 files**.
+Counts: snapshot 51, refresh 32, pipeline 40, history 32, upload 11,
+check-in/welfare 25+6, self creation 32, startup heal/sync 22/26,
+family removal 3, coordinate integrity/label 6/2, presence 11, stationary
+battery 3, backend medication reliability 34. Other isolated files cover
+escalation, battery, billing, phone fields/backfill, snapshot tracking mode,
+JWT configuration and missed-medication summaries.
+
+Full backend remains UNVERIFIED; it was not rerun or called passing. Earlier
+combined evidence remains 19 pass/3 legacy event-loop failures.
+
+Current unchanged frontend, same eleven requested patterns:
+**295 passed / 0 failed, 12 suites passed**, exit 0. Includes B1/location 207,
+medication/check-in 44, SOS/routing 17 and Device Comparison 27.
+All 17 push-medication cases pass this invocation. Earlier combined 292/3/295
+and isolated 15/2/17 remain historical failures classified B (pre-handler
+listener-readiness timing); they are not rewritten as passing. No frontend
+production/test/configuration file changed. Existing force-exit/open-handle
+warning remains non-blocking technical debt.
+
+Python compilation and git diff --check passed. No Android compilation,
+real MongoDB concurrency, process-death or physical validation was performed.
+Related-reader and resumed source-review verdicts follow separately.
