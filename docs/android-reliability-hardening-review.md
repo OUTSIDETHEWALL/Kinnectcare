@@ -1949,3 +1949,89 @@ No real MongoDB concurrency or Android process-death/across-runtime validation
 started. No Android compile/build or physical acceptance occurred.
 No merge, Railway deployment, production mutation, OTA, Android release or
 Google Play submission occurred.
+
+## Current-run final adjudication supplement
+
+No completed snapshot work was redone, no suggested task started, and no new
+application/test source correction was made. The legacy disclosure already
+reproduced above remains **Critical / confirmed**, so broader review stays stopped.
+
+### Legacy sharing, lifetime, race and retention
+
+The two current readers scope family/member or family/day and serialize
+CheckIn(**d). Neither reads the target's current sharing state nor checks its
+consent lifetime/generation before returning retained latitude/longitude and
+location_name. A DIFFERENT family principal received them after actual OFF.
+
+No race is required: write while ON, complete withdrawal, then ordinary read.
+The real old writer body came from supplied committed base
+247c93ffa4ec8a3406de8bacb2ba99b7542a7c19, not fabricated storage.
+Current writers being location-free does not remove old records.
+
+The committed TTL configuration retains checkins for 90 days after created_at.
+Member history returns up to 100 rows; recent returns up to 200 from the current
+local day. A recent legitimate legacy receipt is within these normal windows.
+Actual production indexes/prevalence were not queried. The reproduction confirmed
+that withdrawal leaves the saved receipt unchanged. Waiting for TTL expiration
+is not read authorization and does not close the immediate disclosure.
+
+### Medication test classification: B — TEST-HARNESS / TIMING FLAKINESS
+
+Exact isolated failures:
+
+- does not enqueue or consume a tap when pending storage fails:
+  callbacks[0] is not a function.
+- replays a pending record after a crash before enqueue/flush:
+  callbackHandlers[0] is not a function.
+
+These exceptions occur BEFORE the mocked response invokes the production
+handler. Both tests use create() outside awaited act(), then assume a 10ms sleep
+committed effects. Source inspection shows response-subscription registration
+is synchronous inside the hook effect; async durable replay is launched
+separately, not awaited before subscription. Elapsed 10ms is not a React
+effect/subscription readiness guarantee.
+
+Controlled experiment outside the repository:
+
+- Generated two temporary copies of the existing 17-case file. Relative module
+  paths were redirected to the unchanged checked-in source, with identical
+  production code, mocks, inputs and semantic assertions.
+- Control retained fixed-delay mounts; the variant changed only three mount
+  sites in the two failing cases to awaited act(), used the existing bounded
+  readiness helper, and waited for observable replay completion.
+- Two-case comparison: 4 passed, 30 skipped, exit 0.
+- Full comparison: control 17/17 passed, readiness variant 17/17 passed;
+  34 passed total, exit 0.
+- Both variants recorded one response subscription, one received subscription
+  and two storage reads before invoking each tested callback.
+- Generated inputs, source digest and logs remain in
+  /tmp/pr166-medication-adjudication.EKE3OA; not committed or counted as new tests.
+- Tracked frontend source/test/config remained byte-for-byte unchanged.
+
+The fixed-delay control itself passing on another execution supports
+intermittent scheduling/readiness, not a deterministic production failure.
+Together with the failure location before handler dispatch and the passing
+effect-ready semantic checks, confidence in classification B for these observed
+exceptions is high. This does NOT certify all medication/native delivery paths.
+No production medication code or checked-in test was changed.
+
+Historical results are NOT replaced:
+combined 292 passed / 3 failed / 295, isolated 15 passed / 2 failed / 17.
+The queue-drain failure had already passed in isolation; it also passes in both
+full temporary copies. The original combined command is NOT called all-pass.
+Temporary duplicate cases do not increase the 295 distinct frontend denominator.
+
+### Actual final verdict
+
+**RED — NEW RELEASE BLOCKER FOUND.**
+Family-snapshot correction remains verified. **FAMILY-READABLE DIAGNOSTIC
+LOCATION AUDIT CLEARED.** Retained legacy check-in location disclosure remains
+confirmed and UNFIXED. Medication's observed test failures are classified B,
+not a newly established production regression.
+
+Backend evidence remains 51 new snapshot, 288 focused, 469 distinct isolated/
+26 files; full backend remains UNVERIFIED. No source changed that invalidates
+those passing checks. Static compilation/diff checks remain as recorded.
+Remaining source-review boundary and all prohibited/deferred actions are
+unchanged. No real MongoDB or Android validation, build, merge, deployment,
+production mutation, OTA, release or Play submission was started.

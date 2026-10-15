@@ -193,3 +193,19 @@ software, and separate authorization for each newly confirmed release blocker.
 
 **How to apply:** Explain a credible failure and violated release invariant before
 blocking validation. Never repair a newly found independent blocker automatically.
+
+## Notification test readiness evidence
+
+An elapsed delay after an un-awaited renderer mount is not proof that its
+notification effects installed subscriptions. Separate missing test callback
+readiness from an exception inside the production notification handler.
+
+**Why:** Notification tests failed before dispatching their mocked response
+because mount effects had not run, while equivalent controlled runs passed with
+the same production code. Treating that as a medication delivery regression
+would prompt an unsupported production change.
+
+**How to apply:** Await renderer effects and bounded observable readiness in
+controlled experiments without weakening semantic assertions or changing
+production code. Preserve the original failed-run counts in the report even
+when a later control or readiness variant passes.
