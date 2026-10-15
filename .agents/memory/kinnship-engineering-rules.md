@@ -142,3 +142,15 @@ SHARING OFF" regardless of which feature possesses the location.
 location-free unless a separately authorized design can enforce consent at their
 own storage/delivery boundary. A guarded member write does not authorize another
 collection insert or a later notification; initial consent alone is insufficient.
+
+## Release-blocker review threshold
+
+Stop release review for confirmed Critical/High privacy, safety, security,
+authority-loss, core-reliability, or likely native compile/operation defects.
+Ordinary technical debt and low-impact theoretical imperfections are non-blocking.
+
+**Why:** The user requires a safe releasable product, not theoretically perfect
+software, and separate authorization for each newly confirmed release blocker.
+
+**How to apply:** Explain a credible failure and violated release invariant before
+blocking validation. Never repair a newly found independent blocker automatically.

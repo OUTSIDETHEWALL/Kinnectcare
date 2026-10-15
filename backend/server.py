@@ -8581,7 +8581,8 @@ async def _heal_cross_user_sharing_leaks():
                 "location_sharing_enabled": False,
                 "user_id": {"$ne": None, "$exists": True},
             },
-            {"_id": 0, "id": 1, "user_id": 1, "owner_id": 1},
+            {"_id": 0, "id": 1, "user_id": 1, "owner_id": 1,
+             "location_consent_generation": 1},
         )
         candidates = []
         async for m in cursor:
@@ -8604,18 +8605,26 @@ async def _heal_cross_user_sharing_leaks():
             if not u:
                 continue
             user_pref = u.get("location_sharing_enabled")
-            # None/missing => default True.  Only heal if the linked
-            # user's own preference says they want sharing ON.
-            if user_pref is False:
+            # Repair is authorizing, not merely cosmetic: require affirmative
+            # linked preference evidence, never an unknown/missing value.
+            if user_pref is not True:
                 continue
-            await db.members.update_one(
-                {"id": m["id"]},
+            # A repair does not outrank a newer privacy decision. Consent lifetime
+            # and the observed disabled state must match in the mutation itself.
+            # Missing generations retain the shared legacy-zero semantics.
+            repair_filter = {
+                "id": m["id"], "user_id": uid, "owner_id": m.get("owner_id"),
+                **_location_consent_condition(m.get("location_consent_generation", 0)),
+                "location_sharing_enabled": False,
+            }
+            result = await db.members.update_one(
+                repair_filter,
                 {
                     "$set": {"location_sharing_enabled": True},
                     "$unset": {"location_name": ""},
                 },
             )
-            healed += 1
+            healed += result.modified_count
 
         logger.info(
             f"Build #59 heal: repaired {healed} cross-user "

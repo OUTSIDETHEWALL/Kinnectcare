@@ -733,3 +733,119 @@ verified. Passing tests are not a GREEN verdict. STOP on the next independent
 Critical/High release blocker; do not automatically repair it.
 No merge, Railway deployment, production mutation, OTA, Android production
 build/release or Google Play submission is part of this correction.
+
+---
+
+# Startup-repair consent race correction supplement
+
+## Root cause, evidence and narrow scope
+
+Critical privacy blocker, predating #166. The cross-user sharing heal scanned a
+disabled member, read its linked user's preference asynchronously, then enabled
+sharing using only the member id. A concurrent withdrawal changed generation and
+cleared coordinates, but the old repair restored authority. A subsequent check-in
+then published coordinates while the user's preference stayed OFF.
+
+An offline replay extracted the actual repair from blocked head
+0e37e4a69cd164f85bb91c7ff09356741a8a0f37 and used the real preference/check-in
+functions. It reproduced restored authority and coordinates after withdrawal.
+No external service or production database was used.
+
+Four correction files:
+
+```text
+.agents/memory/kinnship-engineering-rules.md
+backend/server.py
+backend/tests/test_startup_repair_consent_race.py
+docs/android-reliability-hardening-review.md
+```
+
+Cumulative PR: 48 files. No frontend/native/SDK/scheduling/dependency changes.
+
+## Exact correction and semantics
+
+The repair scan now projects the observed consent generation. Its final update
+requires the observed member id, linked user id, creator identity, disabled sharing
+state, and consent lifetime. It reuses _location_consent_condition for generation
+matching, overriding the expected sharing state to False for this repair.
+Missing generation retains the existing legacy-zero semantics.
+
+Only an explicitly affirmative linked preference permits an authorizing repair.
+False, missing and null preference values do not grant authority. A legitimate
+unchanged legacy inconsistency can still be healed. Successful repair enables the
+member flag and removes the OFF placeholder; it neither writes coordinates nor
+changes consent generation. Its count reflects actual modified rows, not attempts.
+
+The CAS itself rejects a stale repair after withdrawal, OFF -> ON, or relinking.
+No second read/check is treated as sufficient. Rejection changes no state,
+coordinates, labels, tuple timestamps or generation. A later check-in remains
+functional but cannot publish under the withdrawn authority.
+
+## Related production authority-writer inventory (read-only)
+
+- update_my_preferences: atomically changes member flag/generation, clears the
+  visible tuple on OFF, then updates the user mirror. Not changed here.
+- update_member_location legacy initialization: only a successful linked-policy
+  read can initialize an absent flag; CAS requires absent flag and generation.
+  Final publication still checks consent lifetime and timestamp ordering.
+- _backfill_location_sharing_flag: sets ON only where the member flag is absent;
+  no generation increment, and cannot overwrite a flag created by a current toggle.
+- _sync_user_sharing_pref_to_members: snapshots OFF users, then disables linked
+  member rows and clears their tuple using user_id only, without generation fencing.
+  Its interaction with concurrent re-enable is a resumed-review target; not changed.
+- _heal_cross_user_sharing_leaks: corrected expected-state/generation/identity CAS.
+- backend/family_group.py self-member creation: copies linked sharing policy while
+  inserting an empty coordinate tuple; not a repair of an existing row.
+
+No other active backend generation writer was found by the targeted read-only
+search. Separate location history/ingest, emergency and geocoding surfaces remain
+independent review targets. No unrelated repair or SOS behavior was changed.
+
+## Deterministic tests and verification
+
+22 new cases execute the actual startup repair with a projection-enforcing cursor
+and predicate-enforcing atomic database model:
+
+- Withdrawal at the asynchronous preference lookup and the final update boundary,
+  with missing/zero/nonzero generations; followed by successful daily/welfare
+  check-ins whose coordinates stay absent (12 cases).
+- OFF -> ON with a new valid check-in before old repair resumes (2 cases).
+- Legitimate unchanged repair for missing/zero/nonzero generations (3 cases).
+- Nonaffirmative linked evidence cannot authorize (3 cases).
+- Linked-account or creator replacement invalidates repair identity (2 cases).
+
+Assertions inspect the entire member state after stale repair, actual CAS
+acceptance/rejection, unchanged generation, absent tuple, label, projected generation,
+and check-in/welfare non-location effects. This is not live MongoDB validation.
+
+Commands/results:
+
+- python -m pytest -q --disable-warnings backend/tests/test_startup_repair_consent_race.py
+  backend/tests/test_checkin_location_consent.py backend/tests/test_location_consent_write_race.py
+  backend/tests/test_task123_welfare_check.py backend/tests/test_coordinate_capture_integrity.py
+  backend/tests/test_task101_location_name_persistence.py:
+  **72 passed**, exit 0 (22 new + the prior focused 50).
+- The same sixteen existing files enumerated in the previous supplement, each run
+  with python -m pytest -q --disable-warnings backend/tests/NAME.py:
+  **192 passed**, all exit 0. Including repair, check-in, upload privacy and welfare:
+  **256 distinct isolated backend tests across 20 files**, without double-counting.
+- Combined upload/capture/label/stationary command: **19 passed / 3 failed**,
+  unchanged legacy ambient-event-loop failures. Stationary alone: **3 passed**.
+  Full backend remains **UNVERIFIED**, not run; production-mutating integration
+  tests remain excluded.
+- cd frontend && npm test -- --runInBand --forceExit trackingRevocationAuthority
+  androidTrackingRecovery androidLocationPublication trackingReliabilityHardening
+  missedCheckinReturnButton pushMedicationReliability sosPermissionRegression
+  medicationAcknowledgment medicationAcknowledgeModal medicationNotificationRoute:
+  **268 passed**, 10 suites, exit 0. Includes 207 B1/location, 44 medication/check-in,
+  and 17 SOS/medication acknowledgment/routing regressions.
+- python -m py_compile backend/server.py; git diff --check: passed.
+- Frontend unchanged; TypeScript/lint not rerun. Android compilation, physical
+  lifecycle acceptance, live MongoDB concurrency and signed-in UI remain unverified.
+
+After commit/push/status verification, resume adversarial release-blocker review
+on the immutable new head. Stop only for confirmed Critical/High privacy, safety,
+security, authority-loss or core-reliability/native-operation blockers. Ordinary
+technical debt and low-impact theoretical concerns are deferred, not build gates.
+No merge, Railway deployment, production mutation, OTA, production Android
+build/release or Play submission is authorized or performed.
