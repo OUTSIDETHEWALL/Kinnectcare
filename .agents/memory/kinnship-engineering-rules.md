@@ -143,6 +143,21 @@ location-free unless a separately authorized design can enforce consent at their
 own storage/delivery boundary. A guarded member write does not authorize another
 collection insert or a later notification; initial consent alone is insufficient.
 
+## Self-member creation consent
+
+New helper-created self-member rows deliberately start sharing OFF. A current
+explicit enable is allowed to be necessary even when the user preference mirror
+already says ON. Do not automatically "repair" this mismatch from that mirror.
+
+**Why:** The user authorized fail-closed creation rather than stale consent
+resurrection. Withdrawal updates existing members before the user mirror; a new
+row inserted in that gap cannot safely obtain ON from even another user read.
+
+**How to apply:** Preserve ordinary membership creation, but establish new sharing
+authority through the existing explicit preference/generation operation. Any
+future automatic initialization needs a separately justified concurrency-safe
+mechanism, not caller snapshots or a second preference read.
+
 ## Release-blocker review threshold
 
 Stop release review for confirmed Critical/High privacy, safety, security,

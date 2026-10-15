@@ -961,3 +961,144 @@ After commit/push/status verification, resume independent release-blocker review
 at that exact head; no GREEN based only on pass counts or partial family audit.
 No merge, Railway deployment, production mutation, OTA, production Android
 build/release or Play submission is authorized or performed.
+
+---
+
+# Missing-self-member consent correction supplement
+
+## Root cause and authority mechanism
+
+The shared self-member creator copied sharing from its caller's user snapshot,
+defaulting missing consent to ON. Withdrawal could complete before the row existed,
+then stale creation supplied new ON authority to ordinary check-in publication.
+This pre-existing creation defect was confirmed offline on the preceding head.
+
+The correction is in backend/family_group.py:ensure_self_member_row, not just the
+startup caller. Existing rows remain unchanged. Every newly created row starts:
+
+- location_sharing_enabled=False
+- location_consent_generation=0
+- latitude=None, longitude=None, coordinate_captured_at=None
+- location_name="Location Sharing Off"
+
+Current ON establishment requires a fresh explicit preference operation through
+the existing endpoint; that operation advances the existing member generation.
+This also works when the user mirror already says ON. The user expressly permits
+a fresh affirmative operation after fail-closed creation. This is not permanent
+disablement: real explicit enable plus fresh upload/check-in is tested.
+
+Another users read cannot safely auto-enable a new row: withdrawal updates
+existing members BEFORE persisting its user mirror. If creation occurs between
+those writes, an apparently current ON user mirror is still obsolete. No separate
+consent system, user-level generation, migration or transaction was introduced.
+
+Creation now uses a deterministic Mongo _id for the (group,user) creation slot
+and update_one with $setOnInsert/upsert. The built-in unique _id prevents duplicate
+rows from concurrent calls to this helper. A duplicate-key loser reads the winner;
+it does not reset consent, metadata or coordinates. The public member id remains
+random per insertion, so deletion/recreation cannot let an old request match a
+new incarnation with a reused generation. Persisted identity is checked on return.
+Missing expected persistence fails explicitly rather than returning a fake row.
+
+Non-location membership fields, invitation role/relationship, cadence, demographics,
+and existing legacy member rows are preserved. No frontend, native, SDK, package,
+SOS or production configuration was changed.
+
+## Complete direct production caller inventory
+
+All seven current direct callsites invoke the same corrected helper:
+
+| Callsite | Supplied snapshot / asynchronous work |
+|---|---|
+| server.py verify-otp, signup_invite | Newly inserted user doc after invite resolution, assignment and legacy placeholder linkage |
+| server.py verify-otp, signup_solo | Newly inserted user doc after solo-group creation |
+| server.py verify-otp, login_invite | Previously loaded user after invitation/group transfer and assignment |
+| server.py verify-otp, login_heal | Loaded user after OTP and any family reconciliation |
+| server.py _heal_missing_self_member_rows, startup_migration | Full cursor snapshot before existence checks |
+| family_group.py join, join_already_member | Authenticated current-user snapshot after invite resolution |
+| family_group.py join, join | Authenticated snapshot after ownership checks, transfer and assignment |
+
+All snapshots may be stale. The corrected creation invariant does not depend on
+their preference values, freshness or supplied generation. None of these helper
+calls can make a NEW helper-created row ON. Existing-row linkage before the helper
+and equivalent authority-establishment paths remain explicit review targets, not
+implicitly cleared by this direct-call inventory. Independent read-only review
+of the committed/pushed head follows verification; report its actual verdict,
+including any stop or incomplete broader scope.
+
+## Deterministic verification
+
+backend/tests/test_self_member_consent_creation.py: **32 passed**:
+
+- 14 caller-input/boundary cases (seven labels, lookup and final upsert). Startup
+  executes the actual startup handler; remaining labels exercise the shared helper
+  with stale input, not entire OTP/email/login flows.
+- One member-first withdrawal/user-mirror-gap case.
+- Four ON/OFF/unknown/missing cases proving fail-closed creation, location-free
+  successful check-in, explicit current enable, accepted normal upload and check-in.
+- One post-insertion ON/OFF/ON case preserving generation three and a valid tuple.
+- Two concurrent creator cases, including a simulated duplicate-key loser.
+- One deletion/recreation public-identity case rejecting old publication identity.
+- Two pre-insertion ON/OFF/ON cases: stale work stays OFF; fresh enable recovers.
+- One invitation metadata/member-creation preservation case.
+- Six existing-row cases (ON/OFF, absent/zero/current generation) preserving state.
+
+The existing family-removal offline collection gained only the upsert/$setOnInsert
+behavior required to run its real join/reinvite regression with the corrected helper.
+
+Focused command:
+
+```text
+python -m pytest -q --disable-warnings
+ backend/tests/test_self_member_consent_creation.py
+ backend/tests/test_family_member_removal.py
+ backend/tests/test_startup_sync_consent_race.py
+ backend/tests/test_startup_repair_consent_race.py
+ backend/tests/test_checkin_location_consent.py
+ backend/tests/test_location_consent_write_race.py
+ backend/tests/test_task123_welfare_check.py
+ backend/tests/test_coordinate_capture_integrity.py
+ backend/tests/test_task101_location_name_persistence.py
+```
+
+Result: **133 passed**, exit 0 (32 creation + 3 real family-removal/reinvite
+regressions + 26 sync + 22 heal + 25 check-in/welfare + 11 upload + 6 welfare
+endpoint + 6 coordinate integrity + 2 label persistence).
+
+Sixteen additional isolated runs, all exit 0:
+
+```text
+test_authoritative_escalation_completion: 18
+test_battery_alert_lifecycle: 48
+test_battery_atomic_state: 6
+test_battery_dedup_concurrent: 9
+test_billing_webhook_reconciliation: 6
+test_build48_alert_phone_backfill: 12
+test_call_button_phone_field: 10
+test_coordinate_capture_integrity: 6
+test_device_presence: 11
+test_device_snapshot_tracking_mode_contract: 5
+test_family_member_removal: 3
+test_jwt_secret_config: 10
+test_missed_medication_summary: 9
+test_task101_location_name_persistence: 2
+test_medication_occurrence_reliability: 34
+test_task107_stationary_battery: 3
+```
+
+These runs total **192**. Without counting duplicate files/tests, current distinct
+isolated backend evidence is **314 passed across 22 files**. Full backend:
+**UNVERIFIED, not run**. Previous combined legacy evidence remains 19 passed /
+3 event-loop failures; that combined command was not rerun in this correction.
+Stationary cases independently passed again.
+
+Frontend command (same ten patterns as preceding supplement): **268 passed /
+10 suites**, exit 0: 207 B1/location + 44 medication/check-in + 17 SOS/routing.
+Jest still uses --forceExit; full frontend/TypeScript/lint not claimed.
+python -m py_compile backend/family_group.py backend/server.py and git diff --check:
+passed. No physical/native or real-database concurrency claim follows these models.
+
+Real MongoDB and Android process-death/across-runtime validation remain deferred
+and unstarted. No Android compile/build or physical validation performed.
+No merge, Railway deployment, production mutation, OTA, production Android
+release/build or Play submission performed or authorized.
