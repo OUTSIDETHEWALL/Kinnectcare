@@ -8,6 +8,7 @@ from pymongo.errors import DuplicateKeyError
 import os
 import json
 import logging
+import math
 import uuid
 import asyncio
 from pathlib import Path
@@ -7079,6 +7080,51 @@ async def diagnostics_my_members(current=Depends(get_current_user)):
     }
 
 
+def _family_device_snapshot(snapshot: Any) -> Optional[Dict[str, Any]]:
+    """Public health schema, independent of arbitrary retained/legacy contents.
+
+    Adding an input field must NOT automatically make it family-readable.
+    Check scalar types too: a legacy object under an otherwise safe key must
+    not smuggle native GPS or other private metadata through the allowlist.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    fields = {
+        "at": (str, datetime),
+        "stored_at": (str, datetime),
+        "device_model": (str,),
+        "ota_update_id": (str,),
+        "ota_channel": (str,),
+        "app_state": (str,),
+        "listeners_attached": (bool,),
+        "sdk_enabled": (bool,),
+        "sdk_is_moving": (bool,),
+        "sdk_tracking_mode": (str,),
+        "activity_age_ms": (int, float),
+        "motion_age_ms": (int, float),
+        "location_age_ms": (int, float),
+        "hb_js_age_ms": (int, float),
+        "hl_inv_age_ms": (int, float),
+        "hl_hb_age_ms": (int, float),
+        "http_att_age_ms": (int, float),
+        "http_ok_age_ms": (int, float),
+    }
+    safe = {}
+    for key, types in fields.items():
+        if key not in snapshot:
+            continue
+        value = snapshot[key]
+        if value is None:
+            safe[key] = None
+        elif isinstance(value, types):
+            if isinstance(value, bool) and bool not in types:
+                continue
+            if isinstance(value, (int, float)) and not math.isfinite(value):
+                continue
+            safe[key] = _to_utc_iso(value) if isinstance(value, datetime) else value
+    return safe
+
+
 @api_router.get("/diagnostics/family-snapshot")
 async def diagnostics_family_snapshot(current=Depends(get_current_user)):
     """Task #21 Deliverable 2 — Side-by-side device comparison.
@@ -7146,13 +7192,10 @@ async def diagnostics_family_snapshot(current=Depends(get_current_user)):
         else:
             d["last_seen_age_ms"] = None
 
-        # Normalise device_snapshot datetimes if any sneaked in as BSON Date.
-        ds = d.get("device_snapshot")
-        if isinstance(ds, dict):
-            for k in ("at",):
-                v = ds.get(k)
-                if hasattr(v, "isoformat"):
-                    ds[k] = _to_utc_iso(v)
+        # Always project, including while ON and for the linked self. This is
+        # a family health endpoint, not a raw/private diagnostic reader.
+        # Never mutate retained storage or infer consent for unknown extras.
+        d["device_snapshot"] = _family_device_snapshot(d.get("device_snapshot"))
         out.append(d)
 
     return {
@@ -7174,7 +7217,9 @@ class DeviceSnapshotUpdate(BaseModel):
     fired, as measured on the device at the time of the push.  None / absent
     means the stage has never fired on this device since the last app install.
     """
-    model_config = ConfigDict(extra="allow")
+    # Keep older/future callers compatible (no extra-field 422), but persist
+    # only supported health fields. Read-side protection also covers old bags.
+    model_config = ConfigDict(extra="ignore")
 
     at: Optional[str] = None           # ISO timestamp of the snapshot
     device_model: Optional[str] = None
@@ -7236,10 +7281,8 @@ async def put_device_snapshot(
             detail="You can only update your own device snapshot.",
         )
 
-    # Store the entire payload verbatim under `device_snapshot` — no field-
-    # level merge needed because the client always sends the full snapshot.
-    # model_dump(exclude_unset=True) drops fields the client didn't send so
-    # we don't wipe previously stored values with nulls from an older build.
+    # Replace with the supported health snapshot, never arbitrary extras.
+    # Absent fields stay absent; explicit nulls retain their existing meaning.
     snapshot = data.model_dump(exclude_unset=True)
     snapshot["stored_at"] = datetime.now(timezone.utc).isoformat()
 

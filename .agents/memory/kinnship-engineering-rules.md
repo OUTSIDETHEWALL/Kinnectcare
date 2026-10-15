@@ -151,6 +151,9 @@ Linked self-diagnostics may retain own diagnostic history while OFF;
 Caregiver/creator/group ownership or requesting a refresh is not ownership of
 another person's GPS. A requester may retain safe refresh status without precise
 location; status authority and location authority are separate.
+Family health snapshots remain deliberate safe projections even while sharing is
+ON. Unknown stored extras are not family-publication authority; do not invent a
+raw-self exception on a shared health endpoint.
 Retention is separate from disclosure: do not delete history merely to hide it.
 Internal precise storage alone is not a privacy release blocker; establish a
 realistic disclosure or authority path, rather than treating every GPS copy as public.

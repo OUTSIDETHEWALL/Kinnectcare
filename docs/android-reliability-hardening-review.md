@@ -1697,3 +1697,123 @@ Real MongoDB concurrency, Android process-death/across-runtime, Android compile/
 build and physical acceptance remain deferred/unstarted or unverified as applicable.
 No merge, Railway deployment, production mutation, OTA, Android build/release
 or Google Play submission occurred.
+
+---
+
+# Family device-snapshot privacy correction
+
+The confirmed extra-bag disclosure is corrected narrowly in backend/server.py.
+The original server contract accepted arbitrary coordinate-bearing extras and
+forwarded the retained device_snapshot verbatim to another family reader.
+Confidence in cause and repair is high at the API boundary. No claim is made
+that the current fixed-field frontend publisher emits GPS, or that production
+contains such snapshots.
+
+## Deliberate read schema and compatible write strategy
+
+_family_device_snapshot() explicitly permits only these 18 health fields:
+
+```text
+at stored_at device_model ota_update_id ota_channel app_state
+listeners_attached sdk_enabled sdk_is_moving sdk_tracking_mode
+activity_age_ms motion_age_ms location_age_ms hb_js_age_ms
+hl_inv_age_ms hl_hb_age_ms http_att_age_ms http_ok_age_ms
+```
+
+String, boolean, and finite numeric fields are type-checked; arbitrary nested
+objects/lists cannot be hidden under an allowlisted scalar key. Null retains
+its meaning. BSON timestamp datetimes normalize to UTC without mutating storage.
+Invalid fields are omitted individually rather than losing the whole useful
+snapshot. Non-object legacy snapshots become null.
+
+diagnostics_family_snapshot() ALWAYS applies this projection, including while
+ON and for the linked self. It is a shared family-health endpoint, not an
+explicit raw-self endpoint. No new raw-self exception or role-based privilege
+was introduced. Existing distinct self-diagnostic APIs remain unchanged.
+
+DeviceSnapshotUpdate now ignores unknown input fields rather than accepting/
+persisting them. This preserves successful writes by older/future callers that
+include extras, rather than introducing an extra-field 422. All fields emitted
+by the current checked-in publisher remain supported, including string tracking
+mode, explicit nulls, timestamps and all eight stage ages.
+
+Read-side protection is independent of input filtering: existing retained bags
+are safely projected without deletion or mutation. No withdrawal cleanup,
+retention changes, generation backfill or raw diagnostic redesign.
+
+## Deterministic evidence
+
+51 new backend/tests/test_family_snapshot_privacy.py cases:
+
+- Actual DeviceSnapshotUpdate -> put_device_snapshot -> actual preference OFF ->
+  actual different-account family reader. Safe fields persist; unknown nested
+  native coordinates, aliases, labels, URLs and provider/pipeline data do not.
+- Legacy pre-correction stored representation tested with sharing ON, OFF and
+  OFF -> ON, against family viewer, linked self and creator/group owner.
+  Storage is unchanged; every family response is safe.
+- Actual current publisher field shape writes/reads while ON and OFF, retaining
+  all supported metrics, battery/movement/GPS-quality and contact-age context.
+- Missing, zero and BSON Int64 generations: old extras cannot revive; fresh
+  safe replacement works.
+- All 18 allowlisted keys tested with a nested private object in place of their
+  declared scalar value. The poisoned field is omitted, others preserved.
+- Non-object bags, invalid/nonfinite numeric ages, BSON timestamps, partial old
+  clients, explicit nulls and absent snapshots.
+- Unrelated family sees no target; caregiver cannot write target telemetry;
+  wrong-family writer denied; both HTTP endpoints require authentication.
+- Assertions inspect the COMPLETE JSON response and independently enumerate
+  allowed keys/scalar shapes, not just a GPS-name blacklist.
+
+## Verification at correction
+
+Focused command: prior twelve focused backend files PLUS
+backend/tests/test_family_snapshot_privacy.py.
+**288 passed**, exit 0 = prior 237 + new 51.
+
+The same sixteen additional isolated files enumerated previously:
+**192 passed**, each successful exit 0. The first batch exceeded its shell time
+budget after eleven files; only the unfinished five were resumed, not a
+redundant rerun of passing files.
+
+Deduplicated total: **469 distinct backend tests / 26 files**.
+Preserved counts: refresh traces 32, pipeline 40, history 32, self creation 32,
+startup heal/sync 22/26, upload 11, check-in/welfare 25 plus additional welfare 6,
+family removal 3, coordinate tuple/label 6/2, presence 11, stationary battery 3,
+backend medication reliability 34.
+
+Compilation and git diff --check passed. Full backend remains UNVERIFIED.
+Previous combined evidence remains 19 passed / 3 legacy loop failures; combined
+backend and real-service integration tests were not rerun.
+
+Frontend command: prior ten patterns PLUS deviceComparison:
+
+```text
+cd frontend && npm test -- --runInBand --forceExit
+ trackingRevocationAuthority androidTrackingRecovery androidLocationPublication
+ trackingReliabilityHardening missedCheckinReturnButton pushMedicationReliability
+ sosPermissionRegression medicationAcknowledgment medicationAcknowledgeModal
+ medicationNotificationRoute deviceComparison
+```
+
+Initial invocation hit its shell time budget. Completed background invocation:
+**292 passed / 3 failed, 11 suites passed / 1 failed, 295 total**, exit 1.
+Failures were in pushMedicationReliability.test.ts: two mocked listener arrays
+were empty after un-awaited renderer creation plus 10ms sleeps, and one timed
+queue-drain assertion saw 11 rather than 21. A teardown/late-require warning
+also appeared.
+
+Isolated --runTestsByPath src/__tests__/pushMedicationReliability.test.ts:
+**15 passed / 2 failed / 17 total**, exit 1. Queue drain passed; the two
+callback-not-a-function assertions remained. No frontend source/test/config
+changed from starting HEAD; no independent repair or repeated retry loop.
+This is NOT a fully green frontend run and NOT the earlier 268-pass claim.
+Across completed runs, 293 distinct cases passed and two remain failing.
+B1/location 207 passed; SOS/routing 17 passed; Device Comparison 27 passed.
+Medication/check-in: combined 41 passed / 3 failed, isolated evidence improves
+one of those failures; two remain unresolved. These test-harness failures do
+not by themselves establish a new production Critical/High defect.
+
+No live MongoDB concurrency or Android process-death validation, Android build/
+compile, physical acceptance, merge, Railway deployment, production mutation,
+OTA or Play submission occurred. Read-only diagnostic audit follows commit/push;
+its actual verdict is recorded separately, not assumed from test success.
