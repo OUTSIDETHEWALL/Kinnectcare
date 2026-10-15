@@ -2527,6 +2527,66 @@ async def delete_account(
 
 
 # ========== Members ==========
+def _member_location_view(doc: dict, current: dict, authority: dict) -> dict:
+    """Final response-only privacy fence. Never mutate retained diagnostics."""
+    if not current.get("id"):
+        raise HTTPException(status_code=403, detail="Authenticated user required")
+    if (not authority or authority.get("id") != doc.get("id")
+            or authority.get("family_group_id") != current.get("family_group_id")):
+        raise HTTPException(status_code=404, detail="Member not found")
+    view = dict(doc)
+    subject = authority.get("user_id")
+    generation = authority.get("location_consent_generation", 0)
+    same_identity = doc.get("user_id") == subject
+    is_self = bool(subject) and subject == current["id"] and same_identity
+    current_scope = (
+        same_identity
+        and authority.get("location_sharing_enabled") is True
+        and isinstance(generation, int) and not isinstance(generation, bool)
+        and generation >= 0
+        and doc.get("location_sharing_enabled") is True
+        and doc.get("location_consent_generation", 0) == generation
+    )
+    trace = doc.get("location_pipeline")
+    if isinstance(trace, dict):
+        trace_generation = trace.get("location_consent_generation")
+        own_trace = is_self and (
+            "subject_user_id" not in trace or trace["subject_user_id"] == subject
+        )
+        family_trace = (
+            current_scope
+            and "subject_user_id" in trace and trace["subject_user_id"] == subject
+            and isinstance(trace_generation, int)
+            and not isinstance(trace_generation, bool)
+            and trace_generation == generation
+        )
+        if not (own_trace or family_trace):
+            # Omit the WHOLE arbitrary diagnostic payload, including future
+            # coordinate aliases, provider/native snapshots, labels and map URLs.
+            view["location_pipeline"] = None
+    else:
+        view["location_pipeline"] = None
+    if not is_self and not current_scope:
+        # A read may have fetched the old tuple before an await/withdrawal.
+        # Do not return it beside a redacted pipeline or a stale ON flag.
+        for field in ("latitude", "longitude", "location_name",
+                      "captured_at", "coordinate_captured_at"):
+            view[field] = None
+        view["location_sharing_enabled"] = (
+            authority.get("location_sharing_enabled") is True
+        )
+    return view
+
+
+async def _current_member_location_view(doc: dict, current: dict) -> dict:
+    authority = await db.members.find_one(
+        {"id": doc["id"], "family_group_id": current["family_group_id"]},
+        {"_id": 0, "id": 1, "family_group_id": 1, "user_id": 1,
+         "location_sharing_enabled": 1, "location_consent_generation": 1},
+    )
+    return _member_location_view(doc, current, authority)
+
+
 @api_router.get("/members", response_model=List[FamilyMember])
 async def list_members(current=Depends(get_current_user), request: Request = None):
     docs = await db.members.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).to_list(1000)
@@ -2658,7 +2718,18 @@ async def list_members(current=Depends(get_current_user), request: Request = Non
                         break
         except Exception:
             logger.warning("device_presence failed during members response", exc_info=True)
-    return [FamilyMember(**d) for d in docs]
+    # One final authority fetch after all geocoding/presence awaits. No await
+    # between this decision and serialization of the complete response.
+    authorities = await db.members.find(
+        {"family_group_id": current["family_group_id"]},
+        {"_id": 0, "id": 1, "family_group_id": 1, "user_id": 1,
+         "location_sharing_enabled": 1, "location_consent_generation": 1},
+    ).to_list(1000)
+    by_id = {d["id"]: d for d in authorities}
+    return [
+        FamilyMember(**_member_location_view(d, current, by_id[d["id"]]))
+        for d in docs if d["id"] in by_id
+    ]
 
 
 @api_router.post("/members", response_model=FamilyMember)
@@ -2739,7 +2810,7 @@ async def update_member(member_id: str, data: FamilyMemberUpdate, current=Depend
             {"id": member_id, "family_group_id": current["family_group_id"]},
             {"_id": 0},
         )
-        return FamilyMember(**doc)
+        return FamilyMember(**_member_location_view(doc, current, doc))
     payload["last_seen"] = datetime.now(timezone.utc)
     r = await db.members.update_one(
         {"id": member_id, "family_group_id": current["family_group_id"]},
@@ -2751,7 +2822,7 @@ async def update_member(member_id: str, data: FamilyMemberUpdate, current=Depend
         {"id": member_id, "family_group_id": current["family_group_id"]},
         {"_id": 0},
     )
-    return FamilyMember(**doc)
+    return FamilyMember(**_member_location_view(doc, current, doc))
 
 
 @api_router.get("/members/{member_id}", response_model=FamilyMember)
@@ -2805,7 +2876,7 @@ async def get_member(member_id: str, current=Depends(get_current_user)):
             "mongo_write_at": _to_utc_iso(doc.get("location_pipeline_mongo_write_at")),
             "members_response_at": datetime.now(timezone.utc).isoformat(),
         }
-    return FamilyMember(**doc)
+    return FamilyMember(**await _current_member_location_view(doc, current))
 
 
 @api_router.delete("/members/{member_id}")
@@ -3613,7 +3684,8 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 logger.warning("device_presence failed after privacy-suppressed location upload", exc_info=True)
             # Re-read after the best-effort stamp so the response includes it.
             doc = await db.members.find_one({"id": member_id}, {"_id": 0})
-            return LocationWriteResponse(**doc, location_write_accepted=False,
+            return LocationWriteResponse(**_member_location_view(doc, current, doc),
+                location_write_accepted=False,
                 location_write_rejection_reason="sharing_disabled") if doc else LocationWriteResponse(
                 id=member_id, owner_id=current["id"], name="", age=0,
                 phone="", gender="", role="family", location_write_accepted=False,
@@ -3854,6 +3926,10 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # first server observation and its provenance is retained.
     if incoming_captured_at is not None and not coord_suppressed:
         update["location_pipeline"] = {
+            # Same immutable authority as the coordinate CAS; never refreshed
+            # from a later read or implicitly granted to legacy snapshots.
+            "location_consent_generation": consent_generation,
+            "subject_user_id": target.get("user_id"),
             "trace_id": str(uuid.uuid4()),
             "native_gps_at": _to_utc_iso(incoming_captured_at),
             "native_latitude": data.latitude,
@@ -4045,9 +4121,16 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         # Do not serialize the pre-stamp snapshot: callers should observe a
         # successful presence write in this same location response.
         refreshed_doc = await db.members.find_one({"id": member_id}, {"_id": 0})
-        if refreshed_doc:
-            doc = refreshed_doc
-    return LocationWriteResponse(**doc, location_write_accepted=write_accepted and not coord_suppressed,
+        if not refreshed_doc:
+            raise HTTPException(status_code=404, detail="Member not found")
+        # This full reread is already the last await; use it as authority.
+        doc = _member_location_view(refreshed_doc, current, refreshed_doc)
+    else:
+        # Owner-assisted writes have awaited diagnostics/history since the
+        # member snapshot was captured. They need a final authority read.
+        doc = await _current_member_location_view(doc, current)
+    return LocationWriteResponse(**doc,
+        location_write_accepted=write_accepted and not coord_suppressed,
         location_write_rejection_reason=rejection_reason)
 
 
@@ -4119,7 +4202,7 @@ async def patch_member_battery(
         doc = await db.members.find_one({"id": member_id}, {"_id": 0})
         if not doc:
             raise HTTPException(status_code=404, detail="Member not found after update")
-        return FamilyMember(**doc)
+        return FamilyMember(**_member_location_view(doc, current, doc))
 
     logger.info(
         f"battery-patch: member={member_id} "
@@ -4153,7 +4236,7 @@ async def patch_member_battery(
     doc = await db.members.find_one({"id": member_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Member not found after update")
-    return FamilyMember(**doc)
+    return FamilyMember(**_member_location_view(doc, current, doc))
 
 
 @api_router.get("/members/{member_id}/location-history")
@@ -4289,7 +4372,7 @@ async def update_checkin_settings(member_id: str, data: CheckinSettings, current
         {"id": member_id, "family_group_id": current["family_group_id"]},
         {"_id": 0},
     )
-    return FamilyMember(**doc)
+    return FamilyMember(**_member_location_view(doc, current, doc))
 
 
 # ========== Alerts ==========

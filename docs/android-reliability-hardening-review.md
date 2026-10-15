@@ -1234,3 +1234,138 @@ precise remaining blocker; do not finish with only a review-resumption statement
 Real MongoDB concurrency and Android process-death follow-ups remain deferred,
 unstarted. No merge, Railway deployment, production mutation, OTA, production
 Android build/release or Play submission performed or authorized.
+
+---
+
+# Location-pipeline privacy correction
+
+## Root cause and strategy
+
+The accepted coordinate CAS also writes precise native/stored coordinates in
+members.location_pipeline. Withdrawal clears the root tuple but deliberately
+retains diagnostic evidence. FamilyMember responses previously serialized that
+arbitrary nested object without a consent-lifetime or linked-self distinction.
+
+New pipeline snapshots carry the ORIGINAL upload's consent generation and linked
+subject_user_id, in the SAME guarded MongoDB mutation as coordinates. Old
+snapshots are not backfilled, retagged, or refreshed into newer authority.
+
+The shared response-only privacy fence preserves a pipeline for:
+
+- Explicit authenticated linked self, including own retained legacy diagnostics
+  while OFF; explicit foreign-subject snapshots are excluded.
+- Another family account ONLY when snapshot subject/generation match the current
+  affirmative member lifetime, and the response's member snapshot has the same
+  identity/generation as current authority.
+
+Otherwise the ENTIRE pipeline object is omitted (null), not four guessed field
+names. Arbitrary aliases, native/provider payloads, labels and map URLs therefore
+cannot bypass denial. Caregiver, creator, group-owner and family membership are
+not self ownership. Unverified/malformed/legacy pipeline authority is never guessed.
+Valid BSON Int64 counters remain supported; boolean counters are not authority.
+
+GET /members and GET /members/{id} apply the fence after geocoding/presence awaits.
+The list uses one final bulk authority fetch. The single route rechecks authority.
+Family snapshots invalidated by withdrawal/cycling/relinking also lose their stale
+root coordinates, label and capture timestamps in the returned copy.
+
+Other ordinary responses using the SAME FamilyMember payload are fenced too:
+profile update, battery patch, check-in settings and LocationWriteResponse,
+including early sharing-disabled and delayed owner-assisted upload responses.
+Where a full member reread is already the last await, that reread is the authority;
+no redundant second DB read is added. Delayed owner-assisted uploads need a final
+authority read because ingest/history awaits follow their original snapshot.
+Brand-new create_member responses have no pipeline/coordinates to disclose.
+
+No retained diagnostic data is deleted. OFF -> ON leaves old pipeline snapshots
+private; a fresh accepted current-generation upload restores valid family
+pipeline and live-coordinate behavior. The static "Location Sharing Off" notice
+is not a precise location label. captured_at may remain an internal ordering
+timestamp after re-enable, without a visible coordinate tuple/pipeline; OFF family
+responses suppress capture timestamps. coordinate_captured_at remains cleared
+until a fresh displayed coordinate is accepted.
+
+## Real write boundary and deterministic tests
+
+There is no independent delayed pipeline insert: pipeline, coordinates and
+server write timestamp share the existing consent-generation + timestamp CAS.
+Tests pause that actual update_one BEFORE predicate evaluation, withdraw through
+real update_my_preferences(), then release the update. Both withdrawal and
+OFF -> ON reject the stale request without replacing retained private metadata.
+This is an offline predicate-enforcing model, NOT real MongoDB concurrency proof.
+
+40 new tests in backend/tests/test_location_pipeline_consent.py passed:
+
+- Both member endpoints: real accepted upload -> real OFF -> entire response
+  inspection, arbitrary nested private evidence absent, stored diagnostics intact.
+- Both endpoints: linked self retains own OFF diagnostics; creator/group owner
+  does not acquire self access.
+- Six OFF -> ON cases (missing/zero/BSON Int64 initial generation, both endpoints):
+  old pipeline cannot revive; fresh upload restores current trace and live tuple.
+- Four real guarded-write races (OFF or OFF -> ON, both endpoints).
+- Six post-geocode family races (OFF, OFF -> ON, relinking, both endpoints).
+- Two post-geocode self relink races; two family-move response denials.
+- Five nonaffirmative authority cases; five unverified/foreign trace-scope cases,
+  including legacy self-only evidence and explicit foreign-subject exclusion.
+- Unrelated-family and no-token HTTP checks for both member endpoints.
+- Owner-assisted upload response while OFF, and accepted upload delayed before
+  response until after withdrawal: truthful acceptance receipt, no GPS disclosure.
+
+One directly required existing stationary-battery test double now supplies the
+additional final family-response authority read. Assertions and test count are
+unchanged. Initial isolated device-presence/stationary fixture exhaustion exposed
+redundant rereads; final code reuses existing post-presence/full rereads where
+they already form the last await. Final isolated presence/stationary runs passed.
+
+## Verification on the corrected source
+
+Focused backend command:
+
+```text
+python -m pytest -q --disable-warnings
+ backend/tests/test_location_pipeline_consent.py
+ backend/tests/test_location_history_consent.py
+ backend/tests/test_self_member_consent_creation.py
+ backend/tests/test_family_member_removal.py
+ backend/tests/test_startup_sync_consent_race.py
+ backend/tests/test_startup_repair_consent_race.py
+ backend/tests/test_checkin_location_consent.py
+ backend/tests/test_location_consent_write_race.py
+ backend/tests/test_task123_welfare_check.py
+ backend/tests/test_coordinate_capture_integrity.py
+ backend/tests/test_task101_location_name_persistence.py
+```
+
+**205 passed**, exit 0: 40 pipeline + 32 history + previous 133 focused tests.
+The sixteen additional isolated files enumerated above also passed, **192 total**
+(11 device-presence and 3 stationary tests included). Excluding repeated files:
+**386 distinct isolated backend tests across 24 files**.
+
+Prior regression counts remain: self-member 32; startup heal 22; startup sync 26;
+upload 11; check-in/welfare privacy 25; additional welfare 6; family removal 3;
+coordinate tuple 6; geocoded label persistence 2; medication reliability 34.
+History's exact-lifetime/final-read/immutable-tag/legacy-self/TTL tests all passed.
+No history API or retention code changed.
+
+Frontend:
+
+```text
+cd frontend && npm test -- --runInBand --forceExit
+ trackingRevocationAuthority androidTrackingRecovery androidLocationPublication
+ trackingReliabilityHardening missedCheckinReturnButton pushMedicationReliability
+ sosPermissionRegression medicationAcknowledgment medicationAcknowledgeModal
+ medicationNotificationRoute
+```
+
+**268 passed / 10 suites**, exit 0: 207 B1/location + 44 medication/check-in +
+17 SOS/routing. Existing Jest open-handle warning remains; no cleanup attempted.
+Python compilation and git diff --check passed. Public preview renders the
+disclaimer; signed-in UI/native behavior not visually verified.
+
+Full backend **UNVERIFIED**. Previous combined 19 passed / 3 legacy event-loop
+failures was not rerun or converted into a full PASS. Native compilation, Android
+build, physical acceptance and process-death validation not performed.
+Real MongoDB concurrency and Android process-death remain deferred, unstarted.
+No merge, Railway deployment, production mutation, OTA, Android build/release or
+Play submission performed. The read-only diagnostic disclosure audit follows
+commit/push; its actual verdict must be returned before ending this run.
