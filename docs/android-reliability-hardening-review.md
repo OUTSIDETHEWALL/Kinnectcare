@@ -1,10 +1,10 @@
 # Android reliability hardening — pre-merge review
 
-**Latest correction: IOS CONFIRMED-REMOVAL SHUTDOWN BLOCKER CLEARED.**
-The separately authorized platform-aware correction and deterministic regressions
-pass. Broader Critical/High review resumes after this narrow correction is pushed.
-Read the final continuation supplement; earlier supplements are historical
-evidence, not current release approval.
+**Latest verdict: RED — NEW RELEASE BLOCKER FOUND.**
+IOS CONFIRMED-REMOVAL SHUTDOWN BLOCKER: CLEARED, verified and pushed.
+Resumed review proved a separate reachable SOS dependency on a pending optional
+GPS/settings result. SOS source remains unchanged; review stopped.
+Read the final supplement; earlier verdicts are historical evidence.
 
 **Status: STOP BEFORE MERGE. Draft review only; no release authorization.**
 
@@ -2331,3 +2331,137 @@ docs/android-reliability-hardening-review.md
 No merge, deploy, production mutation, OTA, Android compilation/build/release,
 Play submission, real MongoDB concurrency, process-death or device testing.
 Broader source-review verdict follows after the narrow correction push.
+
+## Resumed review after iOS correction — High SOS blocker / STOP
+
+**RED — NEW RELEASE BLOCKER FOUND.**
+**IOS CONFIRMED-REMOVAL SHUTDOWN BLOCKER: CLEARED.**
+
+The narrow iOS correction is committed and pushed, with local/remote/PR head
+verified equal. The PR remains open/unmerged. The following finding is independent
+of that correction. No SOS or medication application source was modified.
+
+### Exact source, reachability and provenance
+
+frontend/app/sos-sending.tsx run() awaits foreground permission and then
+Location.getCurrentPositionAsync before calling api.post('/sos'). No application
+deadline or parallel dispatch exists around this optional location stage.
+The automatic 911 dialer is later in the same sequence, after the POST.
+
+This is live application code: the dashboard's completed SOS countdown routes
+to /sos-sending, as does the welfare response's Need Help path. It is not dead
+code or a hypothetical alternative implementation.
+
+The screen is identical to supplied base 247c93ffa4ec8a3406de8bacb2ba99b7542a7c19;
+its last source change predates the current correction. This is a pre-existing
+reachable safety/reliability defect discovered during the authorized SOS review,
+not a regression introduced by the iOS fix or attributed to PR #166.
+
+### Realistic sequence
+
+1. A user completes the dashboard SOS countdown during an emergency.
+2. Foreground location permission is already granted.
+3. The optional current-location request remains pending. One concrete native
+   route is Android location settings resolution: the installed Expo module
+   waits for an activity result before requesting a fix or rejecting the request.
+   Leaving that dialog unresolved leaves this Promise unresolved.
+4. The screen remains at Attaching location. The healthy network is never used
+   to create the SOS alert, so backend push/SMS fanout never starts.
+5. The app's automatic emergency dialer is also not reached. The screen provides
+   a Retry action only on error; a pending location result is not an error.
+
+This does not assert that every Android GNSS request is unbounded. A provider
+may reject/timeout normally; that settled path works. The defect is making the
+emergency dispatch depend on optional asynchronous location/settings completion
+without an application bound or independent alarm path.
+
+### Deterministic proof
+
+Temporary tests outside the repository reuse the committed
+sosPermissionRegression harness and real SOSSending component. Foreground
+permission resolves granted; the API mock is healthy. Mount/effects/timers are
+awaited, and both permission and GPS invocation are asserted before the result:
+
+- Pending location/settings result, advance 120 seconds: **FAIL**; expected
+  POST /sos with unavailable coordinates, observed **zero POST calls**.
+- Rejected optional location, same harness/network: **PASS**; SOS posts without
+  coordinates and reaches confirmation.
+
+Selected comparison: **1 failed / 1 passed / 3 skipped**, exit 1.
+This is not notification-listener-readiness timing: the native location request
+was already invoked and its pending result is the deliberate controlled input.
+The 120 seconds demonstrate the blocked application path; they are not a claim
+of a physical-device delay or a product-selected GPS deadline.
+
+The test and control are temporary duplicates, not additional tests within the
+307 passing checked-in frontend tests. No live alarm, network request or device
+test occurred. No production data or location permissions were changed.
+
+### Severity, confidence and minimum correction
+
+**High — core SOS reliability with safety impact.** High confidence in the
+reachable application dependency and blocked emergency POST. Actual device
+frequency and OS-dialog behavior were not physically measured.
+
+Violated invariant: optional/best-effort location must not prevent a genuine
+emergency alert from being sent when the server is reachable. A missing or
+pending fix is not emergency-send authority and must not gate dispatch.
+The existing backend accepts SOS without coordinates, and existing denied/rejected
+location controls demonstrate that supported behavior.
+
+Smallest conceptual correction, separately authorized: bound or decouple the
+optional location stage so the existing SOS POST proceeds with coordinates only
+if available in time; otherwise send without them. Preserve the distinction
+between actual server acceptance and mere send intent, single-alert/retry
+semantics, explicit emergency location behavior, and truthful dialer/failure UI.
+Do not reuse ordinary-sharing authority as an SOS suppression condition.
+
+Minimum regressions: real screen with granted permission/pending GPS sends once
+within a selected bounded budget; pending settings/permission completion cannot
+block indefinitely; late GPS cannot send a duplicate; normal fix and explicit
+GPS rejection/denial still work; network failure does not claim success;
+retry and dialer behavior remain correct.
+
+**STOP: the independent SOS blocker is NOT FIXED.**
+
+### Review coverage and exact remaining boundary
+
+Since the iOS push, inspected native state persistence/lock/CAS/shutdown
+reservation, dead-process mutation bookkeeping, configuration/acquisition claims,
+lease/cooldown/backoff, JS authority bindings, wake ownership validation,
+receipt-bound bounded acquisition, native shutdown fencing, engine startup/
+recovery/token/stop/restart diffs and patrol's Android recovery behavior.
+No additional Critical/High defect was established in those inspected paths.
+This is source inspection, not native compilation or process-death validation.
+
+Medication inspection covered exact-occurrence resolution, acknowledgment claim
+versus family escalation, durable taken-log ordering, provider completion
+classification and notification action/routing portions. It did not finish the
+full medication restoration/delivery/cumulative review.
+
+SOS review traced actual dashboard/welfare entry points, real sending UI and
+backend's location-optional authenticated alert creation and family fanout.
+Review stopped at the proven optional-GPS/settings dependency, before full SOS
+delivery/routing clearance.
+
+Remaining: complete medication and SOS source review after separate blocker
+correction; finish outstanding shared/iOS/native call-site and cumulative
+interaction assessment; complete the original October 13 eight-part source
+replay. Native/authority/FGS inspection above is retained, not restarted.
+The original-incident archive was inventoried only in this continuation.
+No completed incident replay or original stop-caller attribution is claimed.
+
+Cleared privacy audits remain cleared and were not repeated. No changes to
+backend, native implementation, medication or SOS followed the narrow iOS push.
+Full backend remains UNVERIFIED; 507/27 isolated backend baseline is preserved.
+The current checked-in frontend remains 307/307 passing alongside this separate
+adversarial failure; earlier medication timing failures remain recorded.
+
+Next stage: separate authorization for the narrow SOS optional-location
+dependency correction, then finish the stated remaining source-review boundary.
+Android compile/build is NOT yet cleared.
+
+Real MongoDB concurrency, Android process-death/across-runtime, Android
+compile/build, physical acceptance, burn-in and road tests remain NOT STARTED.
+No merge, Railway deployment, production mutation, OTA, Android build/release,
+Play submission or force-push occurred.

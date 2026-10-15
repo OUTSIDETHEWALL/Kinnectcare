@@ -29,3 +29,15 @@ Also exercise a newly mounted navigation root inside an already-live Android JS 
 **Why:** Real Android beta evidence showed a medication tap dispatched with a previous root's readiness while the new root was still restoring authentication. The acknowledgment route was selected early, then normal startup navigation replaced it with Family.
 
 **How to apply:** Preserve process-level state during remount tests, delay session restoration and navigator commitment independently, and assert the exact pending occurrence survives until the current root is ready. A requested route replacement is not proof that the navigator has committed it.
+
+Cross-runtime authority models must follow the real replacement contract and
+restore their state between independent tests; clearing mock call counts is
+not a reset of durable/native authority.
+
+**Why:** Attempting to authorize over a live owner did not create the intended
+replacement, and leaving a replacement active changed later root-test behavior.
+Those harness errors can masquerade as production lifecycle regressions.
+
+**How to apply:** Establish a real revocation/settled-shutdown/rebind transition
+before asserting stale-owner safety, verify the intended replacement exists,
+and isolate independent tests while deliberately preserving state in remount tests.
