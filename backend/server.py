@@ -4107,7 +4107,13 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # v1.3.3 — match this GPS upload to a pending refresh trace
     # so /api/diagnostics/refresh-traces can show end-to-end latency.
     try:
-        _trace_record_gps(member_id, data.latitude, data.longitude)
+        _trace_record_gps(
+            member_id, data.latitude, data.longitude,
+            subject_user_id=target.get("user_id"),
+            family_group_id=current["family_group_id"],
+            consent_generation=consent_generation,
+            publication_accepted=write_accepted,
+        )
     except Exception as _e:
         pass
     # Location may still be owner-assisted for the existing correction flow,
@@ -6449,7 +6455,13 @@ def _trace_record_request(member_id: str, requester_user_id: str, request_id: st
     return entry
 
 
-def _trace_record_gps(member_id: str, lat: float, lon: float) -> None:
+def _trace_record_gps(
+    member_id: str, lat: float, lon: float, *,
+    subject_user_id: Optional[str] = None,
+    family_group_id: Optional[str] = None,
+    consent_generation: Optional[int] = None,
+    publication_accepted: bool = False,
+) -> None:
     """Match the GPS upload to the most recent pending refresh trace
     for this member (one whose `gps_received_at` is still None and
     `requested_at` is within the last 90 s).  If no match exists, the
@@ -6467,6 +6479,13 @@ def _trace_record_gps(member_id: str, lat: float, lon: float) -> None:
         entry["gps_received_at"] = now_ms
         entry["gps_lat"] = lat
         entry["gps_lon"] = lon
+        # ORIGINAL upload authority, never the refresh requester's identity or
+        # a newer member read after diagnostics/history awaits. Private evidence
+        # can survive withdrawal, but cannot inherit a later ON lifetime.
+        entry["gps_subject_user_id"] = subject_user_id
+        entry["gps_family_group_id"] = family_group_id
+        entry["gps_consent_generation"] = consent_generation
+        entry["gps_publication_accepted"] = publication_accepted is True
         return
 
 
@@ -6927,31 +6946,71 @@ async def diagnostics_refresh_traces(
     Diagnostics page can show end-to-end latency for the four phases:
       request_received -> push_sent -> gps_received.
 
-    For privacy we only return traces the caller is allowed to see:
-      • Traces they themselves requested (caller is `requester_user_id`).
-      • Traces for members in the caller's family_group (so caregivers
-        can see what their seniors' devices did).
+    Status is available to the requester or current family. Precise GPS requires
+    independently verified linked-self ownership or current exact-lifetime family
+    authority. Requesting a refresh never establishes ownership of its GPS.
 
     `limit` capped at 100.  `member_id` optional filter.
     """
+    if not current.get("id"):
+        raise HTTPException(status_code=403, detail="Authenticated user required")
     limit = max(1, min(int(limit or 20), 100))
+    # Freeze evidence BEFORE authority awaits; do not mix later GPS with earlier
+    # authorization. Do not return arbitrary diagnostic bags via **entry.
+    entries = [dict(e) for e in reversed(_REFRESH_TRACE_LOG)
+               if not member_id or e["member_id"] == member_id]
     fg_id = current.get("family_group_id")
-    fg_members = set()
+    viewer = None
     if fg_id:
-        async for m in db.members.find({"family_group_id": fg_id}, {"id": 1}):
-            fg_members.add(m["id"])
+        viewer = await db.users.find_one(
+            {"id": current["id"], "family_group_id": fg_id}, {"_id": 0, "id": 1},
+        )
+    # Final authoritative member fetch follows ALL other awaits. Serialization
+    # below performs no I/O. A stale requester principal grants no family GPS.
+    members = {}
+    if viewer:
+        docs = await db.members.find(
+            {"family_group_id": fg_id},
+            {"_id": 0, "id": 1, "user_id": 1, "family_group_id": 1,
+             "location_sharing_enabled": 1, "location_consent_generation": 1},
+        ).to_list(1000)
+        members = {d["id"]: d for d in docs}
     out = []
-    for entry in reversed(_REFRESH_TRACE_LOG):
-        if member_id and entry["member_id"] != member_id:
+    for entry in entries:
+        member = members.get(entry["member_id"])
+        if entry["requester_user_id"] != current["id"] and not member:
             continue
-        if entry["requester_user_id"] != current["id"] and entry["member_id"] not in fg_members:
-            continue
+        subject = entry.get("gps_subject_user_id")
+        generation = entry.get("gps_consent_generation")
+        is_self = (
+            member is not None and bool(subject)
+            and subject == current["id"] == member.get("user_id")
+        )
+        family_gps = (
+            member is not None
+            and bool(subject)
+            and entry.get("gps_publication_accepted") is True
+            and entry.get("gps_family_group_id") == fg_id
+            and "gps_subject_user_id" in entry and subject == member.get("user_id")
+            and isinstance(generation, int) and not isinstance(generation, bool)
+            and generation >= 0
+            and member.get("location_sharing_enabled") is True
+            and isinstance(member.get("location_consent_generation", 0), int)
+            and not isinstance(member.get("location_consent_generation", 0), bool)
+            and member.get("location_consent_generation", 0) == generation
+        )
+        row = {key: entry.get(key) for key in (
+            "member_id", "request_id", "requested_at", "requester_user_id",
+            "push_sent_at", "push_skipped_reason", "gps_received_at",
+        )}
+        row["gps_lat"] = entry.get("gps_lat") if is_self or family_gps else None
+        row["gps_lon"] = entry.get("gps_lon") if is_self or family_gps else None
         # Computed deltas — friendlier to render.
         ms = entry["requested_at"]
         push_delta = (entry["push_sent_at"] - ms) if entry.get("push_sent_at") else None
         gps_delta = (entry["gps_received_at"] - ms) if entry.get("gps_received_at") else None
         out.append({
-            **entry,
+            **row,
             "push_sent_after_ms": push_delta,
             "gps_received_after_ms": gps_delta,
         })

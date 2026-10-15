@@ -1457,3 +1457,132 @@ native static correctness, cumulative scope and incident replay.
 No compile/build, physical validation, real MongoDB concurrency or Android
 process-death validation started. No merge, Railway deployment, production
 mutation, OTA, Android release/build or Google Play submission occurred.
+
+---
+
+# Refresh-trace GPS privacy correction
+
+## Root cause and exact correction
+
+diagnostics_refresh_traces previously returned **entry to either the requester
+or a member of the target's family. That conflated permission to inspect refresh
+status with ownership/current authority for precise GPS. The buffer retained
+coordinates after withdrawal and had no immutable subject/consent lifetime.
+
+The actual upload now passes its ORIGINAL linked subject, family, consent
+generation and accepted-publication result to _trace_record_gps(). This recorder
+still preserves GPS receipt evidence, but never obtains newer authority from a
+member read after the ingest/history awaits. Rejected publication cannot authorize
+family GPS. The existing 200-entry process-local ring and 90-second pending
+correlation window are unchanged; no data deletion or retention redesign.
+
+Reader behavior:
+
+- Snapshot trace evidence before authority awaits.
+- Recheck the caller's current family relationship in users.
+- Fetch authoritative linked member identities, sharing and generations AFTER
+  that await, then serialize with no further I/O.
+- Preserve safe status for a requester even without current family GPS access.
+- Preserve safe family status for currently related members.
+- Precise family GPS requires accepted original publication, verified original
+  subject/family/generation, current affirmative sharing and an exact lifetime match.
+- Explicit linked self can inspect own attributed diagnostic GPS while OFF,
+  including private rejected/stale work. Role, creator and requester are not self.
+- Unattributed legacy GPS is redacted even for a current self/requester because
+  original ownership cannot safely be established. Safe legacy status remains.
+- Serialize an explicit safe field list, not arbitrary **entry payloads.
+  Unknown nested bags, coordinate aliases, native/provider data, map URLs and
+  precise labels cannot bypass gps_lat/gps_lon denial. Internal authority tags
+  are not returned.
+
+Safe timing/status fields remain: member/request/requester identifiers, requested
+time, push-sent time, push-skipped reason, GPS-received time, computed push/GPS
+deltas. Current legitimate GPS visibility continues under current authority.
+No refresh dispatch/throttle, SOS or native/frontend behavior was modified.
+
+## Real delayed recording boundary
+
+The recorder is synchronous, but runs AFTER asynchronous ingest/history work.
+An upload can pass its live CAS, pause there, then record GPS after withdrawal or
+OFF -> ON. Four tests pause the REAL history/ingest boundaries immediately before
+this recorder, perform real update_my_preferences(), then release old work.
+Old generation metadata is retained immutably and family GPS remains denied.
+This is not a fabricated await inside the synchronous recorder.
+
+## Deterministic verification
+
+32 new backend/tests/test_refresh_trace_consent.py cases passed through actual
+request_location_refresh(), upload, preferences, recorder and reader:
+
+- Real request path, accepted upload and withdrawal: non-requester family viewer
+  AND original requester lose GPS, retain status/timing.
+- Linked self retains attributed private GPS while creator/group owner does not.
+- Missing/zero and BSON Int64 starting generations: OFF -> ON does not revive
+  old GPS; a fresh operation restores current authorized behavior.
+- Four delayed-recording races at two real boundaries, OFF or OFF -> ON.
+- Rejected live write cannot grant family trace authority.
+- Unattributed legacy traces fail closed for family and current self, not status.
+- Invalid generations and foreign/relinked subjects cannot grant GPS.
+- Five asynchronous reader changes: OFF, OFF -> ON, relinking, member family move,
+  and viewer family movement.
+- Former-family requester retains safe status only; unrelated/missing/no-token
+  requesters denied as appropriate.
+- Entire JSON response checked for arbitrary precise aliases, nested payloads,
+  private labels and map URLs; allowlist protects even self from unknown bags.
+- Limit/filter/newest-first/pending traces and safe failure/completion timing work.
+
+Requests use the real no-push-token branch (sent_to=0, no_tokens trace status);
+no external push service is contacted. These tests do not claim device delivery.
+
+Focused command:
+
+```text
+python -m pytest -q --disable-warnings
+ backend/tests/test_refresh_trace_consent.py
+ backend/tests/test_location_pipeline_consent.py
+ backend/tests/test_location_history_consent.py
+ backend/tests/test_self_member_consent_creation.py
+ backend/tests/test_family_member_removal.py
+ backend/tests/test_startup_sync_consent_race.py
+ backend/tests/test_startup_repair_consent_race.py
+ backend/tests/test_checkin_location_consent.py
+ backend/tests/test_location_consent_write_race.py
+ backend/tests/test_task123_welfare_check.py
+ backend/tests/test_coordinate_capture_integrity.py
+ backend/tests/test_task101_location_name_persistence.py
+```
+
+**237 passed**, exit 0: new 32 + previous focused 205.
+The same sixteen additional isolated files enumerated in prior supplements also
+passed: **192**, all exit 0. Excluding repeated files, **418 distinct isolated
+backend tests across 25 files**.
+
+Unchanged passing counts: pipeline 40, history 32, self-member 32, startup heal
+22, startup sync 26, upload 11, check-in/welfare privacy 25, additional welfare 6,
+family removal 3, coordinate tuple 6, label persistence 2, presence 11, stationary
+battery 3, backend medication reliability 34.
+
+Frontend command, unchanged ten patterns:
+
+```text
+cd frontend && npm test -- --runInBand --forceExit
+ trackingRevocationAuthority androidTrackingRecovery androidLocationPublication
+ trackingReliabilityHardening missedCheckinReturnButton pushMedicationReliability
+ sosPermissionRegression medicationAcknowledgment medicationAcknowledgeModal
+ medicationNotificationRoute
+```
+
+**268 passed / 10 suites**, exit 0: 207 B1/location + 44 medication/check-in +
+17 SOS/routing. Existing open-handle warning remains; no unrelated cleanup.
+Python compilation and git diff --check passed. Public disclaimer renders;
+signed-in UI/native behavior not visually verified.
+
+Full backend **UNVERIFIED**. Previous combined evidence remains 19 passed /
+3 legacy event-loop failures; combined run not repeated. No integration test
+known to create external accounts/data was run. Offline predicate models are NOT
+live MongoDB proof. Real MongoDB concurrency and Android process-death validation
+remain deferred, unstarted. No merge, deployment, production mutation, OTA,
+Android compile/build/release, physical acceptance or Play submission performed.
+
+After commit/push, adjudicate the family-snapshot extra bag through actual valid
+input/write and family-read functions, then return the actual diagnostic verdict.

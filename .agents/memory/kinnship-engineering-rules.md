@@ -148,7 +148,9 @@ collection insert or a later notification; initial consent alone is insufficient
 Ordinary sharing OFF denies other family accounts precise history, pipeline and
 nested diagnostic location as well as the live map tuple.
 Linked self-diagnostics may retain own diagnostic history while OFF;
-caregiver/creator/group ownership is not ownership of another person's GPS.
+Caregiver/creator/group ownership or requesting a refresh is not ownership of
+another person's GPS. A requester may retain safe refresh status without precise
+location; status authority and location authority are separate.
 Retention is separate from disclosure: do not delete history merely to hide it.
 Internal precise storage alone is not a privacy release blocker; establish a
 realistic disclosure or authority path, rather than treating every GPS copy as public.
