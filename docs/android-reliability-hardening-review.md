@@ -1369,3 +1369,91 @@ Real MongoDB concurrency and Android process-death remain deferred, unstarted.
 No merge, Railway deployment, production mutation, OTA, Android build/release or
 Play submission performed. The read-only diagnostic disclosure audit follows
 commit/push; its actual verdict must be returned before ending this run.
+
+## Post-push diagnostic disclosure audit: RED / STOP
+
+The pipeline correction was committed/pushed first. A read-only source inventory
+and offline replay then confirmed a NEW independent Critical disclosure:
+GET /diagnostics/refresh-traces returns gps_lat/gps_lon to another family account
+after the target's real sharing withdrawal. This path was NOT changed.
+
+### Diagnostic storage / reader inventory
+
+| Candidate/storage | Precise data and retention | Reader / authority / assessment |
+|---|---|---|
+| members.location_pipeline | Native/stored coordinates; latest member snapshot, no separate TTL; private evidence retained | Ordinary member GET/list, profile/battery/check-in-settings and location responses now use shared final privacy fence. Linked self distinct from roles. Family exact current generation/subject required; whole object denied otherwise. Corrected and tested. |
+| location_history | Precise accepted GPS evidence; configured 7-day accepted_at TTL | Existing history API unchanged: exact current family lifetime and final authority recheck; linked-self legacy/prior evidence retained. 32 regressions passed; replay confirmed family denial after OFF. |
+| location_ingest_log | Raw precise diagnostic coordinates; configured 24h at TTL | No ordinary family API reader found in targeted source inventory. Admin/reset/retention operations and internal logs are not ordinary-family disclosure. Not a release blocker merely because it stores GPS. |
+| _REFRESH_TRACE_LOG | gps_lat/gps_lon; process-local deque maxlen=200, no time TTL, lost on restart/eviction | diagnostics_refresh_traces admits trace requester OR any current family member. No current-sharing check, no original subject/generation, no linked-self distinction. CONFIRMED Critical while OFF. |
+| diagnostics_my_members | Explicit latitude/longitude/name on rows queried by user_id=current.id | Authenticated linked-self diagnostic projection, not arbitrary family rows. No ordinary-family GPS reader found for this projection; private own diagnostics are not automatically a blocker. No blanket lifecycle/race clearance after STOP. |
+| diagnostics_family_snapshot / members.device_snapshot | Projection omits root latitude/longitude/name/pipeline; declared snapshot contract is stage ages, times, SDK/device status. Stored extra fields are allowed and returned as a raw nested bag; latest snapshot, no separate TTL | Same-family reader, no sharing/generation/self distinction. Declared health/time fields do not establish precise geography. Unknown/legacy extra payload exposure remains NOT fully adjudicated at STOP, not asserted harmless or invented as a confirmed second blocker. |
+| diagnostics_health | Geocoding enabled/healthy/key-present booleans and key-source NAME, not secret value or GPS | Authenticated health reader; no coordinate disclosure. Not a GPS privacy blocker. |
+| Backend GPS logs / generic geocode cache | Coordinate logging and generic coordinate/address cache | No ordinary family log/cache API found in targeted inventory. Privileged operational evidence is not automatically family-public. |
+| Client pipeline/local diagnostic snapshots | May contain own GPS and previously authorized family pipeline copies on the viewing device | Local Diagnostics/Copy Log, not a new server API reader for another member's hidden data. Retaining an already-received authorized copy is not proof of a fresh OFF-state server disclosure; no diagnostic redesign or deletion done. |
+| Explicit SOS/emergency alerts | Emergency precise-location workflow | Classified separately from ordinary sharing; semantics untouched. Remaining emergency review is not cleared by this targeted audit. |
+
+This is the inventory reached by the focused diagnostic search, NOT a claim that
+every candidate or the broader source review cleared. Review stops on the first
+corroborated independent Critical path. Legacy check-in/welfare reader assessment
+also remains incomplete from the preceding review.
+
+### Confirmed refresh-trace blocker
+
+Exact active source:
+
+- _trace_record_request(): creates member/requester trace with empty GPS fields.
+- update_member_location(): calls _trace_record_gps() after ingest/history awaits.
+- _trace_record_gps(): writes full-precision gps_lat/gps_lon to a pending trace.
+- diagnostics_refresh_traces(): returns **entry to requester or another current
+  family member, without target sharing or consent-lifetime verification.
+
+Realistic sequence (race NOT required):
+
+1. Sharing ON; a legitimate refresh creates a pending trace.
+2. Target's accepted upload fills that trace with precise GPS.
+3. Target turns sharing OFF through real update_my_preferences().
+4. Root tuple is cleared; corrected member endpoints hide retained pipeline;
+   history API returns no records to another family account.
+5. Another same-family account reads /diagnostics/refresh-traces.
+6. It receives the retained gps_lat/gps_lon anyway.
+
+Offline replay used the actual committed recorder, upload, preference endpoint
+and diagnostic reader. The DB cursor enforced the family predicate and projected
+fields; the viewer was neither linked self nor the trace requester. Assertions
+confirmed sharing OFF, denied pipeline on BOTH member endpoints, empty family
+history, and precise trace coordinates in the complete JSON-serializable response.
+No production/database/network action was involved in this replay.
+
+Violated invariant: OFF forbids ordinary precise GPS disclosure to OTHER family
+accounts, including diagnostic/history copies. Being the refresh requester is
+also not ownership of another person's coordinates.
+
+Provenance: the supplied base already contains the GPS recorder and the same
+requester/family reader rule. This predates PR #166 and the pipeline correction.
+
+Smallest conceptual correction, requiring separate authorization: keep useful
+timings/status, but do not expose precise trace GPS to non-self without exact
+current subject/consent-lifetime authority. Either omit precise fields for
+non-self diagnostic readers if product behavior permits, or bind immutable
+original GPS authority and revalidate it at disclosure. Never guess ownership
+from requester_user_id or retroactively authorize legacy GPS after OFF -> ON.
+Do not merely clear the member tuple or delete the entire trace buffer.
+
+Required deterministic regression: actual trace request + accepted upload ->
+real OFF -> diagnostic read by a DIFFERENT family account/non-requester; inspect
+the entire response for coordinates/aliases. Also cover requester-not-self,
+explicit linked-self diagnostics if retained, OFF -> ON stale work and fresh
+valid behavior, delayed recorder/write boundaries, and changed family authority.
+
+### Final audit / stopping point
+
+**RED — NEW RELEASE BLOCKER FOUND.**
+Diagnostic disclosure audit NOT CLEARED. No refresh-trace source was fixed.
+Broader review did not resume after confirmation. Next authorized review boundary
+is refresh-trace privacy, then remaining diagnostic snapshots/legacy readers,
+followed by native lifecycle/authorization/FGS/recovery, medication/SOS/iOS,
+native static correctness, cumulative scope and incident replay.
+
+No compile/build, physical validation, real MongoDB concurrency or Android
+process-death validation started. No merge, Railway deployment, production
+mutation, OTA, Android release/build or Google Play submission occurred.
