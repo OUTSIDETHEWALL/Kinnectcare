@@ -849,3 +849,115 @@ security, authority-loss or core-reliability/native-operation blockers. Ordinary
 technical debt and low-impact theoretical concerns are deferred, not build gates.
 No merge, Railway deployment, production mutation, OTA, production Android
 build/release or Play submission is authorized or performed.
+
+---
+
+# Startup synchronization authority race correction supplement
+
+## Root cause and narrow correction
+
+High core-reliability blocker, predating #166. An OFF-user cursor supplied stale
+evidence to a later user_id-only update_many. A newer ON toggle advanced member
+generation, but the sweep disabled that newer authority and cleared its tuple.
+Self-created rows were skipped by the cross-user heal, leaving uploads rejected.
+
+Three correction files:
+
+```text
+backend/server.py
+backend/tests/test_startup_sync_consent_race.py
+docs/android-reliability-hardening-review.md
+```
+
+Cumulative PR: 49 files. No frontend/native/dependency/SDK/scheduling changes.
+
+The sweep now observes each linked member's state, generation and identities
+BEFORE asynchronously reading its user's preference. This ordering is essential:
+reading stale OFF evidence first and then capturing a newer member generation
+would incorrectly attach old evidence to current authority.
+
+Only explicit OFF policy authorizes synchronization. The final update_one requires
+the observed member id, linked user, creator, sharing state (or field absence) and
+generation. Legacy missing generation remains zero through the shared predicate.
+The policy is read separately after each member observation, never cached across
+members observed at different times. Selection remains by linked user, not creator.
+
+A legitimate unchanged OFF synchronization still disables the row and clears its
+coordinates, tuple timestamp and label. A stale write changes nothing. Neither
+successful nor rejected maintenance increments/resets generation; newer user
+operations remain authoritative. A second startup after ON leaves the row enabled.
+
+## Startup-maintenance family inventory — source enumeration
+
+The audit searched all active backend startup handlers plus repair, synchronization,
+backfill, migration, reconciliation, normalization and linkage helpers, then traced
+the relevant delegates in backend/family_group.py. No maintenance routine below
+was executed against a real database.
+
+| Path / trigger | Observation, final mutation and preliminary classification |
+|---|---|
+| _backfill_location_sharing_flag / boot | Only absent flags match final update_many; existing user-toggle flags are untouched. Legacy-only initialization; no tuple write or generation change. |
+| _sync_user_sharing_pref_to_members / boot | Corrected member-before-policy observation; final state/generation/identity CAS. Currently fenced, including self-created rows and legacy generation zero. |
+| _heal_cross_user_sharing_leaks / boot | Disabled-member snapshot before affirmative linked-policy lookup; final identity/disabled-state/generation CAS. Currently fenced; deliberately skips self-created rows. |
+| _heal_missing_self_member_rows -> fg.ensure_self_member_row / boot | Full user snapshot precedes member-existence lookups and a new-row insert. Helper copies snapshot sharing into an empty-coordinate row without a generation. Separate authority-insertion race target for independent adjudication; unchanged. |
+| fg.ensure_self_member_row / login, signup, join | Same delegate outside startup; existing row returned unchanged, otherwise snapshot-based creation. Review together with missing-row maintenance, not presumed safe merely because coordinates start empty. |
+| _migrate_family_groups -> fg.create_group_for_user / boot | Selects users missing family id; creates a group and updates user by id; data backfill requires owner plus absent family id. No consent/coordinate writes. Legacy group-identity maintenance; concurrent membership behavior not fully cleared. |
+| fg.ensure_family_group / lazy reconciliation | Resolves group, creates if absent, backfills owned data only where family id is missing. No consent/tuple mutation; legacy group-identity concerns deferred unless confirmed release-critical. |
+| fg.transfer_data_to_group / explicit join | Re-tags owned data by owner_id. Not automatic consent repair; separate membership operation. No direct consent/generation/coordinate write. |
+| Signup/login name-match linkage / account lifecycle | Links matching placeholder rows; not boot consent maintenance. Related identity path for broader review, not changed here. |
+| _migrate_invite_ghost_heal_v62 / boot | Old pending invites + current group-email evidence; final id/pending-status mutation changes invite status only. Does not link members or grant live publication authority. No demonstrated location blocker. |
+| _migrate_iso_string_timestamps_to_date / boot | Converts check-in/alert/reminder/log date fields by _id. Does not backfill member coordinate_captured_at or invent GPS age. Outside live authority writes. |
+| _purge_legacy_demo_data / boot | Deletes fingerprinted demo rows and references. Does not restore coordinates/consent; existing narrow demo-cleanup behavior, not run or changed. |
+| Billing initialization/reconciliation, legacy-reminder migration, medication scheduler / boot or admin | Billing/reminder/scheduling state, not member consent/linkage/tuple mutation. Outside this maintenance authority family. |
+| Geocode/history/alert indexes, recovery-receipt restart, push-token dedupe, alert/phone backfills / boot | Index, delivery, diagnostic or alert metadata. No direct member consent/generation/linkage/visible-tuple mutation found in these handlers. |
+| Geocoding label normalization / member reads | Conditional label persistence against unchanged coordinates/null label. Not startup authority repair; broader asynchronous response review remains separate. |
+| Tests and stale root server copy | Offline/test-only or not the documented active production backend; not treated as live maintenance paths. |
+
+This is a complete candidate enumeration from the targeted source search, not
+independent clearance of every path. Final classifications and any blocker are
+reported by the resumed review. Stop deeper review at the next confirmed
+Critical/High defect; do not repair any separate creation/linkage/migration path.
+
+## Deterministic verification
+
+26 new cases exercise actual synchronization/preference/upload functions:
+
+- Stale OFF versus newer ON at lookup and final-write boundaries, with absent,
+  zero and nonzero generation; a valid new fix exists before stale sync resumes,
+  another upload succeeds afterward, and second startup preserves self-row state.
+- OFF -> ON -> OFF and OFF -> ON -> OFF -> ON reject old work even when the
+  boolean returns to its observed value.
+- Legitimate OFF clearing for missing/False/True flags and legacy/current generations.
+- New withdrawal, linked-user/creator replacement, and nonexplicit OFF policy.
+
+Assertions inspect full member state, accepted coordinate tuple/time, exact
+generation preservation, final mutation rejection and self-created-row persistence.
+
+Commands/results:
+
+- python -m pytest -q --disable-warnings backend/tests/test_startup_sync_consent_race.py
+  backend/tests/test_startup_repair_consent_race.py backend/tests/test_checkin_location_consent.py
+  backend/tests/test_location_consent_write_race.py backend/tests/test_task123_welfare_check.py
+  backend/tests/test_coordinate_capture_integrity.py backend/tests/test_task101_location_name_persistence.py:
+  **98 passed**, exit 0: 26 sync + 22 heal + 25 check-in + 11 upload + 6 welfare
+  + 6 coordinate integrity + 2 label persistence.
+- The sixteen existing isolated files enumerated in the preceding supplements:
+  **192 passed**, all exit 0. Distinct total, without duplicate counting:
+  **282 isolated backend tests across 21 files**.
+- Combined upload/capture/label/stationary run: **19 passed / 3 failed**, unchanged
+  legacy no-current-event-loop failures; stationary separately **3 passed**.
+  Full backend **UNVERIFIED**, not run; external-mutating integration tests excluded.
+- cd frontend && npm test -- --runInBand --forceExit trackingRevocationAuthority
+  androidTrackingRecovery androidLocationPublication trackingReliabilityHardening
+  missedCheckinReturnButton pushMedicationReliability sosPermissionRegression
+  medicationAcknowledgment medicationAcknowledgeModal medicationNotificationRoute:
+  **268 passed**, 10 suites (207 B1/location + 44 medication/check-in + 17 SOS/routing).
+- python -m py_compile backend/server.py; git diff --check: passed.
+- Frontend unchanged; TypeScript/lint not rerun.
+
+Real MongoDB concurrency and Android process-death follow-ups remain deferred,
+not started. No Android compilation or physical validation is claimed.
+After commit/push/status verification, resume independent release-blocker review
+at that exact head; no GREEN based only on pass counts or partial family audit.
+No merge, Railway deployment, production mutation, OTA, production Android
+build/release or Play submission is authorized or performed.

@@ -8506,8 +8506,8 @@ async def _sync_user_sharing_pref_to_members():
     """Build #59 — one-time consistency sweep (per-account isolation).
 
     Re-syncs every user's own personal member row(s) to the current
-    ``users.location_sharing_enabled`` value.  MATCH IS user_id ONLY
-    (not owner_id) — matching on owner_id would incorrectly wipe
+    ``users.location_sharing_enabled`` value.  Targets are linked by user_id
+    (not selected by owner_id) — selecting by owner_id would incorrectly wipe
     location on rows this user created FOR OTHER PEOPLE (their
     parents, spouse, etc.).  That was the exact P3 blocker fixed in
     Build #59: one caregiver turning sharing OFF was also wiping another
@@ -8517,21 +8517,37 @@ async def _sync_user_sharing_pref_to_members():
     stale location leaks.  Idempotent.
     """
     try:
-        # Users who have explicitly disabled sharing but whose member
-        # doc(s) still carry True (or missing the flag).
-        cursor = db.users.find(
-            {"location_sharing_enabled": False},
-            {"_id": 0, "id": 1},
+        # Capture member authority BEFORE reading linked preference evidence.
+        # An old OFF-user cursor followed by a newer member read could otherwise
+        # attach stale evidence to a new generation and defeat even a final CAS.
+        cursor = db.members.find(
+            {"user_id": {"$ne": None, "$exists": True}},
+            {"_id": 0, "id": 1, "user_id": 1, "owner_id": 1,
+             "location_sharing_enabled": 1, "location_consent_generation": 1},
         )
-        n_users = 0
+        off_users = set()
         n_members = 0
-        async for u in cursor:
-            uid = u.get("id")
+        async for member in cursor:
+            uid = member.get("user_id")
             if not uid:
                 continue
-            n_users += 1
-            res = await db.members.update_many(
-                {"user_id": uid},
+            # Do not cache OFF evidence across separately observed member rows.
+            user = await db.users.find_one(
+                {"id": uid}, {"_id": 0, "location_sharing_enabled": 1},
+            )
+            if user is None or user.get("location_sharing_enabled") is not False:
+                continue
+            off_users.add(uid)
+            expected_state = (member["location_sharing_enabled"]
+                if "location_sharing_enabled" in member else {"$exists": False})
+            sync_filter = {
+                "id": member["id"], "user_id": uid,
+                "owner_id": member.get("owner_id"),
+                **_location_consent_condition(member.get("location_consent_generation", 0)),
+                "location_sharing_enabled": expected_state,
+            }
+            res = await db.members.update_one(
+                sync_filter,
                 {"$set": {
                     "location_sharing_enabled": False,
                     "latitude": None,
@@ -8541,9 +8557,9 @@ async def _sync_user_sharing_pref_to_members():
                 }},
             )
             n_members += res.modified_count
-        if n_users:
+        if off_users:
             logger.info(
-                f"Build #57 consistency sweep: {n_users} users had sharing OFF; "
+                f"Build #57 consistency sweep: {len(off_users)} users had sharing OFF; "
                 f"re-mirrored to {n_members} member doc(s)."
             )
     except Exception as e:
