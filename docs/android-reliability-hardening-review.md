@@ -1586,3 +1586,114 @@ Android compile/build/release, physical acceptance or Play submission performed.
 
 After commit/push, adjudicate the family-snapshot extra bag through actual valid
 input/write and family-read functions, then return the actual diagnostic verdict.
+
+## Post-push related diagnostic audit: RED / STOP
+
+The refresh-trace correction was committed/pushed before this audit. The
+previously unresolved family-snapshot bag has now been ADJUDICATED, not left as
+an open hypothesis: valid authenticated snapshot input can persist nested precise
+GPS and the real family reader returns it after real sharing withdrawal.
+No snapshot source was changed under refresh-trace authorization.
+
+### Exact independent blocker
+
+Severity: **Critical**, API-level ordinary-location privacy disclosure.
+Confidence high in the API behavior; production occurrence/client prevalence
+was NOT measured or asserted.
+
+Active backend/server.py:
+
+- DeviceSnapshotUpdate: ConfigDict(extra="allow").
+- put_device_snapshot(): linked-self writer stores data.model_dump(exclude_unset=True)
+  verbatim as members.device_snapshot. The family/linked-self write predicate
+  properly prevents writing another person's snapshot, but does not constrain the
+  contents of this caller's legitimate own diagnostic payload.
+- diagnostics_family_snapshot(): family-authorized projection omits root GPS,
+  but returns the retained device_snapshot bag including unknown nested fields.
+- update_my_preferences(): OFF clears ordinary root coordinates, not this bag.
+
+Realistic supported-input sequence:
+
+1. Target's device submits its own diagnostic snapshot while sharing ON. A valid
+   accepted extra field contains native_location.coords latitude/longitude plus
+   diagnostic label/map URL. This uses the real Pydantic model and own-device PUT,
+   not raw database seeding or a caregiver writing someone else's data.
+2. Target withdraws sharing through real update_my_preferences().
+3. Root tuple clears and generation advances. Stored diagnostic bag is unchanged.
+4. A different authenticated family viewer reads diagnostics_family_snapshot().
+5. Entire nested GPS, private label and map URL are returned.
+
+The offline replay asserted precise values in the stored bag, real OFF state,
+unchanged retained snapshot, viewer != subject and viewer != creator, and all
+precise coordinates/label/map URL in the JSON-serializable family response.
+No external service, real DB, production action, push, or native runtime involved.
+
+Important limit: the checked-in locationEngine.ts pushDeviceSnapshotToBackend()
+builds a fixed health/timing payload and does NOT currently include these GPS
+extras. We do NOT claim this publisher automatically emits the enriched payload,
+or that production contains it. The finding is the existing API contract's
+accepted coordinate-bearing diagnostic input and subsequent unauthorized reader,
+including retained input from compatible diagnostic/older/future clients.
+This is a real write/read route, not an invented coordinate in an internal store
+with no family reader.
+
+Control replay then submitted only declared stage-age/SDK/timestamp fields,
+through the same actual writer while OFF. The family reader returned useful
+health metrics with NONE of the private GPS/label/map strings. Health/timing
+fields themselves are NOT classified as precise location or release blockers.
+
+Violated invariant: withdrawing ordinary location sharing prevents another family
+account from retrieving retained precise location through diagnostic nested bags.
+The subject having previously uploaded private diagnostics while ON is not
+indefinite family-publication authority.
+
+Provenance: supplied base already contains extra="allow", verbatim snapshot
+storage, and the raw family-snapshot reader. Predates PR #166 and this correction.
+
+Smallest conceptual correction REQUIRING SEPARATE AUTHORIZATION:
+
+- Return a deliberate safe health/timing schema for family snapshot readers,
+  rather than arbitrary retained extras; protect EXISTING bags as well as future
+  writes. A new-write-only unknown-field filter is insufficient.
+- Constrain supported future snapshot input where appropriate, without breaking
+  stage ages, SDK state, string tracking mode, device identity or presence.
+- Do not delete diagnostics wholesale. Any retained raw self-only data must be
+  distinguished by linked subject identity, never caregiver/requester/creator.
+- If precise diagnostic fields intentionally become a family feature, require
+  original subject/current exact lifetime authority instead of raw bag forwarding.
+
+Required regression: actual own-device PUT with valid extra nested native GPS
+while ON -> actual OFF -> family-snapshot read by a DIFFERENT account; inspect
+all JSON for coordinates, aliases, private labels and map URLs. Also cover
+retained legacy extras, OFF -> ON, safe fixed-field health snapshots, authentication/
+family isolation, self distinction if preserved, tracking-mode and comparison UI
+compatibility. No broad snapshot redesign or production cleanup authorized here.
+
+### Related response inventory / actual verdict
+
+| Surface | Precise data / reader / assessment |
+|---|---|
+| diagnostics_refresh_traces | Corrected: safe status distinct from exact-lifetime family GPS or attributed linked-self GPS. Legacy GPS private/unattributed denied. 32 new cases passed. |
+| diagnostics_family_snapshot | CONFIRMED independent Critical via accepted retained device_snapshot extras; root projection alone is insufficient. No sharing/lifetime/self fence on nested bag. STOP, not fixed. |
+| Normal member/pipeline responses | Existing whole-pipeline subject/generation/final-authority fence unchanged; 40 regressions passed. Fresh valid behavior and linked self preserved. |
+| location-history API | Exact current family lifetime and final check unchanged; 32 regressions passed, retention untouched. |
+| diagnostics_my_members | Explicit user_id=self query, not arbitrary-family data. No new family disclosure established for this self projection; not called a blocker merely for own GPS. |
+| diagnostics_health | Health/key-source-name flags, no GPS or secret value. No precise-location disclosure. |
+| location_ingest_log / server logs / geocode cache | No ordinary family reader established in targeted inventory; internal coordinate retention alone is not a blocker. |
+| Client-local diagnostic copies | Local storage or already-authorized received data, not proof of a new OFF-state server disclosure. No new blocker inferred. |
+| SOS/emergency | Separate intentional semantics; untouched. No mechanical ordinary-sharing rule imposed on emergency data. |
+
+**RED — NEW RELEASE BLOCKER FOUND.**
+Family-readable diagnostic location audit NOT CLEARED. Family-snapshot bag concern
+is explicitly confirmed at the API level, with the current-publisher limitation
+above. No further independent source search or automatic snapshot fix.
+
+Broader review did not resume after this confirmation. Resume first at snapshot
+response privacy, then any remaining related readers/legacy check-in history,
+then outstanding native lifecycle, authority, FGS/recovery, medication/SOS/iOS,
+native static correctness, cumulative scope and incident replay.
+
+Real MongoDB concurrency, Android process-death/across-runtime, Android compile/
+build and physical acceptance remain deferred/unstarted or unverified as applicable.
+No merge, Railway deployment, production mutation, OTA, Android build/release
+or Google Play submission occurred.
