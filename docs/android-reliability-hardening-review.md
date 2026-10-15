@@ -1,10 +1,11 @@
 # Android reliability hardening — pre-merge review
 
-**Latest correction: SOS OPTIONAL-GPS BLOCKER CLEARED.**
-The authorized bounded-location correction and deterministic regressions pass.
-The iOS shutdown correction remains cleared. Remaining source review resumes
-after the SOS correction push. Read the final supplement for the final verdict;
-earlier verdicts are historical evidence.
+**Latest verdict: GREEN — SOURCE REVIEW CLEARED FOR ANDROID COMPILE/BUILD VALIDATION.**
+SOS OPTIONAL-GPS BLOCKER: CLEARED. iOS confirmed-removal blocker remains cleared.
+The remaining authorized Critical/High source review and October 13 source replay
+are complete; no further confirmed blocker was established.
+This does not authorize or claim Android build, merge, deployment or release.
+Read the final supplement; earlier verdicts are historical evidence.
 
 **Status: STOP BEFORE MERGE. Draft review only; no release authorization.**
 
@@ -2526,3 +2527,103 @@ Only the SOS screen, its existing regression suite, the new offline backend
 contract suite and directly relevant review/engineering guidance change.
 No live alarm, real GPS, external SMS/push or production mutation was performed.
 Broader source-review result follows after push.
+
+## Final resumed source-review verdict after SOS correction
+
+**GREEN — SOURCE REVIEW CLEARED FOR ANDROID COMPILE/BUILD VALIDATION.**
+
+**SOS OPTIONAL-GPS BLOCKER: CLEARED.**
+**IOS CONFIRMED-REMOVAL SHUTDOWN BLOCKER: CLEARED.**
+
+The SOS application correction was committed/pushed as
+45375ff35baea6a5acbb2218404a0b27f470b655 before resuming this review.
+Remote branch and open/unmerged PR head were verified equal. Only review
+documentation changes after that correction; tests/static checks remain valid.
+
+### Completed bounded review and decisions
+
+| Authorized area | Source-review result |
+|---|---|
+| Native tracking lifecycle | Completed the prior persistence/lock, configuration/acquisition quarantine, shutdown-group and engine caller review with remaining api/backgroundLocation/batteryTask consumers. Explicit signout/sharing withdrawal still invalidates; uncertain/disposed operations do not become revocation. No additional confirmed Critical/High. |
+| Authorization lifetimes | Native expected-owner/generation CAS and shutdown reservation remain distinct from JS operation cancellation. Reviewed replacement/relink/session/token, post-callback cleanup, revocation and rearm callers. New SOS operations are fenced separately and cannot grant background tracking authority. No additional confirmed Critical/High. |
+| FGS/background recovery | Reviewed independent WorkManager and SDK wake callers, configured-but-stale flow, due acquisition, finite retry/backoff and foreground reconciliation. FGS denial does not deliberately revoke/stop an authorized tracker. Real Android permission to start services is not source-proven. No additional confirmed source blocker. |
+| Medication | Completed exact occurrence/canonical route, live/headless action handling, durable action replay, target/family authorization, taken-log ordering, T+15 competing claim, durable escalation/stage identity, stale-delivery recovery and provider acceptance semantics. Family acknowledgment is not a self-taken action. Unknown delivery does not become successful delivery. No confirmed production regression; existing timing classification unchanged. |
+| SOS beyond GPS correction | Completed dashboard/welfare entry, bounded sending screen, optional-coordinate API, authenticated family fanout, quiet-hours bypass, foreground channel/routing, active-alert resume and family-scoped acknowledgment/resolution. SMS/push remain existing best-effort provider delivery, not guaranteed recipient display. No further confirmed Critical/High. |
+| iOS/shared logic | Confirmed non-Android native stop contract, preserved Android-only authority module boundary, real-root tests, shared navigation and SOS cancellation/result handling. No broader iOS redesign or new native behavior was introduced. No further confirmed regression in the authorized shared surface. |
+| Native static correctness | Inspected Kotlin synchronized state transitions, synchronous preference persistence, expected-generation comparison, process-incarnation cleanup, Expo export names/argument arity, and JS optional-module contract. TypeScript passes. No obvious compile-invalid source or known API-contract blocker established; native compilation is explicitly NOT claimed. |
+| Cumulative PR interaction | Completed the production diff/caller assessment across native authority, startup/recovery/shutdown, battery/contact versus capture freshness, family UI consumers and the now-corrected iOS/SOS paths. Prior privacy reader/writer clearances were retained rather than rerun. No large-diff/style blocker was invented. |
+
+Medication source review includes frontend medicationAcknowledgment,
+medicationNotificationRoute, the acknowledge panel and push/root startup routing,
+plus backend exact-occurrence acknowledgment, scheduler claim/delivery/recovery
+and provider completion. Caregiver escalation and self-dose acknowledgment
+remain intentionally separate. Provider ticket acceptance is not physical
+notification display; receipt/device acceptance work stays deferred.
+
+### Complete October 13 source-level replay
+
+Starting observations are the supplied incident class: affirmative sharing and
+permissions, SDK enabled/configured, native service nonoperational, denied
+background FGS start, continuing background battery/heartbeat work, no fresh GPS,
+and foreground opening restoring fixes.
+
+The original archive's logcat was streamed read-only for relevant evidence
+classes, without extracting or recording personal payloads. FGS-denied,
+heartbeat, battery and enabled-state classes were present. Broad numeric/error
+search counts are not presented as correlated incident attribution.
+
+| Required replay question | Current architecture |
+|---|---|
+| 1. Authorization preservation | Affirmative durable owner/generation plus current server ownership/consent and OS proof authorizes work. SDK enabled alone grants nothing. Network/bridge uncertainty defers new work without revoking an existing owner. Known OFF, session rejection, removal/replacement or explicit OS denial follows protected shutdown. |
+| 2. Stale/degraded health | Enabled configuration and contact do not renew coordinate_captured_at. Missing/aged accepted capture remains unverified/due/stale. Acquisition timeout produces degraded evidence; background FGS denial produces blocked/degraded evidence, not healthy tracking. |
+| 3. Recovery attempts | SDK heartbeat/motion/activity/boot paths, independent WorkManager, refresh-push and foreground patrol/reconciliation revalidate authority. If SDK reports enabled with a current binding, configuration may be reported already_enabled, but the separate due acquisition still runs under the native gate. It is not treated as proof of an operational service. |
+| 4. FGS denied | The attempt fails/records its outcome and defers with 5/15/at-most-30-minute backoff. GPS is bounded to 20 seconds and upload has an 8-second abort. Later eligible wakes/foreground requests remain recovery opportunities; source cannot guarantee Android grants an exemption or permits service activation. |
+| 5. Destructive stop | FGS failure, GPS timeout, a stale operation or an unavailable lookup does not intentionally stop/revoke an authorized tracker. Shutdown requires confirmed loss and preserves replacement-owner fences. Android recovery is not stop-first. |
+| 6. One-shot versus sustained | Accepted receipt-bound coordinates establish one fresh fix. Later accepted current-owner observations establish recent coordinates; neither manufactures sustained tracking. sustainedTracking remains not_proven. |
+| 7. Caregiver truthfulness | Battery/presence can advance device contact while location stays stale. Patrol, family card, member detail, alert GPS age and tracking labels use capture provenance rather than contact or alert creation time. Unknown capture age remains unknown, not fresh. |
+| 8. Physical evidence still required | Compile/link the actual native binary; enabled-but-dead recovery while activity is absent; FGS denial/exemption behavior; cold headless and WorkManager bootstrap; ordinary process death/reboot; background movement, stationary periods and sustained accepted captures. None was executed here. |
+
+**Replay result:** no known/reproducible source transition was established that
+permanently revokes valid tracking merely because the observed failure occurs,
+or removes every later recovery opportunity. This is NOT proof that the OS will
+repair the service while the app stays closed. No claim is made that the
+historical stop initiator is now known, or that one successful fix proves a
+permanently healthy background service.
+
+### Final verification, limits and stopping point
+
+- Main selected frontend run: **320/320**, 12 suites, exit 0.
+- Additional disjoint headlessActivityWake, heartbeatSnapshot, familyCardStatus,
+  devicePresenceContracts and rootLocationPermissionRecovery run:
+  **98/98**, 5 suites, exit 0.
+- Thus **418 distinct passing selected frontend tests across 17 suites**, in
+  two runs, not a full-project Jest claim.
+- New backend SOS contract: **6/6**, exit 0. Prior backend baseline remains
+  **507 distinct passing tests across 27 files**, not rerun in this continuation.
+- Existing iOS/root **39** and push-medication **17** pass within the main run.
+- TypeScript and diff check pass. Full backend remains **UNVERIFIED**.
+- Web preview workflow restarted and bundled successfully. Signed-in mobile
+  rendering and native/device execution are not established by the web preview.
+  Screenshot of `/` rendered the public Important Notice screen, without a
+  fatal browser error. Existing web notification/style/route warnings remain.
+  The authenticated SOS UI was verified by the offline real-screen tests,
+  not by that public-page screenshot.
+
+Non-blocking/deferred concerns: existing Jest force-exit/open-handle debt,
+provider acceptance versus final display, full backend suite execution and
+physical/native/cross-runtime validation. These are not newly invented source
+blockers or authorization to perform the deferred stages.
+
+**Exact stopping point:** the authorized Critical/High source surface is
+exhausted after the medication/SOS/cumulative completion and eight-part incident
+replay. No remaining source-review area is being silently deferred under GREEN.
+No additional independent confirmed Critical/High blocker remains in this
+reviewed scope. Stop source archaeology.
+
+**Recommended next stage:** separately authorize Android compile/build
+validation. GREEN is permission to recommend that stage, not permission to run it.
+Real MongoDB concurrency, Android process-death/across-runtime, physical
+acceptance, burn-in and road testing remain NOT STARTED.
+
+No merge, Railway deployment, production mutation, OTA, Android build/release,
+Google Play submission or force-push occurred.
