@@ -1,9 +1,10 @@
 # Android reliability hardening — pre-merge review
 
-**Latest continuation:** Legacy check-in history reader correction below is
-verified and authorized for the existing unmerged PR only. Read the final
-continuation supplement for the latest audit verdict; earlier supplements are
-historical evidence, not current release approval.
+**Latest verdict: RED — NEW RELEASE BLOCKER FOUND.** Legacy check-in readers
+are corrected and their related audit is cleared. Resumed review reproduced an
+independent High iOS confirmed-removal shutdown regression, left unfixed.
+Read the final continuation supplement; earlier supplements are historical
+evidence, not current release approval.
 
 **Status: STOP BEFORE MERGE. Draft review only; no release authorization.**
 
@@ -2122,3 +2123,136 @@ warning remains non-blocking technical debt.
 Python compilation and git diff --check passed. No Android compilation,
 real MongoDB concurrency, process-death or physical validation was performed.
 Related-reader and resumed source-review verdicts follow separately.
+
+## Directly related legacy reader audit — CLEARED
+
+**LEGACY CHECK-IN/WELFARE FAMILY-READER AUDIT CLEARED.**
+
+Inventory of reachable committed paths in the active backend:
+
+| Candidate | Provenance, authority and result |
+|---|---|
+| GET /checkins/member/{member_id} | db.checkins; exact supplied-base writer can store GPS; same-family authenticated viewer; now explicit safe receipt projection for all sharing states and identities. No lifetime is backfilled; linked self also gets no GPS. Real historical writer + real withdrawal + actual HTTP JSON tests pass. |
+| GET /checkins/recent | Same storage/provenance/authority/projection; same result, current local-day filter retained. Both endpoint outputs agree. |
+| POST /checkins | Current writer and response are location-free; linked-self/family checks retained. No historical reader here. |
+| POST /checkin-requests/{request_id}/respond, including duplicate/recovered responses | Historical welfare receipts can share db.checkins storage; current responses require authenticated linked member in current family and explicitly null all three declared location fields. CheckIn ignores unknown stored extras. Current writes remain location-free; no caregiver/owner self shortcut. |
+| POST /members/{member_id}/welfare-check-response | Validates request/member/current-family association, delegates to the linked-self response above. No independent historical family reader. |
+| GET /checkin-requests/member/{member_id} | Reads db.checkin_requests, not db.checkins; same-family authenticated access. Raw request history has no sharing/generation/self redaction, but actual supplied-base/current request creation and request updates persist IDs, names, times, status and delivery bookkeeping, not response GPS or labels. Receipt location is not embedded or joined. No realistic retained-location disclosure established. |
+| GET /summary | Reads raw db.checkins but emits only checked_in_today and last_checkin_time from them; same-family authenticated scope. No precise location or self exception; sharing/generation is not required for these safe fields. |
+| GET /history/member/{member_id} | Medication-log date/count/compliance aggregation, not a check-in/welfare receipt projection. No check-in GPS joined or returned. |
+| detect_missed_checkins | Internal receipt-existence checks only; does not publish raw receipts into family alerts. |
+| Cleanup/index/startup migration consumers | Internal maintenance, not an additional family-readable history API. Dynamic collection access was checked for exports; no extra family receipt export was identified. |
+
+Additional offline audit invoked actual request creation, welfare response, real
+withdrawal, request-history read and dashboard summary with a retained exact-base
+GPS-bearing check-in. Request history/summary contained no private coordinates or
+label; unrelated-family request history was empty; stored receipts were unchanged.
+This audit did not mutate production or add duplicate cases to pytest totals.
+The standalone audit's initial missing test-signing configuration and cursor-model
+shape were corrected only in the temporary harness; no application change.
+
+The configured retention remains 90 days; no live database/index/prevalence query
+was run. A theoretical arbitrary poisoned request document is not presented as
+an established historical writer or a release blocker.
+
+## Resumed source review — independent High blocker, STOP
+
+**RED — NEW RELEASE BLOCKER FOUND.**
+
+### Exact defect and provenance
+
+In frontend/app/_layout.tsx, RootNav's successful confirmed-member-absence branch
+now invokes locationEngine.stop only if readTrackingAuthority() returned a value.
+The StartupDiagnostics extension is explicitly Android-only
+(expo-module.config.json platforms=["android"]). On iOS that optional module is
+absent, readTrackingAuthority() returns null, and native shutdown is skipped.
+leonidas.stop() only clears the JS patrol interval; it is not the SDK stop.
+
+The existing iOS stopConfiguredEngine implementation still calls lib.stop().
+The regression is that the shared root no longer reaches it on confirmed member
+absence. This condition was introduced by the PR's B1 native-authority correction;
+the supplied base called locationEngine.stop unconditionally after the same
+successful ownership-absence confirmation. This continuation changed no frontend.
+
+### Realistic sequence and violated invariant
+
+1. An iOS installation has an already-configured native tracker for its linked
+   member. Existing SDK configuration uses stopOnTerminate=false.
+2. The member is removed/unlinked while the authenticated account remains; on
+   root/bootstrap recreation, the native tracker may still be enabled.
+3. The real root finds no linked member, waits the existing 90 seconds, then
+   obtains a successful authenticated /members response with no owned row and
+   matching /auth/me identity and token.
+4. The confirmed-absence branch stops the JS patrol but does not invoke native
+   stop, because Android authority is null on iOS.
+
+No race is necessary. No phone was used to establish physical persistence.
+The deterministic proof establishes the missing native stop invocation at the
+real app root; actual iOS background duration/HTTP consequences were not measured.
+No family GPS disclosure, successful removed-member upload, or physical-device
+acceptance is asserted.
+
+Severity **High — authority-loss / core tracking-lifecycle regression**.
+Confidence high in the missing shutdown and base-vs-current regression. Confirmed
+member loss must terminate the prior tracking binding on iOS too; an Android-only
+authorization extension cannot be a prerequisite for that platform's shutdown.
+
+### Counterfactual verification
+
+Temporary tests outside the repository reuse the actual missedCheckinReturnButton
+root harness, actual RootLayout and existing deterministic 90-second absence
+scenario. Platform is iOS and readTrackingAuthority returns null, matching the
+actual Android-only module boundary. Authenticated members/auth responses are
+successful; the JS patrol-stop assertion passes before the SDK-stop assertion.
+
+The same scenario and assertion run against:
+
+- Current PR root: **FAIL**, expected native engine.stop once, observed **zero**.
+- Exact supplied-base root: **PASS**, native engine.stop called once.
+
+Only import paths in the temporary supplied-base root were rewritten so its
+unchanged component body can run with the same isolated dependencies.
+Two selected cases: **1 pass / 1 fail**, 52 skipped, command exit 1. They are
+counterfactual duplicates, not additions to the 295 original frontend denominator.
+No checked-in test or production source was changed to make this finding pass.
+
+### Smallest conceptual correction and minimum regression
+
+Separately authorize platform-appropriate shutdown at this confirmed-absence
+boundary: Android retains its expected-native-authority CAS protection; iOS
+must use its legitimate existing stop boundary without an Android module.
+Do not weaken B1, treat timeout/offline as removal, or redesign iOS tracking.
+
+Minimum regression: real root on iOS, optional Android authority absent,
+previous tracker enabled, successful same-session confirmed owned-member absence
+-> SDK stop; plus transient/offline/malformed lookup does NOT stop, valid owned
+member does NOT stop, and Android obsolete-authority replacement still survives.
+
+**The independent blocker is NOT FIXED. No suggested task was started or created.**
+
+### Coverage and exact stopping point
+
+Reviewed the new native authority implementation/Expo binding, acquisition and
+shutdown wrappers, wake authorization/recovery fences, shared startup/stop/token
+paths, related member/location read/write boundaries and caregiver tuple-age
+semantics. Medication routing/acknowledgment and SOS payload selection received
+partial source inspection, not complete certification.
+
+Review stopped at the confirmed iOS root member-removal branch. Remaining:
+finish broader native lifecycle/FGS/background/ownership/static review, complete
+medication/SOS/iOS source review, cumulative scope adjudication, and full original
+October 13 incident replay. Existing tests separate stale GPS from continuing
+contact and enabled configuration, but are not a completed original-incident
+replay or attribution of the historical stop caller.
+
+The completed backend 507/27 and requested frontend 295/295 results remain
+accurate, alongside the NEW failing adversarial root scenario. Full backend
+is still UNVERIFIED. Public disclaimer preview renders; signed-in UI was not
+visually verified. No additional application source changed after the narrow
+reader correction push.
+
+Real MongoDB concurrency, Android process-death/across-runtime validation,
+Android compile/build and physical acceptance remain NOT STARTED.
+No merge, Railway deployment, production mutation, OTA, Android build/release,
+or Google Play submission occurred. Recommended next step is separate approval
+for the narrow iOS confirmed-member-removal shutdown correction, not release.

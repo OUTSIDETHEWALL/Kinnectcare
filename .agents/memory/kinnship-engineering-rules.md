@@ -209,3 +209,16 @@ would prompt an unsupported production change.
 controlled experiments without weakening semantic assertions or changing
 production code. Preserve the original failed-run counts in the report even
 when a later control or readiness variant passes.
+
+## Platform scope of native authority
+
+Android-only native authority must not become a prerequisite for legitimate
+non-Android tracking shutdown in shared app lifecycle code.
+
+**Why:** Applying an Android authority guard to a shared confirmed-member-loss
+branch suppressed iOS native shutdown entirely, while Android-only test setup
+provided a native authority that real iOS installations do not have.
+
+**How to apply:** Preserve Android expected-authority CAS protection, but check
+shared lifecycle changes on iOS with the Android extension genuinely absent.
+Keep confirmed loss distinct from timeout, unavailable identity and UI teardown.
