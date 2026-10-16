@@ -29,8 +29,8 @@ module.exports = ({ config }) => ({
   expo: {
     name: 'Kinnship',
     slug: 'kinnship',
-    version: '1.3.1',
-    runtimeVersion: { policy: 'appVersion' },
+    version: '1.3.0',
+    runtimeVersion: '1.3.1',
     updates: {
       url: 'https://u.expo.dev/11cb65a8-eab0-4745-9b4a-7b8964805381',
       enabled: true,
