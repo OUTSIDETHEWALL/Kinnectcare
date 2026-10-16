@@ -2,6 +2,13 @@ import fs from 'fs';
 import path from 'path';
 
 describe('pinned Expo Sharing native patch (source checks, not Android execution)', () => {
+  it('builds the patched module from source instead of linking the unpatched published AAR', () => {
+    const config = require('../../package.json');
+    const patterns = config.expo?.autolinking?.android?.buildFromSource ?? [];
+    expect(patterns.some((pattern: string) =>
+      new RegExp(`^(?:${pattern})$`).test('expo-sharing'))).toBe(true);
+  });
+
   it('covers result, cancellation, exceptions, Activity return and recreation with operation-scoped cleanup', () => {
     const { patchSharing } = require('../../plugins/withReliableSharing');
     const original = fs.readFileSync(path.resolve(__dirname,
