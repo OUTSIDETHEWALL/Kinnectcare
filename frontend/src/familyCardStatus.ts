@@ -22,6 +22,7 @@ export function getFamilyCardStatus(
 ): FamilyCardStatus {
   const devicePresenceAt = usableTimestamp(member.device_presence_at, nowMs);
   const lastSeen = usableTimestamp(member.last_seen, nowMs);
+  const coordinateAt = usableTimestamp(member.coordinate_captured_at, nowMs);
   const batteryUpdatedAt = usableTimestamp(member.battery_updated_at, nowMs);
   const deviceMember = {
     device_presence_at: devicePresenceAt,
@@ -31,7 +32,7 @@ export function getFamilyCardStatus(
   const device = getDeviceCommunicationStatus(deviceMember, nowMs);
   const presenceTimestamp = selectPresenceTimestamp(deviceMember);
   const contactLabel = presenceTimestamp
-    ? `${device.kind === 'healthy' ? 'Last update' : 'Last contact'} ${formatContactAge(presenceTimestamp, nowMs)}`
+    ? `Last contact ${formatContactAge(presenceTimestamp, nowMs)}`
     : null;
   const batteryIssue = issues.find((issue) => issue.kind === 'battery');
   const condition = batteryIssue?.title === 'Battery Critical'
@@ -41,7 +42,7 @@ export function getFamilyCardStatus(
       : null;
   const locationStatus = getDeviceCommunicationStatus({
     device_presence_at: null,
-    last_seen: lastSeen,
+    last_seen: coordinateAt,
     is_moving: member.is_moving,
   }, nowMs);
   const batteryFreshness = batteryUpdatedAt
@@ -56,9 +57,9 @@ export function getFamilyCardStatus(
     device,
     contactLabel,
     locationLabel: locationStatus.kind === 'healthy' ? 'Location' : 'Last known location',
-    locationAgeLabel: lastSeen
-      ? `${locationStatus.kind === 'healthy' ? 'Updated' : 'Last location update'} ${formatContactAge(lastSeen, nowMs)}`
-      : null,
+    locationAgeLabel: coordinateAt
+      ? `Last location captured ${formatContactAge(coordinateAt, nowMs)}`
+      : 'Capture time unavailable',
     battery: getBatteryDisplay(
       member.battery_level,
       member.is_charging,

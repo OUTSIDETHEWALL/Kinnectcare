@@ -3,6 +3,7 @@ const BATTERY_LOG_KEY = '@kinnship/battery_task_log_v1';
 // These tests isolate transport/cadence after recovery authorization.
 // Real ownership, cold boot and independent-wake guards are covered separately.
 jest.mock('../androidTrackingRecovery', () => ({
+  evaluateWakeAuthorization: jest.fn(async () => ({ state: 'AUTHORIZED', source: 'test_owner' })),
   trackingIsRevoked: jest.fn(async () => false),
   trackingPolicyStamp: jest.fn(async () => null),
   verifyWakeOwnership: jest.fn(async () => 'allowed'),
@@ -19,6 +20,8 @@ jest.mock('../androidTrackingRecovery', () => ({
       memberId: member[1], baseUrl: state.url.split('/api/')[0],
       token: state.authorization.accessToken, isCurrent: async () => true,
     });
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    if (member) require('../__mocks__/trackingNative').trackingNative.trackingAuthorize(`test:${member[1]}`, 0);
     return 'already_enabled';
   }),
 }));
@@ -127,9 +130,12 @@ describe('minimum device-presence freshness', () => {
     const mockStorage = storageMock();
     const mockFinish = jest.fn();
     const fetchMock = jest.fn(async (_url, request) => request?.method === 'PATCH'
-      ? { ok: false, status: 401 } : { ok: true, status: 200 });
+      ? { ok: false, status: 401 } : { ok: true, status: 200, json: async () => {
+          const body = JSON.parse(request.body);
+          return { latitude: body.latitude, longitude: body.longitude, coordinate_captured_at: body.timestamp };
+        } });
     const mockGetCurrentPosition = jest.fn().mockResolvedValue({
-      timestamp: '2026-09-14T19:14:13.577Z',
+      timestamp: new Date().toISOString(),
       coords: { latitude: 35, longitude: -114, accuracy: 10 },
     });
     (global as any).fetch = fetchMock;
@@ -249,7 +255,7 @@ describe('minimum device-presence freshness', () => {
       }),
       expect.objectContaining({
         event: 'background_location_skipped',
-        detail: expect.objectContaining({ reason: 'obsolete_execution_or_owner' }),
+        detail: expect.objectContaining({ reason: 'recovery_not_authorized' }),
       }),
     ]));
     expect(mockFinish).toHaveBeenCalledTimes(1);
@@ -326,7 +332,12 @@ describe('minimum device-presence freshness', () => {
     const mockGetCurrentPosition = jest.fn(() => new Promise((resolve) => {
       locationResolvers.push(resolve);
     }));
-    (global as any).fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+    (global as any).fetch = jest.fn(async (_url, request: any) => {
+      const body = request?.body ? JSON.parse(request.body) : {};
+      return { ok: true, status: 200, json: async () => ({
+        latitude: body.latitude, longitude: body.longitude, coordinate_captured_at: body.timestamp,
+      }) };
+    });
 
     jest.isolateModules(() => {
       jest.mock('react-native', () => ({ Platform: { OS: 'android' } }));
@@ -374,7 +385,7 @@ describe('minimum device-presence freshness', () => {
 
     const secondExecution = mockConfiguredHandler!('reused-task-id');
     locationResolvers[0]({
-      timestamp: '2026-09-14T19:14:13.000Z',
+      timestamp: new Date().toISOString(),
       coords: { latitude: 35, longitude: -114, accuracy: 11 },
     });
     await firstExecution;
@@ -386,7 +397,7 @@ describe('minimum device-presence freshness', () => {
     expect(mockFinish).toHaveBeenCalledTimes(1);
 
     locationResolvers[1]({
-      timestamp: '2026-09-14T19:14:45.000Z',
+      timestamp: new Date().toISOString(),
       coords: { latitude: 35, longitude: -114, accuracy: 9 },
     });
     await secondExecution;
@@ -404,7 +415,7 @@ describe('minimum device-presence freshness', () => {
         event: 'background_location_persisted',
         detail: expect.objectContaining({
           taskId: 'reused-task-id',
-          capturedAt: '2026-09-14T19:14:45.000Z',
+          capturedAt: expect.any(String),
         }),
       }),
     ]));

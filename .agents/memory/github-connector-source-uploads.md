@@ -19,3 +19,15 @@ produce a different source tree.
 **How to apply:** Prefer whole-file reads or bounded encoded chunks; verify
 retrieved bytes against the local blob ID before uploading. Never accept a
 successful API response as proof that the remote tree matches the reviewed one.
+
+Keep large source/blob variables local to one upload operation, not persistent
+top-level notebook bindings.
+
+**Why:** The notebook has a 32 MiB capture limit. Accumulated uploads exceeded
+it after a successful ref update: the tool reported an error and reset its
+notebook even though the printed local/remote commit IDs already matched.
+
+**How to apply:** Scope reads and metadata inside an async IIFE and return only
+the small verified result. After a capture/reset error, independently read the
+remote ref before retrying a write; do not mistake a post-write notebook failure
+for a failed push.

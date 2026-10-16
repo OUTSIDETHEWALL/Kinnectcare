@@ -148,10 +148,12 @@ def test_stale_location_battery_does_not_run_alert_lifecycle():
         low_battery_alerted=True,
         low_battery_warn_alerted=True,
     )
-    target = {"id": MEMBER_ID, "user_id": "test-member-user"}
+    target = {"id": MEMBER_ID, "user_id": "test-member-user", "location_sharing_enabled": True}
     database = MagicMock()
     database.members.find_one = AsyncMock(
-        side_effect=[target, copy.deepcopy(member), copy.deepcopy(member)]
+        # Target, pre-write, post-write, and final family-response authority.
+        side_effect=[target, copy.deepcopy(member), copy.deepcopy(member),
+                     copy.deepcopy(member)]
     )
     database.members.find_one_and_update = AsyncMock(return_value=None)
     write_result = MagicMock(matched_count=1, modified_count=1)

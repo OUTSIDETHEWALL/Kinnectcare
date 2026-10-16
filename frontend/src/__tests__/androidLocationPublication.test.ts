@@ -17,13 +17,14 @@ describe('Android one-shot publication across real independent paths', () => {
   let wake: (id: string) => Promise<void>;
   let replacement: Promise<unknown> | undefined;
   const position = {
-    timestamp: '2026-10-11T22:00:00.000Z',
+    timestamp: new Date().toISOString(),
     coords: { latitude: 35, longitude: -114, accuracy: 10 },
     battery: { level: 0.8, is_charging: true },
   };
 
   beforeEach(async () => {
     jest.resetModules();
+    position.timestamp = new Date().toISOString();
     process.env.EXPO_PUBLIC_BACKEND_URL = base;
     storage = new Map();
     token = 'current-session';
@@ -81,10 +82,14 @@ describe('Android one-shot publication across real independent paths', () => {
       NETWORK_TYPE_ANY: 0, registerHeadlessTask: jest.fn(), finish: jest.fn(),
       configure: jest.fn(async (_options, callback) => { wake = callback; return 2; }),
     } }));
-    global.fetch = jest.fn(async url => ({
+    global.fetch = jest.fn(async (url, options) => ({
       ok: true, status: 200,
       json: async () => String(url).endsWith('/auth/me') ? { id: 'owner' }
-        : String(url).endsWith('/members') ? members : { location_sharing_enabled: sharing },
+        : String(url).endsWith('/members') ? members
+          : options?.method === 'PUT' ? {
+              latitude: position.coords.latitude, longitude: position.coords.longitude,
+              coordinate_captured_at: position.timestamp,
+            } : { location_sharing_enabled: sharing },
     })) as any;
     policy = require('../androidTrackingRecovery');
     await policy.authorizeTrackingIntent(

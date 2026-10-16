@@ -65,7 +65,7 @@ class FakeCollection:
         self.documents.append(dict(document))
         return SimpleNamespace(inserted_id=document.get("id"))
 
-    async def update_one(self, query, update):
+    async def update_one(self, query, update, upsert=False):
         for document in self.documents:
             if _matches(document, query):
                 before = dict(document)
@@ -74,6 +74,10 @@ class FakeCollection:
                     matched_count=1,
                     modified_count=int(document != before),
                 )
+        if upsert:
+            document = {**query, **update.get("$setOnInsert", {}), **update.get("$set", {})}
+            self.documents.append(document)
+            return SimpleNamespace(matched_count=0, modified_count=0, upserted_id=document.get("_id"))
         return SimpleNamespace(matched_count=0, modified_count=0)
 
     async def update_many(self, query, update):

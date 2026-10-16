@@ -15,20 +15,20 @@ describe('device presence telemetry contracts', () => {
     expect(source('src/batteryTask.ts')).toContain("'X-Kinnship-Presence-Source': 'battery-task'");
   });
 
-  it('uses presence selection only for caregiver contact labels and leaves GPS freshness logic on last_seen', () => {
+  it('separates contact labels from coordinate-bound GPS freshness', () => {
     const dashboard = source('app/(tabs)/dashboard.tsx');
     const memberDetail = source('app/member/[id].tsx');
     const familyCardStatus = source('src/familyCardStatus.ts');
 
     expect(dashboard).toContain('getFamilyCardStatus(member, issues)');
     expect(familyCardStatus).toContain('selectPresenceTimestamp');
-    expect(familyCardStatus).toContain("'Last update' : 'Last contact'");
+    expect(familyCardStatus).toContain('Last contact ${formatContactAge');
     expect(familyCardStatus).toContain('const lastSeen = usableTimestamp(member.last_seen, nowMs)');
     expect(familyCardStatus).toContain('last_seen: lastSeen');
     expect(familyCardStatus).toContain("'Location' : 'Last known location'");
     expect(memberDetail).toContain('selectPresenceTimestamp');
-    expect(memberDetail).toMatch(/Updated \{formatLastSeenAge\(presenceTimestamp\)\}/);
-    expect(dashboard).toContain('const seenMs = member.last_seen ? new Date(member.last_seen).getTime() : 0;');
+    expect(memberDetail).toMatch(/Device contact \{formatLastSeenAge\(presenceTimestamp\)\}/);
+    expect(dashboard).toContain('const seenMs = member.coordinate_captured_at ? new Date(member.coordinate_captured_at).getTime() : 0;');
     expect(dashboard).toContain('requestMemberRefresh(mb.id, seenMs || null);');
     expect(memberDetail).toContain('const seenMs = md.last_seen ? new Date(md.last_seen).getTime() : 0;');
     expect(memberDetail).toContain('requestMemberRefresh(md.id, seenMs || null);');
@@ -39,7 +39,7 @@ describe('device presence telemetry contracts', () => {
 
     expect(dashboard).toContain("deviceStatus.kind !== 'healthy' && cardStatus.contactLabel");
     expect(dashboard).toContain("battery.statusText.toLowerCase().includes('last known')");
-    expect(dashboard).toContain("cardStatus.locationLabel === 'Last known location' && cardStatus.locationAgeLabel");
+    expect(dashboard).toContain("cardStatus.locationAgeLabel ? (");
     expect(dashboard).toContain("'Last known location: '");
     expect(dashboard).not.toContain('styles.memberMetaLastKnown');
   });

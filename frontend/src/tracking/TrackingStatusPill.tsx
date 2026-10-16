@@ -65,10 +65,10 @@ export type TrackingStatus = {
 // caregiver is looking at on the map is too stale to be trustworthy given
 // the member's current movement state.
 const STATUS: Record<TrackingStatusKind, Omit<TrackingStatus, 'kind'>> = {
-  healthy:       { color: '#166534', bg: '#DCFCE7', label: 'Tracking healthy',     emoji: '🟢' },
-  delayed:       { color: '#92400E', bg: '#FEF3C7', label: 'Tracking delayed',     emoji: '🟡' },
-  degraded:      { color: '#991B1B', bg: '#FEE2E2', label: 'Tracking degraded',    emoji: '🔴' },
-  unavailable:   { color: '#6B7280', bg: '#F3F4F6', label: 'Tracking unavailable', emoji: '◯' },
+  healthy:       { color: '#166534', bg: '#DCFCE7', label: 'Recent location',     emoji: '🟢' },
+  delayed:       { color: '#92400E', bg: '#FEF3C7', label: 'Location delayed',     emoji: '🟡' },
+  degraded:      { color: '#991B1B', bg: '#FEE2E2', label: 'Location stale',       emoji: '🔴' },
+  unavailable:   { color: '#6B7280', bg: '#F3F4F6', label: 'Capture time unavailable', emoji: '◯' },
   'sharing-off': { color: '#374151', bg: '#E5E7EB', label: 'Location sharing off', emoji: '🔒' },
 };
 

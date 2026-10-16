@@ -233,12 +233,12 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
   try {
     if (Platform.OS === 'android') {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { recoverFromIndependentWake } = require('./locationEngine') as typeof import('./locationEngine');
-      const result = await recoverFromIndependentWake(
+      const { recoverWithOperationalReport } = require('./locationEngine') as typeof import('./locationEngine');
+      const result = await recoverWithOperationalReport(
         'workmanager', () => isActiveExecution(execution),
         transport => { authorizedTransport = transport; },
       );
-      recoveryAuthorized = result === 'already_enabled' || result === 'restarted';
+      recoveryAuthorized = result.authorization === 'AUTHORIZED';
     }
     sdkState = await BGL.getState();
   } catch (e: unknown) {

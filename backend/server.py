@@ -8,6 +8,7 @@ from pymongo.errors import DuplicateKeyError
 import os
 import json
 import logging
+import math
 import uuid
 import asyncio
 from pathlib import Path
@@ -327,6 +328,8 @@ class FamilyMember(BaseModel):
     # fix was captured recently".  None for rows created before this
     # field was introduced; populated on the next successful upload.
     captured_at: Optional[datetime] = None
+    # Capture time of the displayed coordinate tuple, never device contact.
+    coordinate_captured_at: Optional[datetime] = None
     # Build 64 — SDK movement state from the Transistor upload payload.
     # True when the SDK was in MOVING mode at the time of the last upload.
     # Exposed in /members so TrackingStatusPill can apply movement-aware
@@ -361,9 +364,15 @@ class FamilyMember(BaseModel):
     # device presence was introduced continue to deserialize unchanged.
     device_presence_at: Optional[datetime] = None
 
-    @field_serializer("last_seen", "created_at", "checkin_interval_started_at", "captured_at", "battery_updated_at", "device_presence_at", when_used='json')
+    @field_serializer("last_seen", "created_at", "checkin_interval_started_at", "captured_at", "coordinate_captured_at", "battery_updated_at", "device_presence_at", when_used='json')
     def _ser_dt(self, v: Optional[datetime]) -> Optional[str]:
         return _to_utc_iso(v)
+
+
+class LocationWriteResponse(FamilyMember):
+    """Additive receipt fields; never persisted on the member document."""
+    location_write_accepted: bool
+    location_write_rejection_reason: Optional[str] = None
 
 
 class CheckinSettings(BaseModel):
@@ -2305,7 +2314,6 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
         # and syncs to a second device on the same account.
         set_doc["location_sharing_enabled"] = bool(data.location_sharing_enabled)
     if set_doc:
-        await db.users.update_one({"id": current["id"]}, {"$set": set_doc})
         # Build #56 — CRITICAL PRIVACY FIX.  When a user flips location
         # sharing OFF we must also:
         #   1. Mirror the flag onto their own member doc so family
@@ -2329,6 +2337,7 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
                 member_update.update({
                     "latitude": None,
                     "longitude": None,
+                    "coordinate_captured_at": None,
                     "location_name": "Location Sharing Off",
                     # Deliberately keep `last_seen` untouched — we don't
                     # want to reset engagement timers or make the
@@ -2367,7 +2376,7 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
             try:
                 result = await db.members.update_many(
                     {"user_id": current["id"]},
-                    {"$set": member_update},
+                    {"$set": member_update, "$inc": {"location_consent_generation": 1}},
                 )
                 logger.info(
                     f"[privacy] location_sharing={enabled} propagated to "
@@ -2375,6 +2384,9 @@ async def update_my_preferences(data: PreferencesUpdate, current=Depends(get_cur
                 )
             except Exception as e:
                 logger.error(f"[privacy] Failed to mirror location_sharing to member docs: {e}")
+                # Do not confirm withdrawal while the atomic publication fence
+                # remains open. Member consent is changed before the user mirror.
+                raise HTTPException(status_code=503, detail="Location sharing update failed; retry.") from e
         await db.users.update_one({"id": current["id"]}, {"$set": set_doc})
     return await get_my_preferences(current)
 
@@ -2516,6 +2528,66 @@ async def delete_account(
 
 
 # ========== Members ==========
+def _member_location_view(doc: dict, current: dict, authority: dict) -> dict:
+    """Final response-only privacy fence. Never mutate retained diagnostics."""
+    if not current.get("id"):
+        raise HTTPException(status_code=403, detail="Authenticated user required")
+    if (not authority or authority.get("id") != doc.get("id")
+            or authority.get("family_group_id") != current.get("family_group_id")):
+        raise HTTPException(status_code=404, detail="Member not found")
+    view = dict(doc)
+    subject = authority.get("user_id")
+    generation = authority.get("location_consent_generation", 0)
+    same_identity = doc.get("user_id") == subject
+    is_self = bool(subject) and subject == current["id"] and same_identity
+    current_scope = (
+        same_identity
+        and authority.get("location_sharing_enabled") is True
+        and isinstance(generation, int) and not isinstance(generation, bool)
+        and generation >= 0
+        and doc.get("location_sharing_enabled") is True
+        and doc.get("location_consent_generation", 0) == generation
+    )
+    trace = doc.get("location_pipeline")
+    if isinstance(trace, dict):
+        trace_generation = trace.get("location_consent_generation")
+        own_trace = is_self and (
+            "subject_user_id" not in trace or trace["subject_user_id"] == subject
+        )
+        family_trace = (
+            current_scope
+            and "subject_user_id" in trace and trace["subject_user_id"] == subject
+            and isinstance(trace_generation, int)
+            and not isinstance(trace_generation, bool)
+            and trace_generation == generation
+        )
+        if not (own_trace or family_trace):
+            # Omit the WHOLE arbitrary diagnostic payload, including future
+            # coordinate aliases, provider/native snapshots, labels and map URLs.
+            view["location_pipeline"] = None
+    else:
+        view["location_pipeline"] = None
+    if not is_self and not current_scope:
+        # A read may have fetched the old tuple before an await/withdrawal.
+        # Do not return it beside a redacted pipeline or a stale ON flag.
+        for field in ("latitude", "longitude", "location_name",
+                      "captured_at", "coordinate_captured_at"):
+            view[field] = None
+        view["location_sharing_enabled"] = (
+            authority.get("location_sharing_enabled") is True
+        )
+    return view
+
+
+async def _current_member_location_view(doc: dict, current: dict) -> dict:
+    authority = await db.members.find_one(
+        {"id": doc["id"], "family_group_id": current["family_group_id"]},
+        {"_id": 0, "id": 1, "family_group_id": 1, "user_id": 1,
+         "location_sharing_enabled": 1, "location_consent_generation": 1},
+    )
+    return _member_location_view(doc, current, authority)
+
+
 @api_router.get("/members", response_model=List[FamilyMember])
 async def list_members(current=Depends(get_current_user), request: Request = None):
     docs = await db.members.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).to_list(1000)
@@ -2647,7 +2719,18 @@ async def list_members(current=Depends(get_current_user), request: Request = Non
                         break
         except Exception:
             logger.warning("device_presence failed during members response", exc_info=True)
-    return [FamilyMember(**d) for d in docs]
+    # One final authority fetch after all geocoding/presence awaits. No await
+    # between this decision and serialization of the complete response.
+    authorities = await db.members.find(
+        {"family_group_id": current["family_group_id"]},
+        {"_id": 0, "id": 1, "family_group_id": 1, "user_id": 1,
+         "location_sharing_enabled": 1, "location_consent_generation": 1},
+    ).to_list(1000)
+    by_id = {d["id"]: d for d in authorities}
+    return [
+        FamilyMember(**_member_location_view(d, current, by_id[d["id"]]))
+        for d in docs if d["id"] in by_id
+    ]
 
 
 @api_router.post("/members", response_model=FamilyMember)
@@ -2728,7 +2811,7 @@ async def update_member(member_id: str, data: FamilyMemberUpdate, current=Depend
             {"id": member_id, "family_group_id": current["family_group_id"]},
             {"_id": 0},
         )
-        return FamilyMember(**doc)
+        return FamilyMember(**_member_location_view(doc, current, doc))
     payload["last_seen"] = datetime.now(timezone.utc)
     r = await db.members.update_one(
         {"id": member_id, "family_group_id": current["family_group_id"]},
@@ -2740,7 +2823,7 @@ async def update_member(member_id: str, data: FamilyMemberUpdate, current=Depend
         {"id": member_id, "family_group_id": current["family_group_id"]},
         {"_id": 0},
     )
-    return FamilyMember(**doc)
+    return FamilyMember(**_member_location_view(doc, current, doc))
 
 
 @api_router.get("/members/{member_id}", response_model=FamilyMember)
@@ -2794,7 +2877,7 @@ async def get_member(member_id: str, current=Depends(get_current_user)):
             "mongo_write_at": _to_utc_iso(doc.get("location_pipeline_mongo_write_at")),
             "members_response_at": datetime.now(timezone.utc).isoformat(),
         }
-    return FamilyMember(**doc)
+    return FamilyMember(**await _current_member_location_view(doc, current))
 
 
 @api_router.delete("/members/{member_id}")
@@ -3531,7 +3614,7 @@ async def check_low_battery(
     )
 
 
-@api_router.put("/members/{member_id}/location", response_model=FamilyMember)
+@api_router.put("/members/{member_id}/location", response_model=LocationWriteResponse)
 async def update_member_location(member_id: str, data: LocationUpdate, current=Depends(get_current_user)):
     # ============================================================
     #  Defense-in-depth: only the member's OWNER device can write
@@ -3553,11 +3636,15 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # ============================================================
     target = await db.members.find_one(
         {"id": member_id, "family_group_id": current["family_group_id"]},
-        {"_id": 0, "id": 1, "user_id": 1},
+        {"_id": 0, "id": 1, "user_id": 1, "location_sharing_enabled": 1,
+         "location_consent_generation": 1},
     )
     if not target:
         raise HTTPException(status_code=404, detail="Member not found")
     is_self = bool(target.get("user_id")) and target["user_id"] == current["id"]
+    # Capture before any asynchronous consent work. OFF -> ON must not revive
+    # a request admitted under the previous consent lifetime.
+    consent_generation = target.get("location_consent_generation", 0)
     is_owner = current.get("family_group_role") == "owner"
     if not (is_self or is_owner):
         logger.warning(
@@ -3598,9 +3685,27 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 logger.warning("device_presence failed after privacy-suppressed location upload", exc_info=True)
             # Re-read after the best-effort stamp so the response includes it.
             doc = await db.members.find_one({"id": member_id}, {"_id": 0})
-            return FamilyMember(**doc) if doc else FamilyMember(
+            return LocationWriteResponse(**_member_location_view(doc, current, doc),
+                location_write_accepted=False,
+                location_write_rejection_reason="sharing_disabled") if doc else LocationWriteResponse(
                 id=member_id, owner_id=current["id"], name="", age=0,
-                phone="", gender="", role="family",
+                phone="", gender="", role="family", location_write_accepted=False,
+                location_write_rejection_reason="sharing_disabled",
+            )
+    if "location_sharing_enabled" not in target:
+        # Legacy rows predate the member mirror. Preserve the documented default
+        # ON only after a successful policy read, initializing without coordinates.
+        # A concurrent toggle creates the flag/generation and makes this CAS fail.
+        legacy_user = await db.users.find_one(
+            {"id": target.get("user_id") or current["id"]},
+            {"_id": 0, "location_sharing_enabled": 1},
+        )
+        if legacy_user is not None and legacy_user.get("location_sharing_enabled", True) is True:
+            await db.members.update_one(
+                {"id": member_id, "family_group_id": current["family_group_id"],
+                 "location_sharing_enabled": {"$exists": False},
+                 "location_consent_generation": {"$exists": False}},
+                {"$set": {"location_sharing_enabled": True}},
             )
     # Build 53 — Location Ingest diagnostic.  Capture the exact
     # before/after last_seen + captured_at values so we can prove
@@ -3699,6 +3804,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     update: Dict[str, Any] = {
         "latitude":  data.latitude,
         "longitude": data.longitude,
+        "coordinate_captured_at": incoming_captured_at,
         "last_seen": server_now,
     }
     if incoming_captured_at is not None:
@@ -3813,6 +3919,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         update.pop("latitude", None)
         update.pop("longitude", None)
         update.pop("location_name", None)
+        update.pop("coordinate_captured_at", None)
 
     # A single immutable trace joins this accepted moving fix to the
     # caregiver's /members → store → map evidence.  The SDK payload does not
@@ -3820,6 +3927,10 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # first server observation and its provenance is retained.
     if incoming_captured_at is not None and not coord_suppressed:
         update["location_pipeline"] = {
+            # Same immutable authority as the coordinate CAS; never refreshed
+            # from a later read or implicitly granted to legacy snapshots.
+            "location_consent_generation": consent_generation,
+            "subject_user_id": target.get("user_id"),
             "trace_id": str(uuid.uuid4()),
             "native_gps_at": _to_utc_iso(incoming_captured_at),
             "native_latitude": data.latitude,
@@ -3856,6 +3967,10 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         # No GPS timestamp — unconditional write (pre-Build-60 path)
         filter_doc = {"id": member_id, "family_group_id": current["family_group_id"]}
 
+    # Consent and ordering are one atomic publication decision. Missing generation
+    # is legacy generation zero, NOT an exemption from affirmative sharing.
+    filter_doc.update(_location_consent_condition(consent_generation))
+
     mongo_update: Dict[str, Any] = {"$set": update}
     if "location_pipeline" in update:
         # MongoDB supplies this timestamp atomically in the same write as the
@@ -3867,24 +3982,19 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     rejection_reason: Optional[str]
 
     if r.matched_count == 0:
-        if incoming_captured_at is not None:
-            # Guard fired: member exists but the incoming GPS fix is not
-            # newer than the stored one.  This is the normal / expected
-            # outcome for every buffered historical point during a replay.
-            # Return the current member doc without raising a 404.
-            write_accepted   = False
-            rejection_reason = "older_timestamp"
-            # Still update last_seen so Leonidas knows the device is alive
-            await db.members.update_one(
-                {"id": member_id, "family_group_id": current["family_group_id"]},
-                {"$set": {"last_seen": server_now}},
-            )
-            doc = await db.members.find_one({"id": member_id}, {"_id": 0})
-            if not doc:
-                raise HTTPException(status_code=404, detail="Member not found")
-        else:
-            # Unconditional path, no match → member genuinely not found
+        doc = await db.members.find_one({"id": member_id}, {"_id": 0})
+        if not doc:
             raise HTTPException(status_code=404, detail="Member not found")
+        write_accepted = False
+        rejection_reason = ("sharing_disabled" if doc.get("location_sharing_enabled") is not True
+            else "consent_changed" if doc.get("location_consent_generation", 0) != consent_generation
+            else "older_timestamp")
+        # Presence is not coordinate freshness and cannot restore the tuple.
+        await db.members.update_one(
+            {"id": member_id, "family_group_id": current["family_group_id"]},
+            {"$set": {"last_seen": server_now}},
+        )
+        doc = await db.members.find_one({"id": member_id}, {"_id": 0})
     else:
         write_accepted   = True
         rejection_reason = "replay_suppressed" if coord_suppressed else None
@@ -3957,6 +4067,12 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 "captured_at":      incoming_captured_at,
                 "member_id":        member_id,
                 "family_group_id":  current["family_group_id"],
+                # Immutable request authority, captured before asynchronous work.
+                # This separate collection is private diagnostic evidence unless
+                # its exact lifetime is still current at a family read. An old
+                # insert after OFF (or OFF -> ON) cannot acquire newer authority.
+                "location_consent_generation": consent_generation,
+                "subject_user_id": target.get("user_id"),
                 "latitude":         data.latitude,
                 "longitude":        data.longitude,
                 "accuracy":         raw_accuracy,
@@ -3992,7 +4108,13 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # v1.3.3 — match this GPS upload to a pending refresh trace
     # so /api/diagnostics/refresh-traces can show end-to-end latency.
     try:
-        _trace_record_gps(member_id, data.latitude, data.longitude)
+        _trace_record_gps(
+            member_id, data.latitude, data.longitude,
+            subject_user_id=target.get("user_id"),
+            family_group_id=current["family_group_id"],
+            consent_generation=consent_generation,
+            publication_accepted=write_accepted,
+        )
     except Exception as _e:
         pass
     # Location may still be owner-assisted for the existing correction flow,
@@ -4006,9 +4128,17 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         # Do not serialize the pre-stamp snapshot: callers should observe a
         # successful presence write in this same location response.
         refreshed_doc = await db.members.find_one({"id": member_id}, {"_id": 0})
-        if refreshed_doc:
-            doc = refreshed_doc
-    return FamilyMember(**doc)
+        if not refreshed_doc:
+            raise HTTPException(status_code=404, detail="Member not found")
+        # This full reread is already the last await; use it as authority.
+        doc = _member_location_view(refreshed_doc, current, refreshed_doc)
+    else:
+        # Owner-assisted writes have awaited diagnostics/history since the
+        # member snapshot was captured. They need a final authority read.
+        doc = await _current_member_location_view(doc, current)
+    return LocationWriteResponse(**doc,
+        location_write_accepted=write_accepted and not coord_suppressed,
+        location_write_rejection_reason=rejection_reason)
 
 
 # ---------------------------------------------------------------------------
@@ -4079,7 +4209,7 @@ async def patch_member_battery(
         doc = await db.members.find_one({"id": member_id}, {"_id": 0})
         if not doc:
             raise HTTPException(status_code=404, detail="Member not found after update")
-        return FamilyMember(**doc)
+        return FamilyMember(**_member_location_view(doc, current, doc))
 
     logger.info(
         f"battery-patch: member={member_id} "
@@ -4113,7 +4243,7 @@ async def patch_member_battery(
     doc = await db.members.find_one({"id": member_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Member not found after update")
-    return FamilyMember(**doc)
+    return FamilyMember(**_member_location_view(doc, current, doc))
 
 
 @api_router.get("/members/{member_id}/location-history")
@@ -4130,23 +4260,62 @@ async def get_location_history(
     discarded before this build.  Intended for use on the Diagnostics screen
     to reconstruct GPS behaviour around observed anomalies.
 
-    Access is limited to members within the same family group.
+    Linked self diagnostics may include prior consent lifetimes. Other family
+    accounts receive only records from the current affirmative consent lifetime.
+    Legacy untagged records are self-only; never guess/backfill their authority.
     `limit` is capped at 100; default 50.
     """
+    if not current.get("id"):
+        raise HTTPException(status_code=403, detail="Authenticated user required")
     member = await db.members.find_one(
         {"id": member_id, "family_group_id": current["family_group_id"]},
-        {"_id": 0, "id": 1},
+        {"_id": 0, "id": 1, "user_id": 1,
+         "location_sharing_enabled": 1, "location_consent_generation": 1},
     )
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
 
+    # Creator/group ownership is not ownership of someone else's coordinates.
+    is_self = bool(member.get("user_id")) and member["user_id"] == current["id"]
+    generation = member.get("location_consent_generation", 0)
+    history_filter = {
+        "member_id": member_id, "family_group_id": current["family_group_id"],
+    }
+    if is_self:
+        # Preserve existing own legacy diagnostics, but never return a new record
+        # explicitly belonging to another linked user after an identity change.
+        history_filter["$or"] = [
+            {"subject_user_id": current["id"]},
+            {"subject_user_id": {"$exists": False}},
+        ]
+    else:
+        if (member.get("location_sharing_enabled") is not True
+                or not isinstance(generation, int) or isinstance(generation, bool)
+                or generation < 0):
+            return []
+        history_filter.update({
+            "location_consent_generation": generation,
+            "subject_user_id": member.get("user_id"),
+        })
+
     limit = max(1, min(limit, 100))
     docs = await db.location_history.find(
-        {"member_id": member_id, "family_group_id": current["family_group_id"]},
+        history_filter,
         {"_id": 0},
         sort=[("accepted_at", -1)],
         limit=limit,
     ).to_list(length=limit)
+
+    # Fetching a history cursor is asynchronous. Do not disclose data admitted
+    # before withdrawal, generation cycling, relinking, or a family move.
+    final_authority = {
+        "id": member_id, "family_group_id": current["family_group_id"],
+        "user_id": member.get("user_id"),
+    }
+    if not is_self:
+        final_authority.update(_location_consent_condition(generation))
+    if not await db.members.find_one(final_authority, {"_id": 0, "id": 1}):
+        return []
 
     # Serialise datetimes to ISO-8601 strings for JSON transport.
     def _ser(d: dict) -> dict:
@@ -4210,7 +4379,7 @@ async def update_checkin_settings(member_id: str, data: CheckinSettings, current
         {"id": member_id, "family_group_id": current["family_group_id"]},
         {"_id": 0},
     )
-    return FamilyMember(**doc)
+    return FamilyMember(**_member_location_view(doc, current, doc))
 
 
 # ========== Alerts ==========
@@ -5268,6 +5437,40 @@ async def member_history(member_id: str, days: int = 7, current=Depends(get_curr
 
 
 # ========== Check-ins ==========
+def _location_consent_condition(generation):
+    """Same atomic consent lifetime for every live member-location writer."""
+    versions = [{"location_consent_generation": generation}]
+    if generation == 0:
+        versions.append({"location_consent_generation": {"$exists": False}})
+    return {"location_sharing_enabled": True, "$and": [{"$or": versions}]}
+
+
+async def _publish_checkin_member_location(member, data):
+    """Publish only against the affirmative consent snapshot read at entry.
+
+    Check-ins supply no trusted capture timestamp, so an accepted complete tuple
+    remains unknown-age. Neither presence nor a rejected write changes tuple time.
+    Location-free receipts/pushes avoid a second, unfenced publication surface.
+    """
+    if member.get("location_sharing_enabled") is not True:
+        return False
+    update = {}
+    if data.location_name:
+        update["location_name"] = data.location_name
+    if data.latitude is not None and data.longitude is not None:
+        update.update(latitude=data.latitude, longitude=data.longitude,
+                      coordinate_captured_at=None)
+    if not update:
+        return False
+    query = {
+        "id": member["id"], "family_group_id": member["family_group_id"],
+        "user_id": member["user_id"],
+        **_location_consent_condition(member.get("location_consent_generation", 0)),
+    }
+    result = await db.members.update_one(query, {"$set": update})
+    return result.matched_count == 1
+
+
 @api_router.post("/checkins", response_model=CheckIn)
 async def create_checkin(data: CheckInCreate, current=Depends(get_current_user)):
     member = await db.members.find_one({"id": data.member_id, "family_group_id": current["family_group_id"]}, {"_id": 0})
@@ -5282,17 +5485,17 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
         )
     ci = CheckIn(
         owner_id=current["id"], family_group_id=current["family_group_id"], member_id=data.member_id, member_name=member["name"],
-        location_name=data.location_name, latitude=data.latitude, longitude=data.longitude,
+        # Receipts/history are location-free. Consent on a member document cannot
+        # atomically authorize a separate collection insert or a later push.
         confirmed_by=member["name"], source="self",
     )
     await db.checkins.insert_one(ci.model_dump())
     update = {"last_seen": datetime.now(timezone.utc), "status": "healthy"}
-    if data.location_name:
-        update["location_name"] = data.location_name
-    if data.latitude is not None and data.longitude is not None:
-        update["latitude"] = data.latitude
-        update["longitude"] = data.longitude
-    await db.members.update_one({"id": data.member_id}, {"$set": update})
+    await db.members.update_one(
+        {"id": member["id"], "family_group_id": current["family_group_id"],
+         "user_id": current["id"]}, {"$set": update},
+    )
+    await _publish_checkin_member_location(member, data)
     # Ack today's missed-checkin alerts (using user tz)
     tz = user_tz(current)
     now_local = datetime.now(tz)
@@ -5313,8 +5516,7 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
         await push_to_family_group(
             current["family_group_id"],
             f"✅ {member['name']} checked in",
-            (member["name"] + " is safe — just checked in"
-                + (f" from {data.location_name}" if data.location_name else "")),
+            member["name"] + " is safe — just checked in",
             {"type": "checkin", "member_id": data.member_id, "checkin_id": ci.id},
             exclude_user_id=current["id"],  # don't ping the senior themselves
         )
@@ -5323,12 +5525,28 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
     return ci
 
 
+def _checkin_history_receipt(doc):
+    """History exposes the event, never retained ordinary location.
+
+    Legacy receipts have no trustworthy consent-lifetime evidence. Neither
+    current sharing nor re-enabling it grants that old GPS family authority.
+    These receipt endpoints deliberately have no private-self location exception.
+    Select safe fields rather than copying a stored bag and deleting known GPS.
+    """
+    return CheckIn(**{
+        key: doc[key] for key in (
+            "id", "owner_id", "family_group_id", "member_id", "member_name",
+            "confirmed_by", "source", "created_at",
+        ) if key in doc
+    })
+
+
 @api_router.get("/checkins/member/{member_id}", response_model=List[CheckIn])
 async def list_member_checkins(member_id: str, current=Depends(get_current_user)):
     docs = await db.checkins.find(
         {"family_group_id": current["family_group_id"], "member_id": member_id}, {"_id": 0}
     ).sort("created_at", -1).to_list(100)
-    return [CheckIn(**d) for d in docs]
+    return [_checkin_history_receipt(d) for d in docs]
 
 
 @api_router.get("/checkins/recent")
@@ -5339,7 +5557,7 @@ async def list_recent_checkins(current=Depends(get_current_user)):
     docs = await db.checkins.find(
         {"family_group_id": current["family_group_id"], "created_at": {"$gte": day_start_utc}}, {"_id": 0}
     ).sort("created_at", -1).to_list(200)
-    return [CheckIn(**d) for d in docs]
+    return [_checkin_history_receipt(d) for d in docs]
 
 
 # ========== Checkin Requests ("Are You OK?") ==========
@@ -5475,9 +5693,11 @@ async def respond_to_checkin_request(
                 await deliver_welfare_response_notification(
                     req_doc,
                     existing["id"],
-                    existing.get("location_name"),
+                    None,
                 )
-            return CheckIn(**existing)
+            return CheckIn(**existing).model_copy(update={
+                "latitude": None, "longitude": None, "location_name": None,
+            })
 
     # Claim the request before creating any side effects. Notification actions
     # may reach both Expo's background task and the foreground listener.
@@ -5511,7 +5731,9 @@ async def respond_to_checkin_request(
                 {"_id": 0},
             )
             if existing:
-                return CheckIn(**existing)
+                return CheckIn(**existing).model_copy(update={
+                    "latitude": None, "longitude": None, "location_name": None,
+                })
         raise HTTPException(status_code=409, detail="Check-in response is already being processed")
 
     async def run_claimed_write(operation):
@@ -5543,9 +5765,7 @@ async def respond_to_checkin_request(
         family_group_id=current["family_group_id"],
         member_id=req_doc["member_id"],
         member_name=member["name"],
-        location_name=data.location_name,
-        latitude=data.latitude,
-        longitude=data.longitude,
+        # Keep the durable welfare receipt location-free, just like daily check-in.
         confirmed_by=member["name"],
         source="request_response",
     )
@@ -5577,18 +5797,19 @@ async def respond_to_checkin_request(
                 },
             )
             raise
-        ci = CheckIn(**existing)
+        ci = CheckIn(**existing).model_copy(update={
+            "latitude": None, "longitude": None, "location_name": None,
+        })
 
-    # Update member last_seen + location.
+    # Presence/check-in success does not require location publication.
     update: dict = {"last_seen": datetime.now(timezone.utc), "status": "healthy"}
-    if data.location_name:
-        update["location_name"] = data.location_name
-    if data.latitude is not None and data.longitude is not None:
-        update["latitude"] = data.latitude
-        update["longitude"] = data.longitude
     await run_claimed_write(
-        db.members.update_one({"id": req_doc["member_id"]}, {"$set": update})
+        db.members.update_one(
+            {"id": member["id"], "family_group_id": current["family_group_id"],
+             "user_id": current["id"]}, {"$set": update},
+        )
     )
+    await run_claimed_write(_publish_checkin_member_location(member, data))
 
     # Ack any missed-checkin alerts for today.
     tz = user_tz(current)
@@ -5626,7 +5847,7 @@ async def respond_to_checkin_request(
     await deliver_welfare_response_notification(
         req_doc,
         ci.id,
-        data.location_name,
+        None,
     )
 
     return ci
@@ -6251,7 +6472,13 @@ def _trace_record_request(member_id: str, requester_user_id: str, request_id: st
     return entry
 
 
-def _trace_record_gps(member_id: str, lat: float, lon: float) -> None:
+def _trace_record_gps(
+    member_id: str, lat: float, lon: float, *,
+    subject_user_id: Optional[str] = None,
+    family_group_id: Optional[str] = None,
+    consent_generation: Optional[int] = None,
+    publication_accepted: bool = False,
+) -> None:
     """Match the GPS upload to the most recent pending refresh trace
     for this member (one whose `gps_received_at` is still None and
     `requested_at` is within the last 90 s).  If no match exists, the
@@ -6269,6 +6496,13 @@ def _trace_record_gps(member_id: str, lat: float, lon: float) -> None:
         entry["gps_received_at"] = now_ms
         entry["gps_lat"] = lat
         entry["gps_lon"] = lon
+        # ORIGINAL upload authority, never the refresh requester's identity or
+        # a newer member read after diagnostics/history awaits. Private evidence
+        # can survive withdrawal, but cannot inherit a later ON lifetime.
+        entry["gps_subject_user_id"] = subject_user_id
+        entry["gps_family_group_id"] = family_group_id
+        entry["gps_consent_generation"] = consent_generation
+        entry["gps_publication_accepted"] = publication_accepted is True
         return
 
 
@@ -6729,31 +6963,71 @@ async def diagnostics_refresh_traces(
     Diagnostics page can show end-to-end latency for the four phases:
       request_received -> push_sent -> gps_received.
 
-    For privacy we only return traces the caller is allowed to see:
-      • Traces they themselves requested (caller is `requester_user_id`).
-      • Traces for members in the caller's family_group (so caregivers
-        can see what their seniors' devices did).
+    Status is available to the requester or current family. Precise GPS requires
+    independently verified linked-self ownership or current exact-lifetime family
+    authority. Requesting a refresh never establishes ownership of its GPS.
 
     `limit` capped at 100.  `member_id` optional filter.
     """
+    if not current.get("id"):
+        raise HTTPException(status_code=403, detail="Authenticated user required")
     limit = max(1, min(int(limit or 20), 100))
+    # Freeze evidence BEFORE authority awaits; do not mix later GPS with earlier
+    # authorization. Do not return arbitrary diagnostic bags via **entry.
+    entries = [dict(e) for e in reversed(_REFRESH_TRACE_LOG)
+               if not member_id or e["member_id"] == member_id]
     fg_id = current.get("family_group_id")
-    fg_members = set()
+    viewer = None
     if fg_id:
-        async for m in db.members.find({"family_group_id": fg_id}, {"id": 1}):
-            fg_members.add(m["id"])
+        viewer = await db.users.find_one(
+            {"id": current["id"], "family_group_id": fg_id}, {"_id": 0, "id": 1},
+        )
+    # Final authoritative member fetch follows ALL other awaits. Serialization
+    # below performs no I/O. A stale requester principal grants no family GPS.
+    members = {}
+    if viewer:
+        docs = await db.members.find(
+            {"family_group_id": fg_id},
+            {"_id": 0, "id": 1, "user_id": 1, "family_group_id": 1,
+             "location_sharing_enabled": 1, "location_consent_generation": 1},
+        ).to_list(1000)
+        members = {d["id"]: d for d in docs}
     out = []
-    for entry in reversed(_REFRESH_TRACE_LOG):
-        if member_id and entry["member_id"] != member_id:
+    for entry in entries:
+        member = members.get(entry["member_id"])
+        if entry["requester_user_id"] != current["id"] and not member:
             continue
-        if entry["requester_user_id"] != current["id"] and entry["member_id"] not in fg_members:
-            continue
+        subject = entry.get("gps_subject_user_id")
+        generation = entry.get("gps_consent_generation")
+        is_self = (
+            member is not None and bool(subject)
+            and subject == current["id"] == member.get("user_id")
+        )
+        family_gps = (
+            member is not None
+            and bool(subject)
+            and entry.get("gps_publication_accepted") is True
+            and entry.get("gps_family_group_id") == fg_id
+            and "gps_subject_user_id" in entry and subject == member.get("user_id")
+            and isinstance(generation, int) and not isinstance(generation, bool)
+            and generation >= 0
+            and member.get("location_sharing_enabled") is True
+            and isinstance(member.get("location_consent_generation", 0), int)
+            and not isinstance(member.get("location_consent_generation", 0), bool)
+            and member.get("location_consent_generation", 0) == generation
+        )
+        row = {key: entry.get(key) for key in (
+            "member_id", "request_id", "requested_at", "requester_user_id",
+            "push_sent_at", "push_skipped_reason", "gps_received_at",
+        )}
+        row["gps_lat"] = entry.get("gps_lat") if is_self or family_gps else None
+        row["gps_lon"] = entry.get("gps_lon") if is_self or family_gps else None
         # Computed deltas — friendlier to render.
         ms = entry["requested_at"]
         push_delta = (entry["push_sent_at"] - ms) if entry.get("push_sent_at") else None
         gps_delta = (entry["gps_received_at"] - ms) if entry.get("gps_received_at") else None
         out.append({
-            **entry,
+            **row,
             "push_sent_after_ms": push_delta,
             "gps_received_after_ms": gps_delta,
         })
@@ -6820,6 +7094,51 @@ async def diagnostics_my_members(current=Depends(get_current_user)):
         ),
         "members": out,
     }
+
+
+def _family_device_snapshot(snapshot: Any) -> Optional[Dict[str, Any]]:
+    """Public health schema, independent of arbitrary retained/legacy contents.
+
+    Adding an input field must NOT automatically make it family-readable.
+    Check scalar types too: a legacy object under an otherwise safe key must
+    not smuggle native GPS or other private metadata through the allowlist.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    fields = {
+        "at": (str, datetime),
+        "stored_at": (str, datetime),
+        "device_model": (str,),
+        "ota_update_id": (str,),
+        "ota_channel": (str,),
+        "app_state": (str,),
+        "listeners_attached": (bool,),
+        "sdk_enabled": (bool,),
+        "sdk_is_moving": (bool,),
+        "sdk_tracking_mode": (str,),
+        "activity_age_ms": (int, float),
+        "motion_age_ms": (int, float),
+        "location_age_ms": (int, float),
+        "hb_js_age_ms": (int, float),
+        "hl_inv_age_ms": (int, float),
+        "hl_hb_age_ms": (int, float),
+        "http_att_age_ms": (int, float),
+        "http_ok_age_ms": (int, float),
+    }
+    safe = {}
+    for key, types in fields.items():
+        if key not in snapshot:
+            continue
+        value = snapshot[key]
+        if value is None:
+            safe[key] = None
+        elif isinstance(value, types):
+            if isinstance(value, bool) and bool not in types:
+                continue
+            if isinstance(value, (int, float)) and not math.isfinite(value):
+                continue
+            safe[key] = _to_utc_iso(value) if isinstance(value, datetime) else value
+    return safe
 
 
 @api_router.get("/diagnostics/family-snapshot")
@@ -6889,13 +7208,10 @@ async def diagnostics_family_snapshot(current=Depends(get_current_user)):
         else:
             d["last_seen_age_ms"] = None
 
-        # Normalise device_snapshot datetimes if any sneaked in as BSON Date.
-        ds = d.get("device_snapshot")
-        if isinstance(ds, dict):
-            for k in ("at",):
-                v = ds.get(k)
-                if hasattr(v, "isoformat"):
-                    ds[k] = _to_utc_iso(v)
+        # Always project, including while ON and for the linked self. This is
+        # a family health endpoint, not a raw/private diagnostic reader.
+        # Never mutate retained storage or infer consent for unknown extras.
+        d["device_snapshot"] = _family_device_snapshot(d.get("device_snapshot"))
         out.append(d)
 
     return {
@@ -6917,7 +7233,9 @@ class DeviceSnapshotUpdate(BaseModel):
     fired, as measured on the device at the time of the push.  None / absent
     means the stage has never fired on this device since the last app install.
     """
-    model_config = ConfigDict(extra="allow")
+    # Keep older/future callers compatible (no extra-field 422), but persist
+    # only supported health fields. Read-side protection also covers old bags.
+    model_config = ConfigDict(extra="ignore")
 
     at: Optional[str] = None           # ISO timestamp of the snapshot
     device_model: Optional[str] = None
@@ -6979,10 +7297,8 @@ async def put_device_snapshot(
             detail="You can only update your own device snapshot.",
         )
 
-    # Store the entire payload verbatim under `device_snapshot` — no field-
-    # level merge needed because the client always sends the full snapshot.
-    # model_dump(exclude_unset=True) drops fields the client didn't send so
-    # we don't wipe previously stored values with nulls from an older build.
+    # Replace with the supported health snapshot, never arbitrary extras.
+    # Absent fields stay absent; explicit nulls retain their existing meaning.
     snapshot = data.model_dump(exclude_unset=True)
     snapshot["stored_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -8436,8 +8752,8 @@ async def _sync_user_sharing_pref_to_members():
     """Build #59 — one-time consistency sweep (per-account isolation).
 
     Re-syncs every user's own personal member row(s) to the current
-    ``users.location_sharing_enabled`` value.  MATCH IS user_id ONLY
-    (not owner_id) — matching on owner_id would incorrectly wipe
+    ``users.location_sharing_enabled`` value.  Targets are linked by user_id
+    (not selected by owner_id) — selecting by owner_id would incorrectly wipe
     location on rows this user created FOR OTHER PEOPLE (their
     parents, spouse, etc.).  That was the exact P3 blocker fixed in
     Build #59: one caregiver turning sharing OFF was also wiping another
@@ -8447,32 +8763,49 @@ async def _sync_user_sharing_pref_to_members():
     stale location leaks.  Idempotent.
     """
     try:
-        # Users who have explicitly disabled sharing but whose member
-        # doc(s) still carry True (or missing the flag).
-        cursor = db.users.find(
-            {"location_sharing_enabled": False},
-            {"_id": 0, "id": 1},
+        # Capture member authority BEFORE reading linked preference evidence.
+        # An old OFF-user cursor followed by a newer member read could otherwise
+        # attach stale evidence to a new generation and defeat even a final CAS.
+        cursor = db.members.find(
+            {"user_id": {"$ne": None, "$exists": True}},
+            {"_id": 0, "id": 1, "user_id": 1, "owner_id": 1,
+             "location_sharing_enabled": 1, "location_consent_generation": 1},
         )
-        n_users = 0
+        off_users = set()
         n_members = 0
-        async for u in cursor:
-            uid = u.get("id")
+        async for member in cursor:
+            uid = member.get("user_id")
             if not uid:
                 continue
-            n_users += 1
-            res = await db.members.update_many(
-                {"user_id": uid},
+            # Do not cache OFF evidence across separately observed member rows.
+            user = await db.users.find_one(
+                {"id": uid}, {"_id": 0, "location_sharing_enabled": 1},
+            )
+            if user is None or user.get("location_sharing_enabled") is not False:
+                continue
+            off_users.add(uid)
+            expected_state = (member["location_sharing_enabled"]
+                if "location_sharing_enabled" in member else {"$exists": False})
+            sync_filter = {
+                "id": member["id"], "user_id": uid,
+                "owner_id": member.get("owner_id"),
+                **_location_consent_condition(member.get("location_consent_generation", 0)),
+                "location_sharing_enabled": expected_state,
+            }
+            res = await db.members.update_one(
+                sync_filter,
                 {"$set": {
                     "location_sharing_enabled": False,
                     "latitude": None,
                     "longitude": None,
+                    "coordinate_captured_at": None,
                     "location_name": "Location Sharing Off",
                 }},
             )
             n_members += res.modified_count
-        if n_users:
+        if off_users:
             logger.info(
-                f"Build #57 consistency sweep: {n_users} users had sharing OFF; "
+                f"Build #57 consistency sweep: {len(off_users)} users had sharing OFF; "
                 f"re-mirrored to {n_members} member doc(s)."
             )
     except Exception as e:
@@ -8510,7 +8843,8 @@ async def _heal_cross_user_sharing_leaks():
                 "location_sharing_enabled": False,
                 "user_id": {"$ne": None, "$exists": True},
             },
-            {"_id": 0, "id": 1, "user_id": 1, "owner_id": 1},
+            {"_id": 0, "id": 1, "user_id": 1, "owner_id": 1,
+             "location_consent_generation": 1},
         )
         candidates = []
         async for m in cursor:
@@ -8533,18 +8867,26 @@ async def _heal_cross_user_sharing_leaks():
             if not u:
                 continue
             user_pref = u.get("location_sharing_enabled")
-            # None/missing => default True.  Only heal if the linked
-            # user's own preference says they want sharing ON.
-            if user_pref is False:
+            # Repair is authorizing, not merely cosmetic: require affirmative
+            # linked preference evidence, never an unknown/missing value.
+            if user_pref is not True:
                 continue
-            await db.members.update_one(
-                {"id": m["id"]},
+            # A repair does not outrank a newer privacy decision. Consent lifetime
+            # and the observed disabled state must match in the mutation itself.
+            # Missing generations retain the shared legacy-zero semantics.
+            repair_filter = {
+                "id": m["id"], "user_id": uid, "owner_id": m.get("owner_id"),
+                **_location_consent_condition(m.get("location_consent_generation", 0)),
+                "location_sharing_enabled": False,
+            }
+            result = await db.members.update_one(
+                repair_filter,
                 {
                     "$set": {"location_sharing_enabled": True},
                     "$unset": {"location_name": ""},
                 },
             )
-            healed += 1
+            healed += result.modified_count
 
         logger.info(
             f"Build #59 heal: repaired {healed} cross-user "

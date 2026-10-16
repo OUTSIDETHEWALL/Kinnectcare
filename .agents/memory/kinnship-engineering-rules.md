@@ -82,3 +82,157 @@ a missing diagnostic check.
 **How to apply:** Review all acquisition paths, including independent Android
 WorkManager/headless paths. Prefer discarding an obsolete one-shot result to
 retaining it for later replay; prove unchanged-valid acquisition still works.
+
+## Tracker lifetime and truthful health
+
+UNKNOWN authorization is neither permission to start tracking for an unverified
+owner nor evidence to stop an already-authorized shared tracker. Operation
+cancellation is not owner revocation. SDK enabled state, device contact, one-shot
+GPS delivery and sustained tracking are separate claims.
+
+**Why:** The product owner requires these distinctions after physical movement
+failed to recover a closed-app tracker while device communication continued.
+The original stop initiator remains unresolved; do not turn that uncertainty
+into an attribution claim.
+
+**How to apply:** Destructive tracking shutdown requires confirmed revocation
+or replacement. Discard stale operations without stopping a valid owner. Never
+infer location freshness from battery/contact or sustained recovery from one fix.
+
+Native lifecycle quarantine covers the whole mutation, including post-callback
+authorization checks and confirmed-revocation cleanup. All outstanding destructive
+shutdown groups must settle before rebinding a shared SDK.
+
+**Why:** Native promise completion alone does not mean late-callback cleanup has
+finished; rebinding earlier permits an old stop or purge to affect the new owner.
+
+**How to apply:** Keep mutation and shutdown barriers independent of GPS timeouts;
+model tests are not proof of native cross-runtime or process-death behavior.
+
+Async withdrawal evidence belongs to the captured owner/generation. Compare and
+revoke atomically in native code, reserving shutdown in the same critical section.
+Do not queue a conditional revoked-intent write in AsyncStorage after this mutation.
+
+**Why:** Another runtime can replace authority between a JS check and mutation,
+or before a delayed storage write arrives; either can destroy the valid replacement.
+
+**How to apply:** Revalidate after reads, then use expected-authority revocation.
+Persist the conditional decision and sticky consent natively; test negative SDK,
+generation, owner, health-state and intent-write side effects, not only return values.
+
+Backend coordinate publication must atomically require both current affirmative
+consent and the consent lifetime captured by the request. OFF then ON must not
+revive a request admitted before withdrawal.
+
+**Why:** Request-start consent can become stale during asynchronous processing.
+A boolean-only final guard also permits old requests after explicit re-enable.
+
+**How to apply:** Bind consent and coordinate ordering to one database mutation;
+withdrawal clears the visible tuple and changes its consent lifetime atomically.
+Test stored coordinates and capture time, not only the HTTP response.
+
+Location-sharing OFF applies to check-in and "I'm OK" member-location
+publication too. Those actions must still perform their non-location job.
+Do not invent a separate privacy exception, or silently change SOS semantics.
+
+**Why:** The user explicitly requires "LOCATION SHARING OFF MEANS LOCATION
+SHARING OFF" regardless of which feature possesses the location.
+
+**How to apply:** Keep receipt/history and delayed check-in confirmation messages
+location-free unless a separately authorized design can enforce consent at their
+own storage/delivery boundary. A guarded member write does not authorize another
+collection insert or a later notification; initial consent alone is insufficient.
+
+## Location-history and diagnostic privacy contract
+
+Ordinary sharing OFF denies other family accounts precise history, pipeline and
+nested diagnostic location as well as the live map tuple.
+Linked self-diagnostics may retain own diagnostic history while OFF;
+Caregiver/creator/group ownership or requesting a refresh is not ownership of
+another person's GPS. A requester may retain safe refresh status without precise
+location; status authority and location authority are separate.
+Family health snapshots remain deliberate safe projections even while sharing is
+ON. Unknown stored extras are not family-publication authority; do not invent a
+raw-self exception on a shared health endpoint.
+Retention is separate from disclosure: do not delete history merely to hide it.
+Internal precise storage alone is not a privacy release blocker; establish a
+realistic disclosure or authority path, rather than treating every GPS copy as public.
+
+**Why:** The user explicitly authorized preserving safely distinguished self
+diagnostics while closing family history/metadata disclosure, without redesigning
+retention or blocking release for harmless internal diagnostic storage.
+
+**How to apply:** Never grant new family-publication authority to old diagnostic
+work or unverified legacy history. Bind family access to the original consent
+lifetime and current linked identity; do not refresh timestamps or backfill old
+records into a newer consent lifetime.
+
+## Self-member creation consent
+
+New helper-created self-member rows deliberately start sharing OFF. A current
+explicit enable is allowed to be necessary even when the user preference mirror
+already says ON. Do not automatically "repair" this mismatch from that mirror.
+
+**Why:** The user authorized fail-closed creation rather than stale consent
+resurrection. Withdrawal updates existing members before the user mirror; a new
+row inserted in that gap cannot safely obtain ON from even another user read.
+
+**How to apply:** Preserve ordinary membership creation, but establish new sharing
+authority through the existing explicit preference/generation operation. Any
+future automatic initialization needs a separately justified concurrency-safe
+mechanism, not caller snapshots or a second preference read.
+
+## Release-blocker review threshold
+
+Stop release review for confirmed Critical/High privacy, safety, security,
+authority-loss, core-reliability, or likely native compile/operation defects.
+Ordinary technical debt and low-impact theoretical imperfections are non-blocking.
+
+**Why:** The user requires a safe releasable product, not theoretically perfect
+software, and separate authorization for each newly confirmed release blocker.
+
+**How to apply:** Explain a credible failure and violated release invariant before
+blocking validation. Never repair a newly found independent blocker automatically.
+
+## Notification test readiness evidence
+
+An elapsed delay after an un-awaited renderer mount is not proof that its
+notification effects installed subscriptions. Separate missing test callback
+readiness from an exception inside the production notification handler.
+
+**Why:** Notification tests failed before dispatching their mocked response
+because mount effects had not run, while equivalent controlled runs passed with
+the same production code. Treating that as a medication delivery regression
+would prompt an unsupported production change.
+
+**How to apply:** Await renderer effects and bounded observable readiness in
+controlled experiments without weakening semantic assertions or changing
+production code. Preserve the original failed-run counts in the report even
+when a later control or readiness variant passes.
+
+## Platform scope of native authority
+
+Android-only native authority must not become a prerequisite for legitimate
+non-Android tracking shutdown in shared app lifecycle code.
+
+**Why:** Applying an Android authority guard to a shared confirmed-member-loss
+branch suppressed iOS native shutdown entirely, while Android-only test setup
+provided a native authority that real iOS installations do not have.
+
+**How to apply:** Preserve Android expected-authority CAS protection, but check
+shared lifecycle changes on iOS with the Android extension genuinely absent.
+Keep confirmed loss distinct from timeout, unavailable identity and UI teardown.
+
+## SOS alert-first contract
+
+SOS delivery must not depend on optional GPS completing. Location is valuable
+enrichment, not permission to delay the emergency alert or its intended dialer.
+Preserve prompt coordinates, explicit emergency location semantics and retries;
+late/stale location must not duplicate or contaminate another SOS.
+
+**Why:** The user explicitly requires pending GPS, permission or settings to
+degrade safely to locationless SOS, not a pending emergency alert.
+
+**How to apply:** Bound all optional location preparation together, keep optional
+post-send enrichment off the dialer path, and verify pending/late native results
+with the real sending screen. Ordinary-sharing OFF is not an SOS suppression rule.

@@ -77,7 +77,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 68, // Build 68 — Location disclosure ordering; preserves Build 67.
+      versionCode: 69, // Build 69 — PR #166 controlled physical-validation generation.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',

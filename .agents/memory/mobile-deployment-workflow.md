@@ -15,4 +15,36 @@ An earlier diagnostic export does not establish which OTA is active during a lat
 
 **Why:** A physical test confirmed the expected OTA was active after an earlier export had been captured; treating the older export as current would have misclassified a validated notification-routing correction as absent.
 
+## Separately authorized PR-native validation
+
+A controlled native validation build is not a release. When the user authorizes
+building an unmerged PR and forbids merge/Play submission, do not run the
+main/store-only wrapper or merge just to satisfy its guards. Use the verified PR
+commit in an isolated checkout and document any build-only APK profile override;
+keep production identity/configuration and the existing signing credentials.
+Do not silently increment or assume the resulting versionCode.
+An APK reusing the already-installed Build 68 number is compile evidence only,
+not unambiguous physical-validation identification. A uniquely numbered physical
+test binary requires the user's separate authorization.
+
+**Why:** The user separately authorized a new Android binary for controlled
+physical validation while explicitly forbidding all production/release actions.
+The user explicitly distinguished successful compilation from a uniquely
+identifiable physical-test build.
+
+**How to apply:** Verify local/remote/PR equality first, normalize the lockfile,
+freeze existing credentials, record the exact uploaded source commit and temporary
+profile differences, and distinguish artifact creation from installation/release.
+
+Cloud builds survive a Replit workspace restart even when local `/tmp` state and
+the waiting CLI disappear. Recover the existing build by its EAS identifier;
+query its status before considering resubmission.
+
+**Why:** A workspace restart removed the isolated checkout and CLI watcher after
+upload, but the same remote build continued with the correct source commit.
+
+**How to apply:** Keep the build identifier in the handoff and resume observation,
+not submission. EAS log responses may be Brotli-compressed; use an HTTP client
+that honors Content-Encoding before interpreting their contents.
+
 **How to apply:** Separate export capture time, OTA activation time, and test time. Prefer direct active-update evidence for the tested launch; do not extrapolate it backward to an older log.

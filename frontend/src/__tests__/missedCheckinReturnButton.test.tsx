@@ -20,6 +20,16 @@ let mockPendingNotification: any = null;
 let mockAuthUser: { id: string } | null = { id: 'caregiver-001' };
 let mockAuthLoading = false;
 let mockPermissionSnapshot = { foreground: 'granted', background: 'granted', notifications: 'granted' };
+let mockNativeSdkEnabled = true;
+const mockNativeSdkStop = jest.fn(async () => { mockNativeSdkEnabled = false; });
+
+jest.mock('react-native-background-geolocation', () => ({
+  __esModule: true,
+  default: {
+    stop: () => mockNativeSdkStop(),
+    registerHeadlessTask: jest.fn(),
+  },
+}));
 
 jest.mock('react-native', () => {
   const React = require('react');
@@ -141,6 +151,7 @@ jest.mock('../store/memberStore', () => ({
   fetchAll: jest.fn(() => Promise.resolve([])),
   fetchOne: jest.fn(() => Promise.resolve()),
   getMyMember: jest.fn(() => undefined),
+  upsertOne: jest.fn(),
   subscribeMember: jest.fn(() => jest.fn()),
 }));
 
@@ -218,6 +229,7 @@ jest.mock('../locationRefresh', () => ({
 }));
 
 jest.mock('../locationEngine', () => ({
+  recoverFromIndependentWake: jest.fn(async () => 'ownership_unavailable'),
   setDeviceInfo: jest.fn(),
   logEvent: jest.fn(() => Promise.resolve()),
   getPipelineTimestamps: jest.fn(() => Promise.resolve({
@@ -401,6 +413,10 @@ describe('Android permission gates and tracking lifecycle at the real navigation
       return () => subscribers.delete(callback);
     });
     engine.isAvailable.mockReturnValue(true);
+    engine.stop.mockResolvedValue(undefined);
+    require('../api').getCurrentToken.mockResolvedValue('test-token');
+    members.upsertOne.mockImplementation((member: any) => { me = member; });
+    mockNativeSdkEnabled = true;
     engine.start.mockImplementation(async () => mockPermissionSnapshot.background === 'granted'
       ? 'background-ready' : 'foreground-only');
     permissions.isPermissionsHandled.mockResolvedValue(true);
@@ -408,6 +424,7 @@ describe('Android permission gates and tracking lifecycle at the real navigation
   });
 
   afterEach(() => {
+    jest.restoreAllMocks();
     if (originalBackendUrl === undefined) delete process.env.EXPO_PUBLIC_BACKEND_URL;
     else process.env.EXPO_PUBLIC_BACKEND_URL = originalBackendUrl;
     native.Platform.OS = 'ios';
@@ -445,6 +462,7 @@ describe('Android permission gates and tracking lifecycle at the real navigation
   it('confirmed sign-out still stops native tracking', async () => {
     const renderer = await mount();
     engine.stop.mockClear();
+    await engine.stop('signout');
     mockAuthUser = null;
     mockAuthLoading = false;
     await act(async () => { renderer.update(<RootLayout />); });
@@ -510,6 +528,10 @@ describe('Android permission gates and tracking lifecycle at the real navigation
 
   it('90-second timeout stops tracking only after successful confirmed ownership absence', async () => {
     me = null;
+    const reliability = require('../trackingReliability');
+    const expected = { ...reliability.readTrackingAuthority(),
+      owner: 'caregiver-001:member-001', revoked: false };
+    jest.spyOn(reliability, 'readTrackingAuthority').mockReturnValue(expected);
     mockApiGet.mockImplementation(async (path: string) => ({
       data: path === '/auth/me' ? { id: 'caregiver-001' } : [],
     }));
@@ -517,7 +539,147 @@ describe('Android permission gates and tracking lifecycle at the real navigation
     await act(async () => { jest.advanceTimersByTime(91_000); });
     await settle();
     expect(engine.stop).toHaveBeenCalledTimes(1);
+    expect(engine.stop).toHaveBeenCalledWith('stopped', 'confirmed_member_removal', expected);
     expect(engine.start).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  function iosWithoutAndroidAuthority() {
+    native.Platform.OS = 'ios';
+    jest.spyOn(require('expo'), 'requireOptionalNativeModule').mockReturnValue(null);
+    expect(require('../trackingReliability').readTrackingAuthority()).toBeNull();
+  }
+
+  function confirmedLookup(rows: any = []) {
+    mockApiGet.mockImplementation(async (path: string) => ({
+      data: path === '/auth/me' ? { id: 'caregiver-001' } : path === '/members' ? rows : [],
+    }));
+  }
+
+  async function expireLinkageWait() {
+    await act(async () => { jest.advanceTimersByTime(91_000); });
+    await settle();
+  }
+
+  it('iOS confirmed removal stops patrol and reaches the real engine/native SDK stop exactly once', async () => {
+    iosWithoutAndroidAuthority();
+    me = null;
+    confirmedLookup();
+    engine.stop.mockImplementationOnce((...args: any[]) =>
+      jest.requireActual('../locationEngine').stop(...args));
+    expect(mockNativeSdkEnabled).toBe(true); // Previously configured native tracker.
+    const renderer = await mount();
+    await expireLinkageWait();
+    expect(leonidas.stop).toHaveBeenCalledTimes(1);
+    expect(engine.stop).toHaveBeenCalledTimes(1);
+    expect(engine.stop).toHaveBeenCalledWith('stopped', 'confirmed_member_removal');
+    expect(mockNativeSdkStop).toHaveBeenCalledTimes(1);
+    expect(mockNativeSdkEnabled).toBe(false);
+    expect(engine.start).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+    expect(mockNativeSdkStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('Android confirmed absence without authority never falls back to unconditional stop', async () => {
+    jest.spyOn(require('expo'), 'requireOptionalNativeModule').mockReturnValue(null);
+    me = null;
+    confirmedLookup();
+    const renderer = await mount();
+    await expireLinkageWait();
+    expect(engine.stop).not.toHaveBeenCalled();
+    expect(mockNativeSdkStop).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it('Android removal retains captured authority and cannot revoke a newer native owner', async () => {
+    const model = require('../__mocks__/trackingNative').trackingNative;
+    const current = JSON.parse(model.trackingRead());
+    const expected = JSON.parse(model.trackingAuthorize('old-member', current.generation));
+    let resolveMembers!: (value: any) => void;
+    me = null;
+    mockApiGet.mockImplementation((path: string) => path === '/members'
+      ? new Promise(resolve => { resolveMembers = resolve; })
+      : Promise.resolve({ data: path === '/auth/me' ? { id: 'caregiver-001' } : [] }));
+    engine.stop.mockImplementationOnce((...args: any[]) =>
+      jest.requireActual('../locationEngine').stop(...args));
+    const renderer = await mount();
+    await expireLinkageWait();
+    expect(resolveMembers).toBeDefined();
+    const revoked = JSON.parse(model.trackingRevoke('stopped'));
+    model.trackingShutdownComplete(revoked.generation);
+    const replacement = JSON.parse(model.trackingAuthorize('replacement-member', revoked.generation));
+    expect(replacement.owner).toBe('replacement-member');
+    expect(replacement.revoked).toBe(false);
+    await act(async () => { resolveMembers({ data: [] }); });
+    await settle();
+    expect(engine.stop).toHaveBeenCalledWith('stopped', 'confirmed_member_removal', expected);
+    expect(JSON.parse(model.trackingRead())).toEqual(replacement);
+    expect(mockNativeSdkStop).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+    const cleanup = JSON.parse(model.trackingRevoke('stopped'));
+    model.trackingShutdownComplete(cleanup.generation);
+  });
+
+  it.each([
+    ['network failure', new Error('offline')],
+    ['unknown response', null],
+    ['non-list response', {}],
+    ['malformed member', [{ id: null }]],
+  ])('iOS %s is not confirmed removal', async (_label, response) => {
+    iosWithoutAndroidAuthority();
+    me = null;
+    if (response instanceof Error) mockApiGet.mockRejectedValue(response);
+    else confirmedLookup(response);
+    const renderer = await mount();
+    await expireLinkageWait();
+    expect(engine.stop).not.toHaveBeenCalled();
+    expect(leonidas.stop).not.toHaveBeenCalled();
+    expect(mockNativeSdkStop).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it.each(['account replacement', 'operation cancelled', 'token replacement', 'new linkage'])(
+    'iOS stale absence cannot stop after %s', async reason => {
+      iosWithoutAndroidAuthority();
+      me = null;
+      let resolveMembers!: (value: any) => void;
+      mockApiGet.mockImplementation((path: string) => path === '/members'
+        ? new Promise(resolve => { resolveMembers = resolve; })
+        : Promise.resolve({ data: path === '/auth/me' ? { id: 'caregiver-001' } : [] }));
+      const renderer = await mount();
+      await expireLinkageWait();
+      expect(resolveMembers).toBeDefined();
+      expect(engine.stop).not.toHaveBeenCalled(); // A timeout/pending lookup is UNKNOWN.
+      if (reason === 'account replacement') {
+        mockAuthUser = { id: 'replacement-user' };
+        me = { id: 'replacement-member', user_id: 'replacement-user' };
+        await act(async () => { renderer.update(<RootLayout />); });
+      } else if (reason === 'operation cancelled') {
+        await act(async () => { renderer.unmount(); });
+      } else if (reason === 'token replacement') {
+        require('../api').getCurrentToken.mockResolvedValue('replacement-token');
+      } else {
+        me = { id: 'newly-linked-member', user_id: 'caregiver-001' };
+        for (const subscriber of [...subscribers]) subscriber(me);
+      }
+      await act(async () => { resolveMembers({ data: [] }); });
+      await settle();
+      expect(engine.stop).not.toHaveBeenCalled();
+      expect(mockNativeSdkStop).not.toHaveBeenCalled();
+      if (reason !== 'operation cancelled') await act(async () => { renderer.unmount(); });
+    },
+  );
+
+  it('iOS fresh positive linkage bootstraps normally without native stop', async () => {
+    iosWithoutAndroidAuthority();
+    me = null;
+    confirmedLookup([{ id: 'member-001', user_id: 'caregiver-001' }]);
+    const renderer = await mount();
+    await expireLinkageWait();
+    expect(engine.start).toHaveBeenCalledTimes(1);
+    expect(engine.stop).not.toHaveBeenCalled();
+    expect(leonidas.start).toHaveBeenCalledTimes(1);
+    expect(mockNativeSdkStop).not.toHaveBeenCalled();
     await act(async () => { renderer.unmount(); });
   });
 
@@ -587,6 +749,7 @@ describe('Android permission gates and tracking lifecycle at the real navigation
     expect(cfg.isOwnerCurrent()).toBe(true);
     engine.stop.mockClear();
     mockAuthUser = reason === 'sign-out' ? null : { id: 'replacement-user' };
+    if (reason === 'sign-out') await engine.stop('signout');
     await act(async () => { renderer.update(<RootLayout />); });
     await settle();
     expect(cfg.isCurrent()).toBe(false);

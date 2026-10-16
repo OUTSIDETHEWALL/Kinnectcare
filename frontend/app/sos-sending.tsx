@@ -23,46 +23,90 @@ import { Colors } from '../src/theme';
 
 type SendStep = 'preparing' | 'locating' | 'sending' | 'done' | 'error';
 
+// Total permission + GPS budget, not a separate wait for each native callback.
+const SOS_LOCATION_BUDGET_MS = 1500;
+type SosCoordinates = { latitude?: number; longitude?: number };
+
+async function bestEffortSosLocation(isCurrent: () => boolean): Promise<SosCoordinates> {
+  let finished = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const location = (async (): Promise<SosCoordinates> => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (finished || !isCurrent() || status !== 'granted') return {};
+      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      if (finished || !isCurrent()) return {};
+      const { latitude, longitude } = pos.coords;
+      return Number.isFinite(latitude) && Number.isFinite(longitude)
+        ? { latitude, longitude } : {};
+    } catch {
+      return {}; // Includes rejection after the fallback has already sent SOS.
+    }
+  })();
+  try {
+    return await Promise.race([
+      location,
+      new Promise<SosCoordinates>(resolve => {
+        timer = setTimeout(() => resolve({}), SOS_LOCATION_BUDGET_MS);
+      }),
+    ]);
+  } finally {
+    finished = true;
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export default function SOSSending() {
   const router = useRouter();
   const [step, setStep] = useState<SendStep>('preparing');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const hasFired = useRef(false);
+  const mounted = useRef(true);
+  const operation = useRef(0);
+  const inFlight = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      operation.current += 1;
+      inFlight.current = false;
+      hasFired.current = false;
+    };
+  }, []);
 
   const run = useCallback(async () => {
+    if (inFlight.current || !mounted.current) return;
+    inFlight.current = true;
+    const id = ++operation.current;
+    const isCurrent = () => mounted.current && operation.current === id;
     setStep('preparing');
     setErrorMsg(null);
     // Brief settling pause so the screen renders before GPS starts.
     await new Promise<void>(resolve => setTimeout(resolve, 350));
     try {
+      if (!isCurrent()) return;
       // Step 1 — GPS (best-effort; SOS fires with or without coordinates)
       setStep('locating');
-      let lat: number | undefined, lon: number | undefined;
-      try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status === 'granted') {
-          const pos = await Location.getCurrentPositionAsync({
-            accuracy: Location.Accuracy.Balanced,
-          });
-          lat = pos.coords.latitude;
-          lon = pos.coords.longitude;
-        }
-      } catch (_e) {}
+      const coordinates = await bestEffortSosLocation(isCurrent);
+      if (!isCurrent()) return;
 
       // Step 2 — POST /sos (the network call that must succeed)
       setStep('sending');
-      await api.post('/sos', { latitude: lat, longitude: lon });
+      await api.post('/sos', {
+        latitude: coordinates.latitude, longitude: coordinates.longitude,
+      });
+      if (!isCurrent()) return;
 
       // Step 3 — post-send housekeeping (best-effort; never blocks success)
-      try {
-        const bg = await import('../src/backgroundLocation');
-        await bg.beginSosBoost(); // 10 s cadence for 30 min so family sees a moving dot
-      } catch (_e) {}
+      void import('../src/backgroundLocation').then(bg => {
+        if (isCurrent()) return bg.beginSosBoost();
+      }).catch(() => {}); // Retain location boost without gating the dialer/UI.
       try { (globalThis as any).__kinnshipAlertsBump = Date.now(); } catch (_e) {}
 
       // Step 4 — success
       setStep('done');
-      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
 
       // Step 5 — launch 911 dialer NOW that the backend has confirmed the
       // SOS and push notifications are on their way to caregivers.
@@ -74,6 +118,7 @@ export default function SOSSending() {
       // we show an explicit prompt so the user can call manually.
       try {
         const canDial = await Linking.canOpenURL('tel:911');
+        if (!isCurrent()) return;
         if (canDial) {
           await Linking.openURL('tel:911');
         } else {
@@ -95,12 +140,15 @@ export default function SOSSending() {
 
       // Brief pause — success rows stay visible before navigating.
       await new Promise<void>(resolve => setTimeout(resolve, 900));
-      router.replace('/sos-confirmation');
+      if (isCurrent()) router.replace('/sos-confirmation');
     } catch (e: any) {
+      if (!isCurrent()) return;
       setErrorMsg(
         e?.response?.data?.detail || 'Network error. Tap Retry to try again.',
       );
       setStep('error');
+    } finally {
+      if (operation.current === id) inFlight.current = false;
     }
   }, [router]);
 
@@ -111,7 +159,6 @@ export default function SOSSending() {
   }, [run]);
 
   const retry = useCallback(() => {
-    hasFired.current = false;
     run();
   }, [run]);
 

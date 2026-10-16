@@ -112,6 +112,13 @@ function bodyResponse(id = 'response-1'): any {
   };
 }
 
+async function waitForNotificationState(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 100 && !predicate(); i += 1) {
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+  }
+  expect(predicate()).toBe(true);
+}
+
 describe('medication and routine notification reliability', () => {
   beforeEach(() => {
     mockDismiss.mockReset().mockResolvedValue(undefined);
@@ -588,11 +595,11 @@ describe('medication and routine notification reliability', () => {
       return null;
     }
     create(React.createElement(ListenerHarness));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await waitForNotificationState(() => mockAddResponse.mock.calls.length > 0);
     await act(async () => {
       setAppReadyForDeepLink(true);
-      await new Promise(resolve => setTimeout(resolve, 40));
     });
+    await waitForNotificationState(() => routed.length === 2);
     expect(routed.map((payload) => payload.notification_id)).toEqual([
       undefined,
       'cold-b',
@@ -624,13 +631,13 @@ describe('medication and routine notification reliability', () => {
       return null;
     }
     create(React.createElement(ListenerHarness));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await waitForNotificationState(() => responses.length > 0);
     await act(async () => {
       await responses[0](bodyResponse('live-b'));
       await responses[0](bodyResponse('live-b'));
       setAppReadyForDeepLink(true);
-      await new Promise(resolve => setTimeout(resolve, 40));
     });
+    await waitForNotificationState(() => routed.length === 2);
     expect(routed.map((payload) => payload.notification_id)).toEqual([
       undefined,
       'live-b',
@@ -666,19 +673,19 @@ describe('medication and routine notification reliability', () => {
       return null;
     }
     create(React.createElement(ListenerHarness));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await waitForNotificationState(() => responses.length > 0);
     await act(async () => {
       await responses[0](bodyResponse('live-b'));
       setAppReadyForDeepLink(true);
-      await new Promise(resolve => setTimeout(resolve, 20));
     });
+    await waitForNotificationState(() => routed.length === 1);
     expect(routed).toEqual([undefined]);
     fail = false;
     await act(async () => {
       setAppReadyForDeepLink(false);
       setAppReadyForDeepLink(true);
-      await new Promise(resolve => setTimeout(resolve, 40));
     });
+    await waitForNotificationState(() => routed.length === 3);
     expect(routed).toEqual([undefined, undefined, 'live-b']);
   });
 

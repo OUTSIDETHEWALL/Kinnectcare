@@ -290,6 +290,7 @@ describe('RootNav location recovery independent of notification onboarding', () 
       await mount();
       expect(enabled).toBe(true);
       if (boundary === 'signout') {
+        await act(async () => { await require('../locationEngine').stop('signout'); });
         auth = { user: null, loading: false }; token = null;
         await act(async () => { tree!.update(<Root />); });
       }
@@ -448,6 +449,7 @@ describe('RootNav location recovery independent of notification onboarding', () 
         if (boundary === 'foreground' || boundary === 'background') {
           grants[boundary] = 'denied'; await resume();
         } else if (boundary === 'signout') {
+          await act(async () => { await require('../locationEngine').stop('signout'); });
           auth = { user: null, loading: false }; token = null;
           await act(async () => { tree!.update(<Root />); });
         } else if (boundary === 'consent') {

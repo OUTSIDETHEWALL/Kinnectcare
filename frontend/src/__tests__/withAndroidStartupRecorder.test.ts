@@ -114,7 +114,7 @@ describe('withAndroidStartupRecorder', () => {
     expect(moduleGradle).toContain('versionCode 1');
     expect(moduleGradle).toContain("versionName '1.0.0'");
     expect(source).toContain('class StartupDiagnosticsModule : Module()');
-    expect(source.match(/Function\("/g)).toHaveLength(3);
+    expect(source.match(/Function\("/g)).toHaveLength(18);
     expect(source).not.toContain('AsyncFunction');
     expect(source).not.toContain('@ReactMethod');
     expect(source).not.toContain('ReactPackage');

@@ -53,6 +53,7 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
+from pymongo.errors import DuplicateKeyError
 
 logger = logging.getLogger(__name__)
 
@@ -244,12 +245,14 @@ async def ensure_self_member_row(
          may have been created by a name-match auto-bind on signup or
          by an earlier call to this helper, and we must never
          clobber caregiver-filled fields like age / phone.
-      2. Otherwise INSERT a minimal row keyed to the joiner with
+      2. Otherwise atomically create a minimal row keyed to the joiner with
          schema-compatible sentinels for demographic fields
          (age=0, phone="", gender="") that the joiner can fill in
          later via the Me tab.  Pull ``role`` and ``relationship``
          from the invite when available so the caregiver's intent
-         (e.g. "Mom" / "senior") is preserved end-to-end.
+         (e.g. "Mom" / "senior") is preserved end-to-end. New rows start
+         location-disabled at generation zero; only a current explicit
+         preference operation may enable them.
 
     Returns the members document (either pre-existing or freshly
     inserted).  The response is a plain ``dict`` (no ``_id``) matching
@@ -292,13 +295,6 @@ async def ensure_self_member_row(
         # invitees are adult family members / caregivers, not seniors.
         role = "family"
 
-    # Mirror the joiner's location-sharing preference — defaults True
-    # to satisfy caregivers who invited someone specifically to share
-    # location; the joiner can opt out from Me → Location Sharing.
-    loc_pref = user.get("location_sharing_enabled")
-    if loc_pref is None:
-        loc_pref = True
-
     display_name = (user.get("full_name") or "").strip() or "Family member"
 
     doc = {
@@ -316,25 +312,50 @@ async def ensure_self_member_row(
         "role": role,
         "relationship": relationship,
         "status": "healthy",
-        "location_name": None,
+        "location_name": "Location Sharing Off",
         "latitude": None,
         "longitude": None,
+        "coordinate_captured_at": None,
         "last_seen": datetime.now(timezone.utc),
-        "location_sharing_enabled": bool(loc_pref),
+        # Neither a caller snapshot nor another users read can safely authorize
+        # a row absent during withdrawal's member-first update. Fail closed.
+        # The real preference endpoint enables existing rows and advances their
+        # consent generation; maintenance must never manufacture ON authority.
+        "location_sharing_enabled": False,
+        "location_consent_generation": 0,
         # Default check-in cadence for seniors so the caregiver's
         # dashboard shows *something* to nudge for a first check-in.
         "daily_checkin_time": "09:00" if role == "senior" else None,
         "created_at": datetime.now(timezone.utc),
     }
-    await db.members.insert_one(doc)
-    # Strip the Mongo _id in case the driver injected one.
-    doc.pop("_id", None)
+    # Mongo's built-in unique _id makes concurrent helper calls converge without
+    # an index migration. This key is deduplication, not consent authority.
+    # Keep the public id random per insertion: deletion/recreation must not let
+    # an old publication request match a new row's reused generation.
+    creation_key = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"kinnship:self-member:{len(group_id)}:{group_id}:{uid}",
+    ))
+    try:
+        await db.members.update_one(
+            {"_id": creation_key}, {"$setOnInsert": doc}, upsert=True,
+        )
+    except DuplicateKeyError:
+        # A concurrent upsert can lose the unique-key insertion race. Read the
+        # winner, never replace it or replay an initial consent state over it.
+        pass
+    persisted = await db.members.find_one(
+        {"_id": creation_key, "family_group_id": group_id, "user_id": uid},
+        {"_id": 0},
+    )
+    if persisted is None:
+        raise RuntimeError("Self-member creation did not leave the expected row")
     logger.info(
-        f"[member-row] REPAIRED missing row — "
+        f"[member-row] ensured self row — "
         f"user={uid[:8]} group={group_id[:8]} "
         f"caller={caller} role={role} relationship={relationship!r}"
     )
-    return doc
+    return persisted
 
 
 def _invite_email_body(

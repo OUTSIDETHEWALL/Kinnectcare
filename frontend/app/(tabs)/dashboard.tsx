@@ -1293,7 +1293,7 @@ function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfa
   // even when nothing changed, producing visible flicker and wasting CPU/battery.
   const [refreshing, setRefreshing] = useState(false);
   useEffect(() => subscribeRefreshing(member.id, setRefreshing), [member.id]);
-  const seenMs = member.last_seen ? new Date(member.last_seen).getTime() : 0;
+  const seenMs = member.coordinate_captured_at ? new Date(member.coordinate_captured_at).getTime() : 0;
   const ageLabel = seenMs ? formatTimeAgo(seenMs) : '';
   const cardStatus = getFamilyCardStatus(member, issues);
   const deviceStatus = cardStatus.device;
@@ -1395,7 +1395,7 @@ function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfa
                 📍 {cardStatus.locationLabel === 'Last known location' ? 'Last known location: ' : ''}
                 {member.location_name || 'Unknown'}
               </Text>
-              {cardStatus.locationLabel === 'Last known location' && cardStatus.locationAgeLabel ? (
+              {cardStatus.locationAgeLabel ? (
                 <Text style={styles.memberMetaAge}>{cardStatus.locationAgeLabel}</Text>
               ) : null}
             </>

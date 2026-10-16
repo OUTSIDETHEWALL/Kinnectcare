@@ -25,6 +25,7 @@ import {
 import { configureBatteryTask, BATTERY_OPT_PROMPTED_KEY } from '../src/batteryTask';
 import { refreshLocationIfStale, setMyMemberId, setMyUserId } from '../src/locationRefresh';
 import * as locationEngine from '../src/locationEngine';
+import { readTrackingAuthority } from '../src/trackingReliability';
 import * as leonidas from '../src/leonidas';
 import * as memberStore from '../src/store/memberStore';
 import { api, getCurrentToken, subscribeToTokenChanges } from '../src/api';
@@ -1148,7 +1149,10 @@ function RootNav() {
     if (previous && user?.id && previous !== user.id) {
       engineBootedForUserIdRef.current = null;
       try { leonidas.stop(); } catch {}
-      void locationEngine.stop();
+      const expected = readTrackingAuthority();
+      if (expected && (!expected.owner || expected.owner.split(':')[0] === previous)) {
+        void locationEngine.stop('stopped', 'confirmed_user_replacement', expected);
+      }
     }
   }, [user?.id, loading]);
   // Observe linkage for the whole session, including after the initial 90 s
@@ -1163,6 +1167,7 @@ function RootNav() {
     const reconcile = async () => {
       if (reading) { reread = true; return; }
       reading = true;
+      const expected = readTrackingAuthority();
       try {
         const snapshot = await readPermissionSnapshot({ includeNotifications: false });
         const disclosed = await isBackgroundLocationDisclosureAcknowledged();
@@ -1175,8 +1180,9 @@ function RootNav() {
         const next = JSON.stringify({ ...snapshot, disclosed, decisionApplies });
         if (disposed) return;
         setAndroidLocationReady(ready);
-        if (!ready && (fingerprint === null || fingerprint !== next)) {
-          void locationEngine.stop('permission').catch(() => {});
+        if ((snapshot.foreground === 'denied' || snapshot.background === 'denied')
+          && (fingerprint === null || fingerprint !== next)) {
+          if (expected) void locationEngine.stop('permission', 'reconcile_os_withdrawal', expected).catch(() => {});
         }
         if ((fingerprint !== null && fingerprint !== next)
           || engineBootedForUserIdRef.current === null) {
@@ -1187,7 +1193,6 @@ function RootNav() {
         // A failed lookup cannot certify background readiness.
         if (!disposed) {
           setAndroidLocationReady(false);
-          void locationEngine.stop('permission').catch(() => {});
           void locationEngine.logEvent('permission_reconciliation_failed');
         }
       } finally {
@@ -1205,8 +1210,9 @@ function RootNav() {
       if (nextId !== memberId) {
         memberId = nextId;
         engineBootedForUserIdRef.current = null;
-        try { leonidas.stop(); } catch (_e) {}
-        void locationEngine.stop();
+        // Store disappearance/replacement is not authoritative removal. The
+        // startup lookup below verifies ownership before a destructive action.
+        void locationEngine.recoverFromIndependentWake('member-store-reconcile').catch(() => {});
         setStartupRevision(value => value + 1);
       }
     });
@@ -1244,10 +1250,12 @@ function RootNav() {
     (async () => {
       if (!user?.id) {
         // Initial auth restoration is not a genuine sign-out.
-        if (Platform.OS === 'android' && loading) return;
-        if (Platform.OS === 'android' || engineBootedForUserIdRef.current !== null) {
+        // Android clearToken() already performs explicit/confirmed sign-out
+        // shutdown. A missing React auth value is not revocation evidence.
+        if (Platform.OS === 'android') return;
+        if (engineBootedForUserIdRef.current !== null) {
           try { leonidas.stop(); } catch (_e) {}
-          await locationEngine.stop();
+          await locationEngine.stop('signout', 'confirmed_session_end');
           engineBootedForUserIdRef.current = null;
         }
         return;
@@ -1318,11 +1326,14 @@ function RootNav() {
           if (cancelled) return;
         }
 
+        let removalAuthority = readTrackingAuthority();
         if (!me) {
           // fetchAll intentionally returns cached data on errors. A timeout
           // alone is therefore not evidence that the owned member was removed.
           // Require a fresh, successful authenticated lookup before stopping.
+          const linkedMemberBeforeLookup = memberStore.getMyMember(user.id)?.id;
           const lookupToken = await getCurrentToken();
+          removalAuthority = readTrackingAuthority();
           if (!lookupToken || cancelled) return;
           const [confirmed, confirmedUser] = await Promise.all([
             api.get('/members'), api.get('/auth/me'),
@@ -1334,12 +1345,21 @@ function RootNav() {
             || confirmed.data.some((m: any) => !m || typeof m.id !== 'string' || !m.id)) {
             throw new Error('invalid_member_lookup');
           }
+          // A relink delivered while this lookup was pending supersedes its
+          // absence result. Android additionally fences shutdown natively.
+          const linkedMemberNow = memberStore.getMyMember(user.id);
+          if (Platform.OS !== 'android' && linkedMemberNow?.user_id === user.id
+            && linkedMemberNow.id && linkedMemberNow.id !== linkedMemberBeforeLookup) return;
           me = confirmed.data.find((m: any) => m.user_id === user.id) ?? null;
           if (me) memberStore.upsertOne(me);
         }
         if (!me) {
           try { leonidas.stop(); } catch (_e) {}
-          await locationEngine.stop();
+          if (Platform.OS !== 'android') {
+            await locationEngine.stop('stopped', 'confirmed_member_removal');
+          } else if (removalAuthority) {
+            await locationEngine.stop('stopped', 'confirmed_member_removal', removalAuthority);
+          }
           engineBootedForUserIdRef.current = null;
           return;
         }

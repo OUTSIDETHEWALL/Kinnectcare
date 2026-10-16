@@ -5,7 +5,7 @@ export type DeviceCommunicationKind = 'healthy' | 'delayed' | 'not-responding' |
 
 export type DeviceCommunicationStatus = {
   kind: DeviceCommunicationKind;
-  label: 'Tracking Healthy' | 'Update Delayed' | 'Device Not Responding' | 'Device Status Unknown';
+  label: 'Device communicating' | 'Update Delayed' | 'Device Not Responding' | 'Device Status Unknown';
   ageMs: number | null;
 };
 
@@ -48,5 +48,5 @@ export function getDeviceCommunicationStatus(
   if (ageMs > delayedAfter) {
     return { kind: 'delayed', label: 'Update Delayed', ageMs };
   }
-  return { kind: 'healthy', label: 'Tracking Healthy', ageMs };
+  return { kind: 'healthy', label: 'Device communicating', ageMs };
 }
