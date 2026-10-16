@@ -513,6 +513,19 @@ afterEach(() => {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('Dashboard — Needs Attention clears on non-dashboard tab when battery_recovered arrives', () => {
+  it('renders family safety state without waiting for optional billing', async () => {
+    mockGetBillingStatus.mockImplementation(() => new Promise(() => {}));
+    mockApiGet.mockImplementation((url: string) => {
+      if (url === '/members') return Promise.resolve(membersResponse());
+      if (url === '/summary') return Promise.resolve(summaryResponse());
+      if (url === '/alerts') return Promise.resolve({ data: [makeLowBatteryAlert()] });
+      return Promise.reject(new Error(`Unexpected GET ${url}`));
+    });
+    const renderer = await mountAndSettle();
+    expect(mockGetBillingStatus).toHaveBeenCalled();
+    expect(needsAttentionCount(renderer.root)).toBe(1);
+    await act(async () => renderer.unmount());
+  });
 
   // ─── Path A: tab-focus lifecycle ─────────────────────────────────────────────
 

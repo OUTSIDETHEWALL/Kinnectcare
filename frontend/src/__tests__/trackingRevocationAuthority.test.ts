@@ -164,14 +164,13 @@ describe('B1: async evidence belongs to its requesting authority', () => {
     const pending = acquisition(sdk, { token, memberId: 'member-A', baseUrl: base,
       isCurrent: async () => true }, {}, () => true,
     (reason: any, expected: any) => engine.stop(reason, 'b1-test', expected));
-    const rejection = expect(pending).rejects.toThrow('gps_authorization_obsolete');
+    const rejection = expect(pending).rejects.toThrow(/gps_authorization_(obsolete|unverified)/);
     await entered.promise;
     const before = await replaceFromOtherRuntime();
     gate.resolve('1');
     await rejection;
     expectBUnchanged(before);
-    expect(sdk.getCurrentPosition).toHaveBeenCalledTimes(1);
-    expect(sdk.getCurrentPosition.mock.calls[0][0].persist).toBe(false);
+    expect(sdk.getCurrentPosition).not.toHaveBeenCalled();
     expect(fetchOriginal.mock.calls.filter(([, options]) => options?.method === 'PUT')).toHaveLength(0);
   });
 

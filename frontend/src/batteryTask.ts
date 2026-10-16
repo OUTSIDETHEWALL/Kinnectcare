@@ -190,6 +190,21 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
     generation: execution.generation,
   });
 
+  // Do not put presence behind ready()/start(), permission queries, the native
+  // mutation FIFO, or GPS acquisition. Each transport is freshly self-authorized.
+  const independentBattery = Platform.OS === 'android'
+    ? (async () => {
+        try {
+          const { authorizeDeviceContactTransport } = await import('./androidTrackingRecovery');
+          const transport = await authorizeDeviceContactTransport(() => isActiveExecution(execution));
+          return await publishTaskBattery(execution, transport, null);
+        } catch (error) {
+          await appendExecutionLog(execution, 'background_battery_error', { error: String(error) });
+          return false;
+        }
+      })()
+    : Promise.resolve();
+
   type BackgroundGeolocationModule = {
     stop: () => Promise<unknown>;
     getState: () => Promise<{
@@ -223,6 +238,7 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
         generation: execution.generation,
       });
     }
+    await independentBattery;
     finishExecutionOnce(backgroundFetch, execution);
     return;
   }
@@ -308,6 +324,32 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
           }
         })();
 
+  if (Platform.OS !== 'android') await publishTaskBattery(execution, null, sdkState);
+  if (!await independentBattery && Platform.OS === 'android' && isActiveExecution(execution)) {
+    // GPS recovery may have confirmed withdrawal while the independent proof
+    // was in flight. Re-prove only contact under the new lifetime; never reuse
+    // an obsolete proof and never re-enable GPS to obtain battery.
+    try {
+      const { authorizeDeviceContactTransport } = await import('./androidTrackingRecovery');
+      await publishTaskBattery(execution,
+        await authorizeDeviceContactTransport(() => isActiveExecution(execution)), null);
+    } catch (error) {
+      await appendExecutionLog(execution, 'background_battery_error', { error: String(error) });
+    }
+  }
+  const locationOutcome = await stationaryLocationRefresh;
+  if (locationOutcome) {
+    await appendExecutionLog(execution, locationOutcome.event, locationOutcome.detail);
+  }
+  finishExecutionOnce(backgroundFetch, execution);
+}
+
+async function publishTaskBattery(
+  execution: TaskExecution,
+  transport: AuthorizedBatteryTransport | null,
+  sdkState: { url?: string; authorization?: { accessToken?: string } } | null,
+): Promise<boolean> {
+  const { taskId } = execution;
   try {
     // Step 1 — Read battery state via expo-battery one-shot APIs.
     // These work in any JS context (foreground, background, headless).
@@ -335,7 +377,6 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
       // Step 2 — Obtain member ID, JWT, and API base URL from the Transistor
       // SDK's persisted SQLite state. No shared main-runtime memory is needed.
       // Android writes use current secure-session proof, not native cached JWT.
-      const transport = authorizedTransport as AuthorizedBatteryTransport | null;
       const locationUrl: string = Platform.OS === 'android'
         ? transport ? `${transport.baseUrl}/api/members/${transport.memberId}/location` : ''
         : sdkState?.url ?? '';
@@ -396,6 +437,7 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
             taskId,
             generation: execution.generation,
           });
+          return true;
         } finally {
           if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
         }
@@ -409,15 +451,7 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
       generation: execution.generation,
     });
   }
-
-  // Persisted means the SDK accepted the fix into its native queue. Actual
-  // server acceptance remains proven by the existing native HTTP callback.
-  const locationOutcome = await stationaryLocationRefresh;
-  if (locationOutcome) {
-    await appendExecutionLog(execution, locationOutcome.event, locationOutcome.detail);
-  }
-
-  finishExecutionOnce(backgroundFetch, execution);
+  return false;
 }
 
 // ── Headless task registration (Android) ──────────────────────────────────────
@@ -429,7 +463,16 @@ async function executeBatteryRefresh(taskId: string): Promise<void> {
 
 try {
   getBackgroundFetch()?.registerHeadlessTask(
-    async ({ taskId }: { taskId: string }) => {
+    async ({ taskId, timeout }: { taskId: string; timeout?: boolean }) => {
+      if (timeout) {
+        const execution = activeTaskExecutions.get(taskId);
+        if (execution) {
+          execution.timedOut = true;
+          finishExecutionOnce(getBackgroundFetch()!, execution);
+        } else getBackgroundFetch()?.finish(taskId);
+        await appendLog('background_battery_timeout', { taskId });
+        return;
+      }
       await executeBatteryRefresh(taskId);
     },
   );

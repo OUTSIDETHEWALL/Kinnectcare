@@ -29,7 +29,7 @@ module.exports = ({ config }) => ({
   expo: {
     name: 'Kinnship',
     slug: 'kinnship',
-    version: '1.3.0',
+    version: '1.3.1',
     runtimeVersion: { policy: 'appVersion' },
     updates: {
       url: 'https://u.expo.dev/11cb65a8-eab0-4745-9b4a-7b8964805381',
@@ -77,7 +77,7 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: 69, // Build 69 — PR #166 controlled physical-validation generation.
+      versionCode: 70, // Source preparation only; requires separately authorized native build.
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
@@ -113,6 +113,7 @@ module.exports = ({ config }) => ({
       'expo-router',
       './plugins/withAndroidTelQueries',
       './plugins/withAndroidStartupRecorder',
+      './plugins/withReliableSharing',
       './plugins/withIosWelfareCheckAction',
       // ----- Transistor Software react-native-background-geolocation -----
       // Order matters: the Transistor plugin must come BEFORE expo-location

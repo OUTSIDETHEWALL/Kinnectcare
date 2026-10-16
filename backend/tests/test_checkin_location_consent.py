@@ -133,7 +133,7 @@ def test_withdrawal_at_final_atomic_write_wins_but_checkin_succeeds(h, kind):
 
 @pytest.mark.parametrize("kind", ["daily", "welfare", "adapter"])
 @pytest.mark.parametrize("new_first", [False, True])
-def test_off_on_cannot_revive_old_request_and_new_request_can_publish(h, kind, new_first):
+def test_off_on_cannot_revive_undated_gps_but_checkin_still_succeeds(h, kind, new_first):
     async def scenario():
         h.pause()
         old = asyncio.create_task(h.submit(kind))
@@ -158,7 +158,7 @@ def test_off_on_cannot_revive_old_request_and_new_request_can_publish(h, kind, n
         if not new_first:
             receipt = await h.submit(kind, latitude=8.0)
             h.assert_receipts_location_free(receipt)
-        assert (h.member["latitude"], h.member["longitude"]) == (8.0, 9.0)
+        assert (h.member["latitude"], h.member["longitude"]) == (None, None)
         assert h.member["coordinate_captured_at"] is None
         assert h.member["location_consent_generation"] == generation
     run(scenario())
@@ -166,6 +166,9 @@ def test_off_on_cannot_revive_old_request_and_new_request_can_publish(h, kind, n
 
 @pytest.mark.parametrize("kind", ["daily", "welfare", "adapter"])
 def test_normal_on_publication_keeps_capture_age_unknown(h, kind):
+    # An unknown-age tuple may replace only another unknown-age tuple.
+    h.member["coordinate_captured_at"] = None
+    h.member["captured_at"] = None
     receipt = run(h.submit(kind))
     assert (h.member["latitude"], h.member["longitude"]) == (3.0, 4.0)
     assert h.member["location_name"] == "Private place"
@@ -196,6 +199,8 @@ def test_no_affirmative_entry_consent_does_not_gain_authority(h, kind, flag):
 @pytest.mark.parametrize("kind", ["daily", "welfare"])
 def test_legacy_generation_zero_is_not_a_consent_exemption(h, kind):
     h.member.pop("location_consent_generation")
+    h.member["coordinate_captured_at"] = None
+    h.member["captured_at"] = None
     receipt = run(h.submit(kind))
     assert h.member["latitude"] == 3.0
     assert "location_consent_generation" not in h.member

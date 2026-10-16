@@ -15,6 +15,9 @@ export type StartupPhase =
   | 'deep_link_processing'
   | 'root_navigation_decision'
   | 'final_route_committed';
+export function markStartupMilestone(event: string, details?: Record<string, boolean | number | string | null>): void {
+  logStartupEvent({ phase: 'app_cold_start', event, details });
+}
 
 export type StartupDiagnosticEntry = {
   t: number;

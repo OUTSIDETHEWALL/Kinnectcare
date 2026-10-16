@@ -73,6 +73,7 @@ import {
   migrateLegacyTrackingIntent, evaluateWakeAuthorization,
   revokeTrackingIntentIfCurrent,
   BACKGROUND_PERMISSION_RATIONALE,
+  getVerifiedConsentGeneration,
 } from './androidTrackingRecovery';
 import type { AuthorizedBatteryTransport, RevocationReason } from './androidTrackingRecovery';
 import { fenceNativeSdk, interruptNativeTracking } from './androidNativeShutdown';
@@ -82,6 +83,27 @@ import { recordTrackingEvidence, observeTrackingMovement,
   withConfirmedTrackingShutdown } from './trackingReliability';
 import type { TrackingAuthority } from './trackingReliability';
 import { acquireAndUploadAndroidPosition, GUARDED_POSITION_MARKER } from './androidLocationAcquisition';
+import { appendEngineEvidence, readEngineEvidence, clearEngineEvidence } from './engineEvidenceJournal';
+import { verifiedDelivery } from './verifiedDelivery';
+import { markStartupMilestone } from './startupDiagnostics';
+
+async function observeNativeCapture(location: any, headless = false): Promise<void> {
+  const captureId = location?.uuid;
+  const capturedAt = Date.parse(location?.timestamp);
+  const authority = readTrackingAuthority();
+  if (!authority || authority.revoked || typeof captureId !== 'string'
+    || !Number.isFinite(capturedAt) || Math.abs(Date.now() - capturedAt) > 5000) return;
+  const history = await readEngineEvidence();
+  const boundary = [...history].reverse().find(e => e.at <= capturedAt
+    && (e.event === 'app_backgrounded' || e.event === 'app_foregrounded'));
+  const current = readTrackingAuthority();
+  if (current?.revoked || current?.owner !== authority.owner || current?.generation !== authority.generation) return;
+  await logEvent('native_capture_observed', { captureId, capturedAt,
+    owner: authority.owner, generation: authority.generation,
+    consentGeneration: location?.extras?.consent_generation ?? 0,
+    origin: (headless || AppState.currentState === 'background')
+      && boundary?.event === 'app_backgrounded' ? 'background' : 'foreground' });
+}
 import {
   LOCATION_UPLOAD_SUCCESS_KEY,
   getLocationUploadSuccessTs,
@@ -376,6 +398,10 @@ function registerHeadlessTaskOnce(): void {
   const HeadlessTask = async (event: any) => {
     try {
       const name = event?.name;
+      if (name === 'location' && !event?.params?.sample
+        && !event?.params?.extras?.[GUARDED_POSITION_MARKER]) {
+        await observeNativeCapture(event.params, true);
+      }
       if (Platform.OS === 'android' && name === 'enabledchange') {
         const enabled = typeof event.params === 'boolean' ? event.params : event?.params?.enabled;
         if (typeof enabled === 'boolean') observeNativeEnabledState(enabled);
@@ -400,6 +426,9 @@ function registerHeadlessTaskOnce(): void {
       await logEvent('headless_task_invoked', { eventName: name ?? 'unknown' });
 
       if (Platform.OS === 'android' && (name === 'motionchange' || name === 'activitychange')) {
+        await logEvent(name === 'motionchange' ? 'sdk_onMotionChange' : 'sdk_onActivityChange', {
+          isMoving: event?.params?.isMoving, activity: event?.params?.activity, origin: 'headless',
+        });
         const activity = event?.params?.activity;
         observeTrackingMovement(event?.params?.isMoving === true || ['in_vehicle', 'on_bicycle', 'on_foot', 'walking', 'running'].includes(activity));
       }
@@ -547,7 +576,11 @@ function registerHeadlessTaskOnce(): void {
         // If the 50-entry buffer fills with failure entries, computeHealthItems()
         // can still find evidence that uploads are working by reading this key
         // directly (via getLastHttpSuccessTs / getPipelineTimestamps).
-        if (success) await recordLocationUploadSuccess();
+        if (success) {
+          await recordLocationUploadSuccess();
+          const receipt = verifiedDelivery(params?.responseText, 'background', readTrackingAuthority());
+          if (receipt) await logEvent('verified_coordinate_publication', receipt);
+        }
 
         // Upsert into memberStore when the upload succeeded and we have
         // a parseable response body — keeps the local store consistent
@@ -761,14 +794,18 @@ export async function logEvent(
   detail?: Record<string, any>,
 ): Promise<void> {
   await loadLogBuffer();
-  logBuffer.push({
+  const record: EngineLogEvent = {
     seq: nextSeq(),
     src: 'engine',
     at: Date.now(),
     event,
     detail,
-  });
+  };
+  logBuffer.push(record);
   logBuffer = pruneBuffer(logBuffer, (e) => e.at, LOG_MAX);
+  await appendEngineEvidence(record);
+  // Compatibility cache only. Canonical reads merge immutable journal records;
+  // another runtime overwriting this short array cannot erase the journal.
   await persistLogBuffer();
 }
 
@@ -779,16 +816,25 @@ export async function logEvent(
 export async function getEngineLog(): Promise<EngineLogEvent[]> {
   await loadLogBuffer();
   logBuffer = pruneBuffer(logBuffer, (e) => e.at, LOG_MAX);
-  return [...logBuffer];
+  const journal = await readEngineEvidence();
+  const seen = new Set<string>();
+  return [...logBuffer, ...journal].sort((a, b) => a.at - b.at).filter(e => {
+    const id = `${e.at}:${e.seq}:${e.event}:${JSON.stringify(e.detail ?? null)}`;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
 }
 
 /** Clear the log buffer.  Surfaced as a button on Diagnostics. */
 export async function clearEngineLog(): Promise<void> {
+  await clearEngineEvidence();
   logBuffer = [];
   await persistLogBuffer();
 }
 
 export type LocationEngineConfig = {
+  consentGeneration?: number;
   /** Authenticated owner, persisted only for authorized Android recovery. */
   ownerUserId?: string;
   /** Caller's backend base URL (e.g. https://kinnship.up.railway.app). */
@@ -1202,6 +1248,7 @@ function attachSdkListeners(lib: any): void {
       (loc: any) => {
         if (Platform.OS === 'android' && (loc?.sample === true
           || loc?.extras?.[GUARDED_POSITION_MARKER])) return;
+        void observeNativeCapture(loc);
         recordPipelineTs('location');
         void logEvent('sdk_onLocation', {
           // Round to 0.01 deg for privacy in logs.  Real PUT uses full
@@ -1305,6 +1352,9 @@ function attachSdkListeners(lib: any): void {
       if (evt?.success === true) {
         void incrementHttpCounter(HTTP_OK_COUNT_KEY);
         void recordLocationUploadSuccess();
+        const receipt = verifiedDelivery(evt.responseText,
+          AppState.currentState === 'background' ? 'background' : 'foreground', readTrackingAuthority());
+        if (receipt) void logEvent('verified_coordinate_publication', receipt);
       } else {
         void incrementHttpCounter(HTTP_FAIL_COUNT_KEY);
       }
@@ -1384,7 +1434,10 @@ function attachSdkListeners(lib: any): void {
       // with enabled=true BEFORE our ready_invoked entry, the native
       // foreground service started autonomously (boot/startOnBoot)
       // without any JS config having been applied yet.
-      void logEvent('sdk_onEnabledChange', { enabled });
+      const authority = readTrackingAuthority();
+      void logEvent('sdk_onEnabledChange', { enabled, owner: authority?.owner,
+        generation: authority?.generation,
+        consentGeneration: getVerifiedConsentGeneration?.(authority?.owner ?? '') ?? null });
     });
     lib.onHeartbeat(async () => {
       recordPipelineTs('heartbeat_js');
@@ -1601,6 +1654,9 @@ export function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<stri
       'Content-Type': 'application/json',
       'X-Kinnship-Presence-Source': 'location-upload',
     },
+    // SDK extras are persisted with EACH fix, not merged at HTTP replay time.
+    extras: { consent_generation: Math.max(cfg.consentGeneration ?? 0,
+      getVerifiedConsentGeneration?.(`${cfg.ownerUserId}:${cfg.memberId}`) ?? 0) },
     authorization: {
       strategy: 'JWT',
       accessToken: cfg.jwt,
@@ -1818,6 +1874,7 @@ async function startConfiguredEngine(cfg: LocationEngineConfig, generation: numb
   // ----- ready() / setConfig() ─────────────────────────────────────
   try {
     if (await stopIfObsolete()) return 'failed';
+    markStartupMilestone('location_authorization_configuration_started');
     if (Platform.OS === 'android') {
       const prior = readTrackingAuthority();
       if (prior?.revoked && prior.shutdownPending) {
@@ -1882,7 +1939,9 @@ async function startConfiguredEngine(cfg: LocationEngineConfig, generation: numb
       }
     }
     if (await stopIfObsolete()) return 'failed';
+    markStartupMilestone('location_authorization_configuration_completed');
   } catch (e: any) {
+    markStartupMilestone('location_authorization_configuration_failed');
     await logEvent('ready_or_setConfig_error', {
       error: String(e?.message || e),
     });
@@ -1988,6 +2047,7 @@ export function stop(
       cachedConfig = null;
       recordTrackingEvidence('stop_requested', { caller, reason,
         generation: expected.generation, authorization: 'REVOKED' });
+      void logEvent('tracking_authority_boundary', { caller, reason, authorization: 'REVOKED' }).catch(() => {});
       await interruptEngineStop();
       const lib = bgGeo();
       if (typeof lib?.destroyLocations === 'function') await lib.destroyLocations();
@@ -2007,6 +2067,7 @@ export function stop(
   try { revocation = revokeTrackingIntent(reason); }
   catch (error) { revocation = Promise.reject(error); }
   recordTrackingEvidence('stop_requested', { caller, reason, generation: engineGeneration, authorization: 'REVOKED' });
+  void logEvent('tracking_authority_boundary', { caller, reason, authorization: 'REVOKED' }).catch(() => {});
   // Deliberately do NOT enter either FIFO. Pending native startup remains
   // quarantined, but shutdown takes effect now and its late completion is fenced.
   const revokedGeneration = trackingIntentEpoch();
@@ -2102,6 +2163,14 @@ export function recoverFromIndependentWake(
       const owned = await ownedNativeSdk(lib, () => generation === engineGeneration && isCurrent(), epoch, token);
       const result = await recoverUnexpectedlyDisabledTracking(
         owned, () => generation === engineGeneration && isCurrent(), onAuthorizedBattery,
+        async () => {
+          if (!isReady) {
+            attachSdkListeners(lib);
+            await owned.ready({ reset: false });
+            isReady = true;
+            await logEvent('ready_ok', { source: 'independent-runtime', callbacksRegistered: true });
+          }
+        },
       );
       await logEvent('independent_tracking_recovery', { trigger, result });
       return result;
@@ -2377,7 +2446,7 @@ export function isAvailable(): boolean {
  * Returns void on success / throws on SDK error.  Caller should treat
  * an absence of `sdk_onHttp` events as failure even if this resolves.
  */
-export async function requestFreshLocation(): Promise<void> {
+export async function requestFreshLocation(source = 'leonidas-recovery'): Promise<void> {
   const lib = bgGeo();
   if (!lib) {
     await logEvent('requestFreshLocation_skipped', { reason: 'native_module_unavailable' });
@@ -2389,7 +2458,7 @@ export async function requestFreshLocation(): Promise<void> {
       samples: 1,
       persist: true,
       timeout: 30,
-      extras: { source: 'leonidas-recovery' },
+      extras: { source },
     });
     await logEvent('requestFreshLocation_ok');
   } catch (e: any) {
@@ -2407,9 +2476,16 @@ export async function getEngineDiagnostics(): Promise<{
   state: LocationEngineState;
   log: EngineLogEvent[];
 }> {
+  const state = await getState();
+  if (isAvailable()) {
+    const authority = readTrackingAuthority();
+    await logEvent('sdk_state_observed', { enabled: state.enabled,
+      generation: authority?.generation, owner: authority?.owner,
+      consentGeneration: getVerifiedConsentGeneration?.(authority?.owner ?? '') ?? 0 });
+  }
   return {
     available: isAvailable(),
-    state: await getState(),
+    state,
     log: await getEngineLog(),
   };
 }

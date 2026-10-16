@@ -2,6 +2,10 @@ import axios from 'axios';
 import * as SecureStore from 'expo-secure-store';
 import { AppState, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { markStartupMilestone } from './startupDiagnostics';
+
+const measuredRequests = new WeakMap<object, { at: number; endpoint: string }>();
+const startupEndpoints = new Set(['/auth/me', '/members', '/summary', '/me/preferences']);
 
 const BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
 const TOKEN_KEY = 'kc_token';
@@ -135,6 +139,10 @@ export function addForegroundPresenceHeader<T extends { headers?: any }>(
 }
 
 api.interceptors.request.use(async (config) => {
+  if (startupEndpoints.has(String(config.url))) {
+    measuredRequests.set(config, { at: Date.now(), endpoint: String(config.url) });
+    markStartupMilestone('api_request_started', { endpoint: String(config.url) });
+  }
   const token = await getToken();
   if (token) {
     config.headers = config.headers ?? {};
@@ -219,9 +227,15 @@ api.interceptors.response.use(
         await saveToken(fresh);
       }
     } catch (_e) {}
+    const timing = measuredRequests.get(res.config);
+    if (timing) markStartupMilestone('api_request_completed',
+      { endpoint: timing.endpoint, durationMs: Date.now() - timing.at, status: res.status });
     return res;
   },
   async (error) => {
+    const timing = error.config && measuredRequests.get(error.config);
+    if (timing) markStartupMilestone('api_request_failed',
+      { endpoint: timing.endpoint, durationMs: Date.now() - timing.at, status: error.response?.status ?? 0 });
     const cfg = error?.config;
     if (!cfg) return Promise.reject(error);
     const url = String(cfg.url || '');
@@ -253,6 +267,7 @@ export type User = {
 };
 
 export type Member = {
+  location_consent_generation?: number;
   id: string;
   user_id?: string | null;
   name: string;

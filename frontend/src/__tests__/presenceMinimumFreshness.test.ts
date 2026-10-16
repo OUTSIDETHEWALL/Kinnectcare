@@ -3,11 +3,21 @@ const BATTERY_LOG_KEY = '@kinnship/battery_task_log_v1';
 // These tests isolate transport/cadence after recovery authorization.
 // Real ownership, cold boot and independent-wake guards are covered separately.
 jest.mock('../androidTrackingRecovery', () => ({
+  getVerifiedConsentGeneration: () => 0,
   evaluateWakeAuthorization: jest.fn(async () => ({ state: 'AUTHORIZED', source: 'test_owner' })),
   trackingIsRevoked: jest.fn(async () => false),
   trackingPolicyStamp: jest.fn(async () => null),
   verifyWakeOwnership: jest.fn(async () => 'allowed'),
   authorizeRevokedBatteryTransport: jest.fn(async () => null),
+  authorizeDeviceContactTransport: jest.fn(async (isCurrent: () => boolean) => {
+    // This transport/cadence fixture supplies explicit contact authorization.
+    // Real fresh-session/owner checks are exercised in androidTrackingRecovery.
+    const state = await require('react-native-background-geolocation').default.getState();
+    const member = state.url?.match(/\/members\/([^/]+)\/location/);
+    if (!member || !state.authorization?.accessToken || !isCurrent()) return null;
+    return { memberId: member[1], baseUrl: state.url.split('/api/')[0],
+      token: state.authorization.accessToken, isCurrent: async () => isCurrent() };
+  }),
   migrateLegacyTrackingIntent: jest.fn(async () => false),
   BACKGROUND_PERMISSION_RATIONALE: {},
   authorizeTrackingIntent: jest.fn(),
@@ -132,7 +142,8 @@ describe('minimum device-presence freshness', () => {
     const fetchMock = jest.fn(async (_url, request) => request?.method === 'PATCH'
       ? { ok: false, status: 401 } : { ok: true, status: 200, json: async () => {
           const body = JSON.parse(request.body);
-          return { latitude: body.latitude, longitude: body.longitude, coordinate_captured_at: body.timestamp };
+          return { latitude: body.latitude, longitude: body.longitude, coordinate_captured_at: body.timestamp,
+            location_write_accepted: true };
         } });
     const mockGetCurrentPosition = jest.fn().mockResolvedValue({
       timestamp: new Date().toISOString(),
@@ -336,6 +347,7 @@ describe('minimum device-presence freshness', () => {
       const body = request?.body ? JSON.parse(request.body) : {};
       return { ok: true, status: 200, json: async () => ({
         latitude: body.latitude, longitude: body.longitude, coordinate_captured_at: body.timestamp,
+        location_write_accepted: true,
       }) };
     });
 
@@ -376,7 +388,7 @@ describe('minimum device-presence freshness', () => {
 
     await Promise.resolve();
     const firstExecution = mockConfiguredHandler!('reused-task-id');
-    for (let i = 0; i < 200 && !mockGetCurrentPosition.mock.calls.length; i += 1) {
+    for (let i = 0; i < 2000 && !mockGetCurrentPosition.mock.calls.length; i += 1) {
       await Promise.resolve();
     }
     expect(mockGetCurrentPosition).toHaveBeenCalledTimes(1);

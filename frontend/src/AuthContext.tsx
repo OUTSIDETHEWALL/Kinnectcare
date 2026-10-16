@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react';
 import { api, saveToken, clearToken, User } from './api';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
@@ -101,8 +101,11 @@ async function readToken(): Promise<string | null> {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const sessionLifetime = useRef(0);
 
   useEffect(() => {
+    const lifetime = sessionLifetime.current;
+    const isCurrent = () => sessionLifetime.current === lifetime;
     (async () => {
       recordNativeStartupCheckpoint('auth_restore_started');
       let authRestoreTerminal: 'auth_restore_completed' | 'auth_restore_failed' = 'auth_restore_failed';
@@ -130,6 +133,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         details: { freshInstall: wasFreshInstallThisLaunch() },
       });
       const token = await readToken();
+      if (!isCurrent()) return;
       logStartupEvent({
         phase: 'session_restore',
         event: 'token_read_completed',
@@ -156,6 +160,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // through to the user — the exact bug the caregiver and member saw on
       // notification tap.
       const cachedUser = await readUserCache();
+      if (!isCurrent()) return;
       logStartupEvent({
         phase: 'session_restore',
         event: 'user_cache_read_completed',
@@ -176,8 +181,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       let authRestoreFailed = false;
       try {
         const res = await api.get('/auth/me');
+        if (!isCurrent()) return;
         setUser(res.data);
         restoredUser = true;
+        // The authenticated identity is sufficient for the existing PIN,
+        // consent and family gates. Cache/timezone maintenance is not.
+        setLoading(false);
         await writeUserCache(res.data);
         logStartupEvent({
           phase: 'session_restore',
@@ -187,12 +196,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         try {
           const tz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
           if (tz && tz !== res.data.timezone) {
-            const updated = await api.put('/auth/timezone', { timezone: tz });
-            setUser(updated.data);
-            await writeUserCache(updated.data);
+            // Do not let a secondary request hold the first Family render.
+            // Keep the already authenticated user; refreshUser will reconcile
+            // server profile metadata without a late bootstrap overwriting it.
+            void api.put('/auth/timezone', { timezone: tz }).catch(() => {});
           }
         } catch (_e) {}
       } catch (e: any) {
+        if (!isCurrent()) return;
         authRestoreFailed = true;
         let status = e?.response?.status;
         // RETRY-ONCE on 401: a single transient 401 (Mongo brief
@@ -207,8 +218,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           try {
             await new Promise((r) => setTimeout(r, 2000));
             const res2 = await api.get('/auth/me');
+            if (!isCurrent()) return;
             setUser(res2.data);
             restoredUser = true;
+            setLoading(false);
             await writeUserCache(res2.data);
             status = undefined; // recovered
             authRestoreFailed = false;
@@ -223,6 +236,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             e = e2;
           }
         }
+        if (!isCurrent()) return;
         if (status === 401) {
           // Confirmed two consecutive 401s → token genuinely invalid.
           // Write diagnostic record BEFORE clearing so we can
@@ -243,8 +257,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             while (arr.length > 20) arr.shift();
             await AsyncStorage.setItem('kc_auth_clear_diag', JSON.stringify(arr));
           } catch (_e) {}
+          if (!isCurrent()) return;
           await clearToken();
+          if (!isCurrent()) return;
           await writeUserCache(null);
+          if (!isCurrent()) return;
           setUser(null);
           restoredUser = false;
           logStartupEvent({
@@ -341,10 +358,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * throws — the verify screen surfaces the error.
    */
   const verifyOtp = async ({ email, code }: { email: string; code: string }) => {
+    const lifetime = ++sessionLifetime.current;
+    const requireCurrent = () => {
+      if (sessionLifetime.current !== lifetime) throw new Error('Sign-in was cancelled. Please try again.');
+    };
     const res = await api.post('/auth/verify-otp', {
       email: (email || '').trim().toLowerCase(),
       code: (code || '').trim(),
     });
+    requireCurrent();
     let authenticatedUser: User = res.data.user;
 
     // FRESH-INSTALL PIN CLEANUP — if this launch was detected as a
@@ -355,6 +377,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // see comment block in v6.10 for the full backstory.
     if (wasFreshInstallThisLaunch()) {
       try { await clearPin(authenticatedUser.id); } catch (_e) {}
+      requireCurrent();
       consumeFreshInstallFlag();
     }
 
@@ -366,10 +389,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // email.
     try {
       const has = await hasPinForUser(authenticatedUser.id);
+      requireCurrent();
       if (has) markUnlocked(authenticatedUser.id);
     } catch (_e) {}
 
+    requireCurrent();
     await saveToken(res.data.access_token);
+    requireCurrent();
 
     // Build #60 — auto-consume pending invite after successful auth.
     //
@@ -397,12 +423,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // diagnostic instead of discarding the only recovery evidence.
     try {
       const { getPendingInvite, clearPendingInvite, markInviteConsumed } = await import('./pendingInvite');
+      requireCurrent();
       logStartupEvent({
         phase: 'pending_invite_load',
         event: 'pending_invite_load_started',
         reason: 'otp_verified',
       });
       const pending = await getPendingInvite();
+      requireCurrent();
       logStartupEvent({
         phase: 'pending_invite_load',
         event: 'pending_invite_load_completed',
@@ -422,10 +450,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             const joinRes = await api.post('/family-group/join', {
               invite_code: pending.token,
             });
+            requireCurrent();
             console.info('[invite-accept] join_confirmed', {
               alreadyMember: !!joinRes.data?.already_member,
             });
             const meRes = await api.get('/auth/me');
+            requireCurrent();
             const targetGroupId = joinRes.data?.group?.id;
             if (targetGroupId && meRes.data?.family_group_id !== targetGroupId) {
               throw new Error('Family assignment was not visible after invite acceptance');
@@ -434,7 +464,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
           console.info('[invite-accept] family_membership_refreshed');
           await markInviteConsumed(pending.token);
+          requireCurrent();
           await clearPendingInvite();
+          requireCurrent();
           console.info('[invite-accept] pending_invite_cleared');
         } catch (error: any) {
           // Keep the token. A failed transition must remain inspectable and
@@ -452,10 +484,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       throw error;
     }
 
+    requireCurrent();
     setUser(authenticatedUser);
     // Cache the final user object only after invite membership is settled, so
     // a reboot cannot hydrate an intermediate solo-family state.
     await writeUserCache(authenticatedUser);
+    requireCurrent();
 
     // Sync timezone if it doesn't match device tz.
     try {
@@ -468,6 +502,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = async () => {
+    sessionLifetime.current += 1;
     forgetSessionUnlock(user?.id);
     // Build #55 — also clear the persistent 24 h PIN session on
     // sign-out so a new user on the same device can't inherit the
@@ -482,8 +517,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const refreshUser = async () => {
+    const lifetime = sessionLifetime.current;
     try {
       const res = await api.get('/auth/me');
+      if (sessionLifetime.current !== lifetime) return;
       setUser(res.data);
       await writeUserCache(res.data);
     } catch (_e) {}

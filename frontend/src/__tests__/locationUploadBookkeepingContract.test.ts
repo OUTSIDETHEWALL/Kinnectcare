@@ -9,9 +9,9 @@ function source(file: string): string {
 
 describe('location upload success bookkeeping coverage', () => {
   it.each([
-    ['src/locationRefresh.ts', 1],
+    ['src/locationRefresh.ts', 0],
     ['src/backgroundLocation.ts', 1],
-    ['app/(tabs)/dashboard.tsx', 2],
+    ['app/(tabs)/dashboard.tsx', 0],
   ])('%s records every successful direct location PUT', (file, expectedCalls) => {
     const text = source(file);
     const locationPuts = text.match(/await api\.put\(`\/members\/\$\{[^}]+\}\/location`, body\)/g)
@@ -21,6 +21,12 @@ describe('location upload success bookkeeping coverage', () => {
 
     expect(locationPuts).toHaveLength(expectedCalls);
     expect(successRecords).toHaveLength(expectedCalls);
+  });
+  it('centralizes guarded timestamped publication instead of duplicating dashboard/refresh writers', () => {
+    expect(source('src/foregroundLocationPublication.ts')).toContain('timestamp: new Date(capturedAt).toISOString()');
+    expect(source('src/foregroundLocationPublication.ts')).toContain('requestFreshLocation');
+    expect(source('src/locationRefresh.ts')).toContain('return refreshForegroundLocation(reason)');
+    expect(source('src/backgroundLocation.ts')).toContain('new Date(fresh.timestamp).toISOString()');
   });
 
   it('uses the shared recorder for both native success callbacks', () => {

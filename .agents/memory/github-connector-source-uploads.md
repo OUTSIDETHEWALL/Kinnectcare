@@ -20,6 +20,15 @@ produce a different source tree.
 retrieved bytes against the local blob ID before uploading. Never accept a
 successful API response as proof that the remote tree matches the reviewed one.
 
+Transport commit metadata as JSON, including the exact trailing newline in the
+stored commit message. Do not obtain the message from raw shell output.
+
+**Why:** Shell-output transport can strip that newline; the remote tree then
+matches exactly while the reconstructed commit ID differs.
+
+**How to apply:** JSON-encode metadata before shell transport, preserve the
+decoded message bytes, and compare the returned commit ID before updating a ref.
+
 Keep large source/blob variables local to one upload operation, not persistent
 top-level notebook bindings.
 

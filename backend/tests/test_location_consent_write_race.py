@@ -34,7 +34,9 @@ def matches(doc, query):
             for op, operand in value.items():
                 if op == "$exists" and (key in doc) != operand:
                     return False
-                if op == "$lt" and (key not in doc or not doc[key] < operand):
+                # Mongo date comparisons are type-bracketed: BSON null does
+                # not match a date $lt, rather than raising like Python None.
+                if op == "$lt" and (key not in doc or doc[key] is None or not doc[key] < operand):
                     return False
                 if op not in ("$exists", "$lt"):
                     raise AssertionError(f"Unmodeled query operator: {op}")
@@ -116,6 +118,7 @@ class Harness:
 
     def upload(self, timestamp="fresh", latitude=3.0):
         payload = {"latitude": latitude, "longitude": latitude + 1}
+        payload["consent_generation"] = self.member.get("location_consent_generation", 0)
         if timestamp == "fresh":
             payload["timestamp"] = datetime.now(timezone.utc).isoformat()
         elif timestamp is not None:
