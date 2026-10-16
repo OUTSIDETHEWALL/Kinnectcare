@@ -9,6 +9,15 @@ jest.mock('../androidTrackingRecovery', () => ({
   trackingPolicyStamp: jest.fn(async () => null),
   verifyWakeOwnership: jest.fn(async () => 'allowed'),
   authorizeRevokedBatteryTransport: jest.fn(async () => null),
+  authorizeDeviceContactTransport: jest.fn(async (isCurrent: () => boolean) => {
+    // This transport/cadence fixture supplies explicit contact authorization.
+    // Real fresh-session/owner checks are exercised in androidTrackingRecovery.
+    const state = await require('react-native-background-geolocation').default.getState();
+    const member = state.url?.match(/\/members\/([^/]+)\/location/);
+    if (!member || !state.authorization?.accessToken || !isCurrent()) return null;
+    return { memberId: member[1], baseUrl: state.url.split('/api/')[0],
+      token: state.authorization.accessToken, isCurrent: async () => isCurrent() };
+  }),
   migrateLegacyTrackingIntent: jest.fn(async () => false),
   BACKGROUND_PERMISSION_RATIONALE: {},
   authorizeTrackingIntent: jest.fn(),

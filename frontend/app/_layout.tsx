@@ -647,6 +647,11 @@ function RootNav() {
   const androidStartupBlocked = Platform.OS === 'android'
     && (loading || !androidLocationReady);
   useEffect(() => {
+    // Android wakes re-prove current session/ownership independently of GPS.
+    // Keep iOS's existing post-bootstrap credential ordering unchanged.
+    if (Platform.OS === 'android' && user?.id) void configureBatteryTask();
+  }, [user?.id]);
+  useEffect(() => {
     if (user && !androidPushBlocked) {
       registerForPushNotifications().catch(() => {});
     }
@@ -1400,7 +1405,7 @@ function RootNav() {
         // Battery subsystem — independent 30-minute target via WorkManager
         // (Android) / BGTaskScheduler (iOS).  Runs even when the device
         // hasn't moved and the Transistor SDK is idle.
-        configureBatteryTask().catch(() => {});
+        if (Platform.OS !== 'android') configureBatteryTask().catch(() => {});
         // Part 7 — Battery optimization prompt moved to post-onboarding.
         // See useEffect below; fired there so the user has context from
         // onboarding before being asked about a system setting.

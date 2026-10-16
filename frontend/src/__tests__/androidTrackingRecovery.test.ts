@@ -758,6 +758,24 @@ describe('owned Android cold tracking recovery', () => {
     expect(sdk.start).not.toHaveBeenCalled();
   });
 
+  it('authorizes only device contact even when GPS permissions are denied', async () => {
+    permissions.foreground = 'denied';
+    permissions.background = 'denied';
+    const proof = await recovery.authorizeDeviceContactTransport(() => true);
+    expect(proof?.memberId).toBe('member-a');
+    expect(await proof?.isCurrent()).toBe(true);
+    expect(sdk.start).not.toHaveBeenCalled();
+    expect(sdk.setConfig).not.toHaveBeenCalled();
+    token = null;
+    expect(await proof?.isCurrent()).toBe(false);
+    expect(await recovery.authorizeDeviceContactTransport(() => true)).toBeNull();
+  });
+  it('does not use a cached owner or issue GPS when contact ownership is unavailable', async () => {
+    members = [{ id: 'other', user_id: 'other-user' }];
+    expect(await recovery.authorizeDeviceContactTransport(() => true)).toBeNull();
+    expect(sdk.start).not.toHaveBeenCalled();
+    expect(sdk.getCurrentPosition).not.toHaveBeenCalled();
+  });
   it('does not automatically rearm consent; explicit opt-in can reauthorize', async () => {
     await recovery.revokeTrackingIntent('consent');
     await recovery.recoverUnexpectedlyDisabledTracking(sdk, () => true);

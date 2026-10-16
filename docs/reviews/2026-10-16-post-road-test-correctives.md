@@ -1,5 +1,9 @@
 # Post-road-test corrective release review
 
+**Historical narrow review.** Superseded by
+`2026-10-16-build70-full-launch-blocker-sprint.md`; its results and release gate
+are the current handoff. The earlier failed-run evidence below is retained.
+
 ## Status and authority
 
 Implementation and review only. No merge, deployment, OTA, Android build, Play

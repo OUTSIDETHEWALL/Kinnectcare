@@ -166,3 +166,71 @@ def test_unknown_write_still_accepts_independent_battery_and_presence(harness):
         assert doc["latitude"] == 3
         assert doc["last_seen"] >= now
     run(scenario())
+
+
+@pytest.mark.parametrize("ordering,verified,accepted", [
+    (None, None, True),
+    (None, 2, False),
+    (-2, 2, False),
+    (2, None, False),
+])
+def test_dated_publication_orders_against_both_fields_including_null(harness, ordering, verified, accepted):
+    now, doc, put, _, _ = harness
+    doc.update(latitude=10, longitude=11,
+               captured_at=None if ordering is None else now + timedelta(seconds=ordering),
+               coordinate_captured_at=None if verified is None else now + timedelta(seconds=verified))
+    before = copy.deepcopy(doc)
+    result = run(put(now, latitude=5))
+    assert result.location_write_accepted is accepted
+    if accepted:
+        assert doc["latitude"] == 5 and doc["coordinate_captured_at"] == now
+    else:
+        assert (doc["latitude"], doc["coordinate_captured_at"], doc["captured_at"]) == (
+            before["latitude"], before["coordinate_captured_at"], before["captured_at"])
+
+
+def test_disabled_optional_geocoding_cannot_crash_coordinate_acceptance(harness, caplog):
+    now, doc, put, _, _ = harness
+    with patch.object(server.geocoding, "GEOCODE_BACKEND_ENABLED", False):
+        result = run(put(now))
+    assert result.location_write_accepted is True and doc["latitude"] == 3
+    assert "geocoding_disabled_upload" in caplog.text
+
+
+def test_caregiver_read_keeps_the_exact_tuple_through_contact_restart_and_replay(harness):
+    now, doc, put, _, db = harness
+
+    class Cursor:
+        async def to_list(self, *args, **kwargs):
+            return [copy.deepcopy(doc)]
+
+    db.members.find.return_value = Cursor()
+
+    async def scenario():
+        with patch.object(server.geocoding, "resolve_location_name",
+                          AsyncMock(return_value=("Current point", False))):
+            await put(now)
+            caregiver = dict(id="caregiver", family_group_id="family", family_group_role="owner")
+            first = (await server.list_members(current=caregiver))[0]
+            expected = (first.latitude, first.longitude, first.coordinate_captured_at)
+            assert expected == (3, 4, now)
+            await put(None, latitude=99)
+            doc.update(last_seen=now + timedelta(seconds=1), battery_level=.69)
+            await put(now - timedelta(seconds=1), latitude=98)
+            # A new GET reconstructs Pydantic objects, as after app recreation.
+            after = (await server.list_members(current=caregiver))[0]
+            assert (after.latitude, after.longitude, after.coordinate_captured_at) == expected
+            await put(now + timedelta(seconds=2), latitude=5)
+            newer = (await server.list_members(current=caregiver))[0]
+            assert (newer.latitude, newer.coordinate_captured_at) == (5, now + timedelta(seconds=2))
+    run(scenario())
+
+
+def test_motor_future_writeback_failure_is_observed(caplog):
+    async def scenario():
+        future = asyncio.get_running_loop().create_future()
+        server._observe_geocode_write(future)
+        future.set_exception(RuntimeError("test-write-failed"))
+        await asyncio.sleep(0)
+    run(scenario())
+    assert "geocode_writeback_failed" in caplog.text

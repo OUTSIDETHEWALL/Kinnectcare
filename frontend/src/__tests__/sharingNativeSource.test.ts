@@ -17,6 +17,9 @@ describe('pinned Expo Sharing native patch (source checks, not Android execution
     expect(patched).toContain('OnDestroy { interruptShare() }');
     expect(patched).not.toContain('startActivityForResult(intent, REQUEST_CODE)');
     expect(patched).not.toContain('pendingPromise?.resolve');
+    expect(patched).toContain('val requestCode = synchronized(this@SharingModule)');
+    expect(patched).toContain('if (pendingPromise !== promise) return@AsyncFunction');
+    expect(patched).toContain('startActivityForResult(intent, requestCode)');
     expect(() => patchSharing('unsupported upstream module')).toThrow(/source changed/);
   });
 });

@@ -1,6 +1,7 @@
 """Real startup repair and preference/check-in endpoints; offline atomic CAS model."""
 import asyncio
 import copy
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +16,7 @@ class RepairHarness(CheckinHarness):
         # Repairable legacy inconsistency: linked policy ON, member mirror OFF.
         self.member.update(owner_id="caregiver", location_sharing_enabled=False,
                            latitude=None, longitude=None, coordinate_captured_at=None,
+                           captured_at=None,
                            location_name="Location Sharing Off")
         if generation is None:
             self.member.pop("location_consent_generation")
@@ -124,6 +126,14 @@ def test_off_on_old_repair_cannot_change_new_authority_or_location(h, boundary):
         await h.sharing(True)
         receipt = await h.submit("daily", latitude=8.0)
         h.assert_receipts_location_free(receipt)
+        # A legacy check-in carries neither capture time nor original consent.
+        # Establish the new lifetime's point through the actual dated handler.
+        assert h.member["latitude"] is None
+        accepted = await server.update_member_location("member", server.LocationUpdate(
+            latitude=8.0, longitude=9.0,
+            timestamp=datetime.now(timezone.utc).isoformat(), consent_generation=9,
+        ), h.current)
+        assert accepted.location_write_accepted is True
         before = copy.deepcopy(h.member)
         h.release.set()
         await task
@@ -148,7 +158,8 @@ def test_unchanged_affirmative_legacy_policy_still_repairs_without_generation_ch
         assert h.member == expected
         assert h.repair_results == [1]
         receipt = await h.submit("daily")
-        assert (h.member["latitude"], h.member["longitude"]) == (3.0, 4.0)
+        expected = (3.0, 4.0) if generation in (None, 0) else (None, None)
+        assert (h.member["latitude"], h.member["longitude"]) == expected
         assert h.member["coordinate_captured_at"] is None
         h.assert_receipts_location_free(receipt)
     run(scenario())

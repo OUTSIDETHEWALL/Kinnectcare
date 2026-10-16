@@ -34,7 +34,9 @@ def matches(doc, query):
             for op, operand in value.items():
                 if op == "$exists" and (key in doc) != operand:
                     return False
-                if op == "$lt" and (key not in doc or not doc[key] < operand):
+                # Mongo date comparisons are type-bracketed: BSON null does
+                # not match a date $lt, rather than raising like Python None.
+                if op == "$lt" and (key not in doc or doc[key] is None or not doc[key] < operand):
                     return False
                 if op not in ("$exists", "$lt"):
                     raise AssertionError(f"Unmodeled query operator: {op}")

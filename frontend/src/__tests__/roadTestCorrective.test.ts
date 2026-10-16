@@ -1,4 +1,5 @@
 import { computeOverallHealth } from '../healthCheck';
+import { locationEvidenceSummary } from '../locationEvidenceSummary';
 import { verifiedDelivery } from '../verifiedDelivery';
 import { beginDiagnosticsExport } from '../diagnosticsExportLock';
 import type { EngineLogEvent } from '../locationEngine';
@@ -64,6 +65,20 @@ describe('road-test diagnostic truth', () => {
 });
 
 describe('export exclusion covers collection and chooser', () => {
+  it('diagnostic background evidence cannot cross a consent lifetime or revocation boundary', () => {
+    const now = Date.now();
+    const proof = { owner: 'self:member', generation: 1, consentGeneration: 1,
+      captureId: 'old-fix', capturedAt: now - 1000 };
+    const log: any[] = [
+      { event: 'native_capture_observed', at: now - 900, detail: { ...proof, origin: 'background' } },
+      { event: 'verified_coordinate_publication', at: now - 800, detail: { ...proof, origin: 'native-receipt' } },
+      { event: 'sdk_state_observed', at: now, detail: { ...proof, consentGeneration: 2, enabled: true } },
+    ];
+    expect(locationEvidenceSummary(log, now).background).toBeNull();
+    log.pop();
+    log.push({ event: 'tracking_authority_boundary', at: now, detail: {} });
+    expect(locationEvidenceSummary(log, now).background).toBeNull();
+  });
   it('rejects rapid double entry, permits cancel/failure/completion retry, and release is idempotent', () => {
     const first = beginDiagnosticsExport()!;
     expect(beginDiagnosticsExport()).toBeNull();

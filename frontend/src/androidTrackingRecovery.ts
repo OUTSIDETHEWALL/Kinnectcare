@@ -233,11 +233,20 @@ export async function authorizeRevokedBatteryTransport(
 ): Promise<AuthorizedBatteryTransport | null> {
   const stamp = await trackingPolicyStamp();
   const value = stamp ? JSON.parse(stamp) : null;
-  const nativeRevoked = readTrackingAuthority()?.revoked === true;
+  if (value?.revoked !== true && readTrackingAuthority()?.revoked !== true) return null;
+  return authorizeDeviceContactTransport(isCurrent);
+}
+
+/** Device contact requires a fresh self-owner session, never a working GPS SDK. */
+export async function authorizeDeviceContactTransport(
+  isCurrent: () => boolean,
+): Promise<AuthorizedBatteryTransport | null> {
+  const stamp = await trackingPolicyStamp();
+  const value = stamp ? JSON.parse(stamp) : null;
   const binding: Binding | undefined = value?.revoked === true ? value.binding
-    : nativeRevoked && value?.ownerUserId ? value : undefined;
+    : value?.ownerUserId ? value : undefined;
   const base = (process.env.EXPO_PUBLIC_BACKEND_URL || '').replace(/\/+$/, '');
-  if ((value?.revoked !== true && !nativeRevoked) || (binding && binding.backendBaseUrl !== base)
+  if ((binding && binding.backendBaseUrl !== base)
     || !base.startsWith('https://')) return null;
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getCurrentToken } = require('./api') as typeof import('./api');
@@ -253,7 +262,10 @@ export async function authorizeRevokedBatteryTransport(
     authenticatedGet(`${base}/api/auth/me`, token),
     authenticatedGet(`${base}/api/members`, token),
   ]) as [{ id?: string }, { id: string; user_id: string }[]];
-  if (!user?.id || !Array.isArray(members) || !await current()) return null;
+  if (!user?.id || !Array.isArray(members)
+    || members.some(member => !member || typeof member.id !== 'string' || !member.id
+      || (member.user_id != null && typeof member.user_id !== 'string'))
+    || !await current()) return null;
   const owned = members.filter(member => member.user_id === user.id
     && (!binding || member.id === binding.memberId));
   if (owned.length !== 1 || (binding && user.id !== binding.ownerUserId)) return null;

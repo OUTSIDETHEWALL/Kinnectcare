@@ -271,6 +271,9 @@ describe('RootNav location recovery independent of notification onboarding', () 
       }
       expect(sdk.start).not.toHaveBeenCalled();
       expect(enabled).toBe(false);
+      if (boundary !== 'signout') {
+        expect(require('../batteryTask').configureBatteryTask).toHaveBeenCalled();
+      }
     },
   );
   it.each(behaviors)('RootNav observes permission withdrawal on resume despite notification %s', async behavior => {

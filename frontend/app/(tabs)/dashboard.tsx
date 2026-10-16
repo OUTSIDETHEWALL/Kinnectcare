@@ -90,6 +90,12 @@ const SOS_CIRCUMFERENCE = 2 * Math.PI * SOS_RING_RADIUS; // ≈ 508.9
 export default function Dashboard() {
   const router = useRouter();
   const { user, logout } = useAuth();
+  const loadOwner = useRef(user?.id);
+  loadOwner.current = user?.id;
+  useEffect(() => {
+    loadOwner.current = user?.id;
+    return () => { loadOwner.current = undefined; };
+  }, [user?.id]);
   // Safe area insets — used to keep the SOS FAB clear of the navigation bar
   // on all device/navigation configurations (gesture, Samsung buttons, Pixel, etc.)
   const insets = useSafeAreaInsets();
@@ -238,6 +244,9 @@ export default function Dashboard() {
   // merge races.
 
   const load = async (trigger: DashboardLoadTrigger = 'unknown') => {
+    const owner = user?.id;
+    const isCurrentLoad = () => !!owner && loadOwner.current === owner;
+    if (!isCurrentLoad()) return;
     // Pipeline instrumentation — record what triggered this refresh
     // so Diagnostics can show the full event sequence.
     try { logPipelineEvent({ stage: 'dashboard-load', trigger }); } catch (_e) {}
@@ -273,10 +282,14 @@ export default function Dashboard() {
         // this dashboard renders.  The dashboard is one of several
         // writers into the canonical store, not an owner of
         // independent state.
-        const [m, s, b, ar] = await Promise.all([
+        // Billing is optional presentation, not authority for family data.
+        // Its retries must never hold the first usable Family screen.
+        void getBillingStatus().then(value => {
+          if (isCurrentLoad()) setBilling(value);
+        }).catch(() => {});
+        const [m, s, ar] = await Promise.all([
           api.get('/members'),
           api.get<DashboardSummary>('/summary'),
-          getBillingStatus().catch(() => null),
           // Fetch alerts in the same parallel burst so Needs Attention and
           // Missed Meds counts are always consistent with the Alerts tab.
           // Return null on failure (not { data: [] }) so the caller can
@@ -285,6 +298,7 @@ export default function Dashboard() {
           // reset-to-0 that would drop Needs Attention after a restart.
           api.get('/alerts').catch(() => null),
         ]);
+        if (!isCurrentLoad()) return;
         mRes = m;
         // Build #59 — fire the invites fetch in parallel too so the
         // "Invitation Pending" section stays in sync with members on
@@ -374,6 +388,7 @@ export default function Dashboard() {
           Array.isArray(m.data) ? m.data : [],
           Date.now(),
         );
+        if (!isCurrentLoad()) return;
         memberStore.upsertMany(receivedMembers);
         setSummary(s.data.members || []);
         setMissedMedicationDetails(s.data.missed_medication_details || []);
@@ -410,7 +425,6 @@ export default function Dashboard() {
             } catch (_e) {}
           }
         }
-        if (b) setBilling(b);
         setLoadError(false);
         if (dlogId) await dashMarkSetState(dlogId).catch(() => {});
       } catch (e: any) {

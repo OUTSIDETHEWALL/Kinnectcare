@@ -98,6 +98,9 @@ class CreationHarness(CheckinHarness):
             self.member["id"], server.LocationUpdate(
                 latitude=8.0, longitude=9.0,
                 timestamp=datetime.now(timezone.utc).isoformat(),
+                # Model a CURRENT client, not an unversioned legacy write
+                # silently adopting a renewed consent lifetime.
+                consent_generation=self.member["location_consent_generation"],
             ), self.current,
         )
 
@@ -188,9 +191,12 @@ def test_new_row_fails_closed_but_current_explicit_on_recovers(h, preference):
         assert receipt.location_write_accepted is True
         assert (h.member["latitude"], h.member["longitude"]) == (8.0, 9.0)
         assert h.member["coordinate_captured_at"] == h.member["captured_at"]
+        captured = h.member["coordinate_captured_at"]
         receipt = await h.checkin()
-        assert (h.member["latitude"], h.member["longitude"]) == (3.0, 4.0)
-        assert h.member["coordinate_captured_at"] is None
+        # The primary check-in succeeds; its undated optional coordinates
+        # cannot destroy the dated tuple or adopt renewed consent.
+        assert (h.member["latitude"], h.member["longitude"]) == (8.0, 9.0)
+        assert h.member["coordinate_captured_at"] == captured
         h.assert_receipts_location_free(receipt)
     run(scenario())
 

@@ -22,6 +22,22 @@ from passlib.context import CryptContext
 from pydantic import field_validator, field_serializer, model_validator
 
 
+def _observe_geocode_write(awaitable):
+    """Motor returns a Future, not necessarily a coroutine; observe failure."""
+    future = asyncio.ensure_future(awaitable)
+
+    def completed(done):
+        if done.cancelled():
+            return
+        try:
+            done.result()
+        except Exception:
+            logging.getLogger(__name__).exception("geocode_writeback_failed")
+
+    future.add_done_callback(completed)
+    return future
+
+
 # Helper: when MongoDB returns a naive datetime, attach UTC tzinfo so
 # JSON output always carries "+00:00" / "Z" suffix.  Without this the
 # frontend's `new Date(iso)` parses the timestamp as DEVICE-LOCAL time,
@@ -2655,7 +2671,7 @@ async def list_members(current=Depends(get_current_user), request: Request = Non
                 # conditional guard as the resolve path so a concurrent upload
                 # cannot write a label for stale coordinates.
                 _member_id = d.get("id")
-                asyncio.ensure_future(
+                _observe_geocode_write(
                     db.members.update_one(
                         {
                             "id": _member_id,
@@ -2690,7 +2706,7 @@ async def list_members(current=Depends(get_current_user), request: Request = Non
                         # lazy geocoding will see a non-null name and skip the
                         # fresh resolve for the new position.
                         _member_id = d.get("id")
-                        asyncio.ensure_future(
+                        _observe_geocode_write(
                             db.members.update_one(
                                 {
                                     "id": _member_id,
@@ -3834,7 +3850,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     if not geocoding.GEOCODE_BACKEND_ENABLED:
         logger.warning(
             "geocoding_disabled_upload: USE_BACKEND_GEOCODING is off — "
-            f"member={member.get('id')} "
+            f"member={member_id} "
             "location_name will remain null; GET /members will show 'Unknown'. "
             "Set USE_BACKEND_GEOCODING=true in Railway to fix."
         )
@@ -3962,18 +3978,23 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # Atomic conditional write
     if incoming_captured_at is not None:
         # Only write lat/lon if the incoming GPS capture is strictly
-        # newer than what is already stored.  The $or handles two cases:
-        #   a) First upload ever — no captured_at in the doc yet.
-        #   b) Subsequent upload — incoming must be strictly newer.
+        # newer than BOTH stored capture fields. Null/missing is an
+        # uninitialized ordering field, not a permanently frozen device.
+        # A legacy mismatch between the fields must not regress the verified
+        # coordinate timestamp merely because captured_at is older or null.
         # last_seen is always updated via a separate unconditional write
         # below if the guard rejects the coordinates.
         filter_doc: Dict[str, Any] = {
             "id": member_id,
             "family_group_id": current["family_group_id"],
             "$or": [
-                {"captured_at": {"$exists": False}},
+                {"captured_at": None},
                 {"captured_at": {"$lt": incoming_captured_at}},
             ],
+            "$and": [{"$or": [
+                {"coordinate_captured_at": None},
+                {"coordinate_captured_at": {"$lt": incoming_captured_at}},
+            ]}],
         }
     else:
         # Missing/null match also admits never-initialized legacy rows. This
@@ -3987,7 +4008,9 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # Consent and ordering are one atomic publication decision. Missing generation
     # is legacy generation zero, NOT an exemption from affirmative sharing.
     filter_doc["user_id"] = target.get("user_id")
-    filter_doc.update(_location_consent_condition(consent_generation))
+    consent_condition = _location_consent_condition(consent_generation)
+    filter_doc["location_sharing_enabled"] = consent_condition["location_sharing_enabled"]
+    filter_doc.setdefault("$and", []).extend(consent_condition["$and"])
 
     mongo_update: Dict[str, Any] = {"$set": update}
     if "location_pipeline" in update:
