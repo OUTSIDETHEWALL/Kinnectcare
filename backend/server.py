@@ -330,6 +330,7 @@ class FamilyMember(BaseModel):
     captured_at: Optional[datetime] = None
     # Capture time of the displayed coordinate tuple, never device contact.
     coordinate_captured_at: Optional[datetime] = None
+    location_consent_generation: int = 0
     # Build 64 — SDK movement state from the Transistor upload payload.
     # True when the SDK was in MOVING mode at the time of the last upload.
     # Exposed in /members so TrackingStatusPill can apply movement-aware
@@ -373,6 +374,9 @@ class LocationWriteResponse(FamilyMember):
     """Additive receipt fields; never persisted on the member document."""
     location_write_accepted: bool
     location_write_rejection_reason: Optional[str] = None
+    location_write_capture_uuid: Optional[str] = None
+    location_write_captured_at: Optional[datetime] = None
+    location_write_consent_generation: Optional[int] = None
 
 
 class CheckinSettings(BaseModel):
@@ -613,6 +617,7 @@ class LocationUpdate(BaseModel):
     #   • Some SDK versions emit Unix epoch milliseconds (int/float)
     #     rather than ISO-8601 — both handled by captured_at below.
     timestamp: Optional[Union[str, int, float]] = None
+    consent_generation: Optional[int] = Field(default=None, ge=0)
     # Battery telemetry.
     #   • Native SDK path:  promoted from battery.level / battery.is_charging
     #     by the validator below.
@@ -626,6 +631,11 @@ class LocationUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_payload(self) -> "LocationUpdate":
+        native_extras = (self.model_extra or {}).get("extras") or {}
+        if self.consent_generation is None and isinstance(native_extras, dict):
+            generation = native_extras.get("consent_generation")
+            if isinstance(generation, int) and not isinstance(generation, bool) and generation >= 0:
+                self.consent_generation = generation
         # ---- Coordinates ----
         # If flat lat/lon are missing but nested coords.{lat,lon} are
         # present, promote them.  This is the Transistor native-payload path
@@ -2645,7 +2655,7 @@ async def list_members(current=Depends(get_current_user), request: Request = Non
                 # conditional guard as the resolve path so a concurrent upload
                 # cannot write a label for stale coordinates.
                 _member_id = d.get("id")
-                asyncio.create_task(
+                asyncio.ensure_future(
                     db.members.update_one(
                         {
                             "id": _member_id,
@@ -2680,7 +2690,7 @@ async def list_members(current=Depends(get_current_user), request: Request = Non
                         # lazy geocoding will see a non-null name and skip the
                         # fresh resolve for the new position.
                         _member_id = d.get("id")
-                        asyncio.create_task(
+                        asyncio.ensure_future(
                             db.members.update_one(
                                 {
                                     "id": _member_id,
@@ -3644,7 +3654,9 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     is_self = bool(target.get("user_id")) and target["user_id"] == current["id"]
     # Capture before any asynchronous consent work. OFF -> ON must not revive
     # a request admitted under the previous consent lifetime.
-    consent_generation = target.get("location_consent_generation", 0)
+    # Missing dispatch provenance is legacy generation ZERO, never permission
+    # to adopt whichever consent lifetime happens to exist at HTTP arrival.
+    consent_generation = data.consent_generation if data.consent_generation is not None else 0
     is_owner = current.get("family_group_role") == "owner"
     if not (is_self or is_owner):
         logger.warning(
@@ -3755,8 +3767,8 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     #   4. last_seen always written (server contact time) regardless of
     #      whether the guard accepted or rejected the lat/lon write, so
     #      Leonidas heartbeat monitoring is unaffected.
-    #   5. If timestamp is absent (JS-side callers, unexpected edge
-    #      cases) fall back to the previous unconditional write.
+    #   5. Unknown-age coordinates may only initialize an undated tuple.
+    #      They must never replace any tuple with GPS ordering/provenance.
     incoming_captured_at: Optional[datetime] = data.captured_at
     if incoming_captured_at is not None and incoming_captured_at > server_now + timedelta(minutes=5):
         logger.warning(
@@ -3964,11 +3976,17 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             ],
         }
     else:
-        # No GPS timestamp — unconditional write (pre-Build-60 path)
-        filter_doc = {"id": member_id, "family_group_id": current["family_group_id"]}
+        # Missing/null match also admits never-initialized legacy rows. This
+        # condition is atomic with the coordinate write: a concurrent verified
+        # fix cannot be overwritten even if it arrived after our policy read.
+        filter_doc = {
+            "id": member_id, "family_group_id": current["family_group_id"],
+            "coordinate_captured_at": None, "captured_at": None,
+        }
 
     # Consent and ordering are one atomic publication decision. Missing generation
     # is legacy generation zero, NOT an exemption from affirmative sharing.
+    filter_doc["user_id"] = target.get("user_id")
     filter_doc.update(_location_consent_condition(consent_generation))
 
     mongo_update: Dict[str, Any] = {"$set": update}
@@ -3988,10 +4006,13 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         write_accepted = False
         rejection_reason = ("sharing_disabled" if doc.get("location_sharing_enabled") is not True
             else "consent_changed" if doc.get("location_consent_generation", 0) != consent_generation
+            else "owner_changed" if doc.get("user_id") != target.get("user_id")
+            else "capture_time_unknown" if incoming_captured_at is None
             else "older_timestamp")
         # Presence is not coordinate freshness and cannot restore the tuple.
         await db.members.update_one(
-            {"id": member_id, "family_group_id": current["family_group_id"]},
+            {"id": member_id, "family_group_id": current["family_group_id"],
+             "user_id": target.get("user_id")},
             {"$set": {"last_seen": server_now}},
         )
         doc = await db.members.find_one({"id": member_id}, {"_id": 0})
@@ -4138,7 +4159,10 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
         doc = await _current_member_location_view(doc, current)
     return LocationWriteResponse(**doc,
         location_write_accepted=write_accepted and not coord_suppressed,
-        location_write_rejection_reason=rejection_reason)
+        location_write_rejection_reason=rejection_reason,
+        location_write_capture_uuid=str(_extras.get("uuid")) if _extras.get("uuid") else None,
+        location_write_captured_at=incoming_captured_at if write_accepted and not coord_suppressed else None,
+        location_write_consent_generation=consent_generation)
 
 
 # ---------------------------------------------------------------------------
@@ -5465,7 +5489,10 @@ async def _publish_checkin_member_location(member, data):
     query = {
         "id": member["id"], "family_group_id": member["family_group_id"],
         "user_id": member["user_id"],
-        **_location_consent_condition(member.get("location_consent_generation", 0)),
+        "coordinate_captured_at": None, "captured_at": None,
+        # These legacy acquisitions carry no original consent lifetime. They
+        # may not adopt a renewed lifetime merely by arriving after re-enable.
+        **_location_consent_condition(0),
     }
     result = await db.members.update_one(query, {"$set": update})
     return result.matched_count == 1

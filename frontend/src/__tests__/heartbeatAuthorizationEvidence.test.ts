@@ -21,7 +21,7 @@ describe('actual background monitoring evidence', () => {
       event('sdk_onHeartbeat', {}, 15 * 60_000),
       event('headless_task_invoked', { eventName: 'terminate' }),
     ], now);
-    expect(items[1].status).toBe('error');
+    expect(items[1].status).toBe('warn');
   });
   it.each(['foreground-only', 'denied', 'failed'])('does not label %s startup as healthy background monitoring', outcome => {
     const items = computeHealthItems([

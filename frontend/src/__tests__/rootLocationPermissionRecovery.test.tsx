@@ -197,7 +197,9 @@ describe('RootNav location recovery independent of notification onboarding', () 
     jest.doMock('../resumeDiagnostics', () => ({ logResumeDecision: jest.fn(), isAlertDismissed: jest.fn(async () => false) }));
     jest.doMock('../activeEmergency', () => ({ setActiveEmergency: jest.fn() }));
     jest.doMock('../refreshPipelineLog', () => ({ logPipelineEvent: jest.fn() }));
-    jest.doMock('../startupDiagnostics', () => ({ logStartupEvent: jest.fn() }));
+    jest.doMock('../startupDiagnostics', () => ({
+      logStartupEvent: jest.fn(), markStartupMilestone: jest.fn(),
+    }));
     jest.doMock('../nativeStartupRecorder', () => ({ recordNativeStartupCheckpoint: jest.fn() }));
     Root = require('../../app/_layout').default;
   });
@@ -213,7 +215,7 @@ describe('RootNav location recovery independent of notification onboarding', () 
   });
   async function flush() {
     for (let i = 0; i < 8; i++) await act(async () => {
-      for (let n = 0; n < 100; n++) await Promise.resolve();
+      for (let n = 0; n < 1000; n++) await Promise.resolve();
     });
   }
   async function mount() {

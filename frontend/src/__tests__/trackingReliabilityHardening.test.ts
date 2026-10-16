@@ -144,7 +144,10 @@ describe('native contract model: owner-scoped acquisition and bounded backoff', 
     expect(native.trackingClaim('owner:member', 0, 'push', now)).toBe(true);
     expect(native.trackingClaim('owner:member', 0, 'work', now)).toBe(false);
     expect(native.trackingClaim('owner:member', 0, 'sdk', now)).toBe(false);
-    expect(native.trackingClaimConfiguration('owner:member', 0, 'foreground', now)).toBe(false);
+    expect(native.trackingClaimConfiguration('owner:member', 0, 'foreground', now)).toBe(true);
+    expect(JSON.parse(native.trackingRead()).operation).toBe('push');
+    native.trackingComplete('foreground', 'operation_discarded', 0, false);
+    expect(JSON.parse(native.trackingRead()).operation).toBe('push');
   });
   it('caps consecutive failures at 5, 15, then 30 minutes', () => {
     for (const [index, minutes] of [5, 15, 30, 30].entries()) {

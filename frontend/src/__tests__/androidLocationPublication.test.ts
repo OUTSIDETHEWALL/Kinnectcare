@@ -55,6 +55,9 @@ describe('Android one-shot publication across real independent paths', () => {
       },
     }));
     sdk = {
+      ready: jest.fn(async () => ({ enabled })),
+      onLocation: jest.fn(), onMotionChange: jest.fn(), onActivityChange: jest.fn(),
+      onHeartbeat: jest.fn(), onProviderChange: jest.fn(), onHttp: jest.fn(),
       registerHeadlessTask: jest.fn(),
       getState: jest.fn(async () => ({
         enabled, url: `${base}/api/members/member/location`,
@@ -88,7 +91,7 @@ describe('Android one-shot publication across real independent paths', () => {
         : String(url).endsWith('/members') ? members
           : options?.method === 'PUT' ? {
               latitude: position.coords.latitude, longitude: position.coords.longitude,
-              coordinate_captured_at: position.timestamp,
+              coordinate_captured_at: position.timestamp, location_write_accepted: true,
             } : { location_sharing_enabled: sharing },
     })) as any;
     policy = require('../androidTrackingRecovery');
@@ -162,7 +165,7 @@ describe('Android one-shot publication across real independent paths', () => {
       finishGps();
       for (let i = 0; i < 1500 && !uploads().length; i++) await Promise.resolve();
       // Drain the fire-and-forget callback's bookkeeping before module reset.
-      for (let i = 0; i < 200; i++) await Promise.resolve();
+      for (let i = 0; i < 2000; i++) await Promise.resolve();
       expect(uploads()).toHaveLength(1);
       expect(nativeWrites).toBe(0);
       expect(sdk.stop).not.toHaveBeenCalled();

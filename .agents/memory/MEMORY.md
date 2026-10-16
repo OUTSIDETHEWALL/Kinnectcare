@@ -34,4 +34,5 @@
 - [Android recovery push invariant](android-recovery-push-invariant.md) — stale-device recovery must be high-priority and strictly data-only so Doze cannot defer it and Android cannot render it.
 - [Diagnostics file export](diagnostics-file-export.md) — add native full-log file sharing only with the next normal Android binary, never as an OTA-only native-module addition.
 - [Cold-headless validation boundary](cold-headless-validation-boundary.md) — warm-process success and native heartbeat firings do not prove cold background bootstrap.
+- [Background road-test acceptance](background-road-test-acceptance.md) — caregiver-side coordinate/capture advancement must precede reopening; include seven-minute parking and separate recreation.
 - [Python test loop isolation](python-test-loop-isolation.md) — new async scenarios must not clear the ambient loop relied on by legacy synchronous tests.

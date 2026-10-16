@@ -1373,6 +1373,7 @@ function RootNav() {
         const started = await ensureTransistorLocationEngine({
           backendBaseUrl,
           memberId: me.id,
+          consentGeneration: me.location_consent_generation ?? 0,
           jwt,
           ...(Platform.OS === 'android' ? {
             ownerUserId: user.id,
@@ -1645,6 +1646,16 @@ function RootNav() {
       }
     })();
   }, [user?.id, needsOnboarding, needsPermissions]);
+
+  useEffect(() => {
+    const gates = { authPending: loading, linkPending: !initialLinkChecked,
+      onboardingPending: !onboardingChecked, disclaimerPending: !disclaimerChecked,
+      permissionsPending: !permissionsChecked, lockPending: !!user && !appLockChecked };
+    const pending = Object.values(gates).some(Boolean);
+    logStartupEvent({ phase: 'root_navigation_decision',
+      event: pending ? 'startup_gates_pending_snapshot' : 'startup_gates_cleared', details: gates });
+    recordNativeStartupCheckpoint(pending ? 'startup_gates_pending_snapshot' : 'startup_gates_cleared');
+  }, [loading, initialLinkChecked, onboardingChecked, disclaimerChecked, permissionsChecked, user?.id, appLockChecked]);
 
   if (loading || !initialLinkChecked || !onboardingChecked || !disclaimerChecked || !permissionsChecked || (user && !appLockChecked)) {
     return (

@@ -3,6 +3,7 @@ const BATTERY_LOG_KEY = '@kinnship/battery_task_log_v1';
 // These tests isolate transport/cadence after recovery authorization.
 // Real ownership, cold boot and independent-wake guards are covered separately.
 jest.mock('../androidTrackingRecovery', () => ({
+  getVerifiedConsentGeneration: () => 0,
   evaluateWakeAuthorization: jest.fn(async () => ({ state: 'AUTHORIZED', source: 'test_owner' })),
   trackingIsRevoked: jest.fn(async () => false),
   trackingPolicyStamp: jest.fn(async () => null),
@@ -132,7 +133,8 @@ describe('minimum device-presence freshness', () => {
     const fetchMock = jest.fn(async (_url, request) => request?.method === 'PATCH'
       ? { ok: false, status: 401 } : { ok: true, status: 200, json: async () => {
           const body = JSON.parse(request.body);
-          return { latitude: body.latitude, longitude: body.longitude, coordinate_captured_at: body.timestamp };
+          return { latitude: body.latitude, longitude: body.longitude, coordinate_captured_at: body.timestamp,
+            location_write_accepted: true };
         } });
     const mockGetCurrentPosition = jest.fn().mockResolvedValue({
       timestamp: new Date().toISOString(),
@@ -336,6 +338,7 @@ describe('minimum device-presence freshness', () => {
       const body = request?.body ? JSON.parse(request.body) : {};
       return { ok: true, status: 200, json: async () => ({
         latitude: body.latitude, longitude: body.longitude, coordinate_captured_at: body.timestamp,
+        location_write_accepted: true,
       }) };
     });
 
@@ -376,7 +379,7 @@ describe('minimum device-presence freshness', () => {
 
     await Promise.resolve();
     const firstExecution = mockConfiguredHandler!('reused-task-id');
-    for (let i = 0; i < 200 && !mockGetCurrentPosition.mock.calls.length; i += 1) {
+    for (let i = 0; i < 2000 && !mockGetCurrentPosition.mock.calls.length; i += 1) {
       await Promise.resolve();
     }
     expect(mockGetCurrentPosition).toHaveBeenCalledTimes(1);

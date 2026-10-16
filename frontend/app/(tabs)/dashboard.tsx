@@ -44,6 +44,8 @@ import { getFamilyCardStatus } from '../../src/familyCardStatus';
 import { confirmPendingInviteCancellation } from '../../src/pendingInviteCancellation';
 import { stampMembersResponse } from '../../src/pipelineSnapshot';
 import { recordLocationUploadSuccess } from '../../src/locationUploadSuccess';
+import { refreshForegroundLocation } from '../../src/foregroundLocationPublication';
+import { markStartupMilestone } from '../../src/startupDiagnostics';
 // TrackingStatusPill removed — Build XX family screen simplification.
 import Svg, { Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
@@ -122,8 +124,18 @@ export default function Dashboard() {
   // than silently resetting to 0.
   const [activeAlerts, setActiveAlerts] = useState<ApiAlert[]>([]);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState(false);
+  const usableMilestone = useRef(false);
+  useEffect(() => {
+    markStartupMilestone('dashboard_coordinator_mounted');
+  }, []);
+  useEffect(() => {
+    if (!loading && !usableMilestone.current && !loadError && members.length > 0) {
+      usableMilestone.current = true;
+      markStartupMilestone('first_usable_family_render', { memberCount: members.length });
+    }
+  }, [loading, loadError, members.length]);
+  const [refreshing, setRefreshing] = useState(false);
   // Build 50 hotfix — banner surfaces stale-but-unresolved emergencies
   // (>5 min old) instead of auto-yanking the user to the incident screen.
   const activeEmergency = useActiveEmergency();
@@ -450,7 +462,11 @@ export default function Dashboard() {
     // the background to avoid the jarring spinner-flash that v6 testers
     // reported as a perceived perf regression.
     setLoading((prev) => members.length === 0 ? true : prev);
-    load('focus').finally(() => setLoading(false));
+    markStartupMilestone('dashboard_initial_load_started');
+    load('focus').finally(() => {
+      markStartupMilestone('dashboard_initial_load_completed');
+      setLoading(false);
+    });
     // Reset SOS dialing mutex on every focus return so the FAB is never
     // permanently locked after the user returns from an SOS flow.
     sosDialingRef.current = false;
@@ -524,46 +540,25 @@ export default function Dashboard() {
     // Auto-tears down on tab blur, so battery cost only applies
     // during active engagement.  Falls back silently if permission
     // is denied or the platform is web.
-    let watcherSub: any = null;
-    (async () => {
-      try {
-        if (Platform.OS === 'web') return;
-        const perm = await Location.getForegroundPermissionsAsync();
-        if (perm.status !== 'granted') return;
-        watcherSub = await Location.watchPositionAsync(
-          {
-            accuracy: Location.Accuracy.High,
-            distanceInterval: 50,
-            timeInterval: 15_000,
-          },
-          async (pos) => {
-            try {
-              const memberId = await AsyncStorage.getItem('kc_my_member_id_v1');
-              if (!memberId) return;
-              const body: any = {
-                latitude: pos.coords.latitude,
-                longitude: pos.coords.longitude,
-              };
-              const resp = await api.put(`/members/${memberId}/location`, body);
-              await recordLocationUploadSuccess();
-              // Build 48 — upsert canonical post-write doc into store so
-              // Dashboard and Member screen see the fresh timestamp
-              // without waiting for the 60 s /members poll.
-              if (resp?.data?.id) {
-                try { memberStore.upsertOne(resp.data); } catch (_e) {}
-              }
-            } catch (_e) {}
-          },
-        );
-      } catch (_e) {}
-    })();
+    let focused = true;
+    let acquiring = false;
+    const refreshPosition = async () => {
+      if (acquiring || !focused) return;
+      acquiring = true;
+      try { await refreshForegroundLocation('dashboard-focus', () => focused); }
+      catch { /* fail closed; the native engine remains the primary tracker */ }
+      finally { acquiring = false; }
+    };
+    void refreshPosition();
+    const positionPoll = setInterval(() => void refreshPosition(), 15_000);
 
     return () => {
       clearInterval(pollId);
       clearInterval(welfarePollId);
       appStateSub.remove();
       notifSub.remove();
-      try { watcherSub?.remove?.(); } catch (_e) {}
+      focused = false;
+      clearInterval(positionPoll);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [members.length]));
@@ -610,19 +605,8 @@ export default function Dashboard() {
           return;
         }
 
-        const pos = await Location.getCurrentPositionAsync({});
-        const body: any = {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-        };
-        // Build 48 — upsert the post-write Member doc into the
-        // canonical store so the senior's own Dashboard re-renders
-        // with the fresh timestamp instantly.
-        const resp = await api.put(`/members/${me.id}/location`, body).catch(() => null);
-        if (resp) await recordLocationUploadSuccess();
-        if (resp && (resp as any).data?.id) {
-          try { memberStore.upsertOne((resp as any).data); } catch (_e) {}
-        }
+        // Publication is owned by the focus-scoped guarded refresh above.
+        // No second, unfenced mount acquisition may race native GPS.
       } catch (_e) {}
     })();
   }, [members.length, user?.id]);

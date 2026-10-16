@@ -62,8 +62,12 @@ export type AuthorizedBatteryTransport = {
 };
 let verifiedOwner: {
   token: string; nonce?: string; memberId: string; ownerUserId: string;
-  sharing: boolean; at: number;
+  sharing: boolean; at: number; consentGeneration: number;
 } | null = null;
+let verifiedConsent: { owner: string; generation: number } | null = null;
+export function getVerifiedConsentGeneration(owner: string): number | null {
+  return verifiedConsent?.owner === owner ? verifiedConsent.generation : null;
+}
 export type RevocationReason = 'stopped' | 'signout' | 'consent' | 'permission';
 type Binding = { ownerUserId: string; memberId: string; backendBaseUrl: string };
 type RevokedIntent = {
@@ -79,6 +83,7 @@ type Intent = {
 };
 export type RecoverySdk = {
   getState: () => Promise<{
+    extras?: Record<string, unknown>;
     enabled?: boolean; url?: string; authorization?: { accessToken?: string };
     stopOnTerminate?: boolean; startOnBoot?: boolean; enableHeadless?: boolean;
   }>;
@@ -271,7 +276,7 @@ export async function verifyWakeOwnership(isCurrent: () => boolean): Promise<str
   const token = await getCurrentToken();
   if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch) return 'obsolete_owner';
   if (!token) return 'no_session';
-  let user: { id?: string }, members: { id: string; user_id: string }[], preferences: { location_sharing_enabled?: boolean };
+  let user: { id?: string }, members: { id: string; user_id: string; location_consent_generation?: number }[], preferences: { location_sharing_enabled?: boolean };
   try {
     [user, members, preferences] = await Promise.all([
       authenticatedGet(`${base}/api/auth/me`, token),
@@ -302,6 +307,7 @@ export async function verifyWakeOwnership(isCurrent: () => boolean): Promise<str
   // A native HTTP receipt has no original dispatch generation. Read the
   // accepted tuple only through this current-token/current-owner operation.
   if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch) return 'obsolete_owner';
+  verifiedConsent = { owner: `${user.id}:${owned[0].id}`, generation: owned[0].location_consent_generation ?? 0 };
   try {
     observeAcceptedTrackingLocation(owned[0], `${user.id}:${owned[0].id}`, expectedEpoch);
   } catch { /* unavailable evidence is not ownership withdrawal */ }
@@ -395,6 +401,7 @@ export async function recoverUnexpectedlyDisabledTracking(
   sdk: RecoverySdk,
   isCurrent: () => boolean,
   onAuthorizedBattery?: (transport: AuthorizedBatteryTransport) => void,
+  registerRuntime?: () => Promise<void>,
 ): Promise<string> {
   let expectedEpoch = trackingIntentEpoch();
   let expectedAuthority = readTrackingAuthority();
@@ -467,15 +474,14 @@ export async function recoverUnexpectedlyDisabledTracking(
   const lastAttempt = Number(await AsyncStorage.getItem(ATTEMPT_KEY));
   const now = Date.now();
   const needsStart = sdkState.enabled !== true;
-  const nativeCooldown = readTrackingAuthority()?.nextEligibleAt ?? 0;
   const coolingDown = intent && needsStart && (
-    (lastAttempt > 0 && lastAttempt <= now && now - lastAttempt < COOLDOWN_MS)
-    || (nativeCooldown > now && nativeCooldown - now <= 30 * 60_000));
+    lastAttempt > 0 && lastAttempt <= now && now - lastAttempt < COOLDOWN_MS);
   // Enabled transport can reuse a one-minute proof, never an unverified owner.
   // Disabled-engine restart ALWAYS revalidates with the server.
   const cache = verifiedOwner;
   if (!sdkState.enabled || !cache || cache.token !== token || cache.nonce !== expectedNonce
-    || cache.memberId !== memberId || Date.now() < cache.at || Date.now() - cache.at >= 60_000) {
+    || cache.memberId !== memberId || Date.now() < cache.at || Date.now() - cache.at >= 60_000
+    || cache.consentGeneration !== getVerifiedConsentGeneration(`${cache.ownerUserId}:${memberId}`)) {
     let responses: unknown[];
     try {
       responses = await Promise.all([
@@ -490,7 +496,7 @@ export async function recoverUnexpectedlyDisabledTracking(
       throw error;
     }
     const [user, members, preferences] = responses as [
-      { id?: string }, { id: string; user_id: string }[], { location_sharing_enabled?: boolean },
+      { id?: string }, { id: string; user_id: string; location_consent_generation?: number }[], { location_sharing_enabled?: boolean },
     ];
     if (!await current()) return 'obsolete_owner';
     if (!user?.id || !Array.isArray(members)
@@ -509,6 +515,7 @@ export async function recoverUnexpectedlyDisabledTracking(
     verifiedOwner = {
       token, nonce: expectedNonce, memberId, ownerUserId: user.id,
       sharing: preferences?.location_sharing_enabled === true, at: Date.now(),
+      consentGeneration: members.find(m => m.id === memberId)!.location_consent_generation ?? 0,
     };
   }
   if (!await current()) return 'obsolete_owner';
@@ -539,9 +546,17 @@ export async function recoverUnexpectedlyDisabledTracking(
     // as legacy intent migration. Never reopen an actual native revocation.
     expectedAuthority = authorizeNativeTracking(`${intent.ownerUserId}:${intent.memberId}`, 0);
   }
-  // Limit GPS starts, not fresh ownership validation or legitimate battery work.
+  // Register this runtime only after genesis adoption and affirmative proof.
+  // Acquisition failure/backoff cannot prevent callback registration.
+  if (registerRuntime) await registerRuntime();
+  if (!await current()) return 'obsolete_owner';
+  // This timestamp limits configuration-recovery starts, not GPS acquisition.
   if (coolingDown) return 'cooldown';
   const locationUrl = `${base}/api/members/${encodeURIComponent(memberId)}/location`;
+  if ((sdkState.extras?.consent_generation ?? 0) !== verification.consentGeneration) {
+    if (!await current()) return 'obsolete_owner';
+    await sdk.setConfig({ extras: { ...sdkState.extras, consent_generation: verification.consentGeneration } });
+  }
   if (sdkState.enabled === true && sdkState.url === locationUrl
     && sdkState.authorization?.accessToken === token) return 'already_enabled';
   if (!await current()) return 'obsolete_owner';

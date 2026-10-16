@@ -150,6 +150,15 @@ object TrackingReliability {
     val elapsed = SystemClock.elapsedRealtime()
     if (s.optBoolean("revoked", true) || s.getLong("generation") != generation || s.optString("owner") != owner) return@synchronized false
     if (s.has("pendingMutation")) return@synchronized false
+    if (s.optBoolean("shutdownPending", false) || (s.optJSONObject("shutdowns")?.length() ?: 0) > 0) return@synchronized false
+    // Configuration has its own lifetime. A persist:false acquisition can be
+    // pending/backing off while this runtime must register callbacks via ready().
+    // Do NOT steal its operation, clear its cooldown, or relax owner authority.
+    if (configurationOnly) {
+      s.put("pendingMutation", operation).put("mutationProcess", processIncarnation)
+      save(context, s)
+      return@synchronized true
+    }
     // elapsedRealtime protects leases within a boot. Wall time supports cooldown
     // across reboot; future/invalid clocks never suppress work indefinitely.
     val claimed = s.optLong("claimedElapsed", 0)
@@ -162,7 +171,6 @@ object TrackingReliability {
     val threshold = if (recentMoving) 10 * 60000 else 60 * 60000
     if (!configurationOnly && capture > 0 && capture <= now && now - capture < threshold) return@synchronized false
     s.put("operation", operation).put("claimedElapsed", elapsed)
-    if (configurationOnly) s.put("pendingMutation", operation).put("mutationProcess", processIncarnation)
     save(context, s)
     true
   }

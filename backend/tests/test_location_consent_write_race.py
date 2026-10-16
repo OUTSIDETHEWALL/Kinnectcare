@@ -116,6 +116,7 @@ class Harness:
 
     def upload(self, timestamp="fresh", latitude=3.0):
         payload = {"latitude": latitude, "longitude": latitude + 1}
+        payload["consent_generation"] = self.member.get("location_consent_generation", 0)
         if timestamp == "fresh":
             payload["timestamp"] = datetime.now(timezone.utc).isoformat()
         elif timestamp is not None:

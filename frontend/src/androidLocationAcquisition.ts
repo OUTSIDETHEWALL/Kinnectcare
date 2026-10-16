@@ -1,5 +1,5 @@
 import {
-  trackingIntentEpoch, trackingIsRevoked, trackingPolicyStamp, verifyWakeOwnership,
+  trackingIntentEpoch, trackingIsRevoked, trackingPolicyStamp, verifyWakeOwnership, getVerifiedConsentGeneration,
 } from './androidTrackingRecovery';
 import type { AuthorizedBatteryTransport } from './androidTrackingRecovery';
 import type { RevocationReason } from './androidTrackingRecovery';
@@ -10,6 +10,8 @@ import {
   readTrackingAuthority, claimTrackingAcquisition, completeTrackingAcquisition, recordTrackingEvidence,
 } from './trackingReliability';
 import type { TrackingAuthority } from './trackingReliability';
+import { appendEngineEvidence } from './engineEvidenceJournal';
+import { nextSeq } from './diagSeq';
 
 export const GUARDED_POSITION_MARKER = 'kc_guarded_one_shot';
 type PositionOptions = { samples?: number; timeout?: number; extras?: Record<string, unknown> };
@@ -63,7 +65,9 @@ export async function acquireAndUploadAndroidPosition(
   };
   const owned = fenceNativeSdk(sdk, () => current(),
     () => executionCurrent() && epoch === trackingIntentEpoch());
-  if (!await current()) throw new Error('gps_authorization_unverified');
+  if (!await current(true)) throw new Error('gps_authorization_unverified');
+  const consentGeneration = getVerifiedConsentGeneration(authority.owner);
+  if (consentGeneration === null) throw new Error('gps_consent_generation_unverified');
   if (!claimTrackingAcquisition(authority.owner, authority.generation, operation)) throw new Error('gps_recovery_not_due');
    recordTrackingEvidence('acquisition_attempt', { operation, generation: authority.generation, owner: authority.owner,
      source: typeof options.extras?.source === 'string' ? options.extras.source : 'UNKNOWN' });
@@ -103,7 +107,7 @@ export async function acquireAndUploadAndroidPosition(
           'X-Kinnship-Presence-Source': 'location-upload',
         },
         body: JSON.stringify({
-          ...position, latitude, longitude,
+          ...position, latitude, longitude, consent_generation: consentGeneration,
         }),
       },
     );
@@ -111,7 +115,9 @@ export async function acquireAndUploadAndroidPosition(
     const accepted = await response.json();
     // HTTP 2xx can represent an older/replay-suppressed GPS fix. It is contact,
     // not fresh coordinate delivery. The response tuple must identify our fix.
-    const coordinateAccepted = new Date(accepted?.coordinate_captured_at ?? '').getTime() === capturedAt
+    const coordinateAccepted = accepted?.location_write_accepted === true
+      && accepted.location_write_rejection_reason == null
+      && new Date(accepted?.coordinate_captured_at ?? '').getTime() === capturedAt
       && accepted.latitude === latitude && accepted.longitude === longitude;
     recordTrackingEvidence('upload_result', { operation, httpAccepted: true, coordinateAccepted, capturedAt });
     if (!coordinateAccepted) throw new Error('gps_coordinates_not_accepted');
@@ -120,6 +126,11 @@ export async function acquireAndUploadAndroidPosition(
       throw new Error('gps_authorization_obsolete');
     }
     await recordLocationUploadSuccess();
+    await appendEngineEvidence({
+      seq: nextSeq(), at: Date.now(), event: 'verified_coordinate_publication', src: 'engine',
+      detail: { origin: 'one-shot', source: options.extras?.source ?? 'one-shot',
+        capturedAt, consentGeneration, generation: authority.generation, owner: authority.owner },
+    });
     if (!await current()) {
       throw new Error('gps_authorization_obsolete');
     }
