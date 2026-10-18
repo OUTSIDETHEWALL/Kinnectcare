@@ -377,6 +377,7 @@ function membersResponse() {
 function summaryResponse() {
   return {
     data: {
+      missed_medication_details: [],
       members: [{
         member_id:         MOCK_MEMBER_ID,
         medication_missed: 0,

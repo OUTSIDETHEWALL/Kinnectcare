@@ -125,6 +125,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // (iOS Keychain entries persist by Apple design, and some
       // Android OEM ROMs preserve EncryptedSharedPreferences too).
       try {
+        logStartupEvent({ phase: 'session_restore', event: 'fresh_install_guard_started' });
         await maybeClearStaleSecureStoreOnFreshInstall();
       } catch (_e) {}
       logStartupEvent({
@@ -132,6 +133,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         event: 'fresh_install_guard_completed',
         details: { freshInstall: wasFreshInstallThisLaunch() },
       });
+      logStartupEvent({ phase: 'session_restore', event: 'token_read_started' });
       const token = await readToken();
       if (!isCurrent()) return;
       logStartupEvent({
@@ -161,6 +163,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Any earlier loading=false would flash the welcome screen
       // through to the user — the exact bug the caregiver and member saw on
       // notification tap.
+      logStartupEvent({ phase: 'session_restore', event: 'user_cache_read_started' });
       const cachedUser = await readUserCache();
       if (!isCurrent()) return;
       logStartupEvent({
@@ -173,6 +176,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // and dismiss loading.  /auth/me continues in the background.
         setUser(cachedUser);
         setLoading(false);
+        recordNativeStartupCheckpoint('auth_identity_ready', { authenticated: true });
         restoredUser = true;
         logStartupEvent({
           phase: 'session_restore',
@@ -182,6 +186,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       let authRestoreFailed = false;
       try {
+        logStartupEvent({ phase: 'session_restore', event: 'auth_me_started' });
         const res = await api.get('/auth/me');
         if (!isCurrent()) return;
         setUser(res.data);
@@ -189,6 +194,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // The authenticated identity is sufficient for the existing PIN,
         // consent and family gates. Cache/timezone maintenance is not.
         setLoading(false);
+        recordNativeStartupCheckpoint('auth_identity_ready', { authenticated: true });
         logStartupEvent({
           phase: 'session_restore',
           event: 'auth_me_completed',
@@ -224,6 +230,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setUser(res2.data);
             restoredUser = true;
             setLoading(false);
+            recordNativeStartupCheckpoint('auth_identity_ready', { authenticated: true });
             status = undefined; // recovered
             authRestoreFailed = false;
             logStartupEvent({

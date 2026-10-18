@@ -18,3 +18,19 @@ Use an ignored workspace-backed cache for the SDK, Gradle cache and disposable c
 **Why:** Temporary storage returned disk-quota errors despite df reporting substantial free space. The same exhausted storage also coincided with a JVM SIGBUS in performance-data sampling.
 
 **How to apply:** Treat quota and host-JVM failures as validation-environment failures, not candidate compilation errors. Preserve logs, bound build concurrency, and do not report a native PASS until the complete task actually finishes.
+
+## Audit the delivered vendor binary, not only the dependency cache
+
+When attributing Android SDK lifecycle behavior, inspect the existing delivered
+AAB/DEX if Maven dependencies use floating versions. A workspace-cached AAR
+alone is not proof of what the installed binary contains.
+
+**Why:** The native location SDK uses a floating patch-version selector.
+Source review can establish the requested behavior but not the exact cloud
+build's implementation. Disassembly of the existing artifact establishes both
+the SDK version and the real notification launch/service paths without a build.
+
+**How to apply:** Recover the existing finished build record, inspect its
+artifact read-only outside Git, and record its checksum in the review evidence.
+Do not rebuild, pin dependencies, change PendingIntent flags or infer a device
+service failure merely to make a lifecycle hypothesis fit.

@@ -36,4 +36,4 @@
 - [Cold-headless validation boundary](cold-headless-validation-boundary.md) — warm-process success and native heartbeat firings do not prove cold background bootstrap.
 - [Background road-test acceptance](background-road-test-acceptance.md) — capture advancement before reopening; 7–10 minute parking, multi-hour endurance and separate recreation.
 - [Python test loop isolation](python-test-loop-isolation.md) — new async scenarios must not clear the ambient loop relied on by legacy synchronous tests.
-- [Android source validation](android-source-validation.md) — precompiled Expo AARs bypass local native patches; full SDK builds need workspace-backed cache storage.
+- [Android source validation](android-source-validation.md) — Expo AARs can bypass patches; inspect delivered artifacts for floating SDKs; full builds need workspace-backed storage.

@@ -75,6 +75,12 @@ describe('real AuthProvider first usable state', () => {
     await act(async () => { tree = create(<AuthProvider><Probe /></AuthProvider>); await flush(); });
     expect(auth!.user?.id).toBe(user.id);
     expect(auth!.loading).toBe(false);
+    // The UI-ready checkpoint must not be confused with completion of the
+    // entire bootstrap (which still awaits optional persistence).
+    expect(require('../nativeStartupRecorder').recordNativeStartupCheckpoint)
+      .toHaveBeenCalledWith('auth_identity_ready', { authenticated: true });
+    expect(require('../nativeStartupRecorder').recordNativeStartupCheckpoint)
+      .not.toHaveBeenCalledWith('auth_restore_completed', expect.anything());
   });
   it('a late bootstrap response cannot resurrect a signed-out cached session', async () => {
     let complete!: (value: unknown) => void;

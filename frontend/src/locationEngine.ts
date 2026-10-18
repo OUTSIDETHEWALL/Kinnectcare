@@ -1622,7 +1622,9 @@ export function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<stri
       // mid-session (e.g. on a token rotation).
       id: 1,
       title: 'Kinnship is sharing your location',
-      text: 'Your family can see where you are. Tap to pause.',
+      // The SDK body PendingIntent launches the app; it does not pause GPS.
+      // Sharing changes remain explicit, consent-fenced actions inside the app.
+      text: 'Your family can see where you are. Open Kinnship to manage sharing.',
       // drawable/notification_icon is compiled into the APK by the
       // expo-notifications plugin from kinnship-notification-icon-shield.png
       // (192×192, pure white on transparent — satisfies Android 5.0+
