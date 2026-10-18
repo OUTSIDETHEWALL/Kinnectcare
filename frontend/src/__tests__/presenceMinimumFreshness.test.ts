@@ -258,6 +258,8 @@ describe('minimum device-presence freshness', () => {
     await mockConfiguredHandler!('stationary-refresh');
 
     expect(mockGetCurrentPosition).not.toHaveBeenCalled();
+    // Diagnostics are persisted asynchronously, outside the OS work budget.
+    for (let i = 0; i < 40; i++) await Promise.resolve();
     const log = JSON.parse(mockStorage.data.get(BATTERY_LOG_KEY) ?? '[]');
     expect(log).toEqual(expect.arrayContaining([
       expect.objectContaining({

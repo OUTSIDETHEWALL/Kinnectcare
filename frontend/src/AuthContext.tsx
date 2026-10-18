@@ -115,10 +115,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         phase: 'session_restore',
         event: 'session_restore_started',
       });
-      await captureInstallReferrerInvite();
-      logStartupEvent({
-        phase: 'session_restore',
-        event: 'install_referrer_capture_completed',
+      // Attribution must not delay an existing authenticated session. New
+      // installations still settle it before exposing the signup flow below.
+      const referrerCapture = captureInstallReferrerInvite().catch(() => null).then(() => {
+        logStartupEvent({ phase: 'session_restore', event: 'install_referrer_capture_completed' });
       });
       // FRESH-INSTALL GUARD — clear any stale Keychain/SecureStore
       // entries that may have survived a previous app uninstall
@@ -140,6 +140,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         outcome: token ? 'token_present' : 'token_missing',
       });
       if (!token) {
+        await referrerCapture;
+        if (!isCurrent()) return;
         // No token at all — definitely not signed in.  Dismiss loading
         // immediately so the user reaches the welcome screen.
         setLoading(false);
@@ -187,12 +189,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // The authenticated identity is sufficient for the existing PIN,
         // consent and family gates. Cache/timezone maintenance is not.
         setLoading(false);
-        await writeUserCache(res.data);
         logStartupEvent({
           phase: 'session_restore',
           event: 'auth_me_completed',
           outcome: 'authenticated',
         });
+        await writeUserCache(res.data);
         try {
           const tz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
           if (tz && tz !== res.data.timezone) {
@@ -222,7 +224,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setUser(res2.data);
             restoredUser = true;
             setLoading(false);
-            await writeUserCache(res2.data);
             status = undefined; // recovered
             authRestoreFailed = false;
             logStartupEvent({
@@ -230,6 +231,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               event: 'auth_me_retry_completed',
               outcome: 'authenticated',
             });
+            await writeUserCache(res2.data);
           } catch (e2: any) {
             status = e2?.response?.status;
             // Capture body+url for the diag below, replace e for that

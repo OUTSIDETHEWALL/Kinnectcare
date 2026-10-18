@@ -30,7 +30,7 @@ jest.mock('../freshInstallGuard', () => ({
   maybeClearStaleSecureStoreOnFreshInstall: async () => {},
   wasFreshInstallThisLaunch: () => false, consumeFreshInstallFlag: () => false,
 }));
-jest.mock('../installReferrerInvite', () => ({ captureInstallReferrerInvite: async () => {} }));
+jest.mock('../installReferrerInvite', () => ({ captureInstallReferrerInvite: jest.fn(async () => {}) }));
 jest.mock('../startupDiagnostics', () => ({ logStartupEvent: jest.fn() }));
 jest.mock('../nativeStartupRecorder', () => ({ recordNativeStartupCheckpoint: jest.fn() }));
 
@@ -47,6 +47,7 @@ describe('real AuthProvider first usable state', () => {
     mockPut.mockReset().mockImplementation(() => new Promise(() => {}));
     mockStorageRead.mockReset().mockResolvedValue(null);
     mockStorageWrite.mockReset().mockResolvedValue(undefined);
+    require('../installReferrerInvite').captureInstallReferrerInvite.mockResolvedValue(undefined);
   });
   afterEach(async () => {
     if (tree) await act(async () => tree.unmount());
@@ -58,6 +59,16 @@ describe('real AuthProvider first usable state', () => {
     expect(mockPut).toHaveBeenCalled();
     expect(auth!.user?.id).toBe(user.id);
     expect(auth!.loading).toBe(false);
+  });
+  it.each(['cached', 'network'])('restores %s authenticated identity without waiting for install attribution', async route => {
+    require('../installReferrerInvite').captureInstallReferrerInvite.mockImplementation(() => new Promise(() => {}));
+    if (route === 'cached') {
+      mockStorageRead.mockResolvedValue(JSON.stringify(user));
+      mockGet.mockImplementation(() => new Promise(() => {}));
+    }
+    await act(async () => { tree = create(<AuthProvider><Probe /></AuthProvider>); await flush(); });
+    expect(auth!.loading).toBe(false);
+    expect(auth!.user?.id).toBe(user.id);
   });
   it('does not hold usable authenticated state behind a delayed cache write', async () => {
     mockStorageWrite.mockImplementation(() => new Promise(() => {}));

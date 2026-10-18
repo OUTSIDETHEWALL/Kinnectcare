@@ -5,7 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { markStartupMilestone } from './startupDiagnostics';
 
 const measuredRequests = new WeakMap<object, { at: number; endpoint: string }>();
-const startupEndpoints = new Set(['/auth/me', '/members', '/summary', '/me/preferences']);
+const startupEndpoints = new Set(['/auth/me', '/members', '/summary', '/alerts', '/me/preferences']);
 
 const BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
 const TOKEN_KEY = 'kc_token';

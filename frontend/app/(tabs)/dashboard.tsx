@@ -25,15 +25,7 @@ import {
   shouldScrollDashboardModalList,
 } from '../../src/dashboardModalLayout';
 import { logScreenRender } from '../../src/screenRenderLog';
-import {
-  startLoad as dashStartLoad,
-  markGetSent as dashMarkGetSent,
-  markGetReceived as dashMarkGetReceived,
-  markSetState as dashMarkSetState,
-  recordStalenessTrigger as dashRecordStaleness,
-  markError as dashMarkError,
-  DashboardLoadTrigger,
-} from '../../src/dashboardLoadLog';
+import type { DashboardLoadTrigger } from '../../src/dashboardLoadLog';
 import { logCardRender } from '../../src/cardRenderLog';
 import { useAuth } from '../../src/AuthContext';
 import * as memberStore from '../../src/store/memberStore';
@@ -46,6 +38,7 @@ import { stampMembersResponse } from '../../src/pipelineSnapshot';
 import { recordLocationUploadSuccess } from '../../src/locationUploadSuccess';
 import { refreshForegroundLocation } from '../../src/foregroundLocationPublication';
 import { markStartupMilestone } from '../../src/startupDiagnostics';
+import { createDashboardLoadTrace } from '../../src/dashboardLoadTrace';
 // TrackingStatusPill removed — Build XX family screen simplification.
 import Svg, { Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
@@ -258,12 +251,12 @@ export default function Dashboard() {
     //  here; this is the canonical source of truth for "what did the
     //  /members API return to Charles" during a stale-render incident.
     setLoadError(false);
-    const dlogId = await dashStartLoad(trigger).catch(() => '');
+    const trace = createDashboardLoadTrace(trigger, isCurrentLoad);
     try {
       // Mark the moment axios.get('/members') is about to fire.  We
       // do this BEFORE Promise.all so a slow /summary doesn't skew
       // the timing of the /members request.
-      if (dlogId) await dashMarkGetSent(dlogId).catch(() => {});
+      trace.sent();
       let mRes: any = null;
       try {
         // Build 47 — INTENTIONALLY retains a direct `api.get('/members')`
@@ -350,25 +343,24 @@ export default function Dashboard() {
         // Capture full raw response + status + Date header BEFORE any
         // mutation.  This is the immutable record of "what the API
         // returned to this device at this exact moment in time".
-        if (dlogId) {
-          await dashMarkGetReceived(dlogId, {
+        trace.received({
             status: m?.status ?? null,
             raw_members: Array.isArray(m?.data) ? m.data : null,
             server_date_header:
               (m?.headers?.date as string | undefined) ||
               (m?.headers?.Date as string | undefined) ||
               null,
-          }).catch(() => {});
-        }
+        });
         // v1.2.8 instrumentation (kept for backwards compat with
         // existing tests that read the screenRenderLog).
-        try {
+        void (async () => { try {
           const list: any[] = Array.isArray(m.data) ? m.data : [];
           await logScreenRender({
             src: 'dashboard-fetch',
             memberCount: list.length,
           });
           for (const mb of list) {
+            if (!isCurrentLoad()) return;
             await logScreenRender({
               src: 'dashboard-fetch',
               memberId: mb?.id,
@@ -378,7 +370,7 @@ export default function Dashboard() {
               locationName: mb?.location_name ?? null,
             });
           }
-        } catch (_e) {}
+        } catch (_e) {} })();
         // Build 47 — atomic write to the canonical store.  Every
         // subscriber (this dashboard via useAllMembers, the member
         // detail screen, Leonidas via getMyLastSeenMs, etc.) sees the
@@ -421,19 +413,14 @@ export default function Dashboard() {
           if (user?.id) {
             try {
               const cacheKey = `@kinnship/active_alerts_v1_${user.id}`;
-              await AsyncStorage.setItem(cacheKey, JSON.stringify(freshAlerts));
+              void AsyncStorage.setItem(cacheKey, JSON.stringify(freshAlerts)).catch(() => {});
             } catch (_e) {}
           }
         }
         setLoadError(false);
-        if (dlogId) await dashMarkSetState(dlogId).catch(() => {});
+        trace.committed();
       } catch (e: any) {
-        if (dlogId) {
-          await dashMarkError(
-            dlogId,
-            String(e?.response?.status ? `HTTP ${e.response.status}` : e?.message || e),
-          ).catch(() => {});
-        }
+        trace.failed(String(e?.response?.status ? `HTTP ${e.response.status}` : e?.message || e));
         throw e;
       }
 
@@ -460,13 +447,13 @@ export default function Dashboard() {
             // Record exactly which members triggered the silent-push
             // cascade.  This is what links the member's per-minute "K"
             // notifications back to Charles's pull-on-stale logic.
-            if (dlogId) await dashRecordStaleness(dlogId, mb.id).catch(() => {});
+            trace.stale(mb.id);
           }
         }
       } catch (_e) {}
     } catch (_e) {
       // Top-level catch — already recorded as error on the entry.
-      setLoadError(true);
+      if (isCurrentLoad()) setLoadError(true);
     }
   };
 

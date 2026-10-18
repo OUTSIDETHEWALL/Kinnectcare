@@ -23,3 +23,16 @@ a brief successful drive cannot close that failure family.
 **How to apply:** After separate release and phone-operation authorization.
 Do not substitute compilation, HTTP contact, one GPS fix, warm-process success,
 or reopening the tracked phone for the caregiver-side background observation.
+
+## Protected moving-tracking baseline
+
+Keep the accepted unattended-moving flow as the baseline during launch cleanup.
+Do not broadly change motion configuration, acquisition thresholds or native
+ownership lifecycle to repair startup or diagnostic presentation. Such a change
+requires a confirmed blocker, a specific justification and regression evidence.
+
+**Why:** The user explicitly requires preserving the successful physical moving
+test while addressing the remaining launch friction.
+
+**How to apply:** Treat startup, notification opening and health presentation
+as separate problems unless evidence establishes a shared tracking defect.

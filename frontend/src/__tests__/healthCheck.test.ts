@@ -2,14 +2,14 @@ import { computeHealthItems, computeOverallHealth, formatAgeMs, worstHealthStatu
 import { backgroundEvidence, e, testNow as now } from './backgroundEvidenceFixture';
 
 describe('independent health observations', () => {
-  it.each([[0, 'ok'], [299_999, 'ok'], [300_000, 'warn'], [899_999, 'warn'],
-    [900_000, 'error']] as const)('HTTP age %d produces %s contact status', (age, status) => {
+  it.each([[0, 'ok'], [299_999, 'ok'], [300_000, 'unknown'], [899_999, 'unknown'],
+    [900_000, 'unknown']] as const)('location-upload age %d produces %s receipt status', (age, status) => {
     const row = computeHealthItems([e('sdk_onHttp', now - age, { success: true })], now)
-      .find(item => /HTTP upload/.test(item.label));
+      .find(item => /Location upload/.test(item.label));
     expect(row?.status).toBe(status);
   });
   it.each([null, 0, now + 60_000])('ignores absent/invalid persisted contact time %s', time => {
-    const row = computeHealthItems([], now, time).find(item => /HTTP upload/.test(item.label));
+    const row = computeHealthItems([], now, time).find(item => /Location upload/.test(item.label));
     expect(row?.status).toBe('unknown');
   });
   it('uses the fresher contact source without asserting GPS freshness', () => {
@@ -21,6 +21,29 @@ describe('independent health observations', () => {
   it('an arbitrary headless invocation is not a heartbeat', () => {
     const items = computeHealthItems([e('headless_task_invoked', now, { eventName: 'terminate' })], now);
     expect(items[1].status).toBe('unknown');
+  });
+  it('old upload receipts are informational, not red, even with current contact', () => {
+    const log = [e('sdk_onHttp', now - 11 * 60 * 60_000, { success: true })];
+    expect(computeHealthItems(log, now)[2].status).toBe('unknown');
+    const hero = computeOverallHealth(log, now, now, now);
+    expect(hero.level).not.toBe('error');
+    expect(hero.level).not.toBe('ok');
+    expect(hero.headline).toBe('Background GPS evidence unavailable');
+  });
+  it('keeps earlier repeated background proof informational without declaring current health', () => {
+    const log = backgroundEvidence();
+    const later = now + 2 * 60 * 60_000;
+    const hero = computeOverallHealth(log, later, later, later);
+    expect(hero.headline).toBe('Background delivery recorded earlier');
+    expect(hero.level).toBe('starting');
+    expect(hero.uploadAgeMs).toBeGreaterThan(60 * 60_000);
+  });
+  it('a fresh capture cannot combine with hours-old evidence to claim sustained current delivery', () => {
+    const log = backgroundEvidence();
+    const later = now + 2 * 60 * 60_000;
+    const latest = backgroundEvidence(later).filter(event =>
+      event.event === 'sdk_state_observed' || event.detail?.capturedAt === later);
+    expect(computeOverallHealth(log.concat(latest), later).level).not.toBe('ok');
   });
   it('contact does not recolor an old heartbeat green; motion suppression is not proof of failure', () => {
     const log = [e('sdk_onHeartbeat', now - 20 * 60_000),

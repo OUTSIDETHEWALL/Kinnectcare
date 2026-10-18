@@ -134,14 +134,14 @@ function nextId(): string {
  * the caller can pass it back into the subsequent update*() calls.
  * Safe to call from anywhere; never throws.
  */
-export async function startLoad(trigger: DashboardLoadTrigger): Promise<string> {
+export async function startLoad(trigger: DashboardLoadTrigger, at = Date.now()): Promise<string> {
   await ensureLoaded();
   const entry: DashboardLoadEntry = {
     seq: nextSeq(),
     src: 'dashboard-load',
     id: nextId(),
     trigger,
-    t_load_started: Date.now(),
+    t_load_started: at,
     t_get_sent: null,
     t_get_received: null,
     t_setstate: null,
@@ -158,8 +158,10 @@ export async function startLoad(trigger: DashboardLoadTrigger): Promise<string> 
   return entry.id;
 }
 
-async function patch(id: string, patcher: (e: DashboardLoadEntry) => void): Promise<void> {
+async function patch(id: string, patcher: (e: DashboardLoadEntry) => void,
+  isCurrent: () => boolean = () => true): Promise<void> {
   await ensureLoaded();
+  if (!isCurrent()) return;
   const e = buffer.find((x) => x.id === id);
   if (!e) return;
   try {
@@ -170,10 +172,10 @@ async function patch(id: string, patcher: (e: DashboardLoadEntry) => void): Prom
   await persist();
 }
 
-export async function markGetSent(id: string): Promise<void> {
+export async function markGetSent(id: string, at = Date.now(), isCurrent?: () => boolean): Promise<void> {
   return patch(id, (e) => {
-    e.t_get_sent = Date.now();
-  });
+    e.t_get_sent = at;
+  }, isCurrent);
 }
 
 export async function markGetReceived(
@@ -184,35 +186,37 @@ export async function markGetReceived(
     server_date_header?: string | null;
     error?: string | null;
   },
+  at = Date.now(),
+  isCurrent?: () => boolean,
 ): Promise<void> {
   return patch(id, (e) => {
-    e.t_get_received = Date.now();
+    e.t_get_received = at;
     e.http_status = opts.status ?? null;
     e.raw_members = opts.raw_members ?? null;
     e.member_count = Array.isArray(opts.raw_members) ? opts.raw_members.length : null;
     e.server_date_header = opts.server_date_header ?? null;
     if (opts.error) e.error = opts.error;
-  });
+  }, isCurrent);
 }
 
-export async function markSetState(id: string): Promise<void> {
+export async function markSetState(id: string, at = Date.now(), isCurrent?: () => boolean): Promise<void> {
   return patch(id, (e) => {
-    e.t_setstate = Date.now();
-  });
+    e.t_setstate = at;
+  }, isCurrent);
 }
 
-export async function recordStalenessTrigger(id: string, memberId: string): Promise<void> {
+export async function recordStalenessTrigger(id: string, memberId: string, isCurrent?: () => boolean): Promise<void> {
   return patch(id, (e) => {
     if (!e.staleness_triggered_for.includes(memberId)) {
       e.staleness_triggered_for.push(memberId);
     }
-  });
+  }, isCurrent);
 }
 
-export async function markError(id: string, error: string): Promise<void> {
+export async function markError(id: string, error: string, isCurrent?: () => boolean): Promise<void> {
   return patch(id, (e) => {
     e.error = error;
-  });
+  }, isCurrent);
 }
 
 /** Read the full buffer (oldest-first). */

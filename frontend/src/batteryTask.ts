@@ -87,6 +87,7 @@ function appendLog(
   event: BatteryTaskLogEntry['event'],
   detail?: Record<string, unknown>,
   shouldWrite: () => boolean = () => true,
+  at = Date.now(),
 ): Promise<void> {
   const write = logWriteQueue.then(async () => {
     if (!shouldWrite()) return;
@@ -94,7 +95,7 @@ function appendLog(
       const raw = await AsyncStorage.getItem(BATTERY_TASK_LOG_KEY);
       const log: BatteryTaskLogEntry[] = raw ? (JSON.parse(raw) as BatteryTaskLogEntry[]) : [];
       const seq = (log[log.length - 1]?.seq ?? 0) + 1;
-      log.push({ seq, at: Date.now(), event, detail });
+      log.push({ seq, at, event, detail });
       if (log.length > BATTERY_TASK_LOG_MAX) {
         log.splice(0, log.length - BATTERY_TASK_LOG_MAX);
       }
@@ -159,8 +160,13 @@ function appendExecutionLog(
   execution: TaskExecution,
   event: BatteryTaskLogEntry['event'],
   detail?: Record<string, unknown>,
-): Promise<void> {
-  return appendLog(event, detail, () => isActiveExecution(execution));
+): void {
+  if (!isActiveExecution(execution)) return;
+  // Optional evidence persistence must not consume the OS work budget before
+  // battery transport starts or after actual work has completed. Normal finish
+  // may precede persistence; timeout/replacement must still discard stale logs.
+  void appendLog(event, detail, () => activeTaskExecutions.get(execution.taskId) === execution
+    && !execution.timedOut);
 }
 
 function finishExecutionOnce(

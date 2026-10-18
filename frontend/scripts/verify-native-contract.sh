@@ -18,4 +18,5 @@ kotlinc -classpath "$runtime" scripts/native-contract/TrackingHarness.kt -d "$wo
 for stage in seed recreate; do
   kotlin -classpath "$runtime:$work/harness.jar" TrackingHarnessKt "$work/state.properties" "$stage"
 done
+kotlin -classpath "$runtime:$work/harness.jar" TrackingHarnessKt "$work/policy.properties" policy
 echo "LIMIT: fake storage/clock; Expo app, ReactHost, chooser, Android scheduling NOT verified"

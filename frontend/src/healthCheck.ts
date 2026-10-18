@@ -7,7 +7,7 @@
  * Status semantics:
  *   ok      — confirmed working
  *   warn    — working but degraded (upload late, power saver active)
- *   error   — confirmed broken (engine explicitly disabled, upload > 15 min)
+ *   error   — actionable failure (for example, engine explicitly disabled)
  *   unknown — no data recorded yet; informational, not a failure
  *
  * The critical distinction: 'unknown' means the event log is empty for this
@@ -16,7 +16,6 @@
  * evidence something is wrong.
  */
 import { EngineLogEvent } from './locationEngine';
-import { Colors } from './theme';
 
 export type HealthStatus = 'ok' | 'warn' | 'error' | 'unknown';
 export type HealthItem = { icon: string; label: string; status: HealthStatus };
@@ -30,8 +29,7 @@ export function healthIcon(s: HealthStatus): string {
 }
 
 // ─── Overall health verdict ────────────────────────────────────────────────
-// Derived primarily from upload recency — the most direct evidence that the
-// full pipeline (SDK → background task → network → backend) is working.
+// Derived from correlated capture/publication evidence, never transport alone.
 // Used by the Diagnostics hero card to answer "is Kinnship protecting my
 // loved one right now?" before the user scrolls into any detail panel.
 
@@ -84,13 +82,12 @@ export function computeOverallHealth(
   const uploadAge = last ? Math.max(0, now - Number(last.detail?.capturedAt)) : null;
   // Two distinct captures spanning a minute establish repeated delivery, not
   // the physical road-test acceptance criterion (which remains unchanged).
-  const repeated = last && background.some(e =>
+  const hasRepeated = (maxAge: number) => last && background.some(e =>
     e.detail?.generation === last.detail?.generation
     && e.detail?.owner === last.detail?.owner
     && (e.detail?.consentGeneration ?? 0) === (last.detail?.consentGeneration ?? 0)
-    && last.detail!.capturedAt - e.detail!.capturedAt >= 60_000
-    && now - e.at < 15 * 60_000);
-  if (repeated && latestState?.detail?.enabled === true && now - latestState.at < 60_000
+    && last.detail!.capturedAt - e.detail!.capturedAt >= 60_000 && now - e.at < maxAge);
+  if (hasRepeated(15 * 60_000) && latestState?.detail?.enabled === true && now - latestState.at < 60_000
     && typeof latestState.detail.owner === 'string' && typeof latestState.detail.generation === 'number'
     && uploadAge !== null && uploadAge < 5 * 60_000) return {
     level: 'ok', headline: 'Repeated background delivery verified',
@@ -98,17 +95,17 @@ export function computeOverallHealth(
     uploadAgeMs: uploadAge,
   };
   if (last) return {
-    level: 'warn', headline: 'Background delivery needs verification',
-    subline: `Last verified background coordinate: ${formatAgeMs(uploadAge)}; sustained health is not established`,
+    level: 'starting', headline: hasRepeated(Infinity) ? 'Background delivery recorded earlier' : 'One background location delivery recorded',
+    subline: `Last verified background coordinate: ${formatAgeMs(uploadAge)}; this is not a claim of current tracking health`,
     uploadAgeMs: uploadAge,
   };
   const contact = [lastSeenMs, lastHttpSuccessMs].some(t =>
     typeof t === 'number' && t > 0 && t <= now + 5000 && now - t < 5 * 60_000);
   return {
-    level: contact || valid.length ? 'warn' : 'starting',
-    headline: 'Background delivery not yet verified',
-    subline: contact ? 'Recent device contact does not establish background GPS delivery'
-      : 'Service state, heartbeat and foreground GPS are separate evidence',
+    level: 'starting',
+    headline: 'Background GPS evidence unavailable',
+    subline: contact ? 'Device communicating; no retained background GPS proof in this diagnostic window'
+      : 'No retained background GPS proof in this diagnostic window; this does not invalidate earlier road tests',
     uploadAgeMs: null,
   };
 }
@@ -143,7 +140,8 @@ export function computeHealthItems(
    */
   lastHttpSuccessMs?: number | null,
 ): HealthItem[] {
-  const rev = [...log].reverse();
+  const rev = log.filter(e => e.at > 0 && e.at <= now + CLOCK_SKEW_TOLERANCE_MS)
+    .sort((a, b) => b.at - a.at);
 
   // 1 — Background service: most recent sdk_onEnabledChange.
   //     null → 'unknown' (not yet seen, normal on fresh start — not an error).
@@ -159,8 +157,9 @@ export function computeHealthItems(
     : enabledEvt.detail?.enabled   ? 'ok'
     : 'error';
 
-  // 2 — Last location upload: sdk_onHttp with success=true.
-  //     ✅ < 5 min  ⚠ 5–15 min  ❌ > 15 min  ℹ no entry yet
+  // 2 — Successful location-transport contact, not GPS capture freshness.
+  //     Recent success is evidence of contact; old/absent success alone does
+  //     not prove a failed upload, stale GPS or a noncommunicating device.
   //
   //     Computed FIRST so item 3 (heartbeat) can use uploadAge to avoid a
   //     false-negative.  See the heartbeat comment below for full reasoning.
@@ -186,8 +185,7 @@ export function computeHealthItems(
   const uploadStatus: HealthStatus =
     uploadAge === null          ? 'unknown'
     : uploadAge < 5 * 60_000   ? 'ok'
-    : uploadAge < 15 * 60_000  ? 'warn'
-    : 'error';
+    : 'unknown'; // Age alone does not prove a failed upload or broken device.
 
   // 3 — Last heartbeat: sdk_onHeartbeat or headless_task_invoked.
   //     ✅ < 2 min  ⚠ 2–10 min  ❌ > 10 min  ℹ no entry yet (not an error)
@@ -251,15 +249,15 @@ export function computeHealthItems(
       label:  hbAge === null
               ? 'Background heartbeat: waiting for first event'
               : (uploadRecent && hbAge >= 10 * 60_000)
-                ? `Last background heartbeat: ${formatAgeMs(hbAge)} (HTTP is not heartbeat evidence)`
+                ? `Last background heartbeat: ${formatAgeMs(hbAge)} (upload is not heartbeat evidence)`
                 : `Last background heartbeat: ${formatAgeMs(hbAge)}`,
       status: hbStatus,
     },
     {
       icon:   healthIcon(uploadStatus),
       label:  uploadAge === null
-               ? 'HTTP upload: waiting for first success'
-               : `Last HTTP upload succeeded: ${formatAgeMs(uploadAge)}`,
+               ? 'Location upload: no retained confirmation'
+               : `Location upload last confirmed: ${formatAgeMs(uploadAge)}`,
       status: uploadStatus,
     },
     {
