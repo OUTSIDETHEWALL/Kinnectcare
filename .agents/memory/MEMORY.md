@@ -32,7 +32,7 @@
 - [BackgroundFetch execution generations](background-fetch-execution-generations.md) — task IDs are reused; timeout and completion guards must be scoped to one invocation.
 - [Caregiver battery and device status](caregiver-battery-device-status.md) — one battery incident escalates in place; dashboard device states reuse movement-aware tolerance.
 - [Android recovery push invariant](android-recovery-push-invariant.md) — stale-device recovery must be high-priority and strictly data-only so Doze cannot defer it and Android cannot render it.
-- [Diagnostics file export](diagnostics-file-export.md) — add native full-log file sharing only with the next normal Android binary, never as an OTA-only native-module addition.
+- [Diagnostics file export](diagnostics-file-export.md) — native sharing must exist in the target binary; keep full sharing first, before long health/log/timeline content.
 - [Cold-headless validation boundary](cold-headless-validation-boundary.md) — warm-process success and native heartbeat firings do not prove cold background bootstrap.
 - [Background road-test acceptance](background-road-test-acceptance.md) — capture advancement before reopening; 7–10 minute parking, multi-hour endurance and separate recreation.
 - [Python test loop isolation](python-test-loop-isolation.md) — new async scenarios must not clear the ambient loop relied on by legacy synchronous tests.

@@ -287,6 +287,9 @@ const mockApiPost          = jest.fn();
 const mockGetBillingStatus = jest.fn();
 const mockListFamilyInvites = jest.fn();
 
+jest.mock('../membersResponse', () => ({
+  getMembersResponse: () => require('../api').api.get('/members'),
+}));
 jest.mock('../api', () => ({
   api: {
     get: (...args: any[]) => mockApiGet(...args),

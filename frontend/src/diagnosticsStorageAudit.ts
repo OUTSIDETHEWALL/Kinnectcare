@@ -263,7 +263,13 @@ const STORAGE_DEFINITIONS: StorageDefinition[] = [
       nullableNumber(r, 'http_status'),
       nullableNumber(r, 'member_count'),
       Array.isArray(r.staleness_triggered_for) ? null : 'staleness_triggered_for_expected_array',
-      Array.isArray(r.raw_members) ? null : 'raw_members_expected_array',
+      Array.isArray(r.raw_members) || (
+        r.raw_members === null
+        && r.t_get_received === null
+        && r.t_setstate === null
+        && r.http_status === null
+        && r.member_count === null
+      ) ? null : 'raw_members_expected_array',
     ),
   },
   {

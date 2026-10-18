@@ -10,6 +10,7 @@ let mockAuth: any;
 let mockMembers: any[] = [];
 const mockSubscribers = new Set<() => void>();
 let mockFocus: (() => void) | undefined;
+let mockShareMembersRequest = false;
 
 jest.mock('react-native', () => {
   class Value { setValue() {} interpolate() { return 0; } }
@@ -51,7 +52,12 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 jest.mock('../AuthContext', () => ({ useAuth: () => mockAuth }));
 jest.mock('../api', () => ({
   api: { get: (...a: any[]) => mockGet(...a) },
+  subscribeToTokenChanges: jest.fn(),
   getBillingStatus: async () => ({}), listFamilyInvites: async () => ({ invites: [] }),
+}));
+jest.mock('../membersResponse', () => ({
+  getMembersResponse: () => mockShareMembersRequest
+    ? jest.requireActual('../membersResponse').getMembersResponse() : mockGet('/members'),
 }));
 jest.mock('../Icon', () => ({ Icon: () => null }));
 jest.mock('../store/memberStore', () => ({
@@ -111,6 +117,8 @@ describe('post-OTA returning-session rendering', () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     mockAuth = { user: { id: 'owner', full_name: 'Test owner' }, loading: false, logout: jest.fn() };
+    mockShareMembersRequest = false;
+    jest.requireActual('../membersResponse').invalidateMembersResponse();
     mockMembers = [];
     mockSubscribers.clear();
     require('@react-native-async-storage/async-storage').getItem.mockReset().mockResolvedValue(null);
@@ -167,6 +175,20 @@ describe('post-OTA returning-session rendering', () => {
     expect(count()).toContain('—');
     expect(tree.root.findAllByProps({ testID: 'dashboard-safety-pending' })).toHaveLength(1);
     expect(mockMilestone).toHaveBeenCalledWith('first_usable_family_render', { memberCount: 1 });
+  });
+  it('joins an existing root members request and renders its response while safety requests remain pending', async () => {
+    mockShareMembersRequest = true;
+    const members = deferred();
+    mockGet.mockImplementation(path => path === '/members' ? members.promise
+      : path === '/summary' ? safety.promise : alerts.promise);
+    const rootRequest = jest.requireActual('../membersResponse').getMembersResponse();
+    await mount();
+    expect(mockGet.mock.calls.filter(args => args[0] === '/members')).toHaveLength(1);
+    const response = { data: [member], headers: { date: 'raw-server-date' }, status: 200 };
+    await act(async () => { members.resolve(response); await rootRequest; await flush(); });
+    expect(tree.root.findAllByProps({ testID: 'member-card-member' })).toHaveLength(1);
+    expect(mockMilestone).toHaveBeenCalledWith('first_usable_family_render', { memberCount: 1 });
+    expect(tree.root.findAllByProps({ testID: 'dashboard-safety-pending' })).toHaveLength(1);
   });
   it('keeps unresolved alerts visible on summary failure, then preserves them when the next alerts fetch fails', async () => {
     await mount();

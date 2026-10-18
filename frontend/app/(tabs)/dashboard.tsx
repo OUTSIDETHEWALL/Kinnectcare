@@ -28,6 +28,7 @@ import { logScreenRender } from '../../src/screenRenderLog';
 import type { DashboardLoadTrigger } from '../../src/dashboardLoadLog';
 import { logCardRender } from '../../src/cardRenderLog';
 import { useAuth } from '../../src/AuthContext';
+import { getMembersResponse } from '../../src/membersResponse';
 import * as memberStore from '../../src/store/memberStore';
 import { logPipelineEvent } from '../../src/refreshPipelineLog';
 import { useActiveEmergency } from '../../src/activeEmergency';
@@ -270,20 +271,18 @@ export default function Dashboard() {
     setLoadError(false);
     const trace = createDashboardLoadTrace(trigger, isCurrentLoad);
     try {
-      // Mark the moment axios.get('/members') is about to fire.  We
-      // do this BEFORE Promise.all so a slow /summary doesn't skew
-      // the timing of the /members request.
+      // Capture this caller's members request/join time before dispatching
+      // optional safety requests. Existing API instrumentation captures the
+      // original request start when joining an already pending response.
       trace.sent();
       let mRes: any = null;
       try {
-        // Build 47 — INTENTIONALLY retains a direct `api.get('/members')`
-        // here (rather than `memberStore.fetchAll()`) because the
-        // dashboard load log captures the raw axios response —
-        // status code + Date header + raw_members payload — for
-        // the diagnostic ring buffer.  The store's fetchAll()
-        // returns only the parsed array, losing those forensic
-        // fields that were critical to diagnosing the Build 41-46
-        // stale-render incidents.
+        // Join the same in-flight raw /members response as canonical
+        // foreground sync instead of starting a competing request. Unlike
+        // fetchAll's cached fallback, this preserves response status, Date
+        // header, raw payload and rejection for the diagnostic trace. The
+        // trace's sent time is this caller's join/request time; API startup
+        // instrumentation retains the actual network dispatch duration.
         //
         // This is NOT a state-ownership bypass: the line directly
         // below feeds `m.data` into the canonical store via
@@ -336,7 +335,7 @@ export default function Dashboard() {
           setAlertsStatus('failed');
           markStartupMilestone('dashboard_alerts_failed');
         });
-        const m = await api.get('/members');
+        const m = await getMembersResponse();
         if (!isCurrentLoad()) return;
         markStartupMilestone('dashboard_members_received');
         mRes = m;

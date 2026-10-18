@@ -1,5 +1,10 @@
 # Build 70 post-OTA startup and notification corrective pass
 
+> This is the initial, pre-export investigation record. The subsequently supplied
+> physical timeline, corrected bottleneck assessment, storage-warning diagnosis
+> and additional source fixes are in [the physical evidence report](build70-physical-startup-evidence.md).
+> Its measured findings supersede the earlier lack-of-evidence statements below.
+
 ## Scope / disposition
 
 Source baseline: merged `23f32f3c10ff899edec5192d3d050e6b2e1147c1`,

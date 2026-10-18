@@ -247,6 +247,30 @@ describe('Diagnostics stale-location snapshot boundary', () => {
     await act(async () => renderer.unmount());
   });
 
+  it('places the single full-share action before health and all scrollable logs on Android', async () => {
+    const { Platform } = require('react-native');
+    Platform.OS = 'android';
+    let renderer: any;
+    try {
+      mockReadPipelineSnapshots.mockResolvedValueOnce([]);
+      renderer = await mountDiagnostics();
+      const actions = renderer.root.findAll((node: any) => node.type === 'TouchableOpacity');
+      expect(actions[0].props.testID).toBe('diagnostics-back');
+      expect(actions[1].props.testID).toBe('diagnostics-share-all');
+      expect(actions.filter((node: any) => node.props.testID === 'diagnostics-share-all')).toHaveLength(1);
+      let ancestor = actions[1].parent;
+      while (ancestor) {
+        expect(ancestor.type).not.toBe('ScrollView');
+        ancestor = ancestor.parent;
+      }
+      expect(actions[1].props.disabled).toBe(false);
+      expect(actions[1].props.accessibilityLabel).toBe('Share Full Diagnostics');
+    } finally {
+      if (renderer) await act(async () => renderer.unmount());
+      Platform.OS = 'ios';
+    }
+  });
+
   it('loads Full Diagnostics from the user-facing route bootloader', async () => {
     mockReadPipelineSnapshots.mockResolvedValueOnce([]);
     let renderer: any;
