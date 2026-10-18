@@ -370,6 +370,11 @@ TaskManager.defineTask(BG_LOCATION_TASK, async (payload: BgTaskPayload) => {
     const bgPayload: Record<string, unknown> = {
       latitude: fresh.coords.latitude,
       longitude: fresh.coords.longitude,
+      // Provider time, never callback/HTTP time. This retired native queue has
+      // no acquisition-lifetime proof; it cannot adopt a renewed consent.
+      ...(Number.isFinite(fresh.timestamp) && fresh.timestamp > 0
+        ? { timestamp: new Date(fresh.timestamp).toISOString() } : {}),
+      consent_generation: 0,
     };
     if (bgBatteryLevel !== null) bgPayload.battery_level = bgBatteryLevel;
     if (bgIsCharging !== null) bgPayload.is_charging = bgIsCharging;

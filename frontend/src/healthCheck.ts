@@ -7,7 +7,7 @@
  * Status semantics:
  *   ok      — confirmed working
  *   warn    — working but degraded (upload late, power saver active)
- *   error   — confirmed broken (engine explicitly disabled, upload > 15 min)
+ *   error   — actionable failure (for example, engine explicitly disabled)
  *   unknown — no data recorded yet; informational, not a failure
  *
  * The critical distinction: 'unknown' means the event log is empty for this
@@ -16,7 +16,6 @@
  * evidence something is wrong.
  */
 import { EngineLogEvent } from './locationEngine';
-import { Colors } from './theme';
 
 export type HealthStatus = 'ok' | 'warn' | 'error' | 'unknown';
 export type HealthItem = { icon: string; label: string; status: HealthStatus };
@@ -30,8 +29,7 @@ export function healthIcon(s: HealthStatus): string {
 }
 
 // ─── Overall health verdict ────────────────────────────────────────────────
-// Derived primarily from upload recency — the most direct evidence that the
-// full pipeline (SDK → background task → network → backend) is working.
+// Derived from correlated capture/publication evidence, never transport alone.
 // Used by the Diagnostics hero card to answer "is Kinnship protecting my
 // loved one right now?" before the user scrolls into any detail panel.
 
@@ -52,148 +50,62 @@ const CLOCK_SKEW_TOLERANCE_MS = 5_000;
 export function computeOverallHealth(
   log: EngineLogEvent[],
   now: number,
-  /** Optional: member.last_seen epoch ms from memberStore (populated by /members API).
-   *  Captures native background uploads that never produce a JS sdk_onHttp event
-   *  because onHttp() is only subscribed inside attachSdkListeners() / startEngine()
-   *  and headless task contexts do not call startEngine().  When present, this acts
-   *  as a second upload-evidence stream with identical freshness thresholds.
-   *  See Task #18 for the full headless logging gap investigation.
-   */
+  /** Contact/HTTP are supplied only for an honest communication fallback. */
   lastSeenMs?: number | null,
-  /** Optional: epoch-ms of the last confirmed successful upload, read from the
-   *  dedicated persistent AsyncStorage key (getLastHttpSuccessTs()).
-   *
-   *  Why this exists: the ring buffer (50 entries) is shared by ALL event types.
-   *  During a network-error storm the buffer can fill with failure entries and
-   *  evict the most recent success.  computeOverallHealth() would then find no
-   *  success in the buffer and fall back to warn or starting even though
-   *  kc_pts_http_ok proves a successful upload just happened.
-   *
-   *  This mirrors the lastHttpSuccessMs pattern already used by computeHealthItems().
-   *  When provided, the function takes the most-recent of all three evidence
-   *  streams (ring buffer, lastSeenMs, lastHttpSuccessMs).
-   */
   lastHttpSuccessMs?: number | null,
 ): OverallHealthResult {
-  const rev = [...log].reverse();
-
-  // ── Primary signal: JS engine log sdk_onHttp success events ──────────────
-  const uploadEvt = rev.find(
-    (e) => e.event === 'sdk_onHttp' && e.detail?.success === true,
-  ) ?? null;
-  const logUploadAge = uploadEvt ? now - uploadEvt.at : null;
-
-  // ── Secondary signal: member.last_seen from the backend /members API ──────
-  // The dashboard reads this field via memberStore and it updates whenever the
-  // Transistor SDK delivers a location to the backend — including headless
-  // native uploads.  Use the more recent of the two sources.
-  const lastSeenAge = (lastSeenMs != null && lastSeenMs > 0 && lastSeenMs <= now)
-    ? now - lastSeenMs
-    : null;
-
-  // ── Tertiary signal: persistent AsyncStorage key kc_pts_http_ok ───────────
-  // Immune to ring-buffer eviction.  Written by both the foreground onHttp
-  // listener and the headless HTTP event handler (recordPipelineTs).
-  const httpSuccessAge =
-    lastHttpSuccessMs != null && lastHttpSuccessMs > 0
-      ? lastHttpSuccessMs <= now
-        ? now - lastHttpSuccessMs
-        : lastHttpSuccessMs <= now + CLOCK_SKEW_TOLERANCE_MS
-          ? 0
-          : null
-      : null;
-
-  // Combine all three evidence streams — pick the freshest (lowest age).
-  const candidateAges = [logUploadAge, lastSeenAge, httpSuccessAge].filter(
-    (a): a is number => a !== null,
-  );
-  const uploadAge = candidateAges.length > 0 ? Math.min(...candidateAges) : null;
-
-  const enabledEvt = rev.find((e) => e.event === 'sdk_onEnabledChange') ?? null;
-  const engineExplicitlyDisabled =
-    enabledEvt !== null && enabledEvt.detail?.enabled === false;
-
-  // Upload happened recently → healthy regardless of heartbeat/bg-service status.
-  if (uploadAge !== null && uploadAge < 5 * 60_000) {
-    return {
-      level: 'ok',
-      headline: 'Background monitoring is healthy',
-      subline: `Last location confirmed: ${formatAgeMs(uploadAge)}`,
-      uploadAgeMs: uploadAge,
-    };
-  }
-
-  // Upload is a bit late but not critically so → warn.
-  if (uploadAge !== null && uploadAge < 15 * 60_000) {
-    return {
-      level: 'warn',
-      headline: 'Monitoring may be delayed',
-      subline: `Last location confirmed: ${formatAgeMs(uploadAge)} — usually self-correcting`,
-      uploadAgeMs: uploadAge,
-    };
-  }
-
-  // Upload is critically old → error.
-  if (uploadAge !== null) {
-    return {
-      level: 'error',
-      headline: 'Monitoring appears to have stopped',
-      subline: `Last location confirmed: ${formatAgeMs(uploadAge)} — check background permissions`,
-      uploadAgeMs: uploadAge,
-    };
-  }
-
-  // No upload in the log at all.  If the engine was explicitly disabled, that
-  // is a confirmed failure.  Otherwise this is a fresh start — not an error.
-  if (engineExplicitlyDisabled) {
-    return {
-      level: 'error',
-      headline: 'Monitoring appears to have stopped',
-      subline: 'The location engine is not running — check permissions',
-      uploadAgeMs: null,
-    };
-  }
-
-  // ── Heartbeat fallback ────────────────────────────────────────────────────
-  //
-  // Why sdk_onHttp may be absent even on a healthy device:
-  //   lib.onHttp() is subscribed inside attachSdkListeners(), which is only
-  //   called by startEngine().  The headless task handler runs in a minimal
-  //   JS context that does NOT call startEngine() / attachSdkListeners().
-  //   When the Transistor native SDK uploads location during a headless
-  //   wakeup (the normal background path), no onHttp JS callback fires and
-  //   therefore no sdk_onHttp entry lands in the ring buffer.
-  //
-  //   The heartbeat IS logged by the headless task via an explicit
-  //   logEvent('headless_task_invoked') call, so heartbeat evidence is
-  //   reliable even when upload evidence is absent.
-  //
-  // Consequence: returning 'starting' whenever sdk_onHttp is absent
-  //   misrepresents an engine that has been running for minutes as
-  //   "just launched."  A caregiver sees the hourglass while the heartbeat
-  //   row shows green — which looks like a contradiction.
-  //
-  // Fix: if a heartbeat is present, return 'warn' (amber) instead of
-  //   'starting' (gray).  Amber correctly communicates "engine is alive
-  //   but we haven't confirmed a location upload yet" — honest and not
-  //   falsely alarming.
-  const hbEvt = rev.find(
-    (e) => e.event === 'sdk_onHeartbeat' || e.event === 'headless_task_invoked',
-  ) ?? null;
-  if (hbEvt !== null) {
-    const hbAge = now - hbEvt.at;
-    return {
-      level: 'warn',
-      headline: 'Engine running, no upload confirmed yet',
-      subline: `Last heartbeat: ${formatAgeMs(hbAge)} — upload confirmation expected within the next minute`,
-      uploadAgeMs: null,
-    };
-  }
-
+  const valid = log.filter(e => e.at <= now + CLOCK_SKEW_TOLERANCE_MS)
+    .sort((a, b) => a.at - b.at);
+  const latestState = [...valid].reverse().find(e =>
+    e.event === 'sdk_state_observed' || e.event === 'sdk_onEnabledChange');
+  const disabled = latestState?.detail?.enabled === false && now - latestState.at < 60_000;
+  if (disabled) return {
+    level: 'error', headline: 'Native location service is disabled',
+    subline: 'Current native state; no claim about earlier delivery', uploadAgeMs: null,
+  };
+  const lastBoundary = [...valid].reverse().find(e => e.event === 'tracking_authority_boundary'
+    || e.event === 'stop_ok')?.at ?? 0;
+  const background = valid.filter(e => e.at >= lastBoundary
+    && e.event === 'verified_coordinate_publication'
+    && (e.detail?.origin === 'background' || (e.detail?.origin === 'native-receipt'
+      && typeof e.detail.captureId === 'string' && valid.some(c =>
+        c.event === 'native_capture_observed' && c.detail?.captureId === e.detail?.captureId
+        && c.detail?.capturedAt === e.detail?.capturedAt && c.detail?.origin === 'background'
+        && (c.detail?.consentGeneration ?? 0) === (e.detail?.consentGeneration ?? 0)
+        && c.detail?.owner === e.detail?.owner && c.detail?.generation === e.detail?.generation)))
+    && (!latestState?.detail?.owner || (e.detail?.owner === latestState.detail.owner
+      && e.detail?.generation === latestState.detail.generation))
+    && (latestState?.detail?.consentGeneration == null
+      || (e.detail?.consentGeneration ?? 0) === latestState.detail.consentGeneration)
+    && typeof e.detail?.capturedAt === 'number' && e.detail.capturedAt <= now + 5000);
+  const last = background.at(-1);
+  const uploadAge = last ? Math.max(0, now - Number(last.detail?.capturedAt)) : null;
+  // Two distinct captures spanning a minute establish repeated delivery, not
+  // the physical road-test acceptance criterion (which remains unchanged).
+  const hasRepeated = (maxAge: number) => last && background.some(e =>
+    e.detail?.generation === last.detail?.generation
+    && e.detail?.owner === last.detail?.owner
+    && (e.detail?.consentGeneration ?? 0) === (last.detail?.consentGeneration ?? 0)
+    && last.detail!.capturedAt - e.detail!.capturedAt >= 60_000 && now - e.at < maxAge);
+  if (hasRepeated(15 * 60_000) && latestState?.detail?.enabled === true && now - latestState.at < 60_000
+    && typeof latestState.detail.owner === 'string' && typeof latestState.detail.generation === 'number'
+    && uploadAge !== null && uploadAge < 5 * 60_000) return {
+    level: 'ok', headline: 'Repeated background delivery verified',
+    subline: `Last verified background coordinate: ${formatAgeMs(uploadAge)}`,
+    uploadAgeMs: uploadAge,
+  };
+  if (last) return {
+    level: 'starting', headline: hasRepeated(Infinity) ? 'Background delivery recorded earlier' : 'One background location delivery recorded',
+    subline: `Last verified background coordinate: ${formatAgeMs(uploadAge)}; this is not a claim of current tracking health`,
+    uploadAgeMs: uploadAge,
+  };
+  const contact = [lastSeenMs, lastHttpSuccessMs].some(t =>
+    typeof t === 'number' && t > 0 && t <= now + 5000 && now - t < 5 * 60_000);
   return {
     level: 'starting',
-    headline: 'Kinnship is starting up',
-    subline: 'Waiting for first successful upload',
+    headline: 'Background GPS evidence unavailable',
+    subline: contact ? 'Device communicating; no retained background GPS proof in this diagnostic window'
+      : 'No retained background GPS proof in this diagnostic window; this does not invalidate earlier road tests',
     uploadAgeMs: null,
   };
 }
@@ -228,22 +140,26 @@ export function computeHealthItems(
    */
   lastHttpSuccessMs?: number | null,
 ): HealthItem[] {
-  const rev = [...log].reverse();
+  const rev = log.filter(e => e.at > 0 && e.at <= now + CLOCK_SKEW_TOLERANCE_MS)
+    .sort((a, b) => b.at - a.at);
 
   // 1 — Background service: most recent sdk_onEnabledChange.
   //     null → 'unknown' (not yet seen, normal on fresh start — not an error).
-  const enabledEvt = rev.find((e) => e.event === 'sdk_onEnabledChange') ?? null;
+  const enabledEvt = rev.find((e) => e.event === 'sdk_onEnabledChange' || e.event === 'sdk_state_observed') ?? null;
   const startup = rev.find(e => e.event === 'startup_outcome')?.detail?.outcome;
   const bgStatus: HealthStatus =
-    startup === 'denied' || startup === 'failed' ? 'error'
+    enabledEvt?.event === 'sdk_state_observed' && now - enabledEvt.at < 60_000
+      ? (enabledEvt.detail?.enabled === true ? 'ok' : 'error')
+    : startup === 'denied' || startup === 'failed' ? 'error'
     : startup === 'foreground-only' ? 'warn'
     : startup === 'background-ready' && enabledEvt === null ? 'ok'
     : enabledEvt === null             ? 'unknown'
     : enabledEvt.detail?.enabled   ? 'ok'
     : 'error';
 
-  // 2 — Last location upload: sdk_onHttp with success=true.
-  //     ✅ < 5 min  ⚠ 5–15 min  ❌ > 15 min  ℹ no entry yet
+  // 2 — Successful location-transport contact, not GPS capture freshness.
+  //     Recent success is evidence of contact; old/absent success alone does
+  //     not prove a failed upload, stale GPS or a noncommunicating device.
   //
   //     Computed FIRST so item 3 (heartbeat) can use uploadAge to avoid a
   //     false-negative.  See the heartbeat comment below for full reasoning.
@@ -269,8 +185,7 @@ export function computeHealthItems(
   const uploadStatus: HealthStatus =
     uploadAge === null          ? 'unknown'
     : uploadAge < 5 * 60_000   ? 'ok'
-    : uploadAge < 15 * 60_000  ? 'warn'
-    : 'error';
+    : 'unknown'; // Age alone does not prove a failed upload or broken device.
 
   // 3 — Last heartbeat: sdk_onHeartbeat or headless_task_invoked.
   //     ✅ < 2 min  ⚠ 2–10 min  ❌ > 10 min  ℹ no entry yet (not an error)
@@ -303,8 +218,7 @@ export function computeHealthItems(
     hbAge === null                                  ? 'unknown'
     : hbAge < 2 * 60_000                           ? 'ok'
     : hbAge < 10 * 60_000                          ? 'warn'
-    : uploadRecent                                  ? 'ok'   // motion path active — heartbeat correctly suppressed
-    : 'error';
+    : 'warn'; // HTTP success cannot replace an absent/stale heartbeat.
 
   // 4 — Battery listener: battery_listeners_attached event present.
   //     Absence is informational — the listener attaches early but may not
@@ -335,15 +249,15 @@ export function computeHealthItems(
       label:  hbAge === null
               ? 'Background heartbeat: waiting for first event'
               : (uploadRecent && hbAge >= 10 * 60_000)
-                ? `Background tracking active — last heartbeat: ${formatAgeMs(hbAge)}`
+                ? `Last background heartbeat: ${formatAgeMs(hbAge)} (upload is not heartbeat evidence)`
                 : `Last background heartbeat: ${formatAgeMs(hbAge)}`,
       status: hbStatus,
     },
     {
       icon:   healthIcon(uploadStatus),
       label:  uploadAge === null
-              ? 'Location upload: waiting for first upload'
-              : `Last location uploaded: ${formatAgeMs(uploadAge)}`,
+               ? 'Location upload: no retained confirmation'
+               : `Location upload last confirmed: ${formatAgeMs(uploadAge)}`,
       status: uploadStatus,
     },
     {

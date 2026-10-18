@@ -219,6 +219,12 @@ export function upsertOne(incoming: MemberRecord, seq: number | null = null): vo
   const id = incoming.id;
   // Capture prev BEFORE any mutation for the pipeline log.
   const prev = state.members[id];
+  if (prev && prev.user_id === incoming.user_id
+    && (incoming.location_consent_generation ?? 0) < (prev.location_consent_generation ?? 0)) {
+    // A pre-withdrawal GET must not turn sharing back ON, even if its
+    // timestamp looks newer. Policy lifetime precedes coordinate ordering.
+    return;
+  }
   if (seq !== null) {
     const cur = fetchSeq[id] ?? 0;
     if (seq < cur) {
@@ -241,6 +247,23 @@ export function upsertOne(incoming: MemberRecord, seq: number | null = null): vo
     fetchSeq[id] = seq;
   }
   // ── Lazy-geocoding location_name preservation ────────────────────────────
+  // Overlapping polls can return out of order even though MongoDB is correct.
+  // Keep GPS as one tuple; fresh contact/battery may still replace their fields.
+  // Explicit withdrawal, a different owner, or a new consent lifetime must not
+  // inherit a tuple from the previous authority.
+  const previousCapture = Date.parse(prev?.coordinate_captured_at ?? '');
+  const incomingCapture = Date.parse(incoming.coordinate_captured_at ?? '');
+  if (prev && prev.user_id === incoming.user_id
+    && (prev.location_consent_generation ?? 0) === (incoming.location_consent_generation ?? 0)
+    && prev.location_sharing_enabled === true && incoming.location_sharing_enabled === true
+    && Number.isFinite(previousCapture)
+    && (!Number.isFinite(incomingCapture) || incomingCapture < previousCapture)) {
+    incoming = { ...incoming };
+    for (const key of ['latitude', 'longitude', 'coordinate_captured_at', 'captured_at',
+      'location_name', 'gps_accuracy', 'gps_speed', 'gps_heading', 'is_moving']) {
+      (incoming as any)[key] = (prev as any)[key];
+    }
+  }
   // Uploads clear location_name on the backend so the lazy resolver on
   // GET /members always sees fresh coordinates.  The PUT response therefore
   // carries location_name = null even though a valid address was already
@@ -256,6 +279,10 @@ export function upsertOne(incoming: MemberRecord, seq: number | null = null): vo
   const incomingLocationName = (incoming as any)?.location_name ?? null;
   const record: MemberRecord =
     !incomingLocationName && prevLocationName
+      && incoming.location_sharing_enabled === true
+      && prev?.user_id === incoming.user_id
+      && (prev?.location_consent_generation ?? 0) === (incoming.location_consent_generation ?? 0)
+      && prev?.latitude === incoming.latitude && prev?.longitude === incoming.longitude
       ? ({ ...incoming, location_name: prevLocationName } as MemberRecord)
       : incoming;
   const committedLocationName = (record as any).location_name ?? null;

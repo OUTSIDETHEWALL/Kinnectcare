@@ -47,6 +47,8 @@ def test_coordinate_timestamp_is_atomic_with_displayed_tuple(kind):
         if "$or" in query:
             incoming = query["$or"][1]["captured_at"]["$lt"]
             matched = document["captured_at"] < incoming
+        if "captured_at" in query and query["captured_at"] is None:
+            matched = document.get("captured_at") is None and document.get("coordinate_captured_at") is None
         if matched:
             document.update(candidate)
         return MagicMock(matched_count=int(matched), modified_count=int(matched))
@@ -63,13 +65,10 @@ def test_coordinate_timestamp_is_atomic_with_displayed_tuple(kind):
             "member", server.LocationUpdate(**data),
             {"id": "user", "family_group_id": "family", "family_group_role": "member"},
         ))
-    if kind in ("replay", "older"):
+    if kind in ("replay", "older", "missing", "future"):
         assert (document["latitude"], document["longitude"], document["coordinate_captured_at"]) == (
             before["latitude"], before["longitude"], before["coordinate_captured_at"],
         )
-    elif kind in ("missing", "future"):
-        assert document["latitude"] == 3.0
-        assert document["coordinate_captured_at"] is None
     else:
         assert document["latitude"] == 3.0
         assert document["coordinate_captured_at"] == captured

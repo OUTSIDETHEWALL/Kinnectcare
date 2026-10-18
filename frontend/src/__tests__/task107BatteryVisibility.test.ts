@@ -51,6 +51,7 @@ describe('Task 107 — caregiver battery row during a long stationary period', (
 });
 
 jest.mock('../androidTrackingRecovery', () => ({
+  getVerifiedConsentGeneration: () => 0,
   evaluateWakeAuthorization: jest.fn(async () => ({ state: 'AUTHORIZED', source: 'test_owner' })),
   trackingIsRevoked: jest.fn(async () => false),
   trackingPolicyStamp: jest.fn(async () => null),
@@ -103,6 +104,7 @@ describe('Task 107 — headless heartbeat battery path', () => {
       const body = options?.body ? JSON.parse(options.body) : {};
       return { ok: true, status: 200, json: async () => ({
         latitude: body.latitude, longitude: body.longitude, coordinate_captured_at: body.timestamp,
+        location_write_accepted: true,
       }) };
     });
     (globalThis as { fetch?: unknown }).fetch = fetchMock;

@@ -49,7 +49,8 @@ describe('owned Android cold tracking recovery', () => {
         : String(url).endsWith('/members') ? members
           : options?.method === 'PUT' ? (() => {
               const p = JSON.parse(options.body);
-              return { latitude: p.latitude, longitude: p.longitude, coordinate_captured_at: p.timestamp };
+              return { latitude: p.latitude, longitude: p.longitude, coordinate_captured_at: p.timestamp,
+                location_write_accepted: true, location_write_rejection_reason: null };
             })() : { location_sharing_enabled: sharing },
     })) as any;
     sdk = {
@@ -110,7 +111,7 @@ describe('owned Android cold tracking recovery', () => {
     let finish!: (value: { enabled: boolean }) => void;
     sdk.start.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     const pending = engine.recoverFromIndependentWake('workmanager');
-    for (let i = 0; i < 200 && !sdk.start.mock.calls.length; i++) await Promise.resolve();
+    for (let i = 0; i < 2000 && !sdk.start.mock.calls.length; i++) await Promise.resolve();
     expect(sdk.start).toHaveBeenCalled();
     const stopped = engine.stop();
     enabled = true;
@@ -266,7 +267,7 @@ describe('owned Android cold tracking recovery', () => {
     expect(sdk.setConfig).toHaveBeenCalledWith(expect.objectContaining({
       url: 'https://example.test/api/members/member-a/location',
     }));
-    expect(sdk.onLocation).not.toHaveBeenCalled();
+    expect(sdk.onLocation).toHaveBeenCalledTimes(1);
     expect(global.fetch).toHaveBeenCalledWith(
       'https://example.test/api/members/member-a/battery',
       expect.objectContaining({ method: 'PATCH', headers: expect.objectContaining({
@@ -304,7 +305,7 @@ describe('owned Android cold tracking recovery', () => {
     await coldNotificationTask()({ data: silentPayload() });
     expect(sdk.start).toHaveBeenCalledTimes(1);
     expect(sdk.getCurrentPosition).toHaveBeenCalledTimes(1);
-    expect(sdk.onLocation).not.toHaveBeenCalled();
+    expect(sdk.onLocation).toHaveBeenCalledTimes(2);
   });
 
   it('duplicate silent push still enforces later durable revocation', async () => {
@@ -757,6 +758,24 @@ describe('owned Android cold tracking recovery', () => {
     expect(sdk.start).not.toHaveBeenCalled();
   });
 
+  it('authorizes only device contact even when GPS permissions are denied', async () => {
+    permissions.foreground = 'denied';
+    permissions.background = 'denied';
+    const proof = await recovery.authorizeDeviceContactTransport(() => true);
+    expect(proof?.memberId).toBe('member-a');
+    expect(await proof?.isCurrent()).toBe(true);
+    expect(sdk.start).not.toHaveBeenCalled();
+    expect(sdk.setConfig).not.toHaveBeenCalled();
+    token = null;
+    expect(await proof?.isCurrent()).toBe(false);
+    expect(await recovery.authorizeDeviceContactTransport(() => true)).toBeNull();
+  });
+  it('does not use a cached owner or issue GPS when contact ownership is unavailable', async () => {
+    members = [{ id: 'other', user_id: 'other-user' }];
+    expect(await recovery.authorizeDeviceContactTransport(() => true)).toBeNull();
+    expect(sdk.start).not.toHaveBeenCalled();
+    expect(sdk.getCurrentPosition).not.toHaveBeenCalled();
+  });
   it('does not automatically rearm consent; explicit opt-in can reauthorize', async () => {
     await recovery.revokeTrackingIntent('consent');
     await recovery.recoverUnexpectedlyDisabledTracking(sdk, () => true);

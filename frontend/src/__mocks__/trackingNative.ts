@@ -32,6 +32,11 @@ export const trackingNative = {
   trackingClaim(owner: string, generation: number, operation: string, now: number, configurationOnly = false): boolean {
     if (state.revoked || state.owner !== owner || state.generation !== generation) return false;
     if (state.pendingMutation) return false;
+    if (state.shutdownPending || Object.keys(state.shutdowns ?? {}).length) return false;
+    if (configurationOnly) {
+      state = { ...state, pendingMutation: operation };
+      return true;
+    }
     if (state.operation && now - state.claimedAt < 60_000) return false;
     if (state.nextEligibleAt > now && state.nextEligibleAt - now <= 1_800_000) return false;
     const moving = state.moving && state.movementAt <= now && now - state.movementAt < 600_000;

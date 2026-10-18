@@ -1,10 +1,11 @@
 const LOG_KEY = '@kinnship/location_engine_log_v1';
 
 async function flushPromises(): Promise<void> {
-  for (let i = 0; i < 30; i++) await Promise.resolve();
+  for (let i = 0; i < 2000; i++) await Promise.resolve();
 }
 
 jest.mock('../androidTrackingRecovery', () => ({
+  getVerifiedConsentGeneration: () => 0,
   evaluateWakeAuthorization: jest.fn(async () => ({ state: 'AUTHORIZED', source: 'test_owner' })),
   trackingIsRevoked: jest.fn(async () => false),
   trackingPolicyStamp: jest.fn(async () => null),
@@ -54,6 +55,7 @@ describe('headless activity wake recovery', () => {
       const body = options?.body ? JSON.parse(options.body) : {};
       return { ok: true, status: 200, json: async () => ({
         latitude: body.latitude, longitude: body.longitude, coordinate_captured_at: body.timestamp,
+        location_write_accepted: true,
       }) } as Response;
     });
     const storage = new Map<string, string>();

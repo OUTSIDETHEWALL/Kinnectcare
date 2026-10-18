@@ -20,6 +20,7 @@
  * Linked from Settings → "Diagnostics" (Beta) row. Safe to keep in
  * production — both logs cap themselves and are rolling buffers.
  */
+import { beginDiagnosticsExport } from './diagnosticsExportLock';
 import React, {
   ErrorInfo, useEffect, useState, useCallback, useRef, useMemo, ReactNode,
 } from 'react';
@@ -308,6 +309,9 @@ function formatLeonidasDecision(
 // ===========================================================
 
 const MOTION_EVENT_SET = new Set([
+  'verified_coordinate_publication',
+  'sdk_state_observed',
+  'ready_ok',
   'sdk_onActivityChange',
   'sdk_onMotionChange',
   'sdk_onHeartbeat',
@@ -933,6 +937,11 @@ function DiagnosticsContent() {
   // the hero card green even when a failure burst has evicted the last success
   // from the ring buffer and lastSeenMs is not yet populated (fresh device /
   // first /members poll pending).
+  const locationEvidence = useMemo(
+    () => require('./locationEvidenceSummary').locationEvidenceSummary(engineLog, nowTick,
+      user?.id ? Date.parse(memberStore.getMyMember(user.id)?.coordinate_captured_at ?? '') : null),
+    [engineLog, nowTick],
+  );
   const overallHealth = useMemo(() => {
     const myLastSeenMs = memberStore.getMyLastSeenMs(user?.id ?? null);
     return computeOverallHealth(
@@ -1409,7 +1418,8 @@ function DiagnosticsContent() {
   };
 
   const onShareAll = async () => {
-    if (sharingAll) return;
+    const release = beginDiagnosticsExport();
+    if (!release) return;
     setSharingAll(true);
     try {
       let model = battOptInfo.model;
@@ -1521,6 +1531,7 @@ function DiagnosticsContent() {
     } catch (error: any) {
       Alert.alert('Could not share diagnostics', error?.message || String(error));
     } finally {
+      release();
       setSharingAll(false);
     }
   };
@@ -1810,6 +1821,26 @@ function DiagnosticsContent() {
       })()}
 
       <ScrollView contentContainerStyle={styles.scroll}>
+        <View style={styles.entry}>
+          <Text style={styles.bold}>Location evidence — separate observations</Text>
+          <Text style={styles.entryLine}>
+            Native service: {locationEvidence.state
+              ? `${locationEvidence.state.detail?.enabled === true ? 'enabled' : 'disabled'} (observed ${formatAgeMs(nowTick - locationEvidence.state.at)})`
+              : 'unknown'}
+          </Text>
+          {([
+            ['Last verified coordinate capture', locationEvidence.capture],
+            ['Last verified background delivery', locationEvidence.background],
+            ['Last explicit one-shot / foreground acquisition', locationEvidence.foreground],
+            ['Last heartbeat', locationEvidence.heartbeat],
+            ['Last motion event', locationEvidence.motion],
+            ['Last device communication (not GPS)', memberStore.getMyLastSeenMs(user?.id ?? null)],
+          ] as [string, number | null][]).map(([label, at]) => (
+            <Text key={label} style={styles.entryLine}>{label}: {at
+              ? `${new Date(at).toISOString()} (${formatAgeMs(Math.max(0, nowTick - at))})`
+              : 'unknown / no retained evidence'}</Text>
+          ))}
+        </View>
         <Text style={styles.intro}>
           Beta diagnostics. If support asks, tap <Text style={styles.bold}>Copy Log</Text> and
           paste into your reply. No personal data leaves your phone until you paste.

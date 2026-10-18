@@ -103,7 +103,17 @@ export async function readNativeSdkEvidence(): Promise<Record<string, unknown>> 
   }
 }
 
+let fileShareActive = false;
 export async function shareFullDiagnostics(
+  payload: Record<string, unknown>, now: Date = new Date(),
+): Promise<void> {
+  if (fileShareActive) throw new Error('A diagnostics file share is already active.');
+  fileShareActive = true;
+  try { await shareDiagnosticsFile(payload, now); }
+  finally { fileShareActive = false; }
+}
+
+async function shareDiagnosticsFile(
   payload: Record<string, unknown>,
   now: Date = new Date(),
 ): Promise<void> {
