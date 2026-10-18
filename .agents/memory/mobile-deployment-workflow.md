@@ -11,6 +11,17 @@ Kinnship is a mobile app, not a Replit Web Publish deployment. After every appro
 
 ## Device evidence chronology
 
+Respect platform-specific release authorization even when the production channel
+serves multiple platforms. Pin the reviewed source commit/tree and runtime before
+publishing; inability to verify GitHub main must stop delivery, not become a warning.
+
+**Why:** An Android-only delivery review found that the routine publishing path
+could otherwise update iOS too and rely on stale remote-tracking state.
+
+**How to apply:** Verify the effective platform and live channel/branch mapping
+before publication. Do not treat runtime compatibility as authority to release
+to an additional platform.
+
 An earlier diagnostic export does not establish which OTA is active during a later physical test. Confirm the software diagnostics screen's installed update and runtime at the time of the test before attributing results to a release.
 
 **Why:** A physical test confirmed the expected OTA was active after an earlier export had been captured; treating the older export as current would have misclassified a validated notification-routing correction as absent.

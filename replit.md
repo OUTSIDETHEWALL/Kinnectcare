@@ -64,7 +64,7 @@ Always run from the `frontend/` directory.
 
 | Task | Command |
 |---|---|
-| Publish OTA update | `yarn ota:publish "Your message"` |
+| Publish Android OTA update | `yarn ota:publish "Message" <reviewed-main-commit> <reviewed-tree> <runtime>` |
 | Submit Android native build | `yarn build:android "Build N message"` |
 | Normalize yarn.lock only | `yarn normalize-lockfile` |
 

@@ -3,8 +3,8 @@
 # publish-ota.sh — safe OTA publish with pre-flight verification
 #
 # Usage (from frontend/ directory):
-#   bash scripts/publish-ota.sh "Your production update message here"
-#   yarn ota:publish "Your production update message here"
+#   yarn ota:publish "Message" <reviewed-main-commit> <reviewed-tree> <runtime>
+#   Android only. Other platforms require a separately reviewed release path.
 #
 # Process (in order, aborts on first failure):
 #   1. Verify .env.production exists and contains the backend URL
@@ -50,9 +50,13 @@ EXPECTED_DOMAIN="kinnectcare-production.up.railway.app"
 # explicit, separate release decision and must not be reachable by changing a
 # routine beta-release argument.
 CHANNEL="production"
+PLATFORM="android"
 MESSAGE="${1:-}"
-if [[ -z "$MESSAGE" || "$#" -ne 1 ]]; then
-  fail "Usage: $0 \"Your production update message\"\n   This release path publishes only to the production channel."
+REVIEWED_COMMIT="${2:-}"
+REVIEWED_TREE="${3:-}"
+REVIEWED_RUNTIME="${4:-}"
+if [[ -z "$MESSAGE" || "$#" -ne 4 || ! "$REVIEWED_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$REVIEWED_TREE" =~ ^[0-9a-f]{40}$ || -z "$REVIEWED_RUNTIME" ]]; then
+  fail "Usage: $0 \"Message\" <reviewed-main-commit> <reviewed-tree> <runtime>\n   This path publishes Android only, to production."
 fi
 
 # ═════════════════════════════════════════════════════════════
@@ -80,15 +84,28 @@ if [[ -n "$GIT_STATUS" ]]; then
 fi
 ok "Working tree clean"
 
-# Check 3 — local main must match origin/main
-git -C "$FRONTEND_DIR" fetch origin --quiet 2>/dev/null \
-  || warn "Could not reach origin to verify sync — continuing with local state only"
-LOCAL_SHA=$(git -C "$FRONTEND_DIR" rev-parse HEAD 2>/dev/null || echo "local_unknown")
-REMOTE_SHA=$(git -C "$FRONTEND_DIR" rev-parse origin/main 2>/dev/null || echo "remote_unknown")
-if [[ "$LOCAL_SHA" != "$REMOTE_SHA" ]]; then
-  fail "Local main (${LOCAL_SHA:0:7}) is not up to date with origin/main (${REMOTE_SHA:0:7}).\n\n   Run: git pull origin main\n   Then verify the PR is already merged before retrying."
-fi
-ok "main is up to date with origin/main (${LOCAL_SHA:0:7})"
+# Check 3 — fail closed; never trust a stale remote-tracking ref.
+# The repository is public. Disable the unreliable credential helper without
+# embedding credentials in URLs or altering the saved remote configuration.
+verify_reviewed_source() {
+  git -C "$FRONTEND_DIR" -c credential.helper= fetch --quiet --no-tags --no-recurse-submodules \
+    origin refs/heads/main:refs/remotes/origin/main \
+    || fail "Cannot verify current GitHub main. Nothing will be published."
+  local local_sha remote_sha local_tree branch status
+  local_sha=$(git -C "$FRONTEND_DIR" rev-parse HEAD)
+  remote_sha=$(git -C "$FRONTEND_DIR" rev-parse origin/main)
+  local_tree=$(git -C "$FRONTEND_DIR" rev-parse 'HEAD^{tree}')
+  [[ "$local_sha" == "$REVIEWED_COMMIT" && "$remote_sha" == "$REVIEWED_COMMIT" && "$local_tree" == "$REVIEWED_TREE" ]] \
+    || fail "Local/main commit or source tree does not match the reviewed release."
+  branch=$(git -C "$FRONTEND_DIR" rev-parse --abbrev-ref HEAD) \
+    || fail "Cannot verify the release branch."
+  status=$(git -C "$FRONTEND_DIR" status --porcelain) \
+    || fail "Cannot verify the working tree."
+  [[ "$branch" == "main" && -z "$status" ]] \
+    || fail "Release source changed: main and a clean working tree are required."
+}
+verify_reviewed_source
+ok "Verified reviewed commit ${REVIEWED_COMMIT} / tree ${REVIEWED_TREE}"
 
 # Check 4 — checked-in EAS production target must still be production
 EAS_CHANNEL=$(cd "$FRONTEND_DIR" && node -p "require('./eas.json').build.production.channel || ''")
@@ -98,13 +115,18 @@ APP_PACKAGE=$(cd "$FRONTEND_DIR" && node -e "
 ")
 EXPECTED_RUNTIME=$(cd "$FRONTEND_DIR" && node -e "
   const app = require('./app.config.js')({ config: {} }).expo;
-  process.stdout.write(app.version || '');
+  const runtime = typeof app.runtimeVersion === 'string' ? app.runtimeVersion
+    : app.runtimeVersion?.policy === 'appVersion' ? app.version : '';
+  process.stdout.write(runtime || '');
 ")
 if [[ "$EAS_CHANNEL" != "production" ]]; then
   fail "Production profile targets EAS channel '${EAS_CHANNEL}', not 'production'."
 fi
 if [[ "$APP_PACKAGE" != "app.kinnship.client" ]]; then
   fail "Unexpected Android package '${APP_PACKAGE}'. Expected app.kinnship.client."
+fi
+if [[ -z "$EXPECTED_RUNTIME" || "$EXPECTED_RUNTIME" != "$REVIEWED_RUNTIME" ]]; then
+  fail "Configured runtime '${EXPECTED_RUNTIME}' does not match reviewed runtime '${REVIEWED_RUNTIME}'."
 fi
 ok "Verified OTA target: app.kinnship.client → EAS production channel → runtime ${EXPECTED_RUNTIME}"
 
@@ -201,6 +223,24 @@ if [[ -z "${EXPO_TOKEN:-}" ]]; then
 fi
 ok "EXPO_TOKEN present"
 
+# A channel can be remapped without changing this repository. Verify the live
+# mapping, including absence of a rollout to a different branch, before publish.
+CHANNEL_JSON=$(npx eas channel:view "$CHANNEL" --json --non-interactive) \
+  || fail "Could not verify the production channel mapping."
+printf '%s' "$CHANNEL_JSON" | node -e "
+  const fs = require('fs');
+  const raw = JSON.parse(fs.readFileSync(0, 'utf8'));
+  const channel = raw.currentPage || raw;
+  const branches = channel.updateBranches || [];
+  const mapping = JSON.parse(channel.branchMapping);
+  if (channel.name !== 'production' || channel.isPaused !== false
+    || mapping.version !== 0 || mapping.data?.length !== 1
+    || mapping.data[0].branchMappingLogic !== 'true'
+    || !branches.some(b => b.id === mapping.data[0].branchId && b.name === 'production')) {
+    throw new Error('Production channel is not mapped exclusively to the production branch');
+  }
+" || fail "Production channel/branch verification failed."
+
 # ═════════════════════════════════════════════════════════════
 hdr "Step 6 — Clear Metro cache"
 # ═════════════════════════════════════════════════════════════
@@ -250,10 +290,13 @@ echo ""
 #   unreliable in the Replit execution environment.  Remove this flag only if
 #   Expo confirms the hang is fixed AND fingerprint-based runtime enforcement
 #   is intentionally adopted as part of the release process.
-EAS_JSON_FILE=/tmp/ota_publish_output.json
+EAS_JSON_FILE=$(mktemp /tmp/kinnship-ota-XXXXXX.json)
+info "Publish receipt will be retained at ${EAS_JSON_FILE}"
 cd "$FRONTEND_DIR"
+verify_reviewed_source
 EAS_SKIP_AUTO_FINGERPRINT=1 npx eas update \
   --channel "$CHANNEL" \
+  --platform "$PLATFORM" \
   --message "$MESSAGE" \
   --non-interactive \
   --json \
@@ -270,57 +313,32 @@ hdr "Step 8 — Post-publish summary"
 # update IDs. These are different values:
 #   Group ID   — EAS engineering reference (not visible on device)
 #   Android ID — what appears in Me → Software → OTA ID on Android
-#   iOS ID     — what appears in Me → Software → OTA ID on iOS
-GROUP_ID="unknown"
-ANDROID_ID="unknown"
-IOS_ID="unknown"
-
-eval "$(node -e "
-  try {
-    const raw = require('fs').readFileSync('${EAS_JSON_FILE}', 'utf8');
-    // The JSON array may be preceded by spinner/progress lines from stderr
-    // mixed in via the 2>&1 redirect; find the first '[' to start parsing.
-    const start = raw.indexOf('[');
-    const updates = JSON.parse(start >= 0 ? raw.slice(start) : raw);
-    const android = updates.find(u => u.platform === 'android') || {};
-    const ios     = updates.find(u => u.platform === 'ios')     || {};
-    const group   = android.group || ios.group || 'unknown';
-    const branches = [...new Set(updates.map(u => u.branch || 'unknown'))].join(',');
-    const runtimes = [...new Set(updates.map(u => u.runtimeVersion || 'unknown'))].join(',');
-    console.log('GROUP_ID=\"'   + group                + '\"');
-    console.log('ANDROID_ID=\"' + (android.id || 'unknown') + '\"');
-    console.log('IOS_ID=\"'     + (ios.id     || 'unknown') + '\"');
-    console.log('PUBLISHED_BRANCHES=\"' + branches + '\"');
-    console.log('PUBLISHED_RUNTIMES=\"' + runtimes + '\"');
-  } catch(e) {
-    process.stderr.write('JSON parse failed: ' + e.message + '\n');
-    console.log('GROUP_ID=\"unknown\"');
-    console.log('ANDROID_ID=\"unknown\"');
-    console.log('IOS_ID=\"unknown\"');
-    console.log('PUBLISHED_BRANCHES=\"unknown\"');
-    console.log('PUBLISHED_RUNTIMES=\"unknown\"');
-  }
-")"
-
-if [[ "$PUBLISHED_BRANCHES" != "production" ]]; then
-  fail "Post-publish verification failed: EAS reported branch '${PUBLISHED_BRANCHES}', expected 'production'."
-fi
-if [[ "$PUBLISHED_RUNTIMES" != "$EXPECTED_RUNTIME" ]]; then
-  fail "Post-publish verification failed: runtime '${PUBLISHED_RUNTIMES}', expected '${EXPECTED_RUNTIME}'."
-fi
+SUMMARY=$(node - "$EAS_JSON_FILE" "$REVIEWED_RUNTIME" "$REVIEWED_COMMIT" <<'NODE'
+const fs = require('fs');
+const [file, runtime, commit] = process.argv.slice(2);
+const updates = JSON.parse(fs.readFileSync(file, 'utf8'));
+const u = updates[0];
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+if (updates.length !== 1 || u.platform !== 'android' || u.branch !== 'production'
+  || u.runtimeVersion !== runtime || !uuid.test(u.id) || !uuid.test(u.group)
+  || u.gitCommitHash !== commit) {
+  throw new Error('Unexpected published platform, branch, runtime, identity or source');
+}
+console.log(u.group + ' ' + u.id);
+NODE
+) || fail "Post-publish verification failed. Inspect the existing update; DO NOT republish."
+read -r GROUP_ID ANDROID_ID <<< "$SUMMARY"
 
 echo ""
 ok "OTA published"
-ok "Verified target: app.kinnship.client → production → runtime ${PUBLISHED_RUNTIMES}"
+ok "Verified target: Android app.kinnship.client → production → runtime ${REVIEWED_RUNTIME}"
+ok "Source commit: ${REVIEWED_COMMIT}; tree: ${REVIEWED_TREE}"
 echo ""
 echo -e "  ${CYAN}EAS Update Group ID${NC}  (engineering reference, not visible on device)"
 echo "  ${GROUP_ID}"
 echo ""
 echo -e "  ${CYAN}Expected in Me → Software → OTA ID${NC}"
 echo -e "  Android : ${ANDROID_ID:0:8}…   (full: ${ANDROID_ID})"
-echo -e "  iOS     : ${IOS_ID:0:8}…   (full: ${IOS_ID})"
 echo ""
-ok "Next: force-kill both apps, relaunch twice to download + apply."
+ok "No iOS update was published. Physical activation/testing remains with Charles."
 ok "Android — Me → Software → OTA ID should show: ${ANDROID_ID:0:8}…"
-ok "iOS     — Me → Software → OTA ID should show: ${IOS_ID:0:8}…"
-ok "Verify connectivity: tap 'Email me a code' — must succeed."
