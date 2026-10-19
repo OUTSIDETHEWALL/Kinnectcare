@@ -1,11 +1,18 @@
-import axios from 'axios';
+import axios, { getAdapter, type InternalAxiosRequestConfig } from 'axios';
 import * as SecureStore from 'expo-secure-store';
 import { AppState, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { markStartupMilestone } from './startupDiagnostics';
+import { startStartupApiTiming, type StartupApiTiming } from './startupApiTiming';
 
 const measuredRequests = new WeakMap<object, { at: number; endpoint: string }>();
+const startupStages = new WeakMap<object, StartupApiTiming>();
 const startupEndpoints = new Set(['/auth/me', '/members', '/summary', '/alerts', '/me/preferences']);
+// Axios 1.16's runtime resolver takes config (as dispatchRequest does), although
+// its public declaration omits that argument. Preserve config-specific fetch/env.
+const resolveAdapter = getAdapter as (
+  adapters: Parameters<typeof getAdapter>[0], config: InternalAxiosRequestConfig,
+) => ReturnType<typeof getAdapter>;
 
 const BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
 const TOKEN_KEY = 'kc_token';
@@ -139,11 +146,40 @@ export function addForegroundPresenceHeader<T extends { headers?: any }>(
 }
 
 api.interceptors.request.use(async (config) => {
+  const stages = startStartupApiTiming(String(config.url));
+  if (stages) startupStages.set(config, stages);
   if (startupEndpoints.has(String(config.url))) {
     measuredRequests.set(config, { at: Date.now(), endpoint: String(config.url) });
     markStartupMilestone('api_request_started', { endpoint: String(config.url) });
   }
-  const token = await getToken();
+  let token: string | null;
+  stages?.tokenStarted();
+  try {
+    token = await getToken();
+    stages?.tokenReady();
+  } catch (error) {
+    stages?.finish('token_failed');
+    throw error;
+  }
+  if (stages) {
+    // Timestamp Axios adapter invocation/settlement without changing the
+    // adapter, its config, or the response/error it produces. This interval
+    // still includes native queuing, transport, server and JS callback delivery.
+    const originalAdapter = config.adapter ?? api.defaults.adapter;
+    config.adapter = adapterConfig => {
+      stages.adapterStarted();
+      let result: ReturnType<ReturnType<typeof getAdapter>>;
+      try {
+        // Resolve at Axios's original dispatch boundary, after its transforms.
+        const adapter = resolveAdapter(originalAdapter, adapterConfig);
+        result = adapter(adapterConfig);
+      } catch (error) { stages.adapterSettled(); throw error; }
+      return result.then(
+        value => { stages.adapterSettled(); return value; },
+        error => { stages.adapterSettled(); throw error; },
+      );
+    };
+  }
   if (token) {
     config.headers = config.headers ?? {};
     config.headers.Authorization = `Bearer ${token}`;
@@ -213,6 +249,8 @@ function _shouldRetry(error: any): boolean {
 
 api.interceptors.response.use(
   async (res) => {
+    const stages = startupStages.get(res.config);
+    stages?.responseEntered();
     try {
       // Rolling-refresh hook — see comment block on the backend
       // /auth/me endpoint for the full backstory.
@@ -224,15 +262,24 @@ api.interceptors.response.use(
         null;
       const fresh = headerTok || bodyTok;
       if (fresh && typeof fresh === 'string' && fresh.length > 20) {
-        await saveToken(fresh);
+        stages?.persistenceStarted();
+        try {
+          await saveToken(fresh);
+          stages?.persistenceEnded(false);
+        } catch (error) {
+          stages?.persistenceEnded(true);
+          throw error;
+        }
       }
     } catch (_e) {}
+    stages?.finish('completed', res.status);
     const timing = measuredRequests.get(res.config);
     if (timing) markStartupMilestone('api_request_completed',
       { endpoint: timing.endpoint, durationMs: Date.now() - timing.at, status: res.status });
     return res;
   },
   async (error) => {
+    if (error.config) startupStages.get(error.config)?.finish('failed', error.response?.status ?? null);
     const timing = error.config && measuredRequests.get(error.config);
     if (timing) markStartupMilestone('api_request_failed',
       { endpoint: timing.endpoint, durationMs: Date.now() - timing.at, status: error.response?.status ?? 0 });

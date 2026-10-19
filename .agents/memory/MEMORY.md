@@ -37,3 +37,4 @@
 - [Background road-test acceptance](background-road-test-acceptance.md) — capture advancement before reopening; 7–10 minute parking, multi-hour endurance and separate recreation.
 - [Python test loop isolation](python-test-loop-isolation.md) — new async scenarios must not clear the ambient loop relied on by legacy synchronous tests.
 - [Android source validation](android-source-validation.md) — Expo AARs can bypass patches; inspect delivered artifacts for floating SDKs; full builds need workspace-backed storage.
+- [Startup latency attribution](startup-latency-attribution.md) — protect tracking; separate API promise time from secure storage, transport, scheduling and response persistence.

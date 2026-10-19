@@ -12,6 +12,7 @@ import {
 import { captureInstallReferrerInvite } from './installReferrerInvite';
 import { logStartupEvent } from './startupDiagnostics';
 import { recordNativeStartupCheckpoint } from './nativeStartupRecorder';
+import { beginStartupApiTiming } from './startupApiTiming';
 
 const TOKEN_KEY = 'kc_token';
 // v1.2 beta — cache the user object alongside the token so we can
@@ -104,6 +105,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const sessionLifetime = useRef(0);
 
   useEffect(() => {
+    const stopStartupApiTiming = Platform.OS === 'android' ? beginStartupApiTiming() : undefined;
     const lifetime = sessionLifetime.current;
     const isCurrent = () => sessionLifetime.current === lifetime;
     (async () => {
@@ -305,6 +307,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         recordNativeStartupCheckpoint(authRestoreTerminal, { authenticated: restoredUser });
       }
     })();
+    return stopStartupApiTiming;
   }, []);
 
   /**
