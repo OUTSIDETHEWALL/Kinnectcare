@@ -392,6 +392,11 @@ describe('Android permission/startup policy', () => {
     else {
       const nativeConfig = sdk.ready.mock.calls[0][0];
       expect(nativeConfig.foregroundService).toBe(true);
+      expect(nativeConfig.notification.sticky).toBe(true);
+      expect(nativeConfig.notification.text).toBe(
+        'Your family can see where you are. Open Kinnship to manage sharing.',
+      );
+      expect(nativeConfig.notification.actions).toBeUndefined();
       expect(nativeConfig.notification.smallIcon).toBe('drawable/notification_icon');
       expect(nativeConfig.notification.sticky).toBe(true);
       expect(nativeConfig.backgroundPermissionRationale.message).toContain('even when the app is closed or not in use');

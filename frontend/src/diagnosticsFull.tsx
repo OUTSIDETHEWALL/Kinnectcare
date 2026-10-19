@@ -1798,6 +1798,23 @@ function DiagnosticsContent() {
         <View style={{ width: 44 }} />
       </View>
 
+      {Platform.OS === 'android' && (
+        <View style={styles.actionRow}>
+          <TouchableOpacity
+            testID="diagnostics-share-all"
+            style={styles.primaryBtn}
+            onPress={() => { void onShareAll(); }}
+            disabled={sharingAll}
+            accessibilityRole="button"
+            accessibilityLabel="Share Full Diagnostics"
+          >
+            <Text style={styles.primaryBtnText}>
+              {sharingAll ? 'Preparing diagnostics…' : 'Share Full Diagnostics'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* =====================================================
           Hero health card — replaces the raw 5-row summary.
           Non-scrolling: always visible between the nav header
@@ -3494,23 +3511,6 @@ function DiagnosticsContent() {
             <Text style={styles.secondaryBtnText}>Refresh</Text>
           </TouchableOpacity>
         </View>
-
-        {Platform.OS === 'android' && (
-          <View style={styles.actionRow}>
-            <TouchableOpacity
-              testID="diagnostics-share-all"
-              style={styles.primaryBtn}
-              onPress={() => { void onShareAll(); }}
-              disabled={sharingAll}
-              accessibilityRole="button"
-              accessibilityLabel="Share All Diagnostics"
-            >
-              <Text style={styles.primaryBtnText}>
-                {sharingAll ? 'Preparing diagnostics…' : 'Share All Diagnostics'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-        )}
 
         {/* Build 53 — dedicated bg_task_log export.  Focused view of
             the Transistor headless execution trace for remote debug. */}

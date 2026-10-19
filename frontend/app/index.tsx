@@ -5,17 +5,21 @@ import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { recordNativeStartupCheckpoint } from '../src/nativeStartupRecorder';
+import { useAuth } from '../src/AuthContext';
 
 let firstWelcomeButtonPressRecorded = false;
 
 export default function Welcome() {
   const router = useRouter();
+  const { user, loading } = useAuth();
+  const showWelcome = !loading && !user;
   const [pressedButton, setPressedButton] = useState<'create-family' | 'sign-in' | null>(null);
   const welcomeLayoutRecordedRef = useRef(false);
 
   useEffect(() => {
-    recordNativeStartupCheckpoint('welcome_render_committed');
-  }, []);
+    if (showWelcome) recordNativeStartupCheckpoint('welcome_render_committed');
+    else recordNativeStartupCheckpoint('welcome_route_suppressed', { authenticated: !!user });
+  }, [showWelcome, user]);
 
   const onWelcomeLayout = () => {
     if (welcomeLayoutRecordedRef.current) return;
@@ -38,6 +42,13 @@ export default function Welcome() {
     console.info('[welcome-touch]', button, 'onPressOut');
     setPressedButton((current) => current === button ? null : current);
   };
+
+  // RootNav redirects in an effect, after the initial route has committed.
+  // Never paint signup controls in that intervening authenticated frame.
+  // This is presentation only: RootNav still owns all access/consent gates.
+  if (!showWelcome) {
+    return <View testID="welcome-session-pending" style={{ flex: 1, backgroundColor: Colors.background }} />;
+  }
 
   return (
     <ImageBackground

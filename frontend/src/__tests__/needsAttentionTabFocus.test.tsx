@@ -287,6 +287,9 @@ const mockApiPost          = jest.fn();
 const mockGetBillingStatus = jest.fn();
 const mockListFamilyInvites = jest.fn();
 
+jest.mock('../membersResponse', () => ({
+  getMembersResponse: () => require('../api').api.get('/members'),
+}));
 jest.mock('../api', () => ({
   api: {
     get: (...args: any[]) => mockApiGet(...args),
@@ -377,6 +380,7 @@ function membersResponse() {
 function summaryResponse() {
   return {
     data: {
+      missed_medication_details: [],
       members: [{
         member_id:         MOCK_MEMBER_ID,
         medication_missed: 0,

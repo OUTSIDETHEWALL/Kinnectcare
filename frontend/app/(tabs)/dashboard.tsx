@@ -28,6 +28,7 @@ import { logScreenRender } from '../../src/screenRenderLog';
 import type { DashboardLoadTrigger } from '../../src/dashboardLoadLog';
 import { logCardRender } from '../../src/cardRenderLog';
 import { useAuth } from '../../src/AuthContext';
+import { getMembersResponse } from '../../src/membersResponse';
 import * as memberStore from '../../src/store/memberStore';
 import { logPipelineEvent } from '../../src/refreshPipelineLog';
 import { useActiveEmergency } from '../../src/activeEmergency';
@@ -38,6 +39,7 @@ import { stampMembersResponse } from '../../src/pipelineSnapshot';
 import { recordLocationUploadSuccess } from '../../src/locationUploadSuccess';
 import { refreshForegroundLocation } from '../../src/foregroundLocationPublication';
 import { markStartupMilestone } from '../../src/startupDiagnostics';
+import { recordNativeStartupCheckpoint } from '../../src/nativeStartupRecorder';
 import { createDashboardLoadTrace } from '../../src/dashboardLoadTrace';
 // TrackingStatusPill removed — Build XX family screen simplification.
 import Svg, { Circle } from 'react-native-svg';
@@ -84,10 +86,14 @@ export default function Dashboard() {
   const router = useRouter();
   const { user, logout } = useAuth();
   const loadOwner = useRef(user?.id);
+  const loadRevision = useRef(0);
   loadOwner.current = user?.id;
   useEffect(() => {
     loadOwner.current = user?.id;
-    return () => { loadOwner.current = undefined; };
+    return () => {
+      loadOwner.current = undefined;
+      loadRevision.current += 1;
+    };
   }, [user?.id]);
   // Safe area insets — used to keep the SOS FAB clear of the navigation bar
   // on all device/navigation configurations (gesture, Samsung buttons, Pixel, etc.)
@@ -124,14 +130,19 @@ export default function Dashboard() {
   const [activeAlerts, setActiveAlerts] = useState<ApiAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [summaryStatus, setSummaryStatus] = useState<'pending' | 'ready' | 'failed'>('pending');
+  const [alertsStatus, setAlertsStatus] = useState<'pending' | 'ready' | 'failed'>('pending');
+  const acceptedAlertsRevision = useRef(0);
   const usableMilestone = useRef(false);
   useEffect(() => {
     markStartupMilestone('dashboard_coordinator_mounted');
+    recordNativeStartupCheckpoint('dashboard_coordinator_mounted');
   }, []);
   useEffect(() => {
-    if (!loading && !usableMilestone.current && !loadError && members.length > 0) {
+    if (!loading && !usableMilestone.current && !loadError) {
       usableMilestone.current = true;
       markStartupMilestone('first_usable_family_render', { memberCount: members.length });
+      recordNativeStartupCheckpoint('first_usable_family_render', { authenticated: true });
     }
   }, [loading, loadError, members.length]);
   const [refreshing, setRefreshing] = useState(false);
@@ -189,11 +200,13 @@ export default function Dashboard() {
   // the first /alerts network round-trip completes.
   useEffect(() => {
     if (!user?.id) return;
+    let cancelled = false;
+    const acceptedAtRead = acceptedAlertsRevision.current;
     (async () => {
       try {
         const key = `@kinnship/active_alerts_v1_${user.id}`;
         const cached = await AsyncStorage.getItem(key);
-        if (cached) {
+        if (cached && !cancelled && acceptedAtRead === acceptedAlertsRevision.current) {
           const parsed = JSON.parse(cached) as ApiAlert[];
           // Only restore alerts that are still unresolved. Acknowledging a
           // notification does not resolve its underlying battery condition.
@@ -208,6 +221,7 @@ export default function Dashboard() {
         }
       } catch (_e) {}
     })();
+    return () => { cancelled = true; };
   }, [user?.id]);
 
   // SOS hold-to-activate. 2.5 s hold → 3-2-1 countdown overlay → fires.
@@ -238,7 +252,11 @@ export default function Dashboard() {
 
   const load = async (trigger: DashboardLoadTrigger = 'unknown') => {
     const owner = user?.id;
-    const isCurrentLoad = () => !!owner && loadOwner.current === owner;
+    // An obsolete focus callback must not invalidate the replacement owner's
+    // current request merely by trying to allocate a new load revision.
+    if (!owner || loadOwner.current !== owner) return;
+    const revision = ++loadRevision.current;
+    const isCurrentLoad = () => !!owner && loadOwner.current === owner && loadRevision.current === revision;
     if (!isCurrentLoad()) return;
     // Pipeline instrumentation — record what triggered this refresh
     // so Diagnostics can show the full event sequence.
@@ -253,20 +271,18 @@ export default function Dashboard() {
     setLoadError(false);
     const trace = createDashboardLoadTrace(trigger, isCurrentLoad);
     try {
-      // Mark the moment axios.get('/members') is about to fire.  We
-      // do this BEFORE Promise.all so a slow /summary doesn't skew
-      // the timing of the /members request.
+      // Capture this caller's members request/join time before dispatching
+      // optional safety requests. Existing API instrumentation captures the
+      // original request start when joining an already pending response.
       trace.sent();
       let mRes: any = null;
       try {
-        // Build 47 — INTENTIONALLY retains a direct `api.get('/members')`
-        // here (rather than `memberStore.fetchAll()`) because the
-        // dashboard load log captures the raw axios response —
-        // status code + Date header + raw_members payload — for
-        // the diagnostic ring buffer.  The store's fetchAll()
-        // returns only the parsed array, losing those forensic
-        // fields that were critical to diagnosing the Build 41-46
-        // stale-render incidents.
+        // Join the same in-flight raw /members response as canonical
+        // foreground sync instead of starting a competing request. Unlike
+        // fetchAll's cached fallback, this preserves response status, Date
+        // header, raw payload and rejection for the diagnostic trace. The
+        // trace's sent time is this caller's join/request time; API startup
+        // instrumentation retains the actual network dispatch duration.
         //
         // This is NOT a state-ownership bypass: the line directly
         // below feeds `m.data` into the canonical store via
@@ -280,18 +296,48 @@ export default function Dashboard() {
         void getBillingStatus().then(value => {
           if (isCurrentLoad()) setBilling(value);
         }).catch(() => {});
-        const [m, s, ar] = await Promise.all([
-          api.get('/members'),
-          api.get<DashboardSummary>('/summary'),
-          // Fetch alerts in the same parallel burst so Needs Attention and
-          // Missed Meds counts are always consistent with the Alerts tab.
-          // Return null on failure (not { data: [] }) so the caller can
-          // distinguish "server returned empty list" from "fetch failed and we
-          // should preserve the previously cached state" — avoiding the silent
-          // reset-to-0 that would drop Needs Attention after a restart.
-          api.get('/alerts').catch(() => null),
-        ]);
+        // Safety data still starts immediately, but neither request may hide
+        // the entire Family screen behind its latency/retries. Unknown is not
+        // a zero/healthy result. Each callback belongs to this account AND
+        // this load, so an older response cannot replace a newer refresh.
+        setSummaryStatus('pending');
+        setAlertsStatus('pending');
+        markStartupMilestone('dashboard_requests_dispatched');
+        void api.get<DashboardSummary>('/summary').then(s => {
+          if (!isCurrentLoad()) return;
+          if (!Array.isArray(s.data?.members) || !Array.isArray(s.data?.missed_medication_details)) {
+            throw new Error('Invalid family safety summary');
+          }
+          setSummary(s.data.members);
+          setMissedMedicationDetails(s.data.missed_medication_details);
+          setSummaryStatus('ready');
+          markStartupMilestone('dashboard_summary_received');
+        }).catch(() => {
+          if (!isCurrentLoad()) return;
+          setSummaryStatus('failed');
+          markStartupMilestone('dashboard_summary_failed');
+        });
+        void api.get('/alerts').then(ar => {
+          if (!isCurrentLoad()) return;
+          if (!Array.isArray(ar.data)) throw new Error('Invalid family alerts');
+          const freshAlerts = (ar.data as ApiAlert[]).filter(a => !a.resolved);
+          acceptedAlertsRevision.current += 1;
+          setActiveAlerts(freshAlerts);
+          setAlertsStatus('ready');
+          markStartupMilestone('dashboard_alerts_received');
+          // Preserve unresolved incidents across recreation; never write an
+          // empty snapshot on request failure or from a superseded load.
+          void AsyncStorage.setItem(
+            `@kinnship/active_alerts_v1_${owner}`, JSON.stringify(freshAlerts),
+          ).catch(() => {});
+        }).catch(() => {
+          if (!isCurrentLoad()) return;
+          setAlertsStatus('failed');
+          markStartupMilestone('dashboard_alerts_failed');
+        });
+        const m = await getMembersResponse();
         if (!isCurrentLoad()) return;
+        markStartupMilestone('dashboard_members_received');
         mRes = m;
         // Build #59 — fire the invites fetch in parallel too so the
         // "Invitation Pending" section stays in sync with members on
@@ -382,41 +428,6 @@ export default function Dashboard() {
         );
         if (!isCurrentLoad()) return;
         memberStore.upsertMany(receivedMembers);
-        setSummary(s.data.members || []);
-        setMissedMedicationDetails(s.data.missed_medication_details || []);
-        // Only update activeAlerts when the fetch actually succeeded (ar !== null).
-        // When /alerts fails, ar is null and we preserve the previous state
-        // (either the in-memory value from the last successful fetch, or the
-        // AsyncStorage snapshot restored on mount) so Needs Attention never
-        // drops to 0 just because of a transient network error.
-        if (ar !== null) {
-          // Filter to current unresolved conditions. Alert acknowledgement only
-          // dismisses notification history; it must not hide an active battery
-          // incident from Needs Attention before recovery.
-          // The battery_recovered path resolves the low_battery alert on the
-          // backend without setting acknowledged=True, so filtering by
-          // !acknowledged alone would keep a resolved alert in state and in the
-          // AsyncStorage cache.  Adding !resolved here ensures:
-          //   1. setActiveAlerts() never holds a resolved alert.
-          //   2. The AsyncStorage snapshot written below is clean, so a
-          //      subsequent force-kill restart cannot flash a stale
-          //      "Needs Attention: 1" from a pre-recovery cache entry.
-          // activeBattAlerts (line ~667) already applies !resolved for display,
-          // but defence-in-depth at the write site prevents any re-surface path.
-          const freshAlerts = ((ar.data as ApiAlert[]) || []).filter(
-            (a: ApiAlert) => !a.resolved,
-          );
-          setActiveAlerts(freshAlerts);
-          // Persist the fresh snapshot so it survives a force-kill restart.
-          // Keyed by user id so a sign-out / sign-in to a different account
-          // never serves stale alerts from the previous session.
-          if (user?.id) {
-            try {
-              const cacheKey = `@kinnship/active_alerts_v1_${user.id}`;
-              void AsyncStorage.setItem(cacheKey, JSON.stringify(freshAlerts)).catch(() => {});
-            } catch (_e) {}
-          }
-        }
         setLoadError(false);
         trace.committed();
       } catch (e: any) {
@@ -454,6 +465,11 @@ export default function Dashboard() {
     } catch (_e) {
       // Top-level catch — already recorded as error on the entry.
       if (isCurrentLoad()) setLoadError(true);
+    } finally {
+      if (isCurrentLoad()) {
+        setLoading(false);
+        markStartupMilestone('dashboard_initial_load_completed');
+      }
     }
   };
 
@@ -464,10 +480,7 @@ export default function Dashboard() {
     // reported as a perceived perf regression.
     setLoading((prev) => members.length === 0 ? true : prev);
     markStartupMilestone('dashboard_initial_load_started');
-    load('focus').finally(() => {
-      markStartupMilestone('dashboard_initial_load_completed');
-      setLoading(false);
-    });
+    void load('focus');
     // Reset SOS dialing mutex on every focus return so the FAB is never
     // permanently locked after the user returns from an SOS flow.
     sosDialingRef.current = false;
@@ -562,7 +575,7 @@ export default function Dashboard() {
       clearInterval(positionPoll);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members.length]));
+  }, [members.length, user?.id]));
 
   useEffect(() => {
     (async () => {
@@ -744,6 +757,8 @@ export default function Dashboard() {
     activeEmergency,
   });
   const needsAttentionCount = needsAttentionIssues.length;
+  const safetyReady = summaryStatus === 'ready' && alertsStatus === 'ready';
+  const safetyFailed = summaryStatus === 'failed' || alertsStatus === 'failed';
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -813,10 +828,10 @@ export default function Dashboard() {
             onPress={() => setShowNeedsAttention(true)}
             activeOpacity={0.75}
             accessibilityRole={needsAttentionCount > 0 ? 'button' : undefined}
-            accessibilityLabel={`${needsAttentionCount} issues need attention`}
+            accessibilityLabel={safetyReady ? `${needsAttentionCount} issues need attention` : 'Safety status not fully verified'}
           >
             <Text style={[styles.summaryNum, needsAttentionCount > 0 && styles.summaryMissedText]}>
-              {needsAttentionCount}
+              {safetyReady ? needsAttentionCount : needsAttentionCount > 0 ? `${needsAttentionCount}+` : '—'}
             </Text>
             <Text style={[styles.summaryLbl, needsAttentionCount > 0 && styles.summaryMissedText]}>
               Needs Attention
@@ -830,12 +845,21 @@ export default function Dashboard() {
             onPress={() => setShowMissedMedications(true)}
             activeOpacity={0.75}
             accessibilityRole={totalMedMissed > 0 ? 'button' : undefined}
-            accessibilityLabel={`${totalMedMissed} missed medications`}
+            accessibilityLabel={summaryStatus === 'ready' ? `${totalMedMissed} missed medications` : 'Missed medications not yet verified'}
           >
-            <Text style={[styles.summaryNum, totalMedMissed > 0 && styles.summaryMissedText]}>{totalMedMissed}</Text>
+            <Text style={[styles.summaryNum, totalMedMissed > 0 && styles.summaryMissedText]}>
+              {summaryStatus === 'ready' ? totalMedMissed : totalMedMissed > 0 ? `${totalMedMissed}+` : '—'}
+            </Text>
             <Text style={[styles.summaryLbl, totalMedMissed > 0 && styles.summaryMissedText]}>Missed meds</Text>
           </TouchableOpacity>
         </View>
+
+        {!safetyReady && (
+          <Text testID="dashboard-safety-pending" style={styles.loadErrorMsg} accessibilityRole="alert">
+            {safetyFailed ? 'Some safety checks are unavailable.' : 'Checking safety status…'}
+            {' '}Any existing alerts and medication details are last known, not a fresh all-clear.
+          </Text>
+        )}
 
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Your Family</Text>

@@ -67,6 +67,7 @@ import { useSyncExternalStore } from 'react';
 import { api, Member } from '../api';
 import { logPipelineEvent } from '../refreshPipelineLog';
 import { observeStoreCommit } from '../pipelineSnapshot';
+import { getMembersResponse, invalidateMembersResponse } from '../membersResponse';
 
 // ============================================================
 //  Module-level state
@@ -360,6 +361,7 @@ export function upsertMany(incoming: MemberRecord[]): void {
 
 /** Remove all records — used on sign-out. */
 export function clearAll(): void {
+  invalidateMembersResponse();
   state = { members: {}, version: state.version + 1, lastFetchAllAt: null };
   for (const k of Object.keys(fetchSeq)) delete fetchSeq[k];
   inFlightOne.clear();
@@ -411,7 +413,7 @@ export function fetchAll(): Promise<MemberRecord[]> {
   if (inFlightAll) return inFlightAll;
   inFlightAll = (async () => {
     try {
-      const r = await api.get('/members');
+      const r = await getMembersResponse();
       const arr: MemberRecord[] = Array.isArray(r?.data) ? r.data : [];
       // Atomic replace of the WHOLE set.  Anything that disappeared
       // from the backend (a removed member) drops out here.

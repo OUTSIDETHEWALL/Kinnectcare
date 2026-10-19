@@ -94,6 +94,32 @@ describe('Diagnostics storage isolation', () => {
     });
   });
 
+  it.each([null, 'request failed'])('accepts an unfinished dashboard request with null raw_members (error=%s)', async error => {
+    storage.set('@kinnship/dashboard_load_log_v1', JSON.stringify([{
+      seq: 1, src: 'dashboard-load', id: 'pending', trigger: 'focus',
+      t_load_started: 123, t_get_sent: 124, t_get_received: null,
+      t_setstate: null, http_status: null, member_count: null,
+      raw_members: null, staleness_triggered_for: [], error,
+    }]));
+    const result = await auditDiagnosticsStorage();
+    expect(result.invalidKeys).toEqual([]);
+    expect(storage.has('@kinnship/dashboard_load_log_v1')).toBe(true);
+  });
+
+  it.each([
+    { raw_members: {} }, { raw_members: 'bad' }, { raw_members: undefined },
+    { t_get_received: 125 }, { t_setstate: 126 },
+    { http_status: 200 }, { member_count: 2 },
+  ])('still rejects malformed or completed dashboard entries with no raw array (%j)', async change => {
+    storage.set('@kinnship/dashboard_load_log_v1', JSON.stringify([{
+      seq: 1, src: 'dashboard-load', id: 'bad', trigger: 'focus',
+      t_load_started: 123, t_get_sent: 124, t_get_received: null,
+      t_setstate: null, http_status: null, member_count: null,
+      raw_members: null, staleness_triggered_for: [], ...change,
+    }]));
+    expect((await auditDiagnosticsStorage()).invalidKeys).toEqual(['@kinnship/dashboard_load_log_v1']);
+  });
+
   it('removes only the selected Diagnostics key and retains before/after evidence', async () => {
     storage.set('kc_push_refresh_log', '{not-json');
     storage.set('kc_my_member_id_v1', 'protected-member-id');
