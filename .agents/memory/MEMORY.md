@@ -38,3 +38,4 @@
 - [Python test loop isolation](python-test-loop-isolation.md) — new async scenarios must not clear the ambient loop relied on by legacy synchronous tests.
 - [Android source validation](android-source-validation.md) — Expo AARs can bypass patches; inspect delivered artifacts for floating SDKs; full builds need workspace-backed storage.
 - [Startup latency attribution](startup-latency-attribution.md) — protect tracking; separate API promise time from secure storage, transport, scheduling and response persistence.
+- [Native observer safety](native-observer-safety.md) — keep tracing off critical paths; preserve callbacks; test blocked consumers and actual compiled hooks.

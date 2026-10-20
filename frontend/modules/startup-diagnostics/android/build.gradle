@@ -10,6 +10,13 @@ expoModule {
   canBePublished false
 }
 
+dependencies {
+  // Expo core's implementation dependency does not expose NetworkingModule.
+  // Use the app's existing RN artifact/version (including its OkHttp API), not
+  // a new networking library or a different runtime transport.
+  compileOnly 'com.facebook.react:react-android'
+}
+
 android {
   namespace "expo.modules.startupdiagnostics"
   defaultConfig {

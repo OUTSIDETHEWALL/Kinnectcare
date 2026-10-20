@@ -10,15 +10,30 @@ import okhttp3.Call
 import okhttp3.Connection
 import okhttp3.EventListener
 import okhttp3.Handshake
+import okhttp3.HttpUrl
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 
 /** Wrap the existing listener/client; never replace its dispatcher or connection pool. */
 object NativeHttpEvidence {
+  private var installed = false
+  @Synchronized
   @JvmStatic fun install(context: Context) {
+    if (installed) return
     val application = context.applicationContext
     EvidenceTrace.install(application)
+    // RN exposes only a global setter. Refuse to overwrite someone else's hook.
+    val occupied = try {
+      NetworkingModule::class.java.getDeclaredField("customClientBuilder").apply { isAccessible = true }.get(null) != null
+    } catch (_: Exception) {
+      EvidenceTrace.httpStatus("declined_unreadable_custom_builder")
+      return
+    }
+    if (occupied) {
+      EvidenceTrace.httpStatus("declined_existing_custom_builder")
+      return
+    }
     NetworkingModule.setCustomClientBuilder { builder ->
       // Snapshot only to preserve the existing listener factory and dispatcher.
       // newBuilder/build share the original pool, dispatcher, cache and policy.
@@ -87,8 +102,16 @@ object NativeHttpEvidence {
           override fun callEnd(call: Call) { emit("native_call_end"); delegate.callEnd(call) }
           override fun callFailed(call: Call, ioe: IOException) { emit("native_call_failed"); delegate.callFailed(call, ioe) }
           override fun canceled(call: Call) { delegate.canceled(call) }
+          override fun proxySelectStart(call: Call, url: HttpUrl) { delegate.proxySelectStart(call, url) }
+          override fun proxySelectEnd(call: Call, url: HttpUrl, proxies: List<Proxy>) { delegate.proxySelectEnd(call, url, proxies) }
+          override fun satisfactionFailure(call: Call, response: Response) { delegate.satisfactionFailure(call, response) }
+          override fun cacheHit(call: Call, response: Response) { delegate.cacheHit(call, response) }
+          override fun cacheMiss(call: Call) { delegate.cacheMiss(call) }
+          override fun cacheConditionalHit(call: Call, response: Response) { delegate.cacheConditionalHit(call, response) }
         }
       }
     }
+    installed = true
+    EvidenceTrace.httpStatus("installed")
   }
 }

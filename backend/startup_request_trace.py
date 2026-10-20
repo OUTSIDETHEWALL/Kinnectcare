@@ -1,6 +1,8 @@
 """Bounded, opt-in startup request correlation; never reads bodies or credentials."""
 import logging
+import queue
 import re
+import threading
 import time
 
 logger = logging.getLogger("kinnship.startup_request_trace")
@@ -14,6 +16,27 @@ class StartupRequestTraceMiddleware:
         self.app = app
         self._window = 0
         self._claims = 0
+        self._records = queue.Queue(maxsize=96)
+        self._dropped = 0
+        self._write_failures = 0
+        self._budget_dropped = 0
+        self._writer = threading.Thread(target=self._write_records, name="startup-trace-writer", daemon=True)
+        self._writer.start()
+
+    def _write_records(self):
+        while True:
+            record = self._records.get()
+            try:
+                if record is None:  # Local-test cleanup; process shutdown owns production lifetime.
+                    return
+                logger.info(
+                    "startup_request_trace id=%s edge=%s endpoint=%s stage=%s elapsed_ms=%.3f status=%s observer_dropped=%s observer_write_failures=%s observer_budget_dropped=%s",
+                    *record, self._dropped, self._write_failures, self._budget_dropped,
+                )
+            except Exception:
+                self._write_failures += 1
+            finally:
+                self._records.task_done()
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope.get("method") != "GET" or scope.get("path") not in PATHS:
@@ -27,6 +50,7 @@ class StartupRequestTraceMiddleware:
         if minute != self._window:
             self._window, self._claims = minute, 0
         if self._claims >= 32:
+            self._budget_dropped += 1
             return await self.app(scope, receive, send)
         self._claims += 1
         edge_id = headers.get(b"x-railway-request-id", b"").decode("ascii", errors="replace")
@@ -36,11 +60,11 @@ class StartupRequestTraceMiddleware:
 
         def record(stage, status=None):
             try:
-                logger.info("startup_request_trace id=%s edge=%s endpoint=%s stage=%s elapsed_ms=%.3f status=%s",
-                            trace_id, edge_id, scope["path"], stage,
-                            (time.monotonic_ns() - started) / 1_000_000, status)
-            except Exception:
-                pass  # Diagnostics cannot change ASGI behavior.
+                # Timestamp on the request path; formatting/handlers/IO never run there.
+                self._records.put_nowait((trace_id, edge_id, scope["path"], stage,
+                                         (time.monotonic_ns() - started) / 1_000_000, status))
+            except queue.Full:
+                self._dropped += 1
 
         async def observed_send(message):
             if message["type"] == "http.response.start":

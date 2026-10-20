@@ -86,7 +86,7 @@ describe('native evidence source contracts (not native compilation)', () => {
   });
   it('keeps evidence outside authority storage and off the producer disk path', () => {
     const source = read(`${native}/EvidenceTrace.kt`);
-    expect(source).toContain('kinnship_bounded_evidence_v1');
+    expect(read(`${native}/EvidenceStore.kt`)).toContain('kinnship_bounded_evidence_v2');
     expect(source).not.toContain('kinnship_tracking_reliability_v1');
     expect(source).toContain('writer.postDelayed({ flush() }, 1000)');
     expect(source).toContain('tail(http, 512)');
@@ -96,6 +96,12 @@ describe('native evidence source contracts (not native compilation)', () => {
     expect(source).not.toContain('"owner"');
     expect(source).not.toContain('"latitude"');
     expect(source).not.toContain('"token"');
+    const producer = source.slice(source.indexOf('@JvmStatic fun record('), source.indexOf('private fun scheduleDrain'));
+    expect(producer).toContain('pending.offer');
+    expect(producer).not.toContain('JSONObject');
+    expect(producer).not.toContain('synchronized(lock)');
+    expect(source).toContain('ArrayBlockingQueue<Pending>(1024)');
+    expect(source).toContain('counters.length() < 256');
   });
   it('observes the existing client without modifying transport policy', () => {
     const source = read(`${native}/NativeHttpEvidence.kt`);
@@ -105,6 +111,9 @@ describe('native evidence source contracts (not native compilation)', () => {
     }
     expect(source).toContain('chain.proceed(chain.request())');
     expect(source).toContain('val original = existing.eventListenerFactory');
+    expect(source).toContain('declined_existing_custom_builder');
+    for (const callback of ['proxySelectStart', 'proxySelectEnd', 'cacheHit', 'cacheMiss',
+      'cacheConditionalHit', 'satisfactionFailure']) expect(source).toContain(`delegate.${callback}(`);
   });
   it('exports the trace through Full Diagnostics', () => {
     expect(read('src/diagnosticsFull.tsx')).toContain('boundedNativeEvidence: readEvidenceTrace()');

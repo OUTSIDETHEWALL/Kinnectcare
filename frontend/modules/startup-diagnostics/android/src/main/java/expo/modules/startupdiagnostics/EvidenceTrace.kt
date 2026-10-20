@@ -4,21 +4,41 @@ import android.content.Context
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
  * Evidence only. No authority, SDK configuration or HTTP policy lives here.
- * Producer work is bounded in-memory; disk writes run on a dedicated thread.
- * Abrupt process death can lose the final unflushed second (reported on export).
+ * Producer work only offers to a bounded queue; parsing/storage use one background thread.
+ * Death can lose queued/unflushed events; export reports queue/loss/IO coverage.
  */
 object EvidenceTrace {
   private val lock = Any()
   private val process = UUID.randomUUID().toString()
-  private val thread by lazy { HandlerThread("kinnship-evidence").apply { start() } }
+  private val thread by lazy { HandlerThread("kinnship-evidence", android.os.Process.THREAD_PRIORITY_BACKGROUND).apply { start() } }
   private val writer by lazy { Handler(thread.looper) }
-  private var context: Context? = null
+  @Volatile private var context: Context? = null
+  private lateinit var store: EvidenceStore
+  private data class Pending(val channel: String, val stage: String, val id: String, val detail: String,
+    val wall: Long, val elapsed: Long)
+  private val pending = ArrayBlockingQueue<Pending>(1024)
+  private val draining = AtomicBoolean()
+  private val queueDropped = AtomicLong()
+  private var previousDropped = 0L
+  private var writeFailures = 0L
+  private var httpOrdinal = 0L
+  private var gpsOrdinal = 0L
+  private val dirtyHttp = mutableSetOf<Int>()
+  private val dirtyGps = mutableSetOf<Int>()
+  private val dirtyHours = mutableSetOf<String>()
+  @Volatile private var httpObserverStatus = "not_installed"
+  @JvmStatic fun httpStatus(status: String) { httpObserverStatus = status }
   private var scheduled = false
   private var sequence = 0L
   private var http = JSONArray()
@@ -46,18 +66,40 @@ object EvidenceTrace {
     "ownership_unavailable", "authorization_unverified", "authorization_obsolete", "sharing_disabled",
     "invalid_owner", "session_rejected", "permission_denied", "no_session", "invalid_backend",
     "obsolete_owner", "authenticated_owner", "native_unavailable", "other")
-  private fun prefs(ctx: Context) = ctx.getSharedPreferences("kinnship_bounded_evidence_v1", Context.MODE_PRIVATE)
-
   @JvmStatic fun install(ctx: Context) {
+    if (context != null) return
     synchronized(lock) {
       if (context != null) return
       context = ctx.applicationContext
-      try {
-        val p = prefs(ctx)
-        http = JSONArray(p.getString("http", "[]"))
-        gps = JSONArray(p.getString("gps", "[]"))
-        hours = JSONObject(p.getString("hours", "{}"))
-      } catch (_: Exception) { /* corrupt evidence is not tracking authority */ }
+      writer.post {
+        store = EvidenceStore(requireNotNull(context).filesDir)
+        val restored = store.load()
+        // Re-sanitize restored rows; malformed/unknown persisted fields never export.
+        fun restore(rows: JSONArray, capacity: Int): JSONArray {
+          val clean = JSONArray()
+          for (i in 0 until rows.length()) try {
+            val row = rows.getJSONObject(i)
+            if (row.optString("stage") !in stages || row.getLong("ordinal") < 0) continue
+            val processId = row.getString("process")
+            if (!Regex("[a-f0-9-]{36}").matches(processId)) continue
+            clean.put(JSONObject().put("stage", row.getString("stage")).put("process", processId)
+              .put("id", row.optString("id").takeIf { idPattern.matches(it) } ?: "")
+              .put("ordinal", row.getLong("ordinal")).put("sequence", row.getLong("sequence"))
+              .put("wallClockMs", row.getLong("wallClockMs")).put("elapsedRealtimeMs", row.getLong("elapsedRealtimeMs"))
+              .put("detail", sanitize(row.optJSONObject("detail") ?: JSONObject())))
+          } catch (_: Exception) { store.readFailures++ }
+          return tail(clean, capacity)
+        }
+        http = restore(restored.first, 512)
+        gps = restore(restored.second, 2048)
+        hours = store.loadHours { key ->
+          val parts = key.split(':')
+          key == "counter_overflow" || (parts.size == 3 && parts[0] in stages && parts[1] in sources && parts[2] in reasons)
+        }
+        httpOrdinal = (0 until http.length()).maxOfOrNull { http.getJSONObject(it).getLong("ordinal") + 1 } ?: 0
+        gpsOrdinal = (0 until gps.length()).maxOfOrNull { gps.getJSONObject(it).getLong("ordinal") + 1 } ?: 0
+        previousDropped = store.loadLoss()
+      }
     }
   }
 
@@ -65,8 +107,33 @@ object EvidenceTrace {
     try {
       if (channel !in setOf("http", "gps") || stage !in stages) return
       install(ctx)
-      synchronized(lock) {
-        val input = JSONObject(detail)
+      // No disk, JSON parsing, ring copies or authority/worker-lock waits here.
+      if (detail.length > 2048 || !pending.offer(Pending(channel, stage, if (id.length == 32) id else "", detail,
+          System.currentTimeMillis(), SystemClock.elapsedRealtime()))) queueDropped.incrementAndGet()
+      scheduleDrain()
+    } catch (_: Exception) { queueDropped.incrementAndGet() }
+  }
+
+  private fun scheduleDrain() {
+    if (draining.compareAndSet(false, true)) writer.post {
+      try {
+        // A finite slice lets delayed flush/export work run even under a flood.
+        repeat(128) {
+          val event = pending.poll() ?: return@repeat
+          try { consume(event) } catch (_: Exception) { queueDropped.incrementAndGet() }
+        }
+      } finally {
+        draining.set(false)
+        if (!scheduled) {
+          scheduled = true
+          writer.postDelayed({ flush() }, 1000)
+        }
+        if (pending.isNotEmpty()) scheduleDrain()
+      }
+    }
+  }
+
+  private fun sanitize(input: JSONObject): JSONObject {
         val safe = JSONObject()
         for (key in listOf("generation", "expectedGeneration", "captureAgeMs", "leaseAgeMs",
           "backoffRemainingMs", "status", "queued", "running", "bytes", "taskId", "accepted")) {
@@ -81,23 +148,37 @@ object EvidenceTrace {
         if (Regex("[A-Za-z0-9_-]{1,128}").matches(edgeId)) safe.put("edgeId", edgeId)
         val parentId = input.optString("parentId")
         if (idPattern.matches(parentId)) safe.put("parentId", parentId)
-        val now = System.currentTimeMillis()
-        val elapsed = SystemClock.elapsedRealtime()
-        val safeId = if (idPattern.matches(id)) id else ""
+        return safe
+  }
+
+  private fun consume(event: Pending) {
+        val input = JSONObject(event.detail)
+        val safe = sanitize(input)
+        val source = safe.optString("source", "other")
+        val reason = safe.optString("reason", "other")
+        val parentId = safe.optString("parentId")
+        val now = event.wall
+        val elapsed = event.elapsed
+        val stage = event.stage
+        val safeId = if (idPattern.matches(event.id)) event.id else ""
         val entry = JSONObject().put("wallClockMs", now).put("elapsedRealtimeMs", elapsed)
           .put("process", process).put("sequence", ++sequence).put("stage", stage)
           .put("id", safeId).put("detail", safe)
-        if (channel == "http") {
+        if (event.channel == "http") {
+          entry.put("ordinal", httpOrdinal++)
           http.put(entry)
           http = tail(http, 512)
+          dirtyHttp.add(((httpOrdinal - 1) / 32 % 16).toInt())
         } else {
           // All events count, even when detail sampling declines a busy wake.
           val hour = (now / 3600000L).toString()
           val counters = hours.optJSONObject(hour) ?: JSONObject().also { hours.put(hour, it) }
           val key = "$stage:$source:$reason"
-          counters.put(key, counters.optLong(key) + 1)
-          val keys = hours.keys().asSequence().toList().sorted()
-          keys.dropLast(48).forEach { hours.remove(it) }
+          val boundedKey = if (counters.has(key) || counters.length() < 256) key else "counter_overflow"
+          counters.put(boundedKey, counters.optLong(boundedKey) + 1)
+          dirtyHours.add(hour)
+          val keys = hours.keys().asSequence().toList().sortedBy { it.toLongOrNull() ?: 0 }
+          keys.dropLast(48).forEach { hours.remove(it); dirtyHours.remove(it) }
           if (stage == "native_wake_received" && safeId.isNotEmpty()) {
             val last = lastSamples[source]
             if (last == null || elapsed - last >= 15 * 60000L) {
@@ -116,16 +197,12 @@ object EvidenceTrace {
           val last = lastSamples[sampleKey]
           if (safeId in sampledWakes || last == null || elapsed - last >= 15 * 60000L) {
             lastSamples[sampleKey] = elapsed
+            entry.put("ordinal", gpsOrdinal++)
             gps.put(entry)
             gps = tail(gps, 2048)
+            dirtyGps.add(((gpsOrdinal - 1) / 32 % 64).toInt())
           }
         }
-        if (!scheduled) {
-          scheduled = true
-          writer.postDelayed({ flush() }, 1000)
-        }
-      }
-    } catch (_: Exception) { /* never affect a decision, task or response */ }
   }
 
   private fun tail(rows: JSONArray, capacity: Int): JSONArray {
@@ -134,25 +211,29 @@ object EvidenceTrace {
   }
 
   private fun flush() {
-    // Serialize writers; do not hold the producer lock during disk IO.
-    val snapshot = synchronized(lock) {
-      scheduled = false
-      arrayOf(http.toString(), gps.toString(), hours.toString())
-    }
+    scheduled = false
     try {
-      context?.let { prefs(it).edit().putString("http", snapshot[0])
-        .putString("gps", snapshot[1]).putString("hours", snapshot[2]).commit() }
-    } catch (_: Exception) { /* export states best-effort durability */ }
+      // Only dirty 32-row pages/current hour are rewritten, never the entire ring.
+      store.save(http, gps, hours, dirtyHttp, dirtyGps, dirtyHours, previousDropped + queueDropped.get())
+      dirtyHttp.clear(); dirtyGps.clear(); dirtyHours.clear()
+    } catch (_: Exception) { writeFailures++ }
   }
 
   @JvmStatic fun read(ctx: Context): String {
-    install(ctx)
-    return synchronized(lock) {
-      JSONObject().put("available", true).put("version", 1)
+    return try {
+      install(ctx)
+      val result = CompletableFuture<String>()
+      writer.post {
+        try { result.complete(JSONObject().put("available", true).put("version", 1)
         .put("http", JSONArray(http.toString())).put("gps", JSONArray(gps.toString()))
         .put("hourlyCounts", JSONObject(hours.toString()))
-        .put("limits", "512 HTTP / 2048 sampled GPS rows; 48 hourly counter buckets; final unflushed second may be lost; absence is not proof without coverage")
-        .toString()
-    }
+          .put("httpObserverStatus", httpObserverStatus).put("pendingEvents", pending.size)
+          .put("queueDropped", previousDropped + queueDropped.get()).put("writeFailures", writeFailures)
+          .put("readFailures", store.readFailures)
+          .put("limits", "512 HTTP / 2048 sampled GPS rows; 48 hours, 256 counter keys/hour plus overflow; 1024 pending events; buffered/unflushed events may be lost on death; absence is not proof without coverage")
+          .toString()) } catch (_: Exception) { result.complete("""{"available":false,"reason":"snapshot_failed"}""") }
+      }
+      result.get(750, TimeUnit.MILLISECONDS)
+    } catch (_: Exception) { """{"available":false,"reason":"observer_busy_or_unavailable"}""" }
   }
 }

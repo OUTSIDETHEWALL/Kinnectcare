@@ -2,15 +2,17 @@
 
 ## Status / release boundary
 
-Local investigation candidate, not a fix. No merge, backend deployment, OTA,
-native build, production configuration/data mutation, or phone operation is
-included. Google Play production remains on HOLD. Preserve moving/background
+Local investigation candidate, not a fix. Subsequent compile-only validation is
+reported in [Native validation](native-evidence-compile-review.md). No merge,
+backend deployment, OTA, production build/configuration/data mutation or phone
+operation is included. Google Play production remains on HOLD. Preserve moving/background
 GPS, native owner/consent fencing, acquisition options, and the 60-minute
 stationary threshold. No new dependency, request, retry, timeout, dispatcher
 limit, connection pool, DNS resolver, SDK listener, or recovery policy is added.
 
-Native compilation, delivered-artifact inspection, signed-in Android UI,
-physical overhead and unattended behavior are **not verified**.
+Native debug compilation and compiled class paths have now been verified.
+Installed DEX/release shrinking, signed-in Android UI, physical overhead and
+unattended behavior remain **not verified**.
 
 ## What existing evidence proves
 
@@ -62,7 +64,11 @@ silently overwritten.
 
 Backend instrumentation is in the active `backend/` tree only. It admits at
 most 32 traced requests per monotonic minute per middleware instance; excess
-requests proceed normally without trace logs. No backend deployment occurred.
+requests proceed normally without trace logs. Log handlers run on a separate
+daemon writer with a 96-record queue; overflow, write failures and admission
+skips are reported in subsequent logs. Elapsed times are captured before
+enqueue: ingestion/log-write timestamps are not request-entry timestamps.
+No backend deployment occurred.
 Railway request ID is recorded only when an actual syntactically valid header
 is available. Otherwise client ↔ backend correlation still uses the opaque ID;
 individual edge matching is not promised.
@@ -128,17 +134,22 @@ event type, not a fictional shared ID before callback dispatch.
 Full Diagnostics adds `boundedNativeEvidence`:
 
 - Separate from startup/authority rings: 512 HTTP rows, 2,048 sampled GPS rows,
-  48 wall-clock-hour counter buckets; source/stage/reason keys are closed sets.
+  48 wall-clock-hour counter buckets, each at most 256 keys plus overflow;
+  source/stage/reason keys are closed sets.
 - GPS detailed wake sampling: first wake per source per 15 monotonic minutes;
   linked acquisition spans follow that sampled wake. Counts include unsampled
   observer events, so busy startup cannot erase the fact a stage ran overnight.
 - Each row has process-random identity, sequence, wall and native elapsed time.
   No token, URL, error message, payload, owner, coordinate or raw location enters
   this store. Optional edge/parent IDs are validated, opaque strings.
-- Disk writes run on one dedicated observer thread with a one-second delay.
-  Export includes the live in-memory snapshot. Abrupt death may lose the final
-  unflushed second. Disk failure has no tracking side effect. Counts reflect
-  observer events, not exact-once tasks. Wall-clock changes affect hour buckets.
+- Producers offer to a 1,024-event queue. JSON, restore, sampling and IO run on
+  one background-priority observer thread, outside authority/client locks.
+  Atomic 32-row pages replace whole-ring SharedPreferences rewrites.
+  A one-second debounce is **not a hard durability deadline**: suspension,
+  backlog, disk failure or death can lose queued/unflushed evidence. Export
+  reports pending/dropped events and IO failures, or explicitly reports a busy
+  snapshot after 750 ms. Counts reflect observer events, not exact-once tasks.
+  Clock changes affect which wall-clock hour buckets survive.
 - Native and JS source tests cannot prove hook delivery in an installed binary.
   Missing rows alone are not proof of a missing callback without confirmed
   observer installation/retention and the native timer coverage.
@@ -157,16 +168,19 @@ unchanged protected recovery scenarios, native-source transform drift and
 idempotence, privacy inventories and backend stream identity/cancellation.
 They do not constitute native compilation or physical acceptance.
 
-Verification on 2026-10-20: 189 tests across eight focused JS suites passed;
+Original verification on 2026-10-20: 189 tests across eight focused JS suites passed;
 six backend observer tests passed; TypeScript passed; targeted ESLint had zero
 errors and 33 warnings (including an existing parser/TypeScript-version
 compatibility warning). The unsigned web disclaimer gate rendered after a
 development-preview restart. This is not signed-in or native Android UI
-verification. No production export, prebuild or native build was run.
+verification. That initial pass did not run a prebuild or native build; the
+subsequently authorized **disposable debug compile-only** pass is documented in
+the native validation report. No production build/export was made.
 
-Smallest next step: review this evidence-only diff, then separately authorize
-compile-only native validation and inspection of the produced hooks. Do not
-publish it, deploy the backend, or operate phones as part of that authorization.
+Compile-only validation and inspection have now completed. The next step is
+owner review and separate authorization for a diagnostic native binary and
+the optional backend instrumentation deployment. Do not publish it, deploy
+the backend, or operate phones under the compile-only authorization.
 Only after separate release approval collect a naturally slow startup and an
 unattended stationary interval with the healthy control. Compare moving capture
 advancement as a protected regression baseline. Neither defect is called fixed.
