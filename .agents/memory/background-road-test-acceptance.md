@@ -36,3 +36,20 @@ test while addressing the remaining launch friction.
 
 **How to apply:** Treat startup, notification opening and health presentation
 as separate problems unless evidence establishes a shared tracking defect.
+
+## Launch hold and separate investigations
+
+Google Play production remains on HOLD pending resolution/acceptance of the
+startup-delay and unattended-stationary-location reliability issues.
+Investigate them separately. Preserve the approximately 60-minute stationary
+policy and the successful moving/background baseline; do not tune either to
+hide a multi-hour stationary gap.
+
+**Why:** The user explicitly set this release boundary on 2026-10-20 after
+reporting a roughly ten-hour stationary gap despite current device/battery
+contact, with another same-release phone remaining healthy.
+
+**How to apply:** Investigation authorization is not release authorization.
+No merge, deployment, OTA, new binary, Play upload, production configuration/data
+change or physical phone operation is included. A foreground-associated
+recovery is not proof of its cause or autonomous stationary acceptance.
