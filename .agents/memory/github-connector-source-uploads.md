@@ -20,6 +20,19 @@ produce a different source tree.
 retrieved bytes against the local blob ID before uploading. Never accept a
 successful API response as proof that the remote tree matches the reviewed one.
 
+Bound encoded chunks at the shell-output boundary, not after receiving one large
+result. Verify the reconstructed Git blob hash inside the receiving sandbox
+before calling GitHub, as well as checking GitHub's returned hash.
+
+**Why:** A large source transfer reported a full length and `truncated:false`
+but arrived shortened at the next execution boundary. Splitting the already
+received result did not restore the missing bytes. Small source-side chunks
+preserved the exact reviewed commit and tree without changing any source.
+
+**How to apply:** Treat transport length/truncation metadata as insufficient
+evidence of integrity. Check content hashes on both sides of each boundary and
+do not update a ref or deploy until blob, tree and commit identities all match.
+
 Transport commit metadata as JSON, including the exact trailing newline in the
 stored commit message. Do not obtain the message from raw shell output.
 
