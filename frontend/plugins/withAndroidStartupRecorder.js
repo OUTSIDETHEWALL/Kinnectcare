@@ -2,6 +2,7 @@ const { withMainActivity, withMainApplication } = require('expo/config-plugins')
 
 const MARKER = 'KinnshipStartupDiagnostics';
 const RECORDER = 'expo.modules.startupdiagnostics.StartupDiagnosticsRecorder';
+const withAndroidEvidenceTracing = require('./withAndroidEvidenceTracing');
 
 function insertInFunction(contents, signature, before, after) {
   const signatureIndex = contents.indexOf(signature);
@@ -20,11 +21,18 @@ function insertInFunction(contents, signature, before, after) {
 }
 
 function injectMainApplication(contents) {
-  if (contents.includes(MARKER)) return contents;
+  const install = 'expo.modules.startupdiagnostics.NativeHttpEvidence.install(this)';
+  const observedInstall = `try { ${install} } catch (_: Exception) { /* evidence only */ }`;
+  if (contents.includes(MARKER)) {
+    if (contents.includes(install)) return contents;
+    const boundary = `${RECORDER}.record(this, "native_application_on_create_started", null)`;
+    if (!contents.includes(boundary)) throw new Error('Evidence Application hook source drift');
+    return contents.replace(boundary, `${boundary}\n    ${observedInstall}`);
+  }
   return insertInFunction(
     contents,
     'override fun onCreate()',
-    `\n    // ${MARKER}: truthful boundary before Application superclass initialization.\n    ${RECORDER}.startNewRun(this)\n    ${RECORDER}.record(this, "native_application_on_create_started", null)\n`,
+    `\n    // ${MARKER}: truthful boundary before Application superclass initialization.\n    ${RECORDER}.startNewRun(this)\n    ${RECORDER}.record(this, "native_application_on_create_started", null)\n    ${observedInstall}\n`,
     `\n    // ${MARKER}: this method has completed its generated Application initialization.\n    ${RECORDER}.record(this, "native_application_on_create_completed", null)\n  `,
   );
 }
@@ -48,6 +56,7 @@ ${next.slice(classEnd)}`;
 }
 
 module.exports = function withAndroidStartupRecorder(config) {
+  config = withAndroidEvidenceTracing(config);
   config = withMainApplication(config, (cfg) => {
     cfg.modResults.contents = injectMainApplication(cfg.modResults.contents);
     return cfg;

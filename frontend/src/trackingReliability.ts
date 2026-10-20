@@ -32,6 +32,7 @@ type ReliabilityModule = {
   trackingRevokeIfCurrent(owner: string, generation: number, reason: string, operation: string): boolean;
   trackingRearmConsent(generation: number): boolean;
   trackingClaim(owner: string, generation: number, operation: string, now: number): boolean;
+  trackingClaimEvidence?(owner: string, generation: number, operation: string, now: number, evidenceId: string): boolean;
   trackingClaimConfiguration(owner: string, generation: number, operation: string, now: number): boolean;
   trackingComplete(operation: string, outcome: string, capturedAt: number, moving: boolean): void;
   trackingRecord(event: string, detail: string): void;
@@ -133,10 +134,12 @@ export function recordTrackingEvidence(event: string, detail: Record<string, unk
   try { native()?.trackingRecord(event, JSON.stringify(detail)); } catch { /* evidence cannot gate shutdown */ }
 }
 
-export function claimTrackingAcquisition(owner: string, generation: number, operation: string): boolean {
+export function claimTrackingAcquisition(owner: string, generation: number, operation: string, evidenceId?: string | null): boolean {
   const module = native();
   if (!module) throw new Error('tracking_native_extension_required');
-  return module.trackingClaim(owner, generation, operation, Date.now());
+  return evidenceId && module.trackingClaimEvidence
+    ? module.trackingClaimEvidence(owner, generation, operation, Date.now(), evidenceId)
+    : module.trackingClaim(owner, generation, operation, Date.now());
 }
 
 export function completeTrackingAcquisition(

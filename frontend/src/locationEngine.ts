@@ -62,6 +62,7 @@
  * keep-alive).
  */
 import { Platform, AppState } from 'react-native';
+import { recordEvidence } from './evidenceTrace';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
@@ -398,6 +399,9 @@ function registerHeadlessTaskOnce(): void {
   const HeadlessTask = async (event: any) => {
     try {
       const name = event?.name;
+      if (['heartbeat', 'boot', 'terminate', 'motionchange', 'activitychange'].includes(name)) {
+        recordEvidence('gps', 'js_wake_received', event?.kcEvidenceWakeId ?? null, { source: name });
+      }
       if (name === 'location' && !event?.params?.sample
         && !event?.params?.extras?.[GUARDED_POSITION_MARKER]) {
         await observeNativeCapture(event.params, true);
@@ -435,6 +439,7 @@ function registerHeadlessTaskOnce(): void {
       if (Platform.OS === 'android' && ['terminate', 'boot', 'heartbeat', 'motionchange', 'activitychange'].includes(name)) {
         const recovery = await recoverWithOperationalReport(
           `sdk-${name}`, () => true, transport => { authorizedTransport = transport; },
+          event?.kcEvidenceWakeId ?? null,
         );
         // A denied/revoked owner must not obtain and upload GPS through the
         // old heartbeat/motion handler merely because a native event arrived.
@@ -456,7 +461,8 @@ function registerHeadlessTaskOnce(): void {
             samples: 1,
             persist: true,
             timeout: 30,
-            extras: { source: 'headless-heartbeat' },
+            extras: { source: 'headless-heartbeat',
+              ...(event?.kcEvidenceWakeId ? { kc_evidence_wake_id: event.kcEvidenceWakeId } : {}) },
           }, authorizedTransport);
           recordPipelineTs('headless_heartbeat');
           await logEvent('headless_heartbeat_ok');
@@ -2094,12 +2100,16 @@ export function recoverFromIndependentWake(
   trigger: string,
   isCurrent: () => boolean = () => true,
   onAuthorizedBattery?: (transport: AuthorizedBatteryTransport) => void,
+  evidenceWakeId: string | null = null,
 ): Promise<string> {
   if (Platform.OS !== 'android') return Promise.resolve('not_android');
   const generation = engineGeneration;
   const expected = readTrackingAuthority();
   return (async () => {
     const verdict = await evaluateWakeAuthorization(() => generation === engineGeneration && isCurrent());
+    recordEvidence('gps', 'authorization_result', evidenceWakeId, {
+      accepted: verdict.state === 'AUTHORIZED', reason: verdict.source, source: trigger, generation,
+    });
     recordTrackingEvidence('wake_authorization', { source: trigger, authorization: verdict.state, reason: verdict.source });
     if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
     if (verdict.state === 'UNKNOWN') return verdict.source;
@@ -2175,6 +2185,11 @@ export function recoverFromIndependentWake(
         },
       );
       await logEvent('independent_tracking_recovery', { trigger, result });
+      recordEvidence('gps', 'authorization_result', evidenceWakeId, {
+        source: trigger, generation,
+        accepted: ['already_enabled', 'restarted', 'cooldown'].includes(result),
+        reason: ['already_enabled', 'restarted', 'cooldown'].includes(result) ? 'allowed' : result,
+      });
       return result;
     } catch (error: unknown) {
       try { recordTrackingRecoveryFailure(error, trigger); } catch { /* missing native extension is already an explicit failure */ }
@@ -2191,8 +2206,9 @@ export function recoverFromIndependentWake(
 export async function recoverWithOperationalReport(
   trigger: string, isCurrent: () => boolean = () => true,
   onAuthorizedBattery?: (transport: AuthorizedBatteryTransport) => void,
+  evidenceWakeId: string | null = null,
 ) {
-  const result = await recoverFromIndependentWake(trigger, isCurrent, onAuthorizedBattery);
+  const result = await recoverFromIndependentWake(trigger, isCurrent, onAuthorizedBattery, evidenceWakeId);
   const report = describeOperationalRecovery(result, readTrackingAuthority());
   recordTrackingEvidence('recovery_verdict', {
     source: trigger, authorization: report.authorization, outcome: report.state,

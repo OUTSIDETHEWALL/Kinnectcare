@@ -1,4 +1,5 @@
 import { markStartupMilestone } from './startupDiagnostics';
+import { recordEvidence, startupTraceId } from './evidenceTrace';
 
 // Observe only the first core batch of each mounted AuthProvider. No token,
 // account, URL, payload or error text is retained. Nothing awaits this observer.
@@ -28,6 +29,7 @@ export function startStartupApiTiming(endpoint: string) {
   if (!window || clock() >= window.until || !ENDPOINTS.has(endpoint) || window.claimed.has(endpoint)) return null;
   window.claimed.add(endpoint);
   const requestId = ++nextRequest;
+  const traceId = startupTraceId();
   const start = clock();
   const startedAt = Date.now();
   let tokenStarted: number | null = null;
@@ -69,10 +71,17 @@ export function startStartupApiTiming(endpoint: string) {
     a === null || b === null ? null : Math.max(0, Math.round(b - a));
 
   return {
+    traceId,
     tokenStarted: () => { tokenStarted = clock(); },
     tokenReady: () => { tokenReady = clock(); },
-    adapterStarted: () => { adapterStarted = clock(); },
-    adapterSettled: () => { adapterSettled = clock(); },
+    adapterStarted: () => {
+      adapterStarted = clock();
+      if (traceId) recordEvidence('http', 'js_adapter_started', traceId);
+    },
+    adapterSettled: () => {
+      adapterSettled = clock();
+      if (traceId) recordEvidence('http', 'js_adapter_settled', traceId);
+    },
     responseEntered: () => { responseEntered = clock(); },
     persistenceStarted: () => { persistenceStarted = clock(); },
     persistenceEnded: (failed: boolean) => {
@@ -89,7 +98,7 @@ export function startStartupApiTiming(endpoint: string) {
       stop();
       try {
         markStartupMilestone('startup_api_stage_timing', {
-          observation: window.id, requestId, endpoint, outcome, status, startedAt,
+          observation: window.id, requestId, endpoint, outcome, status, startedAt, traceId,
           totalMs: duration(start, end),
           preTokenMs: duration(start, tokenStarted),
           tokenReadMs: duration(tokenStarted, tokenReady ?? (outcome === 'token_failed' ? end : null)),

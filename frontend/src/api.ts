@@ -162,6 +162,9 @@ api.interceptors.request.use(async (config) => {
     throw error;
   }
   if (stages) {
+    // Evidence extension is absent in Build 70: no header is added there.
+    // Correlation is observational; no retry, dispatch, cache or timeout changes.
+    if (stages.traceId) config.headers.set('X-Kinnship-Startup-Trace', stages.traceId);
     // Timestamp Axios adapter invocation/settlement without changing the
     // adapter, its config, or the response/error it produces. This interval
     // still includes native queuing, transport, server and JS callback delivery.

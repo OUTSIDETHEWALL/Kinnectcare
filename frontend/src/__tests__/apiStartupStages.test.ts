@@ -6,7 +6,11 @@ jest.mock('expo-secure-store', () => ({
   getItemAsync: jest.fn(), setItemAsync: jest.fn(), AFTER_FIRST_UNLOCK: 'AFTER_FIRST_UNLOCK',
 }));
 const mockMark = jest.fn();
+const mockEvidenceId = jest.fn((): string | null => null);
 jest.mock('../startupDiagnostics', () => ({ markStartupMilestone: (...args: any[]) => mockMark(...args) }));
+jest.mock('../evidenceTrace', () => ({
+  startupTraceId: () => mockEvidenceId(), recordEvidence: jest.fn(),
+}));
 
 import * as SecureStore from 'expo-secure-store';
 import { api, subscribeToTokenChanges } from '../api';
@@ -26,11 +30,28 @@ describe('real API startup stage boundaries', () => {
   let close: () => void;
   beforeEach(() => {
     jest.useFakeTimers(); jest.clearAllMocks();
+    mockEvidenceId.mockReturnValue(null);
     (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('original-test-token');
     (SecureStore.setItemAsync as jest.Mock).mockResolvedValue(undefined);
     close = beginStartupApiTiming();
   });
   afterEach(() => { close(); expect(jest.getTimerCount()).toBe(0); jest.useRealTimers(); });
+
+  it('adds correlation only for a supported native startup observation', async () => {
+    mockEvidenceId.mockReturnValue('a'.repeat(32));
+    const adapter = jest.fn(async config => ({ config, data: [], headers: {}, status: 200, statusText: 'OK' }));
+    const observed = await api.get('/members', { adapter });
+    expect(observed.config.headers.get('X-Kinnship-Startup-Trace')).toBe('a'.repeat(32));
+    const background = await api.get('/members/test/location', { adapter });
+    expect(background.config.headers.get('X-Kinnship-Startup-Trace')).toBeUndefined();
+    expect(background.config.adapter).toBe(adapter);
+  });
+
+  it('sends no new header when the existing binary lacks the extension', async () => {
+    const adapter = jest.fn(async config => ({ config, data: [], headers: {}, status: 200, statusText: 'OK' }));
+    const response = await api.get('/members', { adapter });
+    expect(response.config.headers.get('X-Kinnship-Startup-Trace')).toBeUndefined();
+  });
 
   it('separates token wait, adapter lifetime and refreshed-token persistence without releasing the response early', async () => {
     const token = deferred<string>();
