@@ -89,6 +89,19 @@ play-service-account*.json
 AuthKey_*.p8
 *.appstoreconnect.json
 
+# Workspace-only tooling/evidence, not application source. EAS does not
+# inherit this environment's global Git excludes.
+.cache/
+.config/
+.local/
+.pythonlibs/
+.upm/
+.agents/
+.pytest_cache/
+generated-artifacts/
+attached_assets/
+.gitconfig
+
 # NOTE: google-services.json is intentionally NOT listed here. It IS
 # listed in .gitignore (to keep it out of GitHub) but EAS Build needs it
 # to compile Android with FCM. EAS reads .easignore first if present.
