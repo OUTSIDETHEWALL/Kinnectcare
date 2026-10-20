@@ -34,3 +34,29 @@ the SDK version and the real notification launch/service paths without a build.
 artifact read-only outside Git, and record its checksum in the review evidence.
 Do not rebuild, pin dependencies, change PendingIntent flags or infer a device
 service failure merely to make a lifecycle hypothesis fit.
+
+## EAS archive scope is the repository root
+
+In this monorepo, put EAS upload exclusions at the repository root. EAS CLI
+does not inherit the host's global Git excludes, and frontend/.easignore does
+not protect workspace-root caches or tool configuration.
+
+**Why:** Local validation caches and tooling can otherwise enter the upload
+even though Git status is clean. An archive inspection may retain empty
+directories; inspect contained files, not directory existence alone.
+
+**How to apply:** Inspect the upload archive before submission. Exclude local
+tooling, evidence and server/signing credentials while retaining native module
+sources, public Firebase client configuration and tracked client-only defaults.
+
+## Delivered dependency provenance
+
+Use the AAB's AGP dependencies protobuf to compare resolved Maven coordinates
+and artifact hashes with the baseline, not only requested version selectors.
+
+**Why:** A floating SDK selector can resolve differently between builds without
+any source diff. The delivered dependency provenance distinguishes that risk
+from observer-only source changes.
+
+**How to apply:** Compare location/fetch SDK and HTTP/RN artifacts alongside
+actual DEX hook inspection; source equality alone is insufficient.
