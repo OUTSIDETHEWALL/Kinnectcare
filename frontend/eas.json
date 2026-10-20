@@ -28,6 +28,15 @@
         "EXPO_PUBLIC_GOOGLE_MAPS_API_KEY": "AIzaSyBeIZ4yanf7KrSzOaGpGoqsoBWbnyBsc_I"
       }
     },
+    "diagnostic71": {
+      "extends": "production",
+      "environment": "production",
+      "channel": "diagnostic71",
+      "autoIncrement": false,
+      "env": {
+        "KINNSHIP_DIAGNOSTIC_BUILD": "71"
+      }
+    },
     "production": {
       "channel": "production",
       "ios": {
