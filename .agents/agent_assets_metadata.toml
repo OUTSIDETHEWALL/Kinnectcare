@@ -7,3 +7,18 @@ uri = "file://docs/beta-launch-checklist.md"
 type = "text"
 title = "Kinnship Android Beta Launch Checklist"
 description = "Release-verification checklist covering Railway, Expo OTA, Google Play, website, privacy, physical-device smoke testing, monitoring, and rollback."
+logical_id = "7bbf365b-4502-4a48-a670-fd8a5cc26664"
+
+[[outputs]]
+id = "QAd1B-GuoWZp2KPlyyDSn"
+uri = "file://docs/build71-diagnostic-artifact-review.md"
+type = "text"
+title = "Build 71 artifact validation report"
+description = "Exact source/build identities, release DEX and bundled-JS checks, signing and static upgrade results, Railway candidate, and remaining acceptance limits. No installation or deployment performed."
+logical_id = "7d0e947b-f818-4e10-b3bf-1177b35b75bd"
+content_hash = "sha256:4d6c2e5a1113e0c54bd1c07276da1e5a3040ce5732af98bc80e582355eac243d"
+size = 11704
+mtime_ms = 1792533145255
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/7d0e947b-f818-4e10-b3bf-1177b35b75bd/8a1ba87b-bde5-4147-aa2c-f34eca2e5ff3"
+storage_version_token = "1792533250425118"
+content_type = "text/markdown"
