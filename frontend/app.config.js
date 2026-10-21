@@ -24,8 +24,9 @@ const TRANSISTOR_LICENSE_ANDROID = process.env.TRANSISTOR_LICENSE_ANDROID || '';
 const TRANSISTOR_LICENSE_IOS = process.env.TRANSISTOR_LICENSE_IOS || '';
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || '';
 // Explicit diagnostic profile only. Production/Build 70 keep their existing
-// version and OTA compatibility; Build 71 cannot consume runtime 1.3.1 updates.
-const DIAGNOSTIC_BUILD_71 = process.env.KINNSHIP_DIAGNOSTIC_BUILD === '71';
+// version and OTA compatibility. Each diagnostic binary has its own runtime.
+const DIAGNOSTIC_BUILD = ['71', '72'].includes(process.env.KINNSHIP_DIAGNOSTIC_BUILD)
+  ? Number(process.env.KINNSHIP_DIAGNOSTIC_BUILD) : null;
 
 module.exports = ({ config }) => ({
   ...config,
@@ -80,8 +81,8 @@ module.exports = ({ config }) => ({
 
     android: {
       package: 'app.kinnship.client',
-      versionCode: DIAGNOSTIC_BUILD_71 ? 71 : 70,
-      ...(DIAGNOSTIC_BUILD_71 ? { runtimeVersion: '1.3.1-diagnostic71' } : {}),
+      versionCode: DIAGNOSTIC_BUILD || 70,
+      ...(DIAGNOSTIC_BUILD ? { runtimeVersion: `1.3.1-diagnostic${DIAGNOSTIC_BUILD}` } : {}),
       googleServicesFile: './google-services.json',
       adaptiveIcon: {
         foregroundImage: './assets/images/kinnship-adaptive-foreground-1024.png',
