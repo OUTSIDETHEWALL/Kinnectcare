@@ -60,3 +60,15 @@ from observer-only source changes.
 
 **How to apply:** Compare location/fetch SDK and HTTP/RN artifacts alongside
 actual DEX hook inspection; source equality alone is insufficient.
+
+## Hermes disassembly identifiers
+
+Hermes abbreviates long string operands in instruction listings. Validate full
+names in the bytecode string table separately from abbreviated instruction
+references, and parse both Function and NCFunction closure boundaries.
+
+**Why:** A full-name search can falsely report a missing packaged hook, while
+ignoring closure boundaries can falsely combine unrelated call sites.
+
+**How to apply:** Inspect the delivered bundle, require both names and real
+call sites, and distinguish verifier corrections from application repairs.
