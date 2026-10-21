@@ -133,6 +133,25 @@ module.exports = function withAndroidEvidenceTracing(config) {
       }
       changes.push([path.join(base, 'KinnshipEvidenceBridge.java'), bridge(directory.replaceAll('/', '.'))]);
     }
+    const origins = require('./requestOriginHooks');
+    const rn = path.join(root, 'node_modules/react-native');
+    for (const [relative, transform] of [
+      ['Libraries/Network/RCTNetworking.android.js', origins.rnJs],
+    ]) {
+      const target = path.join(rn, relative);
+      changes.push([target, transform(fs.readFileSync(target, 'utf8'))]);
+    }
+    // Apply the additional transform to the already validated SDK transformation.
+    const managerChange = changes.find(([target]) => target.endsWith('/rnbackgroundgeolocation/HeadlessTaskManager.java'));
+    managerChange[1] = origins.manager(managerChange[1]);
+    const sdkJs = path.join(root, 'node_modules/react-native-background-geolocation/src/index.js');
+    changes.push([sdkJs, origins.sdkJs(fs.readFileSync(sdkJs, 'utf8'))]);
+    for (const [pkg, directory] of [
+      ['react-native-background-geolocation', 'android/src/main/java/com/transistorsoft/rnbackgroundgeolocation'],
+    ]) {
+      const packageName = directory.slice(directory.indexOf('com/')).replaceAll('/', '.');
+      changes.push([path.join(root, 'node_modules', pkg, directory, 'KinnshipOriginBridge.java'), origins.bridge(packageName)]);
+    }
     for (const [target, contents] of changes) fs.writeFileSync(target, contents);
     return cfg;
   }]);

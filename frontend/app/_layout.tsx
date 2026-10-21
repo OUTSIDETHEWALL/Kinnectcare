@@ -750,7 +750,9 @@ function RootNav() {
 
       let list: any[] = [];
       try {
-        const res = await api.get('/alerts');
+        const res = await api.get('/alerts', {
+          requestOrigin: require('../src/requestOrigin').operationOrigin('emergency-resume'),
+        });
         list = res?.data || [];
       } catch (e: any) {
         logResumeDecision({

@@ -23,6 +23,7 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { operationOrigin, withRequestOrigin } from './requestOrigin';
 import { Platform } from 'react-native';
 import { recordEvidence } from './evidenceTrace';
 import type { AuthorizedBatteryTransport } from './androidTrackingRecovery';
@@ -135,6 +136,7 @@ type TaskExecution = {
   generation: number;
   finished: boolean;
   timedOut: boolean;
+  diagnostic?: import('./requestOrigin').RequestOrigin;
 };
 
 let nextTaskGeneration = 0;
@@ -192,6 +194,7 @@ async function executeBatteryRefresh(taskId: string, evidenceWakeId: string | nu
   if (!backgroundFetch) return;
 
   const execution = beginTask(taskId);
+  execution.diagnostic = operationOrigin('workmanager', evidenceWakeId);
   // Optional synchronous observer only; task completion/generation rules remain unchanged.
   recordEvidence('gps', 'js_wake_received', evidenceWakeId, {
     source: 'workmanager', generation: execution.generation,
@@ -207,7 +210,7 @@ async function executeBatteryRefresh(taskId: string, evidenceWakeId: string | nu
     ? (async () => {
         try {
           const { authorizeDeviceContactTransport } = await import('./androidTrackingRecovery');
-          const transport = await authorizeDeviceContactTransport(() => isActiveExecution(execution));
+          const transport = await authorizeDeviceContactTransport(() => isActiveExecution(execution), execution.diagnostic);
           return await publishTaskBattery(execution, transport, null);
         } catch (error) {
           await appendExecutionLog(execution, 'background_battery_error', { error: String(error) });
@@ -345,7 +348,7 @@ async function executeBatteryRefresh(taskId: string, evidenceWakeId: string | nu
     try {
       const { authorizeDeviceContactTransport } = await import('./androidTrackingRecovery');
       await publishTaskBattery(execution,
-        await authorizeDeviceContactTransport(() => isActiveExecution(execution)), null);
+        await authorizeDeviceContactTransport(() => isActiveExecution(execution), execution.diagnostic), null);
     } catch (error) {
       await appendExecutionLog(execution, 'background_battery_error', { error: String(error) });
     }
@@ -418,7 +421,7 @@ async function publishTaskBattery(
 
         try {
           const resp = await Promise.race([
-            fetch(battUrl, {
+            withRequestOrigin(execution.diagnostic, () => fetch(battUrl, {
               method: 'PATCH',
               headers: {
                 'Content-Type': 'application/json',
@@ -430,7 +433,7 @@ async function publishTaskBattery(
                 is_charging: isCharging,
                 battery_updated_at: ts,
               }),
-            }),
+            })),
             new Promise<never>((_, rej) => {
               timeoutHandle = setTimeout(
                 () => rej(new Error('background-battery-patch-timeout')),

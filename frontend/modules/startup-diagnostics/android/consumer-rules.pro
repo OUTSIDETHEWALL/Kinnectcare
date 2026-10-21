@@ -5,3 +5,7 @@
 -keepclassmembers class com.facebook.react.modules.network.NetworkingModule {
     private static com.facebook.react.modules.network.CustomClientBuilder customClientBuilder;
 }
+-keep class expo.modules.startupdiagnostics.RequestOrigins {
+    public static void install(android.content.Context);
+    public static void record(java.lang.String, java.lang.String, java.lang.String, java.lang.String);
+}

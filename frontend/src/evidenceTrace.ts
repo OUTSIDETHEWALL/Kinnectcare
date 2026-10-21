@@ -1,4 +1,5 @@
 /** Optional evidence extension. Build 70 remains usable and sends no trace header. */
+import { readRequestOrigins, requestOriginAvailable } from './requestOrigin';
 type EvidenceModule = {
   evidenceVersion?: () => number;
   evidenceRecord?: (channel: string, stage: string, id: string, detail: string) => void;
@@ -26,7 +27,8 @@ export function recordEvidence(
 export function readEvidenceTrace(): unknown {
   try {
     const module = extension();
-    return module?.evidenceRead ? JSON.parse(module.evidenceRead())
+    return module?.evidenceRead ? { ...JSON.parse(module.evidenceRead()),
+      ...(requestOriginAvailable() ? { requestOrigins: readRequestOrigins() } : {}) }
       : { available: false, reason: 'native_evidence_extension_required' };
   } catch { return { available: false, reason: 'evidence_read_failed' }; }
 }

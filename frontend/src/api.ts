@@ -4,6 +4,11 @@ import { AppState, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { markStartupMilestone } from './startupDiagnostics';
 import { startStartupApiTiming, type StartupApiTiming } from './startupApiTiming';
+import { operationOrigin, requestOriginAvailable, withRequestOrigin, type RequestOrigin } from './requestOrigin';
+
+declare module 'axios' {
+  interface AxiosRequestConfig { requestOrigin?: RequestOrigin }
+}
 
 const measuredRequests = new WeakMap<object, { at: number; endpoint: string }>();
 const startupStages = new WeakMap<object, StartupApiTiming>();
@@ -161,25 +166,33 @@ api.interceptors.request.use(async (config) => {
     stages?.finish('token_failed');
     throw error;
   }
-  if (stages) {
+  if (stages || requestOriginAvailable()) {
     // Evidence extension is absent in Build 70: no header is added there.
     // Correlation is observational; no retry, dispatch, cache or timeout changes.
-    if (stages.traceId) config.headers.set('X-Kinnship-Startup-Trace', stages.traceId);
+    if (stages?.traceId) config.headers.set('X-Kinnship-Startup-Trace', stages.traceId);
     // Timestamp Axios adapter invocation/settlement without changing the
     // adapter, its config, or the response/error it produces. This interval
     // still includes native queuing, transport, server and JS callback delivery.
     const originalAdapter = config.adapter ?? api.defaults.adapter;
+    const diagnostic = config.requestOrigin ?? operationOrigin(
+      String(config.url) === '/auth/me' ? 'foreground-auth'
+        : String(config.url).includes('/battery') ? 'foreground-battery'
+          : String(config.url).startsWith('/billing') ? 'billing'
+            : String(config.url).includes('medication') ? 'medication'
+              : String(config.url).includes('check') ? 'check-in' : 'foreground-api',
+    );
     config.adapter = adapterConfig => {
-      stages.adapterStarted();
+      stages?.adapterStarted();
       let result: ReturnType<ReturnType<typeof getAdapter>>;
       try {
         // Resolve at Axios's original dispatch boundary, after its transforms.
         const adapter = resolveAdapter(originalAdapter, adapterConfig);
-        result = adapter(adapterConfig);
-      } catch (error) { stages.adapterSettled(); throw error; }
+        result = withRequestOrigin(diagnostic, () => adapter(adapterConfig));
+      } catch (error) { stages?.adapterSettled(); throw error; }
+      if (!stages) return result;
       return result.then(
-        value => { stages.adapterSettled(); return value; },
-        error => { stages.adapterSettled(); throw error; },
+        value => { stages?.adapterSettled(); return value; },
+        error => { stages?.adapterSettled(); throw error; },
       );
     };
   }
@@ -526,8 +539,8 @@ export type BillingStatus = {
   annual_savings_cents: number;
 };
 
-export async function getBillingStatus(): Promise<BillingStatus> {
-  const r = await api.get('/billing/status');
+export async function getBillingStatus(requestOrigin?: RequestOrigin): Promise<BillingStatus> {
+  const r = await api.get('/billing/status', requestOrigin ? { requestOrigin } : undefined);
   return r.data;
 }
 

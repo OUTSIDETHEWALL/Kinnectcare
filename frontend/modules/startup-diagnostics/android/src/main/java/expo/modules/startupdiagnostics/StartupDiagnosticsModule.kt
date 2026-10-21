@@ -17,6 +17,18 @@ class StartupDiagnosticsModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("StartupDiagnostics")
 
+    Function("originVersion") { 1 }
+    Function("originBind") { request: Int, detail: String ->
+      appContext.reactContext?.let { RequestOrigins.install(it); RequestOrigins.bind(it, request, detail) }
+    }
+    Function("originRecord") { kind: String, id: String, stage: String, detail: String ->
+      appContext.reactContext?.let { RequestOrigins.install(it); RequestOrigins.record(kind, id, stage, detail) }
+    }
+    Function("originRead") {
+      appContext.reactContext?.let { RequestOrigins.install(it) }
+      RequestOrigins.read()
+    }
+
     Function("evidenceVersion") { 1 }
     Function("evidenceRecord") { channel: String, stage: String, id: String, detail: String ->
       appContext.reactContext?.let { EvidenceTrace.record(it, channel, stage, id, detail) }

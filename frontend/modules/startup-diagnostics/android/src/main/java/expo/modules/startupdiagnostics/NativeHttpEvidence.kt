@@ -23,6 +23,7 @@ object NativeHttpEvidence {
     if (installed) return
     val application = context.applicationContext
     EvidenceTrace.install(application)
+    RequestOrigins.install(application)
     // RN exposes only a global setter. Refuse to overwrite someone else's hook.
     val occupied = try {
       NetworkingModule::class.java.getDeclaredField("customClientBuilder").apply { isAccessible = true }.get(null) != null
@@ -39,6 +40,7 @@ object NativeHttpEvidence {
       // newBuilder/build share the original pool, dispatcher, cache and policy.
       val existing = builder.build()
       val original = existing.eventListenerFactory
+      val dispatcherId = System.identityHashCode(existing.dispatcher)
       fun id(call: Call): String? {
         val request = call.request()
         val candidate = request.header("X-Kinnship-Startup-Trace") ?: return null
@@ -51,15 +53,27 @@ object NativeHttpEvidence {
         id(call)?.let {
           EvidenceTrace.record(application, "http", "dispatcher_entered", it, "{}")
         }
+        RequestOrigins.tag(call)?.let {
+          RequestOrigins.record("request", it.id, "entered",
+            """{"queued":${existing.dispatcher.queuedCallsCount()},"running":${existing.dispatcher.runningCallsCount()},"dispatcher":$dispatcherId}""")
+        }
         chain.proceed(chain.request())
       }
       builder.eventListenerFactory { call ->
         val delegate = original.create(call)
         val traceId = id(call)
-        if (traceId == null) delegate else object : EventListener() {
-          fun emit(stage: String, detail: String = "{}") =
-            EvidenceTrace.record(application, "http", stage, traceId, detail)
+        val origin = RequestOrigins.begin(call)
+        val originId = origin?.id
+        if (traceId == null && originId == null) delegate else object : EventListener() {
+          fun emit(stage: String, detail: String = "{}") {
+            if (traceId != null) EvidenceTrace.record(application, "http", stage, traceId, detail)
+          }
           override fun callStart(call: Call) {
+            origin?.let {
+              RequestOrigins.record("request", it.id, "native_start", it.detail.dropLast(1) +
+                ""","endpoint":"${RequestOrigins.endpoint(call.request())}","method":"${call.request().method}","queued":${existing.dispatcher.queuedCallsCount()},"running":${existing.dispatcher.runningCallsCount()},"dispatcher":$dispatcherId}""")
+            }
+            RequestOrigins.census(existing.dispatcher)
             emit("native_call_start", """{"queued":${existing.dispatcher.queuedCallsCount()},"running":${existing.dispatcher.runningCallsCount()}}""")
             delegate.callStart(call)
           }
@@ -99,9 +113,20 @@ object NativeHttpEvidence {
             emit("response_body_end"); delegate.responseBodyEnd(call, byteCount)
           }
           override fun responseFailed(call: Call, ioe: IOException) { delegate.responseFailed(call, ioe) }
-          override fun callEnd(call: Call) { emit("native_call_end"); delegate.callEnd(call) }
-          override fun callFailed(call: Call, ioe: IOException) { emit("native_call_failed"); delegate.callFailed(call, ioe) }
-          override fun canceled(call: Call) { delegate.canceled(call) }
+          override fun callEnd(call: Call) {
+            originId?.let { RequestOrigins.record("request", it, "ended", "{}") }
+            RequestOrigins.finish(call)
+            emit("native_call_end"); delegate.callEnd(call)
+          }
+          override fun callFailed(call: Call, ioe: IOException) {
+            originId?.let { RequestOrigins.record("request", it, "failed", "{}") }
+            RequestOrigins.finish(call)
+            emit("native_call_failed"); delegate.callFailed(call, ioe)
+          }
+          override fun canceled(call: Call) {
+            originId?.let { RequestOrigins.record("request", it, "canceled", "{}") }
+            delegate.canceled(call)
+          }
           override fun proxySelectStart(call: Call, url: HttpUrl) { delegate.proxySelectStart(call, url) }
           override fun proxySelectEnd(call: Call, url: HttpUrl, proxies: List<Proxy>) { delegate.proxySelectEnd(call, url, proxies) }
           override fun satisfactionFailure(call: Call, response: Response) { delegate.satisfactionFailure(call, response) }

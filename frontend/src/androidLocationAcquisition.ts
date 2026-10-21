@@ -13,6 +13,7 @@ import type { TrackingAuthority } from './trackingReliability';
 import { appendEngineEvidence } from './engineEvidenceJournal';
 import { nextSeq } from './diagSeq';
 import { recordEvidence, startupTraceId } from './evidenceTrace';
+import { operationOrigin, originPhase, withRequestOrigin } from './requestOrigin';
 
 export const GUARDED_POSITION_MARKER = 'kc_guarded_one_shot';
 type PositionOptions = { samples?: number; timeout?: number; extras?: Record<string, unknown> };
@@ -36,6 +37,9 @@ export async function acquireAndUploadAndroidPosition(
   const authority = readTrackingAuthority();
   const operation = `gps-${Date.now()}-${Math.random()}`;
   const evidenceId = startupTraceId();
+  const diagnostic = operationOrigin('gps-acquisition',
+    typeof options.extras?.kc_evidence_wake_id === 'string' ? options.extras.kc_evidence_wake_id : null,
+    authority?.generation);
   if (!authority || authority.revoked) throw new Error('tracking_native_authority_unavailable');
   const current = async (freshOwnership = false) => {
     const latestAuthority = readTrackingAuthority();
@@ -51,7 +55,8 @@ export async function acquireAndUploadAndroidPosition(
     }
     if (permission.foreground !== 'granted' || permission.background !== 'granted') return false;
     if (freshOwnership) {
-      const ownership = await verifyWakeOwnership(executionCurrent);
+      const ownership = await verifyWakeOwnership(executionCurrent,
+        originPhase(diagnostic, 'acquisition-ownership'));
       recordEvidence('gps', 'authorization_result', evidenceId, {
         accepted: ownership === 'allowed', generation: authority.generation,
         reason: ownership,
@@ -112,7 +117,7 @@ export async function acquireAndUploadAndroidPosition(
   try {
     recordTrackingEvidence('upload_attempt', { operation, generation: authority.generation, capturedAt });
     recordEvidence('gps', 'publication_attempt', evidenceId, { generation: authority.generation });
-    const response = await fetch(
+    const response = await withRequestOrigin(originPhase(diagnostic, 'location-publication'), () => fetch(
       `${transport.baseUrl}/api/members/${encodeURIComponent(transport.memberId)}/location`,
       {
         method: 'PUT', signal: controller.signal,
@@ -124,7 +129,7 @@ export async function acquireAndUploadAndroidPosition(
           ...position, latitude, longitude, consent_generation: consentGeneration,
         }),
       },
-    );
+    ));
     if (!response.ok) {
       recordEvidence('gps', 'publication_result', evidenceId, { accepted: false, status: response.status });
       throw new Error(`gps_upload_http_${response.status}`);
