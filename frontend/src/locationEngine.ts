@@ -2113,7 +2113,7 @@ export function recoverFromIndependentWake(
   );
   const recovery = (async () => {
     const verdict = await evaluateWakeAuthorization(() => generation === engineGeneration && isCurrent(),
-      originPhase(diagnostic, 'initial-ownership'));
+      originPhase(diagnostic, 'initial-ownership'), generation);
     recordEvidence('gps', 'authorization_result', evidenceWakeId, {
       accepted: verdict.state === 'AUTHORIZED', reason: verdict.source, source: trigger, generation,
     });

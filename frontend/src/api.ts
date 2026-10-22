@@ -5,6 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { markStartupMilestone } from './startupDiagnostics';
 import { startStartupApiTiming, type StartupApiTiming } from './startupApiTiming';
 import { operationOrigin, requestOriginAvailable, withRequestOrigin, type RequestOrigin } from './requestOrigin';
+import { beginOwnershipSessionChange } from './initialOwnershipReads';
 
 declare module 'axios' {
   interface AxiosRequestConfig { requestOrigin?: RequestOrigin }
@@ -82,14 +83,19 @@ function notifyTokenChange(token: string | null): void {
 }
 
 export async function saveToken(token: string) {
-  if (Platform.OS === 'web') await AsyncStorage.setItem(TOKEN_KEY, token);
-  else {
-    await SecureStore.setItemAsync(TOKEN_KEY, token, {
-      // The iOS notification-service action handler must be able to read the
-      // token while the phone is locked. This remains device-local and only
-      // becomes available after the first unlock following a reboot.
-      keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
-    });
+  const finishSessionChange = beginOwnershipSessionChange();
+  try {
+    if (Platform.OS === 'web') await AsyncStorage.setItem(TOKEN_KEY, token);
+    else {
+      await SecureStore.setItemAsync(TOKEN_KEY, token, {
+        // The iOS notification-service action handler must be able to read the
+        // token while the phone is locked. This remains device-local and only
+        // becomes available after the first unlock following a reboot.
+        keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+      });
+    }
+  } finally {
+    finishSessionChange();
   }
   notifyTokenChange(token);
 }
@@ -105,21 +111,26 @@ export async function migrateTokenForBackgroundActions(): Promise<void> {
   });
 }
 export async function clearToken() {
-  const clearStoredToken = async () => {
-    try {
-      if (Platform.OS === 'web') await AsyncStorage.removeItem(TOKEN_KEY);
-      else await SecureStore.deleteItemAsync(TOKEN_KEY);
-    } finally {
-      notifyTokenChange(null);
+  const finishSessionChange = beginOwnershipSessionChange();
+  try {
+    const clearStoredToken = async () => {
+      try {
+        if (Platform.OS === 'web') await AsyncStorage.removeItem(TOKEN_KEY);
+        else await SecureStore.deleteItemAsync(TOKEN_KEY);
+      } finally {
+        notifyTokenChange(null);
+      }
+    };
+    if (Platform.OS === 'android') {
+      // Invalidate/interrupt before waiting on either secure or ordinary storage.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const engine = require('./locationEngine') as typeof import('./locationEngine');
+      await Promise.all([engine.stop('signout', 'clear_session_token'), clearStoredToken()]);
+    } else {
+      await clearStoredToken();
     }
-  };
-  if (Platform.OS === 'android') {
-    // Invalidate/interrupt before waiting on either secure or ordinary storage.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const engine = require('./locationEngine') as typeof import('./locationEngine');
-    await Promise.all([engine.stop('signout', 'clear_session_token'), clearStoredToken()]);
-  } else {
-    await clearStoredToken();
+  } finally {
+    finishSessionChange();
   }
 }
 

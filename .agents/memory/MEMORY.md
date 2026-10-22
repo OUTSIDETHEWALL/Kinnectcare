@@ -39,3 +39,4 @@
 - [Android source validation](android-source-validation.md) — inspect delivered DEX/dependency hashes; root EAS archive rules must exclude workspace tooling.
 - [Startup latency attribution](startup-latency-attribution.md) — protect tracking; separate API promise time from secure storage, transport, scheduling and response persistence.
 - [Native observer safety](native-observer-safety.md) — keep tracing off critical paths; preserve callbacks; test blocked consumers and actual compiled hooks.
+- [Ownership-sharing acceptance](ownership-sharing-acceptance.md) — follow physical attribution; synthetic queue reduction is not phone-performance acceptance or release authorization.
