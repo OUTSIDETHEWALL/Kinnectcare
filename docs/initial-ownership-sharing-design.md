@@ -149,8 +149,8 @@ interchangeable.
   verbose evidence writer; an initial attempt using real Android HandlerThread
   hit unavailable Android native functions. The clean substitute run passes.
   This is NOT full Android/Expo compilation or device execution.
-- Full Jest emits existing open-handle/after-teardown diagnostics; no claim of
-  a completely clean full-suite exit.
+- Full Jest also emits open-handle/after-teardown diagnostics; their baseline
+  status was not separately established. No claim of a clean full-suite exit.
 - Backend tests: not applicable / not run; no backend diff.
 - Existing web workflow restarted; unauthenticated Important Notice renders.
   Signed-in screens and Android behavior were not visually verified.
