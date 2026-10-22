@@ -34,6 +34,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import { captureDiagnosticSource, readNativeSdkEvidence, shareFullDiagnostics } from '../src/fullDiagnosticsExport';
 import { readTrackingEvidence } from './trackingReliability';
+import { readEvidenceTrace } from './evidenceTrace';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
 import { getNotificationLog, clearNotificationLog } from '../src/notificationLog';
@@ -1520,6 +1521,7 @@ function DiagnosticsContent() {
           startupEvidence,
           nativeStartupEvidence,
           trackingReliability: readTrackingEvidence(),
+          boundedNativeEvidence: readEvidenceTrace(),
           cardRenderEvents: cardEvents,
           liveLogs,
           storageEvidence,

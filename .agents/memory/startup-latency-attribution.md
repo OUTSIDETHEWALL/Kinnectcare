@@ -27,3 +27,9 @@ required these distinctions rather than a speculative server or token-cache fix.
 
 **How to apply:** Report measured intervals separately from hypotheses, bound
 diagnostic sampling, and do not claim physical acceptance from simulated timing.
+Treat native response completion to JS adapter settlement as a mixed residual,
+not pure bridge delivery. Separate native event emission and JS callback entry
+before attributing that residual to a specific runtime.
+
+**Why:** The user requires evidence distinguishing response transport,
+native processing and native-to-JS delivery, not a renamed unknown interval.

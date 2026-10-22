@@ -145,34 +145,45 @@ object TrackingReliability {
   }
 
   fun claim(context: Context, owner: String, generation: Long, operation: String, now: Long,
-    configurationOnly: Boolean = false): Boolean = synchronized(lock) {
+    configurationOnly: Boolean = false, evidenceId: String = ""): Boolean = synchronized(lock) {
     val s = state(context)
     val elapsed = SystemClock.elapsedRealtime()
-    if (s.optBoolean("revoked", true) || s.getLong("generation") != generation || s.optString("owner") != owner) return@synchronized false
-    if (s.has("pendingMutation")) return@synchronized false
-    if (s.optBoolean("shutdownPending", false) || (s.optJSONObject("shutdowns")?.length() ?: 0) > 0) return@synchronized false
+    fun decision(accepted: Boolean, reason: String): Boolean {
+      EvidenceTrace.record(context, "gps", if (configurationOnly) "configuration_claim_decision" else "claim_decision", evidenceId, JSONObject()
+        .put("accepted", accepted).put("reason", reason).put("generation", s.optLong("generation"))
+        .put("expectedGeneration", generation)
+        .put("captureAgeMs", now - s.optLong("capturedAt", now))
+        .put("leaseAgeMs", elapsed - s.optLong("claimedElapsed", elapsed))
+        .put("backoffRemainingMs", maxOf(0, s.optLong("nextEligibleAt", 0) - now)).toString())
+      return accepted
+    }
+    if (s.optBoolean("revoked", true)) return@synchronized decision(false, "revoked")
+    if (s.getLong("generation") != generation) return@synchronized decision(false, "generation_mismatch")
+    if (s.optString("owner") != owner) return@synchronized decision(false, "owner_mismatch")
+    if (s.has("pendingMutation")) return@synchronized decision(false, "mutation_pending")
+    if (s.optBoolean("shutdownPending", false) || (s.optJSONObject("shutdowns")?.length() ?: 0) > 0) return@synchronized decision(false, "shutdown_pending")
     // Configuration has its own lifetime. A persist:false acquisition can be
     // pending/backing off while this runtime must register callbacks via ready().
     // Do NOT steal its operation, clear its cooldown, or relax owner authority.
     if (configurationOnly) {
       s.put("pendingMutation", operation).put("mutationProcess", processIncarnation)
       save(context, s)
-      return@synchronized true
+      return@synchronized decision(true, "allowed")
     }
     // elapsedRealtime protects leases within a boot. Wall time supports cooldown
     // across reboot; future/invalid clocks never suppress work indefinitely.
     val claimed = s.optLong("claimedElapsed", 0)
-    if (s.has("operation") && elapsed >= claimed && elapsed - claimed < 60000) return@synchronized false
+    if (s.has("operation") && elapsed >= claimed && elapsed - claimed < 60000) return@synchronized decision(false, "lease_active")
     val next = s.optLong("nextEligibleAt", 0)
-    if (next > now && next - now <= 30 * 60000) return@synchronized false
+    if (next > now && next - now <= 30 * 60000) return@synchronized decision(false, "backoff")
     val capture = s.optLong("capturedAt", 0)
     val movement = s.optLong("movementAt", 0)
     val recentMoving = s.optBoolean("moving", false) && movement <= now && now - movement < 10 * 60000
     val threshold = if (recentMoving) 10 * 60000 else 60 * 60000
-    if (!configurationOnly && capture > 0 && capture <= now && now - capture < threshold) return@synchronized false
+    if (!configurationOnly && capture > 0 && capture <= now && now - capture < threshold) return@synchronized decision(false, "capture_recent")
     s.put("operation", operation).put("claimedElapsed", elapsed)
     save(context, s)
-    true
+    decision(true, "allowed")
   }
 
   fun complete(context: Context, operation: String, outcome: String, capturedAt: Long, moving: Boolean) = synchronized(lock) {

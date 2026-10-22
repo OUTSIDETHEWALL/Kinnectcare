@@ -59,3 +59,19 @@ not submission. EAS log responses may be Brotli-compressed; use an HTTP client
 that honors Content-Encoding before interpreting their contents.
 
 **How to apply:** Separate export capture time, OTA activation time, and test time. Prefer direct active-update evidence for the tested launch; do not extrapolate it backward to an older log.
+
+## Protected diagnostic baseline and coordinated approval
+
+Build 70 remains the protected known-good moving-GPS baseline. Building a
+diagnostic artifact does not authorize installing it, deploying its backend
+correlation observer, publishing an OTA or changing production configuration.
+Client/server evidence collection requires separate coordinated approval after
+the artifact review.
+
+**Why:** The owner requires inspection before authorizing the Railway
+instrumentation and diagnostic phone update together.
+
+**How to apply:** Preserve the baseline during preparation. Report bundle
+upload-signing continuity separately from the Play-installed app signing
+lineage and an actual data-preserving upgrade; an AAB signature alone does not
+prove those device-level properties.

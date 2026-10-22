@@ -6,7 +6,19 @@ jest.mock('expo-secure-store', () => ({
   getItemAsync: jest.fn(), setItemAsync: jest.fn(), AFTER_FIRST_UNLOCK: 'AFTER_FIRST_UNLOCK',
 }));
 const mockMark = jest.fn();
+const mockEvidenceId = jest.fn((): string | null => null);
+let mockOriginEnabled = false;
+const mockOriginBind = jest.fn();
+jest.mock('expo', () => ({
+  requireOptionalNativeModule: () => ({
+    originVersion: () => mockOriginEnabled ? 1 : 0,
+    originRecord: jest.fn(), originBind: (...args: any[]) => mockOriginBind(...args),
+  }),
+}));
 jest.mock('../startupDiagnostics', () => ({ markStartupMilestone: (...args: any[]) => mockMark(...args) }));
+jest.mock('../evidenceTrace', () => ({
+  startupTraceId: () => mockEvidenceId(), recordEvidence: jest.fn(),
+}));
 
 import * as SecureStore from 'expo-secure-store';
 import { api, subscribeToTokenChanges } from '../api';
@@ -26,11 +38,47 @@ describe('real API startup stage boundaries', () => {
   let close: () => void;
   beforeEach(() => {
     jest.useFakeTimers(); jest.clearAllMocks();
+    mockEvidenceId.mockReturnValue(null);
+    mockOriginEnabled = false;
     (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('original-test-token');
     (SecureStore.setItemAsync as jest.Mock).mockResolvedValue(undefined);
     close = beginStartupApiTiming();
   });
   afterEach(() => { close(); expect(jest.getTimerCount()).toBe(0); jest.useRealTimers(); });
+
+  it('adds correlation only for a supported native startup observation', async () => {
+    mockEvidenceId.mockReturnValue('a'.repeat(32));
+    const adapter = jest.fn(async config => ({ config, data: [], headers: {}, status: 200, statusText: 'OK' }));
+    const observed = await api.get('/members', { adapter });
+    expect(observed.config.headers.get('X-Kinnship-Startup-Trace')).toBe('a'.repeat(32));
+    const background = await api.get('/members/test/location', { adapter });
+    expect(background.config.headers.get('X-Kinnship-Startup-Trace')).toBeUndefined();
+    expect(background.config.adapter).toBe(adapter);
+  });
+
+  it('links supported local origins at the unchanged adapter boundary, without new headers or requests', async () => {
+    mockOriginEnabled = true;
+    close();
+    const { operationOrigin } = require('../requestOrigin');
+    const context = operationOrigin('dashboard');
+    const adapter = jest.fn(config => {
+      (globalThis as any).__kinnshipBindRequestOrigin(5);
+      return Promise.resolve({ config, data: [], headers: {}, status: 200, statusText: 'OK' });
+    });
+    const response = await api.get('/summary', { adapter, requestOrigin: context });
+    expect(adapter).toHaveBeenCalledTimes(1);
+    expect(mockOriginBind).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(mockOriginBind.mock.calls[0][1]).operation).toBe(context.operation);
+    expect(response.config.headers.get('X-Kinnship-Startup-Trace')).toBeUndefined();
+    expect(response.config.headers.get('Authorization')).toBe('Bearer original-test-token');
+    expect(response.config.headers.get('X-Kinnship-Presence-Source')).toBe('foreground-api');
+  });
+
+  it('sends no new header when the existing binary lacks the extension', async () => {
+    const adapter = jest.fn(async config => ({ config, data: [], headers: {}, status: 200, statusText: 'OK' }));
+    const response = await api.get('/members', { adapter });
+    expect(response.config.headers.get('X-Kinnship-Startup-Trace')).toBeUndefined();
+  });
 
   it('separates token wait, adapter lifetime and refreshed-token persistence without releasing the response early', async () => {
     const token = deferred<string>();

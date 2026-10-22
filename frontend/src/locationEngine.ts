@@ -62,6 +62,8 @@
  * keep-alive).
  */
 import { Platform, AppState } from 'react-native';
+import { recordEvidence } from './evidenceTrace';
+import { operationOrigin, originEvent, originPhase, withRequestOrigin } from './requestOrigin';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
@@ -351,7 +353,7 @@ async function patchHeadlessHeartbeatPresence(
     }
 
     const response = await Promise.race([
-      fetch(`${baseUrl}/api/members/${memberId}/battery`, {
+      withRequestOrigin(operationOrigin('sdk-headless-battery', event?.kcEvidenceWakeId), () => fetch(`${baseUrl}/api/members/${memberId}/battery`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -363,7 +365,7 @@ async function patchHeadlessHeartbeatPresence(
           is_charging: battCharging,
           battery_updated_at: new Date().toISOString(),
         }),
-      }),
+      })),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('headless-battery-patch-timeout')), 6000),
       ),
@@ -398,6 +400,9 @@ function registerHeadlessTaskOnce(): void {
   const HeadlessTask = async (event: any) => {
     try {
       const name = event?.name;
+      if (['heartbeat', 'boot', 'terminate', 'motionchange', 'activitychange'].includes(name)) {
+        recordEvidence('gps', 'js_wake_received', event?.kcEvidenceWakeId ?? null, { source: name });
+      }
       if (name === 'location' && !event?.params?.sample
         && !event?.params?.extras?.[GUARDED_POSITION_MARKER]) {
         await observeNativeCapture(event.params, true);
@@ -435,6 +440,7 @@ function registerHeadlessTaskOnce(): void {
       if (Platform.OS === 'android' && ['terminate', 'boot', 'heartbeat', 'motionchange', 'activitychange'].includes(name)) {
         const recovery = await recoverWithOperationalReport(
           `sdk-${name}`, () => true, transport => { authorizedTransport = transport; },
+          event?.kcEvidenceWakeId ?? null,
         );
         // A denied/revoked owner must not obtain and upload GPS through the
         // old heartbeat/motion handler merely because a native event arrived.
@@ -456,7 +462,8 @@ function registerHeadlessTaskOnce(): void {
             samples: 1,
             persist: true,
             timeout: 30,
-            extras: { source: 'headless-heartbeat' },
+            extras: { source: 'headless-heartbeat',
+              ...(event?.kcEvidenceWakeId ? { kc_evidence_wake_id: event.kcEvidenceWakeId } : {}) },
           }, authorizedTransport);
           recordPipelineTs('headless_heartbeat');
           await logEvent('headless_heartbeat_ok');
@@ -1088,7 +1095,7 @@ export async function pushBatteryUpdate(
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 6000);
       try {
-        const response = await fetch(`${transport.baseUrl}/api${url}`, {
+        const response = await withRequestOrigin(operationOrigin('background-battery'), () => fetch(`${transport.baseUrl}/api${url}`, {
           method: 'PATCH', signal: controller.signal,
           headers: {
             'Content-Type': 'application/json',
@@ -1096,7 +1103,7 @@ export async function pushBatteryUpdate(
             Authorization: `Bearer ${transport.token}`,
           },
           body: JSON.stringify(body),
-        });
+        }));
         if (!response.ok) throw new Error(`battery-http-${response.status}`);
         resp = { status: response.status, data: await response.json() };
       } finally { clearTimeout(timeout); }
@@ -2094,12 +2101,22 @@ export function recoverFromIndependentWake(
   trigger: string,
   isCurrent: () => boolean = () => true,
   onAuthorizedBattery?: (transport: AuthorizedBatteryTransport) => void,
+  evidenceWakeId: string | null = null,
 ): Promise<string> {
   if (Platform.OS !== 'android') return Promise.resolve('not_android');
   const generation = engineGeneration;
   const expected = readTrackingAuthority();
-  return (async () => {
-    const verdict = await evaluateWakeAuthorization(() => generation === engineGeneration && isCurrent());
+  const diagnostic = operationOrigin(
+    trigger.startsWith('sdk-') ? 'sdk-headless' : trigger === 'workmanager' ? 'workmanager'
+      : trigger.includes('patrol') ? 'patrol' : trigger === 'js-position' ? 'foreground-position' : 'independent-other',
+    evidenceWakeId, expected?.generation,
+  );
+  const recovery = (async () => {
+    const verdict = await evaluateWakeAuthorization(() => generation === engineGeneration && isCurrent(),
+      originPhase(diagnostic, 'initial-ownership'), generation);
+    recordEvidence('gps', 'authorization_result', evidenceWakeId, {
+      accepted: verdict.state === 'AUTHORIZED', reason: verdict.source, source: trigger, generation,
+    });
     recordTrackingEvidence('wake_authorization', { source: trigger, authorization: verdict.state, reason: verdict.source });
     if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
     if (verdict.state === 'UNKNOWN') return verdict.source;
@@ -2124,6 +2141,7 @@ export function recoverFromIndependentWake(
       const shutdownGeneration = engineGeneration;
       const transport = await authorizeRevokedBatteryTransport(
         () => shutdownGeneration === engineGeneration && isCurrent(),
+        diagnostic,
       );
       if (transport) onAuthorizedBattery?.(transport);
       return 'tracking_revoked';
@@ -2137,11 +2155,13 @@ export function recoverFromIndependentWake(
       const shutdownGeneration = engineGeneration;
       const transport = await authorizeRevokedBatteryTransport(
         () => shutdownGeneration === engineGeneration && isCurrent(),
+        diagnostic,
       );
       if (transport) onAuthorizedBattery?.(transport);
       return 'permission_denied';
     }
-    const ownership = await verifyWakeOwnership(() => generation === engineGeneration && isCurrent());
+    const ownership = await verifyWakeOwnership(() => generation === engineGeneration && isCurrent(),
+      originPhase(diagnostic, 'second-ownership'));
     if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
     if (ownership !== 'allowed') {
       if (['session_rejected', 'invalid_owner', 'sharing_disabled'].includes(ownership)) {
@@ -2156,7 +2176,7 @@ export function recoverFromIndependentWake(
     try {
       // Adopt legacy intent before capturing the native operation fence's policy
       // stamp. The migration itself is read-only with respect to the SDK.
-      await migrateLegacyTrackingIntent(lib, () => generation === engineGeneration && isCurrent());
+      await migrateLegacyTrackingIntent(lib, () => generation === engineGeneration && isCurrent(), diagnostic);
       if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
       const epoch = trackingIntentEpoch();
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -2173,8 +2193,14 @@ export function recoverFromIndependentWake(
             await logEvent('ready_ok', { source: 'independent-runtime', callbacksRegistered: true });
           }
         },
+        diagnostic,
       );
       await logEvent('independent_tracking_recovery', { trigger, result });
+      recordEvidence('gps', 'authorization_result', evidenceWakeId, {
+        source: trigger, generation,
+        accepted: ['already_enabled', 'restarted', 'cooldown'].includes(result),
+        reason: ['already_enabled', 'restarted', 'cooldown'].includes(result) ? 'allowed' : result,
+      });
       return result;
     } catch (error: unknown) {
       try { recordTrackingRecoveryFailure(error, trigger); } catch { /* missing native extension is already an explicit failure */ }
@@ -2185,14 +2211,17 @@ export function recoverFromIndependentWake(
     }
     });
   })();
+  void recovery.then(() => originEvent(diagnostic, 'js_settled'), () => originEvent(diagnostic, 'js_settled'));
+  return recovery;
 }
 
 /** Cold push acquisition uses a receipt-bound upload, never foreground caches. */
 export async function recoverWithOperationalReport(
   trigger: string, isCurrent: () => boolean = () => true,
   onAuthorizedBattery?: (transport: AuthorizedBatteryTransport) => void,
+  evidenceWakeId: string | null = null,
 ) {
-  const result = await recoverFromIndependentWake(trigger, isCurrent, onAuthorizedBattery);
+  const result = await recoverFromIndependentWake(trigger, isCurrent, onAuthorizedBattery, evidenceWakeId);
   const report = describeOperationalRecovery(result, readTrackingAuthority());
   recordTrackingEvidence('recovery_verdict', {
     source: trigger, authorization: report.authorization, outcome: report.state,
@@ -2351,7 +2380,8 @@ async function setAuthTokenConfigured(jwt: string, generation: number): Promise<
   if (Platform.OS === 'android') {
     // A new token is not proof that it still belongs to this tracking owner.
     const verdict = await evaluateWakeAuthorization(() => generation === engineGeneration
-      && !!cachedConfig && (!cachedConfig.isCurrent || cachedConfig.isCurrent()));
+      && !!cachedConfig && (!cachedConfig.isCurrent || cachedConfig.isCurrent()),
+    originPhase(operationOrigin('engine-startup'), 'token-ownership'));
     if (verdict.state !== 'AUTHORIZED') {
       if (verdict.state === 'REVOKED' && expected) {
         await stop(verdict.reason ?? 'stopped', 'token_refresh_confirmed_revocation', expected);

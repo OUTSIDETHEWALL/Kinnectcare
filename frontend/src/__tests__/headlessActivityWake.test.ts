@@ -47,6 +47,7 @@ describe('headless activity wake recovery', () => {
     'forces and records a persisted upload for a moving %s headless event',
     async (eventName, params, expectedActivity) => {
     let headlessTask: ((event: any) => Promise<void>) | undefined;
+    let evaluateWakeAuthorization: jest.Mock;
     const mockGetCurrentPosition = jest.fn().mockResolvedValue({
       coords: { latitude: 47.6, longitude: -122.3, accuracy: 8 },
       timestamp: new Date().toISOString(),
@@ -97,6 +98,8 @@ describe('headless activity wake recovery', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       require('../locationEngine');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      evaluateWakeAuthorization = require('../androidTrackingRecovery').evaluateWakeAuthorization;
     });
 
     expect(headlessTask).toBeDefined();
@@ -106,6 +109,11 @@ describe('headless activity wake recovery', () => {
     });
     await flushPromises();
 
+    expect(evaluateWakeAuthorization!).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ origin: 'sdk-headless', phase: 'initial-ownership' }),
+      expect.any(Number),
+    );
     expect(mockGetCurrentPosition).toHaveBeenCalledWith(expect.objectContaining({
       persist: false,
       extras: expect.objectContaining({ source: 'headless-motionchange' }),

@@ -1,0 +1,67 @@
+# EAS CLI uses the Git root as its archive root in this monorepo. Its archive
+# does not inherit global Git excludes or frontend/.easignore.
+.git/
+node_modules/
+.cache/
+.config/
+.local/
+.pythonlibs/
+.upm/
+.agents/
+.pytest_cache/
+generated-artifacts/
+attached_assets/
+.gitconfig
+
+# Build output and local tooling, not native module source.
+build/
+.gradle/
+.kotlin/
+.cxx/
+.idea/
+.expo/
+dist/
+web-build/
+DerivedData/
+xcuserdata/
+*.tsbuildinfo
+*.hprof
+*.iml
+local.properties
+expo-env.d.ts
+
+# Server/signing credentials are never part of a client source archive.
+.env
+.env.*
+*.keystore
+!debug.keystore
+*.jks
+*.p8
+*.p12
+*.key
+*.pem
+*.mobileprovision
+play-service-account*.json
+*service-account*.json
+*.appstoreconnect.json
+AuthKey_*.p8
+
+*.ipa
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+*.orig.*
+.DS_Store
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+.metro-health-check*
+
+# Public Android Firebase client config must be included for FCM.
+!frontend/google-services.json
+# Existing tracked client-only defaults; profile values still take precedence.
+!frontend/.env.production

@@ -7,3 +7,32 @@ uri = "file://docs/beta-launch-checklist.md"
 type = "text"
 title = "Kinnship Android Beta Launch Checklist"
 description = "Release-verification checklist covering Railway, Expo OTA, Google Play, website, privacy, physical-device smoke testing, monitoring, and rollback."
+logical_id = "7bbf365b-4502-4a48-a670-fd8a5cc26664"
+
+[[outputs]]
+id = "QAd1B-GuoWZp2KPlyyDSn"
+uri = "file://docs/build71-diagnostic-artifact-review.md"
+type = "text"
+title = "Build 71 artifact validation report"
+description = "Exact source/build identities, release DEX and bundled-JS checks, signing and static upgrade results, Railway candidate, and remaining acceptance limits. No installation or deployment performed."
+logical_id = "7d0e947b-f818-4e10-b3bf-1177b35b75bd"
+content_hash = "sha256:4d6c2e5a1113e0c54bd1c07276da1e5a3040ce5732af98bc80e582355eac243d"
+size = 11704
+mtime_ms = 1792533145255
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/7d0e947b-f818-4e10-b3bf-1177b35b75bd/8a1ba87b-bde5-4147-aa2c-f34eca2e5ff3"
+storage_version_token = "1792533250425118"
+content_type = "text/markdown"
+
+[[outputs]]
+id = "PCE78DK8-IgmeHJgQpmJt"
+uri = "file://docs/build72-request-origin-artifact-review.md"
+type = "text"
+title = "Build 72 — Artifact Verification Report"
+description = "Exact source and artifact identities, packaged JS/native hook verification, signing and runtime isolation, and physical-validation limits."
+logical_id = "c13f0bc6-94f3-47d9-83bd-f57b83d949aa"
+content_hash = "sha256:cd79d4ec95e6ead878a73c89d77203d0ee60c4419f338221b7408cef554fe44f"
+size = 9649
+mtime_ms = 1792622280131
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/c13f0bc6-94f3-47d9-83bd-f57b83d949aa/0a83fca8-c0e3-4625-9b95-acc109a26050"
+storage_version_token = "1792622324002378"
+content_type = "text/markdown"

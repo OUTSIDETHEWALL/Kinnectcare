@@ -12,6 +12,8 @@ import {
 import type { TrackingAuthority } from './trackingReliability';
 import { appendEngineEvidence } from './engineEvidenceJournal';
 import { nextSeq } from './diagSeq';
+import { recordEvidence, startupTraceId } from './evidenceTrace';
+import { operationOrigin, originPhase, withRequestOrigin } from './requestOrigin';
 
 export const GUARDED_POSITION_MARKER = 'kc_guarded_one_shot';
 type PositionOptions = { samples?: number; timeout?: number; extras?: Record<string, unknown> };
@@ -34,6 +36,10 @@ export async function acquireAndUploadAndroidPosition(
   const stamp = await trackingPolicyStamp();
   const authority = readTrackingAuthority();
   const operation = `gps-${Date.now()}-${Math.random()}`;
+  const evidenceId = startupTraceId();
+  const diagnostic = operationOrigin('gps-acquisition',
+    typeof options.extras?.kc_evidence_wake_id === 'string' ? options.extras.kc_evidence_wake_id : null,
+    authority?.generation);
   if (!authority || authority.revoked) throw new Error('tracking_native_authority_unavailable');
   const current = async (freshOwnership = false) => {
     const latestAuthority = readTrackingAuthority();
@@ -49,7 +55,13 @@ export async function acquireAndUploadAndroidPosition(
     }
     if (permission.foreground !== 'granted' || permission.background !== 'granted') return false;
     if (freshOwnership) {
-      const ownership = await verifyWakeOwnership(executionCurrent);
+      const ownership = await verifyWakeOwnership(executionCurrent,
+        originPhase(diagnostic, 'acquisition-ownership'));
+      recordEvidence('gps', 'authorization_result', evidenceId, {
+        accepted: ownership === 'allowed', generation: authority.generation,
+        reason: ownership,
+        parentId: typeof options.extras?.kc_evidence_wake_id === 'string' ? options.extras.kc_evidence_wake_id : null,
+      });
       if (!executionCurrent() || epoch !== trackingIntentEpoch()) return false;
       if (ownership !== 'allowed') {
         if (['session_rejected', 'invalid_owner', 'sharing_disabled'].includes(ownership)) {
@@ -65,10 +77,15 @@ export async function acquireAndUploadAndroidPosition(
   };
   const owned = fenceNativeSdk(sdk, () => current(),
     () => executionCurrent() && epoch === trackingIntentEpoch());
-  if (!await current(true)) throw new Error('gps_authorization_unverified');
+  const authorized = await current(true);
+  recordEvidence('gps', 'authorization_result', evidenceId, {
+    accepted: authorized, generation: authority.generation,
+    reason: authorized ? 'allowed' : 'authorization_unverified',
+  });
+  if (!authorized) throw new Error('gps_authorization_unverified');
   const consentGeneration = getVerifiedConsentGeneration(authority.owner);
   if (consentGeneration === null) throw new Error('gps_consent_generation_unverified');
-  if (!claimTrackingAcquisition(authority.owner, authority.generation, operation)) throw new Error('gps_recovery_not_due');
+  if (!claimTrackingAcquisition(authority.owner, authority.generation, operation, evidenceId)) throw new Error('gps_recovery_not_due');
    recordTrackingEvidence('acquisition_attempt', { operation, generation: authority.generation, owner: authority.owner,
      source: typeof options.extras?.source === 'string' ? options.extras.source : 'UNKNOWN' });
   let settled = false;
@@ -76,7 +93,8 @@ export async function acquireAndUploadAndroidPosition(
   try {
   const position = await Promise.race([owned.getCurrentPosition({
     ...options, timeout: Math.min(options.timeout ?? 20, 20), persist: false,
-    extras: { ...options.extras, [GUARDED_POSITION_MARKER]: true },
+    extras: { ...options.extras, [GUARDED_POSITION_MARKER]: true,
+      ...(evidenceId ? { kc_evidence_id: evidenceId } : {}) },
   }), new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error('gps_acquisition_408_timeout')), Math.min(options.timeout ?? 20, 20) * 1000);
   })]);
@@ -98,7 +116,8 @@ export async function acquireAndUploadAndroidPosition(
   const timeout = setTimeout(() => controller.abort(), 8000);
   try {
     recordTrackingEvidence('upload_attempt', { operation, generation: authority.generation, capturedAt });
-    const response = await fetch(
+    recordEvidence('gps', 'publication_attempt', evidenceId, { generation: authority.generation });
+    const response = await withRequestOrigin(originPhase(diagnostic, 'location-publication'), () => fetch(
       `${transport.baseUrl}/api/members/${encodeURIComponent(transport.memberId)}/location`,
       {
         method: 'PUT', signal: controller.signal,
@@ -110,8 +129,11 @@ export async function acquireAndUploadAndroidPosition(
           ...position, latitude, longitude, consent_generation: consentGeneration,
         }),
       },
-    );
-    if (!response.ok) throw new Error(`gps_upload_http_${response.status}`);
+    ));
+    if (!response.ok) {
+      recordEvidence('gps', 'publication_result', evidenceId, { accepted: false, status: response.status });
+      throw new Error(`gps_upload_http_${response.status}`);
+    }
     const accepted = await response.json();
     // HTTP 2xx can represent an older/replay-suppressed GPS fix. It is contact,
     // not fresh coordinate delivery. The response tuple must identify our fix.
@@ -120,6 +142,9 @@ export async function acquireAndUploadAndroidPosition(
       && new Date(accepted?.coordinate_captured_at ?? '').getTime() === capturedAt
       && accepted.latitude === latitude && accepted.longitude === longitude;
     recordTrackingEvidence('upload_result', { operation, httpAccepted: true, coordinateAccepted, capturedAt });
+    recordEvidence('gps', 'publication_result', evidenceId, {
+      accepted: coordinateAccepted, status: response.status, generation: authority.generation,
+    });
     if (!coordinateAccepted) throw new Error('gps_coordinates_not_accepted');
     // Do not publish coordinates to callers/diagnostics after a later boundary.
     if (!await current()) {
@@ -135,6 +160,7 @@ export async function acquireAndUploadAndroidPosition(
       throw new Error('gps_authorization_obsolete');
     }
     completeTrackingAcquisition(operation, 'fresh_fix_delivered', capturedAt, position.is_moving === true);
+    recordEvidence('gps', 'acquisition_completed', evidenceId, { accepted: true, generation: authority.generation });
     settled = true;
     return position;
   } finally { clearTimeout(timeout); }
@@ -150,6 +176,7 @@ export async function acquireAndUploadAndroidPosition(
             : fgsDenied ? 'fgs_denied' : 'unclassified';
     recordTrackingEvidence('acquisition_failed', { operation, outcome, fgsDenied, reason });
     if (!settled) completeTrackingAcquisition(operation, outcome);
+    recordEvidence('gps', 'acquisition_completed', evidenceId, { accepted: false, generation: authority.generation });
     throw error;
   } finally { if (timer) clearTimeout(timer); }
 }

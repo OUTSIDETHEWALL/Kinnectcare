@@ -1,2 +1,6 @@
 # Replit-uploaded reference files — never commit these
 attached_assets/
+
+# Generated validation artifacts must not enter Git or source uploads.
+/.cache/
+/generated-artifacts/

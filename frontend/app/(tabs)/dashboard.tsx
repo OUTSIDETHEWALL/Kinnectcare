@@ -29,6 +29,7 @@ import type { DashboardLoadTrigger } from '../../src/dashboardLoadLog';
 import { logCardRender } from '../../src/cardRenderLog';
 import { useAuth } from '../../src/AuthContext';
 import { getMembersResponse } from '../../src/membersResponse';
+import { operationOrigin } from '../../src/requestOrigin';
 import * as memberStore from '../../src/store/memberStore';
 import { logPipelineEvent } from '../../src/refreshPipelineLog';
 import { useActiveEmergency } from '../../src/activeEmergency';
@@ -293,7 +294,7 @@ export default function Dashboard() {
         // independent state.
         // Billing is optional presentation, not authority for family data.
         // Its retries must never hold the first usable Family screen.
-        void getBillingStatus().then(value => {
+        void getBillingStatus(operationOrigin('dashboard', null)).then(value => {
           if (isCurrentLoad()) setBilling(value);
         }).catch(() => {});
         // Safety data still starts immediately, but neither request may hide
@@ -303,7 +304,7 @@ export default function Dashboard() {
         setSummaryStatus('pending');
         setAlertsStatus('pending');
         markStartupMilestone('dashboard_requests_dispatched');
-        void api.get<DashboardSummary>('/summary').then(s => {
+        void api.get<DashboardSummary>('/summary', { requestOrigin: operationOrigin('dashboard') }).then(s => {
           if (!isCurrentLoad()) return;
           if (!Array.isArray(s.data?.members) || !Array.isArray(s.data?.missed_medication_details)) {
             throw new Error('Invalid family safety summary');
@@ -317,7 +318,7 @@ export default function Dashboard() {
           setSummaryStatus('failed');
           markStartupMilestone('dashboard_summary_failed');
         });
-        void api.get('/alerts').then(ar => {
+        void api.get('/alerts', { requestOrigin: operationOrigin('dashboard') }).then(ar => {
           if (!isCurrentLoad()) return;
           if (!Array.isArray(ar.data)) throw new Error('Invalid family alerts');
           const freshAlerts = (ar.data as ApiAlert[]).filter(a => !a.resolved);

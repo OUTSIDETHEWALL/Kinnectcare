@@ -115,6 +115,8 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
 app = FastAPI(title="Kinnship API")
+from startup_request_trace import StartupRequestTraceMiddleware
+app.add_middleware(StartupRequestTraceMiddleware)
 api_router = APIRouter(prefix="/api")
 
 

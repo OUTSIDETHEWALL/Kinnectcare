@@ -7,6 +7,8 @@ import {
   withExpectedTrackingRevocation, rearmNativeTrackingConsent,
 } from './trackingReliability';
 import type { TrackingAuthority } from './trackingReliability';
+import { operationOrigin, originPhase, withRequestOrigin, type RequestOrigin } from './requestOrigin';
+import { initialOwnershipReads, ownershipSession, ownershipSessionCurrent } from './initialOwnershipReads';
 
 export type AuthorizationVerdict = {
   state: 'AUTHORIZED' | 'UNKNOWN' | 'REVOKED';
@@ -14,7 +16,9 @@ export type AuthorizationVerdict = {
   reason?: RevocationReason;
 };
 
-export async function evaluateWakeAuthorization(isCurrent: () => boolean): Promise<AuthorizationVerdict> {
+export async function evaluateWakeAuthorization(
+  isCurrent: () => boolean, origin?: RequestOrigin, initialLifecycleGeneration?: number,
+): Promise<AuthorizationVerdict> {
   try {
     if (await trackingIsRevoked()) return { state: 'REVOKED', source: 'durable_revocation', reason: 'stopped' };
     const permission = await readPermissionSnapshot({ includeNotifications: false });
@@ -24,7 +28,7 @@ export async function evaluateWakeAuthorization(isCurrent: () => boolean): Promi
     if (permission.foreground !== 'granted' || permission.background !== 'granted') {
       return { state: 'UNKNOWN', source: 'permission_unverified' };
     }
-    const result = await verifyWakeOwnership(isCurrent);
+    const result = await verifyWakeOwnership(isCurrent, origin, initialLifecycleGeneration);
     if (result === 'allowed') return { state: 'AUTHORIZED', source: 'authenticated_owner' };
     if (result === 'invalid_owner' || result === 'sharing_disabled' || result === 'session_rejected') {
       return { state: 'REVOKED', source: result,
@@ -230,16 +234,18 @@ function parseIntent(raw: string | null): Intent | null {
 /** GPS revocation does not revoke an otherwise valid owner's battery contact. */
 export async function authorizeRevokedBatteryTransport(
   isCurrent: () => boolean,
+  origin?: RequestOrigin,
 ): Promise<AuthorizedBatteryTransport | null> {
   const stamp = await trackingPolicyStamp();
   const value = stamp ? JSON.parse(stamp) : null;
   if (value?.revoked !== true && readTrackingAuthority()?.revoked !== true) return null;
-  return authorizeDeviceContactTransport(isCurrent);
+  return authorizeDeviceContactTransport(isCurrent, origin);
 }
 
 /** Device contact requires a fresh self-owner session, never a working GPS SDK. */
 export async function authorizeDeviceContactTransport(
   isCurrent: () => boolean,
+  origin: RequestOrigin = operationOrigin('device-contact'),
 ): Promise<AuthorizedBatteryTransport | null> {
   const stamp = await trackingPolicyStamp();
   const value = stamp ? JSON.parse(stamp) : null;
@@ -259,8 +265,8 @@ export async function authorizeDeviceContactTransport(
     return trackingIntentEpoch() === expectedEpoch && isCurrent() && policy === stamp && currentToken === token;
   };
   const [user, members] = await Promise.all([
-    authenticatedGet(`${base}/api/auth/me`, token),
-    authenticatedGet(`${base}/api/members`, token),
+    authenticatedGet(`${base}/api/auth/me`, token, originPhase(origin, 'device-contact')),
+    authenticatedGet(`${base}/api/members`, token, originPhase(origin, 'device-contact')),
   ]) as [{ id?: string }, { id: string; user_id: string }[]];
   if (!user?.id || !Array.isArray(members)
     || members.some(member => !member || typeof member.id !== 'string' || !member.id
@@ -277,7 +283,15 @@ export async function authorizeDeviceContactTransport(
  * remote consent withdrawal must interrupt even a never-returning native call.
  * Network failure is not evidence of removal. No SDK-retained token is used.
  */
-export async function verifyWakeOwnership(isCurrent: () => boolean): Promise<string> {
+export async function verifyWakeOwnership(
+  isCurrent: () => boolean, origin: RequestOrigin = operationOrigin('ownership-direct'),
+  initialLifecycleGeneration?: number,
+): Promise<string> {
+  // Only the initial recovery stage opts in. Later ownership/acquisition checks
+  // must dispatch new reads even if an initial flight happens to be pending.
+  const initial = initialLifecycleGeneration !== undefined && origin.phase === 'initial-ownership';
+  const session = initial ? ownershipSession() : null;
+  const admittedAuthority = initial ? readTrackingAuthority() : null;
   const expectedEpoch = trackingIntentEpoch();
   const stamp = await trackingPolicyStamp();
   const intent = await readIntent();
@@ -288,22 +302,47 @@ export async function verifyWakeOwnership(isCurrent: () => boolean): Promise<str
   const token = await getCurrentToken();
   if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch) return 'obsolete_owner';
   if (!token) return 'no_session';
+  const sameAuthority = () => {
+    const latest = readTrackingAuthority() as (TrackingAuthority & {
+      pendingMutation?: string; shutdowns?: Record<string, unknown>;
+    }) | null;
+    return !!admittedAuthority && !!latest && !latest.revoked
+      && latest.owner === admittedAuthority.owner && latest.generation === admittedAuthority.generation
+      && !latest.shutdownPending && !latest.pendingMutation && !Object.keys(latest.shutdowns ?? {}).length;
+  };
+  if (session && !ownershipSessionCurrent(session)) return 'obsolete_owner';
+  const admittedConsent = admittedAuthority ? getVerifiedConsentGeneration(admittedAuthority.owner) : null;
+  const sharingKey = session && intent && admittedAuthority && !admittedAuthority.revoked
+    && admittedAuthority.owner === `${intent.ownerUserId}:${intent.memberId}`
+    && sameAuthority() && stamp === await trackingPolicyStamp()
+    ? JSON.stringify([session.revision, token, base, stamp, admittedAuthority.owner,
+      expectedEpoch, initialLifecycleGeneration, admittedConsent])
+    : null;
+  // The loader has no consumer isCurrent callback and no authorization effects.
+  // Cancellation of its initiator must not poison a still-current follower.
+  const load = () => Promise.all([
+    authenticatedGet(`${base}/api/auth/me`, token, origin),
+    authenticatedGet(`${base}/api/members`, token, origin),
+    authenticatedGet(`${base}/api/me/preferences`, token, origin),
+  ]) as Promise<[unknown, unknown, unknown]>;
+  const obsoleteInitial = () => !!session && (!ownershipSessionCurrent(session)
+    || (!!sharingKey && !sameAuthority()));
   let user: { id?: string }, members: { id: string; user_id: string; location_consent_generation?: number }[], preferences: { location_sharing_enabled?: boolean };
   try {
-    [user, members, preferences] = await Promise.all([
-      authenticatedGet(`${base}/api/auth/me`, token),
-      authenticatedGet(`${base}/api/members`, token),
-      authenticatedGet(`${base}/api/me/preferences`, token),
-    ]) as [typeof user, typeof members, typeof preferences];
+    if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteInitial()) return 'obsolete_owner';
+    [user, members, preferences] = await (sharingKey
+      ? initialOwnershipReads(sharingKey, load) : load()) as [typeof user, typeof members, typeof preferences];
   } catch (error) {
-    if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || await getCurrentToken() !== token) return 'obsolete_owner';
+    if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || await getCurrentToken() !== token
+      || obsoleteInitial()) return 'obsolete_owner';
     // Only /auth/me 401 confirms session invalidation. A member/preferences
     // 403 can be an endpoint policy failure, not evidence of sign-out.
     return String(error).includes('session_rejected') ? 'session_rejected' : 'ownership_unavailable';
   }
   const currentStamp = await trackingPolicyStamp();
   const currentToken = await getCurrentToken();
-  if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || currentStamp !== stamp || currentToken !== token) return 'obsolete_owner';
+  if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || currentStamp !== stamp || currentToken !== token
+    || obsoleteInitial()) return 'obsolete_owner';
   if (!user?.id || !Array.isArray(members)
     || members.some(member => !member || typeof member.id !== 'string'
       || (member.user_id != null && typeof member.user_id !== 'string'))) {
@@ -318,7 +357,12 @@ export async function verifyWakeOwnership(isCurrent: () => boolean): Promise<str
   if (preferences?.location_sharing_enabled !== true) return 'ownership_unavailable';
   // A native HTTP receipt has no original dispatch generation. Read the
   // accepted tuple only through this current-token/current-owner operation.
-  if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch) return 'obsolete_owner';
+  if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteInitial()) return 'obsolete_owner';
+  if (sharingKey && admittedAuthority) {
+    const latestConsent = getVerifiedConsentGeneration(admittedAuthority.owner);
+    if (latestConsent !== admittedConsent
+      && latestConsent !== (owned[0].location_consent_generation ?? 0)) return 'obsolete_owner';
+  }
   verifiedConsent = { owner: `${user.id}:${owned[0].id}`, generation: owned[0].location_consent_generation ?? 0 };
   try {
     observeAcceptedTrackingLocation(owned[0], `${user.id}:${owned[0].id}`, expectedEpoch);
@@ -326,13 +370,13 @@ export async function verifyWakeOwnership(isCurrent: () => boolean): Promise<str
   return 'allowed';
 }
 
-async function authenticatedGet(url: string, token: string): Promise<unknown> {
+async function authenticatedGet(url: string, token: string, origin?: RequestOrigin): Promise<unknown> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
   try {
-    const response = await fetch(url, {
+    const response = await withRequestOrigin(origin, () => fetch(url, {
       headers: { Authorization: `Bearer ${token}` }, signal: controller.signal,
-    });
+    }));
     if (!response.ok) throw new Error(
       url.endsWith('/api/auth/me') && response.status === 401 ? 'session_rejected' : `ownership_http_${response.status}`,
     );
@@ -348,6 +392,7 @@ async function authenticatedGet(url: string, token: string): Promise<unknown> {
  */
 export async function migrateLegacyTrackingIntent(
   sdk: Pick<RecoverySdk, 'getState'>, isCurrent: () => boolean,
+  origin?: RequestOrigin,
 ): Promise<boolean> {
   const expectedEpoch = trackingIntentEpoch();
   if (await trackingPolicyStamp() !== null || !isCurrent()) return false;
@@ -371,10 +416,11 @@ export async function migrateLegacyTrackingIntent(
   const { getCurrentToken } = require('./api') as typeof import('./api');
   const token = await getCurrentToken();
   if (!token || !isCurrent() || trackingIntentEpoch() !== expectedEpoch) return false;
+  const diagnostic = originPhase(origin ?? operationOrigin('legacy-migration'), 'migration');
   const [user, members, preferences, permissions] = await Promise.all([
-    authenticatedGet(`${base}/api/auth/me`, token),
-    authenticatedGet(`${base}/api/members`, token),
-    authenticatedGet(`${base}/api/me/preferences`, token),
+    authenticatedGet(`${base}/api/auth/me`, token, diagnostic),
+    authenticatedGet(`${base}/api/members`, token, diagnostic),
+    authenticatedGet(`${base}/api/me/preferences`, token, diagnostic),
     readPermissionSnapshot({ includeNotifications: false }),
   ]) as [{ id?: string }, { id: string; user_id: string }[],
     { location_sharing_enabled?: boolean }, { foreground: string; background: string }];
@@ -414,6 +460,7 @@ export async function recoverUnexpectedlyDisabledTracking(
   isCurrent: () => boolean,
   onAuthorizedBattery?: (transport: AuthorizedBatteryTransport) => void,
   registerRuntime?: () => Promise<void>,
+  origin?: RequestOrigin,
 ): Promise<string> {
   let expectedEpoch = trackingIntentEpoch();
   let expectedAuthority = readTrackingAuthority();
@@ -427,12 +474,12 @@ export async function recoverUnexpectedlyDisabledTracking(
       });
       if (!applied) return 'obsolete_owner';
     } else await shutdownConfirmedRevocation(sdk, 'recovery_durable_revocation', expectedAuthority);
-    const transport = await authorizeRevokedBatteryTransport(isCurrent);
+    const transport = await authorizeRevokedBatteryTransport(isCurrent, origin);
     if (transport) onAuthorizedBattery?.(transport);
     return 'tracking_revoked';
   }
   if (expectedStamp === null) {
-    await migrateLegacyTrackingIntent(sdk, isCurrent);
+    await migrateLegacyTrackingIntent(sdk, isCurrent, origin);
     expectedEpoch = trackingIntentEpoch();
     expectedStamp = await trackingPolicyStamp();
     if (revokedStamp(expectedStamp)) {
@@ -496,10 +543,11 @@ export async function recoverUnexpectedlyDisabledTracking(
     || cache.consentGeneration !== getVerifiedConsentGeneration(`${cache.ownerUserId}:${memberId}`)) {
     let responses: unknown[];
     try {
+      const diagnostic = originPhase(origin ?? operationOrigin('recovery'), 'recovery-cache-miss');
       responses = await Promise.all([
-        authenticatedGet(`${base}/api/auth/me`, token),
-        authenticatedGet(`${base}/api/members`, token),
-        authenticatedGet(`${base}/api/me/preferences`, token),
+        authenticatedGet(`${base}/api/auth/me`, token, diagnostic),
+        authenticatedGet(`${base}/api/members`, token, diagnostic),
+        authenticatedGet(`${base}/api/me/preferences`, token, diagnostic),
       ]);
     } catch (error) {
       if (String(error).includes('session_rejected') && await current()) {
@@ -546,7 +594,7 @@ export async function recoverUnexpectedlyDisabledTracking(
     if (!await withdrawCurrent(sharingOff ? 'consent' : 'permission',
       'recovery_confirmed_consent_or_permission')) return 'obsolete_owner';
     // Battery contact is not GPS consent. Still require the verified app session.
-    const transport = await authorizeRevokedBatteryTransport(isCurrent);
+    const transport = await authorizeRevokedBatteryTransport(isCurrent, origin);
     if (transport) onAuthorizedBattery?.(transport);
     return sharingOff ? 'sharing_disabled' : 'permission_denied';
   }

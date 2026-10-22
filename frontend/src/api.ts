@@ -4,6 +4,12 @@ import { AppState, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { markStartupMilestone } from './startupDiagnostics';
 import { startStartupApiTiming, type StartupApiTiming } from './startupApiTiming';
+import { operationOrigin, requestOriginAvailable, withRequestOrigin, type RequestOrigin } from './requestOrigin';
+import { beginOwnershipSessionChange } from './initialOwnershipReads';
+
+declare module 'axios' {
+  interface AxiosRequestConfig { requestOrigin?: RequestOrigin }
+}
 
 const measuredRequests = new WeakMap<object, { at: number; endpoint: string }>();
 const startupStages = new WeakMap<object, StartupApiTiming>();
@@ -77,14 +83,19 @@ function notifyTokenChange(token: string | null): void {
 }
 
 export async function saveToken(token: string) {
-  if (Platform.OS === 'web') await AsyncStorage.setItem(TOKEN_KEY, token);
-  else {
-    await SecureStore.setItemAsync(TOKEN_KEY, token, {
-      // The iOS notification-service action handler must be able to read the
-      // token while the phone is locked. This remains device-local and only
-      // becomes available after the first unlock following a reboot.
-      keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
-    });
+  const finishSessionChange = beginOwnershipSessionChange();
+  try {
+    if (Platform.OS === 'web') await AsyncStorage.setItem(TOKEN_KEY, token);
+    else {
+      await SecureStore.setItemAsync(TOKEN_KEY, token, {
+        // The iOS notification-service action handler must be able to read the
+        // token while the phone is locked. This remains device-local and only
+        // becomes available after the first unlock following a reboot.
+        keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+      });
+    }
+  } finally {
+    finishSessionChange();
   }
   notifyTokenChange(token);
 }
@@ -100,21 +111,26 @@ export async function migrateTokenForBackgroundActions(): Promise<void> {
   });
 }
 export async function clearToken() {
-  const clearStoredToken = async () => {
-    try {
-      if (Platform.OS === 'web') await AsyncStorage.removeItem(TOKEN_KEY);
-      else await SecureStore.deleteItemAsync(TOKEN_KEY);
-    } finally {
-      notifyTokenChange(null);
+  const finishSessionChange = beginOwnershipSessionChange();
+  try {
+    const clearStoredToken = async () => {
+      try {
+        if (Platform.OS === 'web') await AsyncStorage.removeItem(TOKEN_KEY);
+        else await SecureStore.deleteItemAsync(TOKEN_KEY);
+      } finally {
+        notifyTokenChange(null);
+      }
+    };
+    if (Platform.OS === 'android') {
+      // Invalidate/interrupt before waiting on either secure or ordinary storage.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const engine = require('./locationEngine') as typeof import('./locationEngine');
+      await Promise.all([engine.stop('signout', 'clear_session_token'), clearStoredToken()]);
+    } else {
+      await clearStoredToken();
     }
-  };
-  if (Platform.OS === 'android') {
-    // Invalidate/interrupt before waiting on either secure or ordinary storage.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const engine = require('./locationEngine') as typeof import('./locationEngine');
-    await Promise.all([engine.stop('signout', 'clear_session_token'), clearStoredToken()]);
-  } else {
-    await clearStoredToken();
+  } finally {
+    finishSessionChange();
   }
 }
 
@@ -161,22 +177,33 @@ api.interceptors.request.use(async (config) => {
     stages?.finish('token_failed');
     throw error;
   }
-  if (stages) {
+  if (stages || requestOriginAvailable()) {
+    // Evidence extension is absent in Build 70: no header is added there.
+    // Correlation is observational; no retry, dispatch, cache or timeout changes.
+    if (stages?.traceId) config.headers.set('X-Kinnship-Startup-Trace', stages.traceId);
     // Timestamp Axios adapter invocation/settlement without changing the
     // adapter, its config, or the response/error it produces. This interval
     // still includes native queuing, transport, server and JS callback delivery.
     const originalAdapter = config.adapter ?? api.defaults.adapter;
+    const diagnostic = config.requestOrigin ?? operationOrigin(
+      String(config.url) === '/auth/me' ? 'foreground-auth'
+        : String(config.url).includes('/battery') ? 'foreground-battery'
+          : String(config.url).startsWith('/billing') ? 'billing'
+            : String(config.url).includes('medication') ? 'medication'
+              : String(config.url).includes('check') ? 'check-in' : 'foreground-api',
+    );
     config.adapter = adapterConfig => {
-      stages.adapterStarted();
+      stages?.adapterStarted();
       let result: ReturnType<ReturnType<typeof getAdapter>>;
       try {
         // Resolve at Axios's original dispatch boundary, after its transforms.
         const adapter = resolveAdapter(originalAdapter, adapterConfig);
-        result = adapter(adapterConfig);
-      } catch (error) { stages.adapterSettled(); throw error; }
+        result = withRequestOrigin(diagnostic, () => adapter(adapterConfig));
+      } catch (error) { stages?.adapterSettled(); throw error; }
+      if (!stages) return result;
       return result.then(
-        value => { stages.adapterSettled(); return value; },
-        error => { stages.adapterSettled(); throw error; },
+        value => { stages?.adapterSettled(); return value; },
+        error => { stages?.adapterSettled(); throw error; },
       );
     };
   }
@@ -523,8 +550,8 @@ export type BillingStatus = {
   annual_savings_cents: number;
 };
 
-export async function getBillingStatus(): Promise<BillingStatus> {
-  const r = await api.get('/billing/status');
+export async function getBillingStatus(requestOrigin?: RequestOrigin): Promise<BillingStatus> {
+  const r = await api.get('/billing/status', requestOrigin ? { requestOrigin } : undefined);
   return r.data;
 }
 
