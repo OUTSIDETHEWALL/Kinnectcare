@@ -25,7 +25,7 @@ const TRANSISTOR_LICENSE_IOS = process.env.TRANSISTOR_LICENSE_IOS || '';
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || '';
 // Explicit diagnostic profile only. Production/Build 70 keep their existing
 // version and OTA compatibility. Each diagnostic binary has its own runtime.
-const DIAGNOSTIC_BUILD = ['71', '72', '73'].includes(process.env.KINNSHIP_DIAGNOSTIC_BUILD)
+const DIAGNOSTIC_BUILD = ['71', '72', '73', '74'].includes(process.env.KINNSHIP_DIAGNOSTIC_BUILD)
   ? Number(process.env.KINNSHIP_DIAGNOSTIC_BUILD) : null;
 
 module.exports = ({ config }) => ({

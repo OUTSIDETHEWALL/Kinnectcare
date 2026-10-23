@@ -55,6 +55,15 @@
         "KINNSHIP_DIAGNOSTIC_BUILD": "73"
       }
     },
+    "diagnostic74": {
+      "extends": "production",
+      "environment": "production",
+      "channel": "diagnostic74",
+      "autoIncrement": false,
+      "env": {
+        "KINNSHIP_DIAGNOSTIC_BUILD": "74"
+      }
+    },
     "production": {
       "channel": "production",
       "ios": {
