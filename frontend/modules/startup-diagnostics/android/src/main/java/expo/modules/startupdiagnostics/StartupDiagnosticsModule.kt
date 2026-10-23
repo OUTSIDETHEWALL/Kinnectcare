@@ -10,12 +10,15 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Synchronous, durable startup diagnostics. All errors are contained because
- * this module is observational and must never affect application startup.
+ * Local diagnostics and synchronous tracking safety APIs. Observational writes
+ * contain their failures; operational lifetime queries remain memory-only.
  */
 class StartupDiagnosticsModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("StartupDiagnostics")
+
+    Function("headlessTaskCurrent") { token: String -> HeadlessTaskLifetimes.current(token) }
+    Function("headlessTaskEnd") { token: String -> HeadlessTaskLifetimes.end(token) }
 
     Function("originVersion") { 1 }
     Function("originBind") { request: Int, detail: String ->

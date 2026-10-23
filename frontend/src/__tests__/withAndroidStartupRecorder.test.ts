@@ -114,7 +114,12 @@ describe('withAndroidStartupRecorder', () => {
     expect(moduleGradle).toContain('versionCode 1');
     expect(moduleGradle).toContain("versionName '1.0.0'");
     expect(source).toContain('class StartupDiagnosticsModule : Module()');
-    expect(source.match(/Function\("/g)).toHaveLength(22);
+    // Explicitly include the Build 73 origin API and operational lifetime API.
+    expect(source.match(/Function\("/g)).toHaveLength(28);
+    for (const method of ['originVersion', 'originBind', 'originRecord', 'originRead',
+      'headlessTaskCurrent', 'headlessTaskEnd']) {
+      expect(source).toContain(`Function("${method}")`);
+    }
     expect(source).not.toContain('AsyncFunction');
     expect(source).not.toContain('@ReactMethod');
     expect(source).not.toContain('ReactPackage');

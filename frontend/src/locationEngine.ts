@@ -62,6 +62,7 @@
  * keep-alive).
  */
 import { Platform, AppState } from 'react-native';
+import { headlessTaskLifetime } from './headlessTaskLifetime';
 import { recordEvidence } from './evidenceTrace';
 import { operationOrigin, originEvent, originPhase, withRequestOrigin } from './requestOrigin';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -311,6 +312,7 @@ let headlessRegistered = false;
  */
 async function patchHeadlessHeartbeatPresence(
   lib: any, event: any, transport?: AuthorizedBatteryTransport,
+  executionCurrent: () => boolean = () => true,
 ): Promise<boolean> {
   const heartbeatLocation = event?.params?.location ?? event?.location;
   const battLevel: number | undefined = heartbeatLocation?.battery?.level;
@@ -342,7 +344,8 @@ async function patchHeadlessHeartbeatPresence(
     const memberMatch = locationUrl.match(/\/members\/([^/]+)\/location/);
     const memberId = memberMatch?.[1] ?? '';
     const baseUrl = locationUrl.split('/api/members/')[0] ?? '';
-    if (!memberId || !jwt || !baseUrl || (transport && !await transport.isCurrent())) {
+    if (!memberId || !jwt || !baseUrl || !executionCurrent()
+      || (transport && !await transport.isCurrent()) || !executionCurrent()) {
       await logEvent('headless_battery_patch_skipped', {
         reason: 'missing_member_id_or_jwt',
         hasMemberId: !!memberId,
@@ -353,7 +356,9 @@ async function patchHeadlessHeartbeatPresence(
     }
 
     const response = await Promise.race([
-      withRequestOrigin(operationOrigin('sdk-headless-battery', event?.kcEvidenceWakeId), () => fetch(`${baseUrl}/api/members/${memberId}/battery`, {
+      withRequestOrigin(operationOrigin('sdk-headless-battery', event?.kcEvidenceWakeId), () => {
+        if (!executionCurrent()) throw new Error('headless_task_obsolete');
+        return fetch(`${baseUrl}/api/members/${memberId}/battery`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -365,7 +370,8 @@ async function patchHeadlessHeartbeatPresence(
           is_charging: battCharging,
           battery_updated_at: new Date().toISOString(),
         }),
-      })),
+        });
+      }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('headless-battery-patch-timeout')), 6000),
       ),
@@ -398,6 +404,8 @@ function registerHeadlessTaskOnce(): void {
   if (!lib) return;
 
   const HeadlessTask = async (event: any) => {
+    const lifetime = Platform.OS === 'android' ? headlessTaskLifetime(event) : null;
+    const executionCurrent = () => lifetime?.isCurrent() ?? true;
     try {
       const name = event?.name;
       if (['heartbeat', 'boot', 'terminate', 'motionchange', 'activitychange'].includes(name)) {
@@ -434,25 +442,30 @@ function registerHeadlessTaskOnce(): void {
         await logEvent(name === 'motionchange' ? 'sdk_onMotionChange' : 'sdk_onActivityChange', {
           isMoving: event?.params?.isMoving, activity: event?.params?.activity, origin: 'headless',
         });
+        if (!executionCurrent()) return;
         const activity = event?.params?.activity;
         observeTrackingMovement(event?.params?.isMoving === true || ['in_vehicle', 'on_bicycle', 'on_foot', 'walking', 'running'].includes(activity));
       }
       if (Platform.OS === 'android' && ['terminate', 'boot', 'heartbeat', 'motionchange', 'activitychange'].includes(name)) {
+        if (!executionCurrent()) {
+          await logEvent('headless_task_discarded', { reason: 'native_execution_not_current', eventName: name });
+          return;
+        }
         const recovery = await recoverWithOperationalReport(
-          `sdk-${name}`, () => true, transport => { authorizedTransport = transport; },
+          `sdk-${name}`, executionCurrent, transport => { if (executionCurrent()) authorizedTransport = transport; },
           event?.kcEvidenceWakeId ?? null,
         );
         // A denied/revoked owner must not obtain and upload GPS through the
         // old heartbeat/motion handler merely because a native event arrived.
-        if (recovery.authorization !== 'AUTHORIZED'
-          || (await lib.getState()).enabled !== true) return;
+        if (!executionCurrent() || recovery.authorization !== 'AUTHORIZED'
+          || (await lib.getState()).enabled !== true || !executionCurrent()) return;
       }
 
       if (name === 'heartbeat') {
         // Presence-first: the heartbeat already carries a last-known location
         // with a native battery snapshot. PATCH it before any GPS work so a
         // slow or failed getCurrentPosition cannot suppress device presence.
-        const presencePatched = await patchHeadlessHeartbeatPresence(lib, event, authorizedTransport);
+        const presencePatched = await patchHeadlessHeartbeatPresence(lib, event, authorizedTransport, executionCurrent);
 
         // Android samples without native persistence, then revalidates and
         // explicitly uploads. iOS retains its existing native transport.
@@ -464,7 +477,7 @@ function registerHeadlessTaskOnce(): void {
             timeout: 30,
             extras: { source: 'headless-heartbeat',
               ...(event?.kcEvidenceWakeId ? { kc_evidence_wake_id: event.kcEvidenceWakeId } : {}) },
-          }, authorizedTransport);
+          }, authorizedTransport, executionCurrent);
           recordPipelineTs('headless_heartbeat');
           await logEvent('headless_heartbeat_ok');
           // Compatibility fallback for older SDK heartbeat payloads that omit
@@ -474,7 +487,7 @@ function registerHeadlessTaskOnce(): void {
           if (!presencePatched) {
             await patchHeadlessHeartbeatPresence(lib, {
               params: { location: pos },
-            }, authorizedTransport);
+            }, authorizedTransport, executionCurrent);
           }
         } catch (e: any) {
           await logEvent('headless_heartbeat_error', {
@@ -677,7 +690,7 @@ function registerHeadlessTaskOnce(): void {
               const loc = await acquireGuardedPosition(lib, {
                 samples: 1, persist: true, timeout: 30,
                 extras: { source: 'headless-motionchange' },
-              }, authorizedTransport);
+              }, authorizedTransport, executionCurrent);
               // Android returned only after a fenced HTTP acceptance; iOS
               // retains native autoSync. Round diagnostic coordinates.
               await logEvent('gps_fix_received', {
@@ -716,6 +729,8 @@ function registerHeadlessTaskOnce(): void {
     } catch (_e) {
       // Any uncaught throw in a headless task could destabilize the
       // SDK's native service; defensive top-level catch.
+    } finally {
+      lifetime?.cancel();
     }
   };
 
@@ -895,18 +910,21 @@ function interruptEngineStop(force = false): Promise<void> {
 
 async function acquireGuardedPosition(
   lib: any, options: any, transport?: AuthorizedBatteryTransport,
+  executionCurrent: () => boolean = () => true,
 ): Promise<any> {
   if (Platform.OS !== 'android') return lib.getCurrentPosition(options);
+  if (!executionCurrent()) throw new Error('gps_authorization_obsolete');
   const generation = engineGeneration;
   let proof = transport;
   if (!proof) {
     const result = await recoverWithOperationalReport(
-      'js-position', () => generation === engineGeneration, receipt => { proof = receipt; },
+      'js-position', () => generation === engineGeneration && executionCurrent(),
+      receipt => { if (executionCurrent()) proof = receipt; },
     );
     if (result.authorization !== 'AUTHORIZED') throw new Error('gps_not_authorized');
   }
   if (!proof) throw new Error('gps_not_authorized');
-  return acquireAuthorizedAndroidPosition(lib, proof, options, () => generation === engineGeneration);
+  return acquireAuthorizedAndroidPosition(lib, proof, options, () => generation === engineGeneration && executionCurrent());
 }
 
 /** All Android one-shot native requests share the quarantined lifecycle FIFO. */
@@ -2189,6 +2207,7 @@ export function recoverFromIndependentWake(
           if (!isReady) {
             attachSdkListeners(lib);
             await owned.ready({ reset: false });
+            if (generation !== engineGeneration || !isCurrent()) return;
             isReady = true;
             await logEvent('ready_ok', { source: 'independent-runtime', callbacksRegistered: true });
           }
