@@ -65,6 +65,7 @@ import { Platform, AppState } from 'react-native';
 import { headlessTaskLifetime } from './headlessTaskLifetime';
 import { recordEvidence } from './evidenceTrace';
 import { operationOrigin, originEvent, originPhase, withRequestOrigin } from './requestOrigin';
+import { deepStage } from './deepAsyncTrace';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
@@ -436,7 +437,12 @@ function registerHeadlessTaskOnce(): void {
       // have gone silent — this distinguishes "headless alive, JS dead"
       // from "entire background pipeline stopped".
       recordPipelineTs('headless_invoked');
+      const entryDiagnostic = event?.kcEvidenceWakeId ? {
+        operation: event.kcEvidenceWakeId, wake: event.kcEvidenceWakeId, origin: 'headless-entry',
+      } : undefined;
+      deepStage(entryDiagnostic, 'headless_log_entered');
       await logEvent('headless_task_invoked', { eventName: name ?? 'unknown' });
+      deepStage(entryDiagnostic, 'headless_log_completed');
 
       if (Platform.OS === 'android' && (name === 'motionchange' || name === 'activitychange')) {
         await logEvent(name === 'motionchange' ? 'sdk_onMotionChange' : 'sdk_onActivityChange', {
@@ -2135,6 +2141,7 @@ export function recoverFromIndependentWake(
     recordEvidence('gps', 'authorization_result', evidenceWakeId, {
       accepted: verdict.state === 'AUTHORIZED', reason: verdict.source, source: trigger, generation,
     });
+    deepStage(diagnostic, 'authorization_result_published', { reason: verdict.source });
     recordTrackingEvidence('wake_authorization', { source: trigger, authorization: verdict.state, reason: verdict.source });
     if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
     if (verdict.state === 'UNKNOWN') return verdict.source;
@@ -2164,7 +2171,9 @@ export function recoverFromIndependentWake(
       if (transport) onAuthorizedBattery?.(transport);
       return 'tracking_revoked';
     }
+    deepStage(diagnostic, 'recovery_permissions_entered');
     const permissions = await readPermissionSnapshot({ includeNotifications: false });
+    deepStage(diagnostic, 'recovery_permissions_completed');
     if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
     if (permissions.foreground !== 'granted' || permissions.background !== 'granted') {
       // A wake must enforce withdrawal even if another wake owns a stalled FIFO.
@@ -2178,8 +2187,10 @@ export function recoverFromIndependentWake(
       if (transport) onAuthorizedBattery?.(transport);
       return 'permission_denied';
     }
+    deepStage(diagnostic, 'recovery_second_ownership_entered');
     const ownership = await verifyWakeOwnership(() => generation === engineGeneration && isCurrent(),
       originPhase(diagnostic, 'second-ownership'));
+    deepStage(diagnostic, 'recovery_second_ownership_completed');
     if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
     if (ownership !== 'allowed') {
       if (['session_rejected', 'invalid_owner', 'sharing_disabled'].includes(ownership)) {
@@ -2188,7 +2199,9 @@ export function recoverFromIndependentWake(
       }
       return ownership;
     }
+    deepStage(diagnostic, 'recovery_fifo_entered');
     return serializeEngineOperation(async () => {
+    deepStage(diagnostic, 'recovery_admitted');
     const lib = bgGeo();
     if (!lib) return 'native_unavailable';
     try {
@@ -2230,7 +2243,13 @@ export function recoverFromIndependentWake(
     }
     });
   })();
-  void recovery.then(() => originEvent(diagnostic, 'js_settled'), () => originEvent(diagnostic, 'js_settled'));
+  void recovery.then(() => {
+    deepStage(diagnostic, 'recovery_returned');
+    originEvent(diagnostic, 'js_settled');
+  }, () => {
+    deepStage(diagnostic, 'recovery_rejected');
+    originEvent(diagnostic, 'js_settled');
+  });
   return recovery;
 }
 

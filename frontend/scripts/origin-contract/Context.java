@@ -5,7 +5,8 @@ public class Context {
   public Context(File root) { this.root = root; }
   public Context getApplicationContext() { return this; }
   public File getFilesDir() {
-    if (!Thread.currentThread().getName().contains("kinnship-origins")) throw new AssertionError("disk on producer");
+    if (!Thread.currentThread().getName().contains("kinnship-origins")
+        && !Thread.currentThread().getName().contains("kinnship-deep-async")) throw new AssertionError("disk on producer");
     return root;
   }
 }

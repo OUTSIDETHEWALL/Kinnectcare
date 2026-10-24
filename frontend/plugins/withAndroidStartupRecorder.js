@@ -3,6 +3,7 @@ const { withMainActivity, withMainApplication } = require('expo/config-plugins')
 const MARKER = 'KinnshipStartupDiagnostics';
 const RECORDER = 'expo.modules.startupdiagnostics.StartupDiagnosticsRecorder';
 const withAndroidEvidenceTracing = require('./withAndroidEvidenceTracing');
+const withDeepAsyncTracing = require('./withDeepAsyncTracing');
 
 function insertInFunction(contents, signature, before, after) {
   const signatureIndex = contents.indexOf(signature);
@@ -57,6 +58,7 @@ ${next.slice(classEnd)}`;
 
 module.exports = function withAndroidStartupRecorder(config) {
   config = withAndroidEvidenceTracing(config);
+  if (process.env.KINNSHIP_DIAGNOSTIC_BUILD === '75') config = withDeepAsyncTracing(config);
   config = withMainApplication(config, (cfg) => {
     cfg.modResults.contents = injectMainApplication(cfg.modResults.contents);
     return cfg;

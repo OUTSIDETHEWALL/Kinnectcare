@@ -29,3 +29,14 @@ binary while its source tests pass, leading to false conclusions from missing da
 then inspect the separately approved release artifact before claiming device
 coverage. Prebuild-time JavaScript dependency hooks also need explicit coverage
 review before an OTA-only collection is considered.
+
+Preferential failure retention must continue after a stalled operation finally
+resumes. Do not unpin the first pathological SDK/WorkManager operation merely
+because foreground return makes its Promise settle.
+
+**Why:** Foreground recovery and export traffic can otherwise evict the very
+background evidence needed to distinguish the missing async boundary.
+
+**How to apply:** Stress retention both while an operation remains pending and
+after late settlement followed by a foreground event flood; retain its correlated
+requests, flight, and at least one follower.

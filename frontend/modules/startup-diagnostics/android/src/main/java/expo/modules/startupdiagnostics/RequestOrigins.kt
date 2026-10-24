@@ -197,11 +197,26 @@ object RequestOrigins {
       }
     }
     row.put(event.stage, stage)
+    if (event.kind == "request") {
+      val opaque = row.optString("request")
+      if (opaque.length == 32 && event.stage in setOf("native_start", "ended", "failed", "canceled"))
+        DeepAsyncTrace.recordAt("request", opaque,
+          if (event.stage == "native_start") "native_http_associated" else "native_" + event.stage,
+          "{}", event.elapsed, event.wall)
+    }
     if (event.kind == "task" && event.stage == "removed") {
       val invoked = row.optJSONObject("invoked")
       if (invoked != null && row.optLong("timeoutMs") > 0) {
         row.put("deadlineReachedAtRemoval", event.elapsed - invoked.optLong("elapsed") >= row.optLong("timeoutMs"))
       }
+    }
+    if (event.kind == "task" && event.stage in setOf("queued", "invoked", "removed")) {
+      val safe = JSONObject()
+      for (field in listOf("taskId", "reactTaskId", "context", "timeoutMs", "deadlineReachedAtRemoval"))
+        if (row.has(field)) safe.put(field, row.get(field))
+      DeepAsyncTrace.recordAt("wake", row.optString("wake"),
+        if (event.stage == "removed") "native_lifetime_removed" else "native_task_" + event.stage,
+        safe.toString(), event.elapsed, event.wall)
     }
     // Bounded dimensions; cumulative counts remain useful after detail eviction.
     val counter = "${event.kind}:${row.optString("origin", "unknown")}:${row.optString("phase", "none")}:${event.stage}"

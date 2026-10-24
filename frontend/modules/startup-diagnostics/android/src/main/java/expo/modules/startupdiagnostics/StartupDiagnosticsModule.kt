@@ -27,6 +27,15 @@ class StartupDiagnosticsModule : Module() {
     Function("originRecord") { kind: String, id: String, stage: String, detail: String ->
       appContext.reactContext?.let { RequestOrigins.install(it); RequestOrigins.record(kind, id, stage, detail) }
     }
+    Function("deepRecord") { kind: String, id: String, stage: String, detail: String ->
+      appContext.reactContext?.let { DeepAsyncTrace.install(it) }
+      DeepAsyncTrace.record(kind, id, stage, detail)
+    }
+    Function("deepBindRequest") { request: Int, id: String ->
+      appContext.reactContext?.let { DeepAsyncTrace.bind(it, request, id) }
+    }
+    Function("deepBodyBind") { blob: String, request: String -> DeepAsyncTrace.bodyBind(blob, request) }
+    Function("deepRead") { DeepAsyncTrace.read() }
     Function("originRead") {
       appContext.reactContext?.let { RequestOrigins.install(it) }
       RequestOrigins.read()

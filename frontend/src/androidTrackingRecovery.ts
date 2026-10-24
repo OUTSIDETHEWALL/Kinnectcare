@@ -9,6 +9,7 @@ import {
 import type { TrackingAuthority } from './trackingReliability';
 import { operationOrigin, originPhase, withRequestOrigin, type RequestOrigin } from './requestOrigin';
 import { initialOwnershipReads, ownershipSession, ownershipSessionCurrent } from './initialOwnershipReads';
+import { deepStage, diagnosticId } from './deepAsyncTrace';
 
 export type AuthorizationVerdict = {
   state: 'AUTHORIZED' | 'UNKNOWN' | 'REVOKED';
@@ -20,8 +21,12 @@ export async function evaluateWakeAuthorization(
   isCurrent: () => boolean, origin?: RequestOrigin, initialLifecycleGeneration?: number,
 ): Promise<AuthorizationVerdict> {
   try {
+    deepStage(origin, 'revocation_read_entered');
     if (await trackingIsRevoked()) return { state: 'REVOKED', source: 'durable_revocation', reason: 'stopped' };
+    deepStage(origin, 'revocation_read_completed');
+    deepStage(origin, 'permission_read_entered');
     const permission = await readPermissionSnapshot({ includeNotifications: false });
+    deepStage(origin, 'permission_read_completed');
     if (permission.foreground === 'denied' || permission.background === 'denied') {
       return { state: 'REVOKED', source: 'os_permission', reason: 'permission' };
     }
@@ -29,6 +34,7 @@ export async function evaluateWakeAuthorization(
       return { state: 'UNKNOWN', source: 'permission_unverified' };
     }
     const result = await verifyWakeOwnership(isCurrent, origin, initialLifecycleGeneration);
+    deepStage(origin, 'authorization_returned', { reason: result });
     if (result === 'allowed') return { state: 'AUTHORIZED', source: 'authenticated_owner' };
     if (result === 'invalid_owner' || result === 'sharing_disabled' || result === 'session_rejected') {
       return { state: 'REVOKED', source: result,
@@ -36,6 +42,7 @@ export async function evaluateWakeAuthorization(
     }
     return { state: 'UNKNOWN', source: result };
   } catch {
+    deepStage(origin, 'authorization_rejected');
     return { state: 'UNKNOWN', source: 'lookup_failed' };
   }
 }
@@ -237,7 +244,9 @@ export async function authorizeRevokedBatteryTransport(
   isCurrent: () => boolean,
   origin?: RequestOrigin,
 ): Promise<AuthorizedBatteryTransport | null> {
+  deepStage(origin, 'contact_policy_entered');
   const stamp = await trackingPolicyStamp();
+  deepStage(origin, 'contact_policy_completed');
   const value = stamp ? JSON.parse(stamp) : null;
   if (value?.revoked !== true && readTrackingAuthority()?.revoked !== true) return null;
   return authorizeDeviceContactTransport(isCurrent, origin);
@@ -248,35 +257,49 @@ export async function authorizeDeviceContactTransport(
   isCurrent: () => boolean,
   origin: RequestOrigin = operationOrigin('device-contact'),
 ): Promise<AuthorizedBatteryTransport | null> {
+  const finish = (transport: AuthorizedBatteryTransport | null) => {
+    deepStage(origin, 'contact_returned', { eligible: !!transport });
+    return transport;
+  };
+  deepStage(origin, 'contact_policy_entered');
   const stamp = await trackingPolicyStamp();
+  deepStage(origin, 'contact_policy_completed');
   const value = stamp ? JSON.parse(stamp) : null;
   const binding: Binding | undefined = value?.revoked === true ? value.binding
     : value?.ownerUserId ? value : undefined;
   const base = (process.env.EXPO_PUBLIC_BACKEND_URL || '').replace(/\/+$/, '');
   if ((binding && binding.backendBaseUrl !== base)
-    || !base.startsWith('https://')) return null;
+    || !base.startsWith('https://')) return finish(null);
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getCurrentToken } = require('./api') as typeof import('./api');
   const expectedEpoch = trackingIntentEpoch();
+  deepStage(origin, 'contact_token_entered');
   const token = await getCurrentToken();
-  if (!token || !isCurrent()) return null;
+  deepStage(origin, 'contact_token_completed');
+  if (!token || !isCurrent()) return finish(null);
   const current = async () => {
+    deepStage(origin, 'contact_post_policy_entered');
     const policy = await trackingPolicyStamp();
+    deepStage(origin, 'contact_post_policy_completed');
+    deepStage(origin, 'contact_post_token_entered');
     const currentToken = await getCurrentToken();
+    deepStage(origin, 'contact_post_token_completed');
     return trackingIntentEpoch() === expectedEpoch && isCurrent() && policy === stamp && currentToken === token;
   };
+  deepStage(origin, 'contact_unshared_entered');
   const [user, members] = await Promise.all([
     authenticatedGet(`${base}/api/auth/me`, token, originPhase(origin, 'device-contact'), isCurrent),
     authenticatedGet(`${base}/api/members`, token, originPhase(origin, 'device-contact'), isCurrent),
   ]) as [{ id?: string }, { id: string; user_id: string }[]];
+  deepStage(origin, 'contact_aggregate_fulfilled');
   if (!user?.id || !Array.isArray(members)
     || members.some(member => !member || typeof member.id !== 'string' || !member.id
       || (member.user_id != null && typeof member.user_id !== 'string'))
-    || !await current()) return null;
+    || !await current()) return finish(null);
   const owned = members.filter(member => member.user_id === user.id
     && (!binding || member.id === binding.memberId));
-  if (owned.length !== 1 || (binding && user.id !== binding.ownerUserId)) return null;
-  return { baseUrl: base, memberId: owned[0].id, token, isCurrent: current };
+  if (owned.length !== 1 || (binding && user.id !== binding.ownerUserId)) return finish(null);
+  return finish({ baseUrl: base, memberId: owned[0].id, token, isCurrent: current });
 }
 
 /**
@@ -288,21 +311,34 @@ export async function verifyWakeOwnership(
   isCurrent: () => boolean, origin: RequestOrigin = operationOrigin('ownership-direct'),
   initialLifecycleGeneration?: number,
 ): Promise<string> {
+  let attached = false;
+  const finish = (result: string) => {
+    if (result === 'obsolete_owner' && attached) deepStage(origin, 'consumer_late_resume');
+    deepStage(origin, 'ownership_returned', { reason: result });
+    return result;
+  };
+  deepStage(origin, 'ownership_entered');
   // Only the initial recovery stage opts in. Later ownership/acquisition checks
   // must dispatch new reads even if an initial flight happens to be pending.
   const initial = initialLifecycleGeneration !== undefined && origin.phase === 'initial-ownership';
   const session = initial ? ownershipSession() : null;
   const admittedAuthority = initial ? readTrackingAuthority() : null;
   const expectedEpoch = trackingIntentEpoch();
+  deepStage(origin, 'policy_read_entered');
   const stamp = await trackingPolicyStamp();
+  deepStage(origin, 'policy_read_completed');
+  deepStage(origin, 'intent_read_entered');
   const intent = await readIntent();
+  deepStage(origin, 'intent_read_completed');
   const base = (process.env.EXPO_PUBLIC_BACKEND_URL || '').replace(/\/+$/, '');
-  if (!base.startsWith('https://') || (intent && intent.backendBaseUrl !== base)) return 'invalid_backend';
+  if (!base.startsWith('https://') || (intent && intent.backendBaseUrl !== base)) return finish('invalid_backend');
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getCurrentToken } = require('./api') as typeof import('./api');
+  deepStage(origin, 'token_read_entered');
   const token = await getCurrentToken();
-  if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch) return 'obsolete_owner';
-  if (!token) return 'no_session';
+  deepStage(origin, 'token_read_completed');
+  if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch) return finish('obsolete_owner');
+  if (!token) return finish('no_session');
   const sameAuthority = () => {
     const latest = readTrackingAuthority() as (TrackingAuthority & {
       pendingMutation?: string; shutdowns?: Record<string, unknown>;
@@ -311,14 +347,15 @@ export async function verifyWakeOwnership(
       && latest.owner === admittedAuthority.owner && latest.generation === admittedAuthority.generation
       && !latest.shutdownPending && !latest.pendingMutation && !Object.keys(latest.shutdowns ?? {}).length;
   };
-  if (session && !ownershipSessionCurrent(session)) return 'obsolete_owner';
+  if (session && !ownershipSessionCurrent(session)) return finish('obsolete_owner');
   const admittedConsent = admittedAuthority ? getVerifiedConsentGeneration(admittedAuthority.owner) : null;
   const sharingKey = session && intent && admittedAuthority && !admittedAuthority.revoked
     && admittedAuthority.owner === `${intent.ownerUserId}:${intent.memberId}`
-    && sameAuthority() && stamp === await trackingPolicyStamp()
+    && sameAuthority() && stamp === (deepStage(origin, 'eligibility_policy_entered'), await trackingPolicyStamp())
     ? JSON.stringify([session.revision, token, base, stamp, admittedAuthority.owner,
       expectedEpoch, initialLifecycleGeneration, admittedConsent])
     : null;
+  deepStage(origin, 'sharing_eligibility_completed', { eligible: !!sharingKey });
   // Loading dispatches synchronously. Fence creation, never abort a pending
   // shared read when its initiator expires: a live follower still needs it.
   // Every consumer separately validates the eventual raw responses below.
@@ -331,65 +368,100 @@ export async function verifyWakeOwnership(
     || (!!sharingKey && !sameAuthority()));
   let user: { id?: string }, members: { id: string; user_id: string; location_consent_generation?: number }[], preferences: { location_sharing_enabled?: boolean };
   try {
-    if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteInitial()) return 'obsolete_owner';
+    if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteInitial()) return finish('obsolete_owner');
+    attached = true;
+    deepStage(origin, sharingKey ? 'flight_await_entered' : 'unshared_load_entered');
     [user, members, preferences] = await (sharingKey
-      ? initialOwnershipReads(sharingKey, load) : load()) as [typeof user, typeof members, typeof preferences];
+      ? initialOwnershipReads(sharingKey, load, origin) : load()) as [typeof user, typeof members, typeof preferences];
+    deepStage(origin, 'aggregate_fulfilled');
+    deepStage(origin, 'consumer_resumed');
   } catch (error) {
-    if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || await getCurrentToken() !== token
-      || obsoleteInitial()) return 'obsolete_owner';
+    deepStage(origin, 'aggregate_rejected');
+    if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch
+      || (deepStage(origin, 'error_token_entered'), await getCurrentToken()) !== token
+      || obsoleteInitial()) return finish('obsolete_owner');
+    deepStage(origin, 'error_token_completed');
     // Only /auth/me 401 confirms session invalidation. A member/preferences
     // 403 can be an endpoint policy failure, not evidence of sign-out.
-    return String(error).includes('session_rejected') ? 'session_rejected' : 'ownership_unavailable';
+    return finish(String(error).includes('session_rejected') ? 'session_rejected' : 'ownership_unavailable');
   }
+  deepStage(origin, 'post_policy_entered');
   const currentStamp = await trackingPolicyStamp();
+  deepStage(origin, 'post_policy_completed');
+  deepStage(origin, 'post_token_entered');
   const currentToken = await getCurrentToken();
+  deepStage(origin, 'post_token_completed');
   if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || currentStamp !== stamp || currentToken !== token
-    || obsoleteInitial()) return 'obsolete_owner';
+    || obsoleteInitial()) return finish('obsolete_owner');
+  deepStage(origin, 'execution_authority_validated');
   if (!user?.id || !Array.isArray(members)
     || members.some(member => !member || typeof member.id !== 'string'
       || (member.user_id != null && typeof member.user_id !== 'string'))) {
-    return 'ownership_unavailable';
+    return finish('ownership_unavailable');
   }
   const owned = members.filter(member => member.user_id === user.id
     && (!intent || member.id === intent.memberId));
-  if (owned.length > 1) return 'ownership_unavailable';
-  if (owned.length !== 1 || (intent && user.id !== intent.ownerUserId)) return 'invalid_owner';
+  if (owned.length > 1) return finish('ownership_unavailable');
+  if (owned.length !== 1 || (intent && user.id !== intent.ownerUserId)) return finish('invalid_owner');
+  deepStage(origin, 'ownership_response_validated');
   if (preferences?.location_sharing_enabled === false
-    || await AsyncStorage.getItem('@kinnship/location_sharing_off_v1') === '1') return 'sharing_disabled';
-  if (preferences?.location_sharing_enabled !== true) return 'ownership_unavailable';
+    || (deepStage(origin, 'sharing_flag_entered'), await AsyncStorage.getItem('@kinnship/location_sharing_off_v1')) === '1') return finish('sharing_disabled');
+  deepStage(origin, 'sharing_flag_completed');
+  if (preferences?.location_sharing_enabled !== true) return finish('ownership_unavailable');
   // A native HTTP receipt has no original dispatch generation. Read the
   // accepted tuple only through this current-token/current-owner operation.
-  if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteInitial()) return 'obsolete_owner';
+  if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteInitial()) return finish('obsolete_owner');
   if (sharingKey && admittedAuthority) {
     const latestConsent = getVerifiedConsentGeneration(admittedAuthority.owner);
     if (latestConsent !== admittedConsent
-      && latestConsent !== (owned[0].location_consent_generation ?? 0)) return 'obsolete_owner';
+      && latestConsent !== (owned[0].location_consent_generation ?? 0)) return finish('obsolete_owner');
   }
   verifiedConsent = { owner: `${user.id}:${owned[0].id}`, generation: owned[0].location_consent_generation ?? 0 };
   try {
     observeAcceptedTrackingLocation(owned[0], `${user.id}:${owned[0].id}`, expectedEpoch);
   } catch { /* unavailable evidence is not ownership withdrawal */ }
-  return 'allowed';
+  return finish('allowed');
 }
 
 async function authenticatedGet(
   url: string, token: string, origin?: RequestOrigin, dispatchCurrent: () => boolean = () => true,
 ): Promise<unknown> {
+  const endpoint = url.endsWith('/api/auth/me') ? 'auth-me'
+    : url.endsWith('/api/members') ? 'members' : 'preferences';
+  const diagnostic = origin ? { ...origin, asyncRequest: diagnosticId() } : undefined;
+  deepStage(diagnostic, 'helper_entered', { endpoint });
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => {
+    deepStage(diagnostic, 'abort_timer_fired');
+    controller.abort();
+  }, 8000);
+  let fetchFulfilled = false;
   try {
-    const response = await withRequestOrigin(origin, () => {
+    deepStage(diagnostic, 'fetch_await_entered');
+    const response = await withRequestOrigin(diagnostic, () => {
       // No asynchronous gap between execution liveness and request creation.
       if (!dispatchCurrent()) throw new Error('ownership_operation_obsolete');
       return fetch(url, {
         headers: { Authorization: `Bearer ${token}` }, signal: controller.signal,
       });
     });
+    fetchFulfilled = true;
+    deepStage(diagnostic, 'fetch_fulfilled');
     if (!response.ok) throw new Error(
       url.endsWith('/api/auth/me') && response.status === 401 ? 'session_rejected' : `ownership_http_${response.status}`,
     );
-    return await response.json();
-  } finally { clearTimeout(timeout); }
+    deepStage(diagnostic, 'body_await_entered');
+    const value = await response.json();
+    deepStage(diagnostic, 'helper_fulfilled');
+    return value;
+  } catch (error) {
+    if (!fetchFulfilled) deepStage(diagnostic, 'fetch_rejected');
+    deepStage(diagnostic, 'helper_rejected');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    deepStage(diagnostic, 'helper_exited');
+  }
 }
 
 /**

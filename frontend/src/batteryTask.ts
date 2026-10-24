@@ -25,6 +25,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { operationOrigin, withRequestOrigin } from './requestOrigin';
 import { Platform } from 'react-native';
+import { deepStage } from './deepAsyncTrace';
 import { recordEvidence } from './evidenceTrace';
 import type { AuthorizedBatteryTransport } from './androidTrackingRecovery';
 
@@ -195,6 +196,7 @@ async function executeBatteryRefresh(taskId: string, evidenceWakeId: string | nu
 
   const execution = beginTask(taskId);
   execution.diagnostic = operationOrigin('workmanager', evidenceWakeId);
+  deepStage(execution.diagnostic, 'workmanager_entered');
   // Optional synchronous observer only; task completion/generation rules remain unchanged.
   recordEvidence('gps', 'js_wake_received', evidenceWakeId, {
     source: 'workmanager', generation: execution.generation,
@@ -211,8 +213,10 @@ async function executeBatteryRefresh(taskId: string, evidenceWakeId: string | nu
         try {
           const { authorizeDeviceContactTransport } = await import('./androidTrackingRecovery');
           const transport = await authorizeDeviceContactTransport(() => isActiveExecution(execution), execution.diagnostic);
+          deepStage(execution.diagnostic, 'workmanager_contact_resumed', { eligible: !!transport });
           return await publishTaskBattery(execution, transport, null);
         } catch (error) {
+          deepStage(execution.diagnostic, 'workmanager_contact_rejected');
           await appendExecutionLog(execution, 'background_battery_error', { error: String(error) });
           return false;
         }
@@ -366,13 +370,18 @@ async function publishTaskBattery(
   sdkState: { url?: string; authorization?: { accessToken?: string } } | null,
 ): Promise<boolean> {
   const { taskId } = execution;
+  deepStage(execution.diagnostic, 'battery_publication_entered', { eligible: !!transport });
   try {
     // Step 1 — Read battery state via expo-battery one-shot APIs.
     // These work in any JS context (foreground, background, headless).
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const BatteryModule = require('expo-battery') as typeof import('expo-battery');
+    deepStage(execution.diagnostic, 'battery_level_entered');
     const rawLevel: number = await BatteryModule.getBatteryLevelAsync();
+    deepStage(execution.diagnostic, 'battery_level_completed');
+    deepStage(execution.diagnostic, 'battery_state_entered');
     const rawState: number = await BatteryModule.getBatteryStateAsync();
+    deepStage(execution.diagnostic, 'battery_state_completed');
 
     const validLevel =
       typeof rawLevel === 'number' && isFinite(rawLevel) && rawLevel >= 0;
@@ -420,6 +429,7 @@ async function publishTaskBattery(
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
         try {
+          deepStage(execution.diagnostic, 'battery_patch_entered');
           const resp = await Promise.race([
             withRequestOrigin(execution.diagnostic, () => fetch(battUrl, {
               method: 'PATCH',
@@ -441,6 +451,7 @@ async function publishTaskBattery(
               );
             }),
           ]);
+          deepStage(execution.diagnostic, 'battery_patch_completed');
 
           if (resp.status < 200 || resp.status >= 300) {
             throw new Error(`background-battery-http-${resp.status}`);
@@ -453,6 +464,7 @@ async function publishTaskBattery(
             taskId,
             generation: execution.generation,
           });
+          deepStage(execution.diagnostic, 'battery_publication_returned', { eligible: true });
           return true;
         } finally {
           if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
@@ -467,6 +479,7 @@ async function publishTaskBattery(
       generation: execution.generation,
     });
   }
+  deepStage(execution.diagnostic, 'battery_publication_returned', { eligible: false });
   return false;
 }
 

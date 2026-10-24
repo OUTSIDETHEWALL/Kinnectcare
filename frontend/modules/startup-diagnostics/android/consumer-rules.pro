@@ -13,3 +13,4 @@
     public static java.lang.String begin(int, java.util.function.BooleanSupplier);
     public static void end(java.lang.String);
 }
+-keep class expo.modules.startupdiagnostics.DeepAsyncTrace { *; }
