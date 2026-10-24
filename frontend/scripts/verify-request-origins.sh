@@ -62,4 +62,5 @@ kotlin -classpath "$runtime" OriginHarnessKt "$work/state" seed
 kotlin -classpath "$runtime" OriginHarnessKt "$work/state" recreate
 kotlinc -classpath "$work/classes:$cp:$work/runtime.jar" scripts/origin-contract/DeepAsyncHarness.kt -d "$work/deep-harness.jar"
 kotlin -classpath "$work/classes:$work/runtime.jar:$work/deep-harness.jar:$cp" DeepAsyncHarnessKt "$work/deep-state"
+kotlin -classpath "$work/classes:$work/runtime.jar:$work/deep-harness.jar:$cp" DeepAsyncHarnessKt "$work/deep-unavailable" unavailable
 echo 'LIMIT: local JVM simulation, not Android scheduling, release shrinker, full Expo build, or phone acceptance'

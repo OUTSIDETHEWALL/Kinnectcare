@@ -14,6 +14,22 @@ private fun await(check: () -> Boolean) {
 }
 fun main(args: Array<String>) {
   val context = Context(File(args[0]).apply { mkdirs() })
+  if (args.getOrNull(1) == "unavailable") {
+    Context.failFiles = true
+    Trace.install(context)
+    var applicationProgress = 0
+    Trace.record("request", id(1), "helper_entered", "{}")
+    applicationProgress++
+    Trace.record("request", id(1), "helper_exited", "{}")
+    await {
+      val state = JSONObject(Trace.read())
+      state.optLong("restoreFailures") > 0 && state.getJSONArray("entities").length() == 1
+    }
+    check(applicationProgress == 1)
+    check(JSONObject(Trace.read()).getJSONArray("entities").length() == 1)
+    println("PASS actual deep recorder: unavailable storage is caught on worker; application and recording continue")
+    return
+  }
   Trace.install(context)
   Trace.record("operation", id(1), "ownership_entered", """{"origin":"sdk-headless","wake":"${id(90)}"}""")
   Trace.record("operation", id(2), "contact_unshared_entered", """{"origin":"workmanager","wake":"${id(91)}"}""")

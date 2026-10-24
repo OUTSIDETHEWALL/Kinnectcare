@@ -54,8 +54,8 @@ object DeepAsyncTrace {
       if (!installed.compareAndSet(false, true)) return
       val application = context.applicationContext
       writer.post {
-        file = File(application.filesDir, "deep-async-v1.json")
         try {
+          file = File(application.filesDir, "deep-async-v1.json")
           val f = file!!
           if (f.exists() && f.length() <= 4 * 1024 * 1024) {
             val saved = JSONObject(f.readText()).optJSONArray("entities") ?: JSONArray()
@@ -100,6 +100,8 @@ object DeepAsyncTrace {
         refreshScheduled = true
         writer.postDelayed({ refreshScheduled = false; refresh() }, 1000)
       }
+    } catch (_: Throwable) {
+      failures++
     } finally {
       draining.set(false)
       if (events.isNotEmpty()) schedule()
@@ -182,6 +184,7 @@ object DeepAsyncTrace {
     return keep
   }
   private fun refresh() {
+    try {
     val now = SystemClock.elapsedRealtime()
     entities.values.forEach { row ->
       val age = if (row.optString("process") == process) now - row.optLong("startedElapsed")
@@ -193,8 +196,10 @@ object DeepAsyncTrace {
       .put("capacity", CAPACITY).put("entities", JSONArray(entities.values.toList()))
       .put("queueDepth", depth.get()).put("observerDrops", drops.get()).put("bindingDrops", bindingDrops.get())
       .put("evicted", evicted).put("writeFailures", failures).put("restoreFailures", restoreFailures).toString()
+    } catch (_: Throwable) { failures++ }
   }
   private fun tick() {
+    try {
     writer.postDelayed({
       try {
         refresh()
@@ -207,6 +212,7 @@ object DeepAsyncTrace {
       } catch (_: Throwable) { failures++ }
       tick()
     }, 60000)
+    } catch (_: Throwable) { failures++ }
   }
   @JvmStatic fun read(): String = snapshot
   @JvmStatic fun bind(context: Context, request: Int, opaque: String) {
