@@ -1,5 +1,37 @@
 # Diagnostic recorder safety correction — Build 76
 
+## Delivered outcome: FAIL — not eligible for physical validation
+
+The delivered AAB failed visibility preservation. Build 75 contains five native
+response-emission hooks and eleven FileReader hooks; Build 76 contains zero of
+either. Seven required patched-JS marker call sites are also absent.
+
+**Severity: High. Confidence: high.** The config-plugin entrypoint still
+activates deep instrumentation only for the exact diagnostic-build value `75`.
+The `76` profile therefore skipped both the ASM registration and dependency JS
+patches. Standalone transformation tests passed, but did not exercise the
+profile-specific entrypoint. The delivered artifact gate caught this omission.
+No application correction or replacement build was made after inspection.
+
+The independent producer audit passed: 74 roots / 149 reachable app-owned
+methods, constructors, class initializers and synchronous diagnostic callbacks
+show no recorder-readiness, worker-lock, file-I/O or drainage wait. This does not
+make the incomplete observation candidate acceptable.
+
+- EAS build: `bcd8ab82-106a-4b1e-8ec5-2851b637ad7f`
+- Version: `1.3.1` / `76`; runtime `1.3.1-diagnostic76`; channel `diagnostic76`
+- Frozen source: `39ec36088f17c0237ed2465d5bc794a36347524f`
+- Source tree: `ace9c461f979fadff81442655b7a83d9faa4b2a2`
+- AAB: 83,496,992 bytes
+- AAB SHA-256: `ec5e478234cf5c52a2e971a31e4424e804ee749c1e6d29a0458180c4d956bbd5`
+- Signature verified; same signer as Builds 74 and 75.
+- All 342 resolved dependency hashes, permissions, components, ABIs, packaged
+  SDK configuration, backend endpoint set and 22 lifetime/HTTP class method
+  fingerprints remain unchanged.
+
+The pre-artifact statements below describe source intent and host checks,
+not a passing delivered-coverage result. No distribution or installation.
+
 ## Scope and diagnosis
 
 High severity, high confidence: the rejected Build 75 observer could first-touch
@@ -11,7 +43,8 @@ Exception handling and warm blocked-consumer tests do not bound that wait.
 Only diagnostic admission, processing lifecycle, cached export and tests change.
 No GPS, ownership, authorization, sharing, request coalescing, HTTP/dispatcher,
 WorkManager, heartbeat, native-task lifetime, privacy or backend policy changes.
-No deep marker is removed.
+No deep marker was intentionally removed from source; the delivered activation
+failure above nevertheless removed required compiled coverage.
 
 ## Producer path
 

@@ -97,3 +97,16 @@ check falsely reported their inclusion even though none of their files shipped.
 
 **How to apply:** Inspect contents recursively, verify critical source hashes,
 and fail any upload gate with a nonzero exit that actually stops submission.
+
+## Verify profile activation, not just a transform in isolation
+
+Every new diagnostic profile must activate the complete config-plugin chain,
+including dependency-JS patches and Gradle ASM registration.
+
+**Why:** A legacy exact-profile check skipped both transformations for a newer
+profile, even while standalone real-RN-class transformation tests passed.
+Only the delivered AAB exposed the missing native and Hermes call sites.
+
+**How to apply:** Test the real profile-specific plugin entrypoint and inspect
+generated native configuration before submission; retain actual delivered-Dex
+and Hermes coverage gates. A passing transformer test cannot replace either.
