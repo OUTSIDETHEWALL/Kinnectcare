@@ -1,16 +1,12 @@
 package expo.modules.startupdiagnostics
 
 import android.content.Context
-import android.os.Handler
-import android.os.HandlerThread
 import android.os.SystemClock
 import com.facebook.react.bridge.ReadableMap
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -19,20 +15,21 @@ import java.util.concurrent.atomic.AtomicLong
 object DeepAsyncTrace {
   private const val CAPACITY = 512
   private const val QUEUE = 2048
-  private val process = UUID.randomUUID().toString().replace("-", "")
+  private val process = UUID(System.currentTimeMillis(), System.nanoTime()).toString().replace("-", "")
   private data class Event(val kind: String, val id: String, val stage: String, val detail: String,
     val elapsed: Long, val wall: Long)
-  private val events = ConcurrentLinkedQueue<Event>()
-  private val depth = AtomicInteger()
+  private val events = RecorderQueue<Event>(QUEUE)
   private val draining = AtomicBoolean()
   private val drops = AtomicLong()
   private val bindingDrops = AtomicLong()
   private val installed = AtomicBoolean()
-  private val numeric = ConcurrentHashMap<String, String>()
-  private val bodies = ConcurrentHashMap<String, String>()
-  private val promises = ConcurrentHashMap<Any, String>()
-  private val thread by lazy { HandlerThread("kinnship-deep-async", android.os.Process.THREAD_PRIORITY_BACKGROUND).apply { start() } }
-  private val writer by lazy { Handler(thread.looper) }
+  private val numeric = RecorderMap<String, String>(2048) { bindingDrops.incrementAndGet() }
+  private val bodies = RecorderMap<String, String>(512) { bindingDrops.incrementAndGet() }
+  private val promises = RecorderMap<Any, String>(512) { bindingDrops.incrementAndGet() }
+  private val writer = RecorderWorker("kinnship-deep-async")
+  @JvmStatic fun startWorker() {
+    if (writer.start()) { draining.set(false); if (events.isNotEmpty()) schedule() }
+  }
   // Writer-only state. read() returns a precomputed immutable snapshot.
   private val entities = linkedMapOf<String, JSONObject>()
   private val wakes = linkedMapOf<String, JSONObject>()
@@ -52,9 +49,9 @@ object DeepAsyncTrace {
   @JvmStatic fun install(context: Context) {
     try {
       if (!installed.compareAndSet(false, true)) return
-      val application = context.applicationContext
-      writer.post {
+      if (!writer.initialize {
         try {
+          val application = context.applicationContext
           file = File(application.filesDir, "deep-async-v1.json")
           val f = file!!
           if (f.exists() && f.length() <= 4 * 1024 * 1024) {
@@ -67,7 +64,7 @@ object DeepAsyncTrace {
         } catch (_: Throwable) { restoreFailures++ }
         refresh()
         tick()
-      }
+      }) { installed.set(false); drops.incrementAndGet() }
     } catch (_: Throwable) { drops.incrementAndGet() }
   }
 
@@ -78,21 +75,21 @@ object DeepAsyncTrace {
     try {
       if (kind !in setOf("request", "operation", "flight", "wake") || !ids.matches(id)
         || !stages.matches(stage) || detail.length > 1024) return
-      if (depth.incrementAndGet() > QUEUE) { depth.decrementAndGet(); drops.incrementAndGet(); return }
-      events.offer(Event(kind, id, stage, detail, elapsed, wall))
+      if (!events.offer(Event(kind, id, stage, detail, elapsed, wall))) drops.incrementAndGet()
       schedule()
     } catch (_: Throwable) { drops.incrementAndGet() }
   }
   private fun schedule() {
     if (draining.compareAndSet(false, true)) {
-      try { writer.post { drain() } } catch (_: Throwable) { draining.set(false); drops.incrementAndGet() }
+      try {
+        if (!writer.post { drain() }) { draining.set(false); drops.incrementAndGet() }
+      } catch (_: Throwable) { draining.set(false); drops.incrementAndGet() }
     }
   }
   private fun drain() {
     try {
       var event = events.poll()
       while (event != null) {
-        depth.decrementAndGet()
         try { accept(event) } catch (_: Throwable) { failures++ }
         event = events.poll()
       }
@@ -194,7 +191,9 @@ object DeepAsyncTrace {
     }
     snapshot = JSONObject().put("available", true).put("version", 1).put("process", process)
       .put("capacity", CAPACITY).put("entities", JSONArray(entities.values.toList()))
-      .put("queueDepth", depth.get()).put("observerDrops", drops.get()).put("bindingDrops", bindingDrops.get())
+      .put("queueDepth", events.size).put("queueHighWater", events.highWater.get())
+      .put("workerFailures", writer.failures.get()).put("workerDrops", writer.dropped.get())
+      .put("observerDrops", drops.get()).put("bindingDrops", bindingDrops.get())
       .put("evicted", evicted).put("writeFailures", failures).put("restoreFailures", restoreFailures).toString()
     } catch (_: Throwable) { failures++ }
   }
@@ -218,20 +217,18 @@ object DeepAsyncTrace {
   @JvmStatic fun bind(context: Context, request: Int, opaque: String) {
     try {
       if (!ids.matches(opaque)) return
-      install(context)
       val key = System.identityHashCode(context).toString() + ":" + request
-      if (numeric.size >= 2048 && !numeric.containsKey(key)) {
-        // Bounded, nonblocking turnover. Lost correlations are counted, never guessed.
-        numeric.keys.iterator().let { if (it.hasNext()) { numeric.remove(it.next()); bindingDrops.incrementAndGet() } }
-      }
-      numeric[key] = opaque
+      if (!numeric.put(key, opaque)) return
       record("request", opaque, "native_request_bound", """{"context":${System.identityHashCode(context)}}""")
     } catch (_: Throwable) { drops.incrementAndGet() }
   }
   @JvmStatic fun nativeEmission(context: Any?, request: Int, stage: String) {
     try {
-      val id = numeric[System.identityHashCode(context).toString() + ":" + request] ?: return
+      val key = System.identityHashCode(context).toString() + ":" + request
+      val id = numeric[key] ?: return
       record("request", id, stage, "{}")
+      if (stage == "native_completion_emission_attempted" || stage == "native_error_emission_attempted")
+        numeric.remove(key)
     } catch (_: Throwable) { drops.incrementAndGet() }
   }
   @JvmStatic fun bodyBind(blob: String, request: String) {
@@ -249,7 +246,7 @@ object DeepAsyncTrace {
     } catch (_: Throwable) { drops.incrementAndGet() }
   }
   @JvmStatic fun promiseAttempt(promise: Any?, stage: String) {
-    try { val id = promises.remove(promise) ?: return; record("request", id, stage, "{}") }
+    try { if (promise == null) return; val id = promises.remove(promise) ?: return; record("request", id, stage, "{}") }
     catch (_: Throwable) { drops.incrementAndGet() }
   }
 }

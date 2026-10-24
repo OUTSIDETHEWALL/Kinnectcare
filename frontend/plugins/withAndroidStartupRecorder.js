@@ -23,9 +23,12 @@ function insertInFunction(contents, signature, before, after) {
 
 function injectMainApplication(contents) {
   const install = 'expo.modules.startupdiagnostics.NativeHttpEvidence.install(this)';
-  const observedInstall = `try { ${install} } catch (_: Exception) { /* evidence only */ }`;
+  const bootstrap = 'expo.modules.startupdiagnostics.RecorderBootstrap.start(this)';
+  const observedInstall = `try { ${install} } catch (_: Exception) { /* evidence only */ }\n    try { ${bootstrap} } catch (_: Throwable) { /* diagnostics never gate Application */ }`;
   if (contents.includes(MARKER)) {
-    if (contents.includes(install)) return contents;
+    if (contents.includes(install)) {
+      return contents.includes(bootstrap) ? contents : contents.replace(install, `${install}\n      ${bootstrap}`);
+    }
     const boundary = `${RECORDER}.record(this, "native_application_on_create_started", null)`;
     if (!contents.includes(boundary)) throw new Error('Evidence Application hook source drift');
     return contents.replace(boundary, `${boundary}\n    ${observedInstall}`);

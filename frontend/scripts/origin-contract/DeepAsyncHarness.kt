@@ -14,6 +14,7 @@ private fun await(check: () -> Boolean) {
 }
 fun main(args: Array<String>) {
   val context = Context(File(args[0]).apply { mkdirs() })
+  Trace.startWorker()
   if (args.getOrNull(1) == "unavailable") {
     Context.failFiles = true
     Trace.install(context)
@@ -40,11 +41,14 @@ fun main(args: Array<String>) {
   Trace.record("request", id(6), "native_ended", """{"operation":"${id(2)}","endpoint":"auth-me"}""")
   await { JSONObject(Trace.read()).getJSONArray("entities").length() >= 6 }
   val gate = CountDownLatch(1)
-  Handler.block = gate
+  val writer = Trace::class.java.getDeclaredField("writer").apply { isAccessible = true }.get(null)
+  val held = CountDownLatch(1)
+  writer.javaClass.getMethod("post", Runnable::class.java).invoke(writer, Runnable { held.countDown(); gate.await() })
+  check(held.await(2, TimeUnit.SECONDS))
   val start = System.nanoTime()
   for (i in 100..20100) Trace.record("request", id(i), "helper_exited", """{"operation":"${id(i + 30000)}"}""")
   check(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) < 2000) { "producer blocked on writer" }
-  gate.countDown(); Handler.block = null
+  gate.countDown()
   await { JSONObject(Trace.read()).optLong("observerDrops") > 0 }
   for (i in 21000..21900) Trace.record("request", id(i), "helper_exited", "{}")
   await { JSONObject(Trace.read()).optLong("evicted") > 0 }

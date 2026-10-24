@@ -53,3 +53,19 @@ still contains a cold-start wait. Catching exceptions does not bound a wait.
 
 **How to apply:** Inspect the delivered initialization call chain and require
 separate cold-start evidence before certifying a recorder as nonblocking.
+
+Admission must not start or initialize its consumer. Use bounded nonblocking
+attempts; unavailable, contended, full or closed infrastructure must produce
+counted diagnostic loss rather than application backpressure. Initialization
+and storage processing belong to an independent lifecycle operation. Review
+other recorders on the same call chain, not just the newest observer.
+
+**Why:** The product owner rejected a native diagnostic candidate whose warm
+blocked-writer tests passed but whose first event could wait on a lazy looper.
+Diagnostic correctness never authorizes delaying production execution.
+
+**How to apply:** Test actual cold first use, held initialization/storage,
+unpublished queue reservations, saturation, concurrent admission and shutdown/
+recreation. Inspect delivered DEX as well as source. Keep rejected artifacts
+immutable and use a new native identity for corrected candidates. Host latency
+measurements are not Android scheduling or physical defect acceptance.

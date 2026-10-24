@@ -1,16 +1,9 @@
 package expo.modules.startupdiagnostics
 
 import android.content.Context
-import android.os.Handler
-import android.os.HandlerThread
 import android.os.SystemClock
 import java.io.File
 import java.util.UUID
-import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import okhttp3.Call
@@ -26,25 +19,24 @@ object RequestOrigins {
   const val OTHER_CAPACITY = 256
   const val QUEUE_CAPACITY = 2048
   private const val MAX_FILE_BYTES = 2 * 1024 * 1024
-  private val process = UUID.randomUUID().toString().replace("-", "")
+  private val process = UUID(System.currentTimeMillis(), System.nanoTime()).toString().replace("-", "")
   private val ordinal = AtomicLong()
   private val dropped = AtomicLong()
   private val bindingDropped = AtomicLong()
   private val draining = AtomicBoolean()
   private val installed = AtomicBoolean()
-  private val thread by lazy { HandlerThread("kinnship-origins", android.os.Process.THREAD_PRIORITY_BACKGROUND).apply { start() } }
-  private val writer by lazy { Handler(thread.looper) }
+  private val writer = RecorderWorker("kinnship-origins")
+  @JvmStatic fun startWorker() {
+    if (writer.start()) { draining.set(false); if (pending.isNotEmpty()) schedule() }
+  }
   private data class Event(val kind: String, val id: String, val stage: String, val detail: String,
     val elapsed: Long, val wall: Long, val sequence: Long)
   data class Tag(val id: String, val detail: String)
-  private val pending = ArrayBlockingQueue<Event>(QUEUE_CAPACITY)
+  private val pending = RecorderQueue<Event>(QUEUE_CAPACITY)
   private data class Binding(val tag: Tag, val count: Int = 1, val ambiguous: Boolean = false)
-  private val bindings = ConcurrentHashMap<Int, Binding>()
-  private val calls = ConcurrentHashMap<Call, Tag>()
-  private val queuePeaks = ConcurrentHashMap<Int, AtomicInteger>()
-  private val peakSlots = Semaphore(8)
-  private val bindingSlots = Semaphore(REQUEST_CAPACITY)
-  private val callSlots = Semaphore(REQUEST_CAPACITY)
+  private val bindings = RecorderMap<Int, Binding>(REQUEST_CAPACITY) { bindingDropped.incrementAndGet() }
+  private val calls = RecorderMap<Call, Tag>(REQUEST_CAPACITY) { bindingDropped.incrementAndGet() }
+  private val queuePeaks = RecorderMap<Int, AtomicInteger>(8) { bindingDropped.incrementAndGet() }
   // Writer-thread-only state. Compact records update in place, not one row per stage.
   private val requests = linkedMapOf<String, JSONObject>()
   private val operations = linkedMapOf<String, JSONObject>()
@@ -58,6 +50,7 @@ object RequestOrigins {
   private var restoreFailures = 0L
   private var flushScheduled = false
   private var file: File? = null
+  @Volatile private var cachedSnapshot = """{"available":false,"reason":"observer_initializing"}"""
   private val fields = setOf("operation", "origin", "phase", "wake", "generation", "runtime", "request",
     "endpoint", "method", "taskId", "reactTaskId", "context", "timeoutMs", "queued", "running", "dispatcher", "reason", "trigger",
     "queueMissing", "queueTruncated")
@@ -66,25 +59,23 @@ object RequestOrigins {
 
   @JvmStatic fun install(context: Context) {
     if (!installed.compareAndSet(false, true)) return
-    val application = context.applicationContext
-    writer.post {
-      file = File(application.filesDir, "request-origins-v1.json")
-      restore()
-    }
+    if (!writer.initialize {
+      try { file = File(context.applicationContext.filesDir, "request-origins-v1.json"); restore() }
+      catch (_: Throwable) { restoreFailures++ }
+      cachedSnapshot = snapshot().toString()
+    }) { installed.set(false); dropped.incrementAndGet() }
   }
 
   @JvmStatic fun bind(context: Context, request: Int, detail: String) {
     if (detail.length > 768) { bindingDropped.incrementAndGet(); return }
     val tag = Tag("$process-${ordinal.incrementAndGet()}", detail)
-    var admitted = false
     // RN IDs can restart on runtime recreation. Ambiguous associations are NEVER
     // guessed; all colliding pending bindings are explicitly unattributed.
-    bindings.compute(request) { _, previous ->
-      if (previous != null) { admitted = true; Binding(previous.tag, previous.count + 1, true) }
-      else if (bindingSlots.tryAcquire()) { admitted = true; Binding(tag) }
-      else { bindingDropped.incrementAndGet(); null }
+    val admitted = bindings.compute(request) { _, previous ->
+      if (previous != null) Binding(previous.tag, previous.count + 1, true)
+      else Binding(tag)
     }
-    if (admitted) record("request", tag.id, "created",
+    if (admitted != null) record("request", tag.id, "created",
       detail.dropLast(1) + ""","context":${System.identityHashCode(context)}}""")
   }
 
@@ -92,18 +83,21 @@ object RequestOrigins {
   fun begin(call: Call): Tag? {
     var found: Tag? = null
     val requestId = call.request().tag() as? Int
-    if (requestId != null) bindings.computeIfPresent(requestId) { _, binding ->
-      if (!binding.ambiguous) found = binding.tag else bindingDropped.incrementAndGet()
-      if (binding.count > 1) binding.copy(count = binding.count - 1)
-      else { bindingSlots.release(); null }
+    if (requestId != null) {
+      val binding = bindings.computePrevious(requestId) { _, previous ->
+        if (previous != null && previous.count > 1) previous.copy(count = previous.count - 1) else null
+      }
+      if (binding != null) {
+        if (!binding.ambiguous) found = binding.tag else bindingDropped.incrementAndGet()
+      }
     }
     if (!call.request().url.encodedPath.startsWith("/api/")) return null
     val tag = found ?: Tag("$process-${ordinal.incrementAndGet()}", """{"origin":"unattributed"}""")
-    if (callSlots.tryAcquire()) calls[call] = tag else bindingDropped.incrementAndGet()
+    calls[call] = tag
     return tag
   }
   fun tag(call: Call): Tag? = calls[call]
-  fun finish(call: Call) { if (calls.remove(call) != null) callSlots.release() }
+  fun finish(call: Call) { calls.remove(call) }
 
   /** Exact local queue membership at rising peaks, not inferred from callStart.
    * At most eight dispatcher counters; one compact retained snapshot each.
@@ -114,10 +108,8 @@ object RequestOrigins {
     if (count < 16) return
     val identity = System.identityHashCode(dispatcher)
     val peak = queuePeaks[identity] ?: run {
-      if (!peakSlots.tryAcquire()) return
       val candidate = AtomicInteger()
       val existing = queuePeaks.putIfAbsent(identity, candidate)
-      if (existing != null) peakSlots.release()
       existing ?: candidate
     }
     // Stop census work after the retained-ID limit; do not repeatedly copy a
@@ -158,7 +150,12 @@ object RequestOrigins {
       || id.length !in 1..96 || detail.length > 2048) return
     val event = Event(kind, id, stage, detail, SystemClock.elapsedRealtime(), System.currentTimeMillis(), ordinal.incrementAndGet())
     if (!pending.offer(event)) dropped.incrementAndGet()
-    if (draining.compareAndSet(false, true)) writer.post { drain() }
+    schedule()
+  }
+  private fun schedule() {
+    if (draining.compareAndSet(false, true) && !writer.post { drain() }) {
+      draining.set(false); dropped.incrementAndGet()
+    }
   }
 
   private fun drain() {
@@ -167,10 +164,12 @@ object RequestOrigins {
       val event = pending.poll() ?: break
       try { consume(event) } catch (_: Exception) { failures++ }
     }
-    if (pending.isNotEmpty()) writer.post { drain() }
+    if (pending.isNotEmpty()) {
+      if (!writer.post { drain() }) { draining.set(false); dropped.incrementAndGet() }
+    }
     else {
       draining.set(false)
-      if (pending.isNotEmpty() && draining.compareAndSet(false, true)) writer.post { drain() }
+      if (pending.isNotEmpty()) schedule()
     }
     if (!flushScheduled) {
       flushScheduled = true
@@ -227,6 +226,7 @@ object RequestOrigins {
   }
 
   private fun snapshot(): JSONObject = JSONObject().put("available", true).put("version", 1)
+    .put("publishedOrdinal", ordinal.get())
     .put("process", process).put("requests", JSONArray(requests.values.toList()))
     .put("operations", JSONArray(operations.values.toList())).put("tasks", JSONArray(tasks.values.toList()))
     .put("queueSnapshots", JSONArray(bursts.values.toList()))
@@ -234,6 +234,7 @@ object RequestOrigins {
     .put("countsScope", "cumulative across retained process history, not queue occupancy")
     .put("queueDropped", priorDropped + dropped.get()).put("bindingDropped", priorBindingDropped + bindingDropped.get())
     .put("pendingBindings", bindings.size).put("pendingEvents", pending.size)
+    .put("queueHighWater", pending.highWater.get()).put("workerFailures", writer.failures.get())
     .put("activeCallAssociations", calls.size)
     .put("observerFailures", failures).put("restoreFailures", restoreFailures)
     .put("limits", "512 requests; 256 operations; 256 tasks; 8 queue snapshots (128 IDs each); 2048 pending events; 512 pending bindings; 256 counter dimensions plus overflow; 2 MiB per file")
@@ -273,11 +274,8 @@ object RequestOrigins {
       temporary.writeText(data)
       check(temporary.renameTo(target))
     } catch (_: Exception) { failures++ }
+    finally { cachedSnapshot = snapshot().toString() }
   }
 
-  @JvmStatic fun read(): String = try {
-    val result = CompletableFuture<String>()
-    writer.post { result.complete(snapshot().toString()) }
-    result.get(750, TimeUnit.MILLISECONDS)
-  } catch (_: Exception) { """{"available":false,"reason":"origin_observer_busy"}""" }
+  @JvmStatic fun read(): String = cachedSnapshot
 }
