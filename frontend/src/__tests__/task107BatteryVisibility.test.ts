@@ -79,6 +79,12 @@ jest.mock('../permissionCoordinator', () => ({
   serializePermissionOperation: (operation: () => Promise<unknown>) => operation(),
 }));
 
+jest.mock('expo', () => ({ requireOptionalNativeModule: () => ({
+  ...require('../__mocks__/trackingNative').trackingNative,
+  headlessTaskCurrent: (token: string) => token === 'native-active',
+  headlessTaskEnd: jest.fn(),
+}) }));
+
 describe('Task 107 — headless heartbeat battery path', () => {
   afterEach(() => {
     jest.resetModules();
@@ -99,7 +105,7 @@ describe('Task 107 — headless heartbeat battery path', () => {
         return Promise.resolve();
       }),
     };
-    let headlessTask: ((event: { name: string }) => Promise<void>) | undefined;
+    let headlessTask: ((event: { name: string; kcTaskLifetime: string }) => Promise<void>) | undefined;
     const fetchMock = jest.fn(async (_url, options: any) => {
       const body = options?.body ? JSON.parse(options.body) : {};
       return { ok: true, status: 200, json: async () => ({
@@ -148,7 +154,7 @@ describe('Task 107 — headless heartbeat battery path', () => {
     });
 
     expect(headlessTask).toBeDefined();
-    await headlessTask!({ name: 'heartbeat' });
+    await headlessTask!({ name: 'heartbeat', kcTaskLifetime: 'native-active' });
     expect(JSON.parse(storage.get('@kinnship/location_engine_log_v1') ?? '[]').filter((entry: any) =>
       entry.event === 'independent_tracking_recovery').map((entry: any) => entry.detail))
       .toEqual([expect.objectContaining({ result: 'already_enabled' })]);

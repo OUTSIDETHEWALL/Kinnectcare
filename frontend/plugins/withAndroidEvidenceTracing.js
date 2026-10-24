@@ -144,6 +144,12 @@ module.exports = function withAndroidEvidenceTracing(config) {
     // Apply the additional transform to the already validated SDK transformation.
     const managerChange = changes.find(([target]) => target.endsWith('/rnbackgroundgeolocation/HeadlessTaskManager.java'));
     managerChange[1] = origins.manager(managerChange[1]);
+    // Operational fence goes after observer transforms: removal invalidates
+    // liveness BEFORE any diagnostic observer can block.
+    const lifetimes = require('./headlessTaskLifetimeHooks');
+    managerChange[1] = lifetimes.manager(managerChange[1]);
+    changes.push([path.join(root, 'node_modules/react-native-background-geolocation/android/src/main/java/com/transistorsoft/rnbackgroundgeolocation/KinnshipTaskLifetimeBridge.java'),
+      lifetimes.bridge('com.transistorsoft.rnbackgroundgeolocation')]);
     const sdkJs = path.join(root, 'node_modules/react-native-background-geolocation/src/index.js');
     changes.push([sdkJs, origins.sdkJs(fs.readFileSync(sdkJs, 'utf8'))]);
     for (const [pkg, directory] of [

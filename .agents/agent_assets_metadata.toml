@@ -36,3 +36,45 @@ mtime_ms = 1792622280131
 storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/c13f0bc6-94f3-47d9-83bd-f57b83d949aa/0a83fca8-c0e3-4625-9b95-acc109a26050"
 storage_version_token = "1792622324002378"
 content_type = "text/markdown"
+
+[[outputs]]
+id = "aAU8OlVxsDI0G2OPT64Cl"
+uri = "file://.cache/kinnship-eas-build74/build74-artifact-review.html"
+type = "html"
+title = "Build 74 — delivered artifact PASS and physical test plan"
+description = "Pinned source and tree, actual AAB native/JS inspection, Build 73 comparison, signing, checksum, exact committed files, test results, and a physical validation plan that has not been executed."
+logical_id = "a33c010f-a307-422b-9b11-85bae70c4b80"
+content_hash = "sha256:b1b520faa0b96bd4d1039c45a5872ab80edcd8eb96c4030c756c1f7f26493443"
+size = 17426
+mtime_ms = 1792788259742
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/a33c010f-a307-422b-9b11-85bae70c4b80/4a878e42-a07c-45b8-ad5f-44eec6f7e3f4"
+storage_version_token = "1792788303026300"
+content_type = "text/html"
+
+[[outputs]]
+id = "WYl62YfWfx4d4TWkBl4W_"
+uri = "file://generated-artifacts/build75/Build-75-inspection-report.md"
+type = "text"
+title = "Build 75 — delivered artifact report"
+description = "Full artifact identity, inspection results, unresolved cold-initialization safety gate, and conditional physical-validation instructions. Not cleared for distribution."
+logical_id = "d30be126-b847-4297-a78b-1579611d245e"
+content_hash = "sha256:b811f1012d45e1d27fa68ed9272acf363790b644aab3540ef2f930d9eb74ce1c"
+size = 11418
+mtime_ms = 1792878557821
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/d30be126-b847-4297-a78b-1579611d245e/2a8dc37b-1ce3-430c-b7d3-e7948777b9e6"
+storage_version_token = "1792878576829124"
+content_type = "text/markdown"
+
+[[outputs]]
+id = "qXM1TWFWEdzxMxBQtJHTX"
+uri = "file://generated-artifacts/build76/Build-76-inspection-report.html"
+type = "html"
+title = "Build 76 — Rejection and Inspection Report"
+description = "Failed visibility-preservation gate. Includes AAB identity, signer, source, missing native/JavaScript hooks, independent producer-safety audit, baseline comparisons and test evidence. Not approved for distribution or installation."
+logical_id = "b8e98a01-5b88-47d3-bf1f-d806a2b4bb3d"
+content_hash = "sha256:2ebfe3384a87df04dec29a10fbac2db56e4d5a4f640432dc3e2ce3c9e807a70a"
+size = 31571
+mtime_ms = 1792883160590
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/b8e98a01-5b88-47d3-bf1f-d806a2b4bb3d/3e0b065e-bf0a-4ca3-8287-1861e54f1b7f"
+storage_version_token = "1792883296927933"
+content_type = "text/html"
