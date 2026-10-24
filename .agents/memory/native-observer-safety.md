@@ -69,3 +69,15 @@ unpublished queue reservations, saturation, concurrent admission and shutdown/
 recreation. Inspect delivered DEX as well as source. Keep rejected artifacts
 immutable and use a new native identity for corrected candidates. Host latency
 measurements are not Android scheduling or physical defect acceptance.
+
+Avoid globally invalidating diagnostic associations just because a read
+contended. Lost mutations need conservative attribution invalidation, but
+unrelated healthy requests should retain their correlation.
+
+**Why:** A nonblocking try-lock prototype preserved every real HTTP callback
+yet discarded most correlated histories under an ordinary request burst.
+Nonblocking admission alone is not evidence that observation remains useful.
+
+**How to apply:** Check complete correlated histories and explicit losses
+alongside application callbacks. Use bounded atomic associations or similarly
+scoped invalidation; distinguish ordinary burst coverage from artificial overload.

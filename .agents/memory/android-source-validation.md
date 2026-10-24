@@ -85,3 +85,15 @@ make the verifier fail even when the delivered native runtime is correct.
 
 **How to apply:** Resolve the packaged resource rather than inferring runtime
 identity from a missing JSON field or from the EAS profile alone.
+
+## EAS archive inspection can retain empty excluded directories
+
+When auditing exclusions in an inspected source archive, test for forbidden
+files and material, not just directory existence.
+
+**Why:** The EAS archive inspection copier retained empty directory skeletons
+for excluded workspace tooling and generated-output paths. A directory-only
+check falsely reported their inclusion even though none of their files shipped.
+
+**How to apply:** Inspect contents recursively, verify critical source hashes,
+and fail any upload gate with a nonzero exit that actually stops submission.
