@@ -55,6 +55,33 @@
         "KINNSHIP_DIAGNOSTIC_BUILD": "73"
       }
     },
+    "diagnostic74": {
+      "extends": "production",
+      "environment": "production",
+      "channel": "diagnostic74",
+      "autoIncrement": false,
+      "env": {
+        "KINNSHIP_DIAGNOSTIC_BUILD": "74"
+      }
+    },
+    "diagnostic75": {
+      "extends": "production",
+      "environment": "production",
+      "channel": "diagnostic75",
+      "autoIncrement": false,
+      "env": {
+        "KINNSHIP_DIAGNOSTIC_BUILD": "75"
+      }
+    },
+    "diagnostic76": {
+      "extends": "production",
+      "distribution": "store",
+      "channel": "diagnostic76",
+      "autoIncrement": false,
+      "env": {
+        "KINNSHIP_DIAGNOSTIC_BUILD": "76"
+      }
+    },
     "production": {
       "channel": "production",
       "ios": {

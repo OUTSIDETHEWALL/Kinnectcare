@@ -35,6 +35,7 @@ import * as Clipboard from 'expo-clipboard';
 import { captureDiagnosticSource, readNativeSdkEvidence, shareFullDiagnostics } from '../src/fullDiagnosticsExport';
 import { readTrackingEvidence } from './trackingReliability';
 import { readEvidenceTrace } from './evidenceTrace';
+import { readDeepAsyncTrace } from './deepAsyncTrace';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
 import { getNotificationLog, clearNotificationLog } from '../src/notificationLog';
@@ -1522,6 +1523,7 @@ function DiagnosticsContent() {
           nativeStartupEvidence,
           trackingReliability: readTrackingEvidence(),
           boundedNativeEvidence: readEvidenceTrace(),
+          deepAsyncEvidence: readDeepAsyncTrace(),
           cardRenderEvents: cardEvents,
           liveLogs,
           storageEvidence,
