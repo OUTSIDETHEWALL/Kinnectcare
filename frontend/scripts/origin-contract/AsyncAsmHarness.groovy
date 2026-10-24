@@ -11,7 +11,7 @@ source = source.replace('com.android.build.api.instrumentation.ClassContext', 'O
 def loader = new GroovyClassLoader(getClass().classLoader)
 def factory = loader.parseClass(source).getDeclaredConstructor().newInstance()
 def jar = new JarFile(args[1])
-int classes = 0, calls = 0
+int classes = 0, calls = 0, responseCalls = 0, fileReaderCalls = 0
 jar.entries().each { entry ->
   if (!entry.name.endsWith('.class')) return
   def name = entry.name.replace('/', '.').replace('.class', '')
@@ -24,14 +24,21 @@ jar.entries().each { entry ->
     MethodVisitor visitMethod(int access, String n, String d, String s, String[] e) {
       new MethodVisitor(Opcodes.ASM9) {
         void visitMethodInsn(int op, String owner, String method, String desc, boolean itf) {
-          if (owner == 'expo/modules/startupdiagnostics/DeepAsyncTrace') calls++
+          if (owner == 'expo/modules/startupdiagnostics/DeepAsyncTrace') {
+            calls++
+            if (name == 'com.facebook.react.modules.network.ResponseUtil') responseCalls++
+            if (name.startsWith('com.facebook.react.modules.blob.FileReaderModule')) fileReaderCalls++
+          }
         }
       }
     }
   }, 0)
   classes++
 }
-assert classes >= 2
-assert calls >= 8
+assert classes == 3
+assert responseCalls == 5
+assert fileReaderCalls == 11
+assert calls == 16
 println "PASS actual RN class transformation: ${classes} classes, ${calls} passive observer calls"
+println "Native response hooks: ${responseCalls} / 5; Native FileReader hooks: ${fileReaderCalls} / 11"
 println 'LIMIT: AGP frame recomputation, shrinker and delivered DEX still require the native build.'

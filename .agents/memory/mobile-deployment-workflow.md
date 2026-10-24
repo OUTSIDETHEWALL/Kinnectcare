@@ -62,7 +62,7 @@ that honors Content-Encoding before interpreting their contents.
 
 ## Protected diagnostic baseline and coordinated approval
 
-Build 70 remains the protected known-good moving-GPS baseline. Building a
+Build 74 is the current physical-phone baseline. Building a
 diagnostic artifact does not authorize installing it, deploying its backend
 correlation observer, publishing an OTA or changing production configuration.
 Client/server evidence collection requires separate coordinated approval after

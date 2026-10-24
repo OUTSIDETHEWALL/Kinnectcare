@@ -61,7 +61,7 @@ ${next.slice(classEnd)}`;
 
 module.exports = function withAndroidStartupRecorder(config) {
   config = withAndroidEvidenceTracing(config);
-  if (process.env.KINNSHIP_DIAGNOSTIC_BUILD === '75') config = withDeepAsyncTracing(config);
+  if (require('./diagnosticBuild').diagnosticBuild() !== null) config = withDeepAsyncTracing(config);
   config = withMainApplication(config, (cfg) => {
     cfg.modResults.contents = injectMainApplication(cfg.modResults.contents);
     return cfg;
