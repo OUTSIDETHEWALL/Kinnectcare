@@ -72,3 +72,16 @@ ignoring closure boundaries can falsely combine unrelated call sites.
 
 **How to apply:** Inspect the delivered bundle, require both names and real
 call sites, and distinguish verifier corrections from application repairs.
+
+## Packaged Expo runtime identity
+
+The embedded Android asset manifest may contain only asset metadata, without
+runtimeVersion. Verify the native runtime through the manifest's referenced
+Android string resource, and verify the channel through the updates request
+headers.
+
+**Why:** Assuming a runtimeVersion field in the embedded asset manifest can
+make the verifier fail even when the delivered native runtime is correct.
+
+**How to apply:** Resolve the packaged resource rather than inferring runtime
+identity from a missing JSON field or from the EAS profile alone.

@@ -40,3 +40,16 @@ background evidence needed to distinguish the missing async boundary.
 **How to apply:** Stress retention both while an operation remains pending and
 after late settlement followed by a foreground event flood; retain its correlated
 requests, flight, and at least one follower.
+
+## Cold worker initialization is part of the producer path
+
+A worker-backed recorder is not automatically nonblocking: first access to a
+lazy Handler can call HandlerThread.getLooper(), which can wait for worker
+initialization. Include lazy initialization in the safety review, not just
+steady-state queue admission.
+
+**Why:** Blocked-writer JVM tests can pass while the delivered producer path
+still contains a cold-start wait. Catching exceptions does not bound a wait.
+
+**How to apply:** Inspect the delivered initialization call chain and require
+separate cold-start evidence before certifying a recorder as nonblocking.

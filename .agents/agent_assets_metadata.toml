@@ -50,3 +50,17 @@ mtime_ms = 1792788259742
 storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/a33c010f-a307-422b-9b11-85bae70c4b80/4a878e42-a07c-45b8-ad5f-44eec6f7e3f4"
 storage_version_token = "1792788303026300"
 content_type = "text/html"
+
+[[outputs]]
+id = "WYl62YfWfx4d4TWkBl4W_"
+uri = "file://generated-artifacts/build75/Build-75-inspection-report.md"
+type = "text"
+title = "Build 75 — delivered artifact report"
+description = "Full artifact identity, inspection results, unresolved cold-initialization safety gate, and conditional physical-validation instructions. Not cleared for distribution."
+logical_id = "d30be126-b847-4297-a78b-1579611d245e"
+content_hash = "sha256:b811f1012d45e1d27fa68ed9272acf363790b644aab3540ef2f930d9eb74ce1c"
+size = 11418
+mtime_ms = 1792878557821
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/d30be126-b847-4297-a78b-1579611d245e/2a8dc37b-1ce3-430c-b7d3-e7948777b9e6"
+storage_version_token = "1792878576829124"
+content_type = "text/markdown"
