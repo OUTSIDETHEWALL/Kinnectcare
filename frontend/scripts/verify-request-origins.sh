@@ -44,7 +44,7 @@ native=modules/startup-diagnostics/android/src/main/java/expo/modules/startupdia
 # Compile against the actual RN 0.81.5 release classes, not just the runtime shim.
 kotlinc -classpath "$cp:$cache/react-android.jar" \
   "$native/RequestOrigins.kt" "$native/NativeHttpEvidence.kt" \
-  "$native/EvidenceTrace.kt" "$native/EvidenceStore.kt" -d "$work/production.jar"
+  "$native/EvidenceTrace.kt" "$native/EvidenceStore.kt" "$native/DeepAsyncTrace.kt" -d "$work/production.jar"
 javac -cp "$cp:$work/classes" -d "$work/classes" "$work/bridge/KinnshipOriginBridge.java"
 echo 'PASS production observers against actual RN 0.81.5 / Android / OkHttp APIs; generated bridge compilation'
 javap -classpath "$work/production.jar" expo.modules.startupdiagnostics.RequestOrigins | grep -E 'static final void (record|bind|install)'
@@ -53,11 +53,14 @@ javap -classpath "$work/production.jar" expo.modules.startupdiagnostics.RequestO
 javac -cp "$cp:$kotlinlib" -d "$work/classes" \
   scripts/origin-contract/{Context,Looper,HandlerThread,Handler,SystemClock}.java
 kotlinc -classpath "$work/classes:$cp" \
-  "$native/RequestOrigins.kt" "$native/NativeHttpEvidence.kt" \
+  "$native/RequestOrigins.kt" "$native/NativeHttpEvidence.kt" "$native/DeepAsyncTrace.kt" \
   scripts/origin-contract/EvidenceTraceStub.kt -d "$work/runtime.jar"
 kotlinc -classpath "$work/classes:$cp:$work/runtime.jar" \
   scripts/origin-contract/OriginHarness.kt -d "$work/harness.jar"
 runtime="$work/classes:$work/runtime.jar:$work/harness.jar:$cp"
 kotlin -classpath "$runtime" OriginHarnessKt "$work/state" seed
 kotlin -classpath "$runtime" OriginHarnessKt "$work/state" recreate
+kotlinc -classpath "$work/classes:$cp:$work/runtime.jar" scripts/origin-contract/DeepAsyncHarness.kt -d "$work/deep-harness.jar"
+kotlin -classpath "$work/classes:$work/runtime.jar:$work/deep-harness.jar:$cp" DeepAsyncHarnessKt "$work/deep-state"
+kotlin -classpath "$work/classes:$work/runtime.jar:$work/deep-harness.jar:$cp" DeepAsyncHarnessKt "$work/deep-unavailable" unavailable
 echo 'LIMIT: local JVM simulation, not Android scheduling, release shrinker, full Expo build, or phone acceptance'

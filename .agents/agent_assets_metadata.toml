@@ -36,3 +36,17 @@ mtime_ms = 1792622280131
 storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/c13f0bc6-94f3-47d9-83bd-f57b83d949aa/0a83fca8-c0e3-4625-9b95-acc109a26050"
 storage_version_token = "1792622324002378"
 content_type = "text/markdown"
+
+[[outputs]]
+id = "aAU8OlVxsDI0G2OPT64Cl"
+uri = "file://.cache/kinnship-eas-build74/build74-artifact-review.html"
+type = "html"
+title = "Build 74 — delivered artifact PASS and physical test plan"
+description = "Pinned source and tree, actual AAB native/JS inspection, Build 73 comparison, signing, checksum, exact committed files, test results, and a physical validation plan that has not been executed."
+logical_id = "a33c010f-a307-422b-9b11-85bae70c4b80"
+content_hash = "sha256:b1b520faa0b96bd4d1039c45a5872ab80edcd8eb96c4030c756c1f7f26493443"
+size = 17426
+mtime_ms = 1792788259742
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/a33c010f-a307-422b-9b11-85bae70c4b80/4a878e42-a07c-45b8-ad5f-44eec6f7e3f4"
+storage_version_token = "1792788303026300"
+content_type = "text/html"
