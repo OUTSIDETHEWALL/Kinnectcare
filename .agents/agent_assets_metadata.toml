@@ -78,3 +78,17 @@ mtime_ms = 1792883160590
 storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/b8e98a01-5b88-47d3-bf1f-d806a2b4bb3d/3e0b065e-bf0a-4ca3-8287-1861e54f1b7f"
 storage_version_token = "1792883296927933"
 content_type = "text/html"
+
+[[outputs]]
+id = "9veGJFIEB0u38KqI6LoEU"
+uri = "file://generated-artifacts/build77/Build-77-inspection-report.html"
+type = "html"
+title = "Build 77 — Delivered AAB Inspection Report"
+description = "Both acceptance gates passed: 5/5 response hooks, 11/11 FileReader hooks, 95/95 JS marker types, and preserved nonblocking recorder safety. Includes identity, signing, baseline comparisons and test evidence. Physical distribution requires separate authorization."
+logical_id = "41b5ef9f-f180-4e03-82df-8abcf41c9d2e"
+content_hash = "sha256:115c4df79cd2ea09ab1ea5984c93a15a9da5a412359c2edf0f49d4a1ef3fa9ad"
+size = 36382
+mtime_ms = 1792886374076
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/41b5ef9f-f180-4e03-82df-8abcf41c9d2e/40f615ae-3b43-46db-9b65-924e1b60a861"
+storage_version_token = "1792886399533198"
+content_type = "text/html"
