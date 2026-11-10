@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 from fastapi import FastAPI
+from pymongo.errors import DuplicateKeyError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import email_links as links
@@ -53,6 +54,8 @@ class Collection:
         return SimpleNamespace(to_list=rows)
 
     async def insert_one(self, row, **kwargs):
+        if "_id" in row and any(r.get("_id") == row["_id"] for r in self.rows):
+            raise DuplicateKeyError("duplicate intrinsic key")
         self.rows.append(copy.deepcopy(row))
 
     async def update_one(self, query, update, upsert=False, **kwargs):
@@ -382,6 +385,12 @@ def test_invitation_tokens_have_256_random_bits():
     tokens = {fg.generate_invite_token() for _ in range(100)}
     assert len(tokens) == 100
     assert all(re.fullmatch(r"INV-[A-F0-9]{64}", token) for token in tokens)
+
+
+def test_old_and_new_creation_share_a_normalized_intrinsic_account_key():
+    assert links.account_key(" Invited@Example.com ") == links.account_key("invited@example.com")
+    source = open(os.path.join(os.path.dirname(os.path.dirname(__file__)), "server.py")).read()
+    assert '"_id": el.account_key(email)' in source
 
 
 @pytest.mark.asyncio

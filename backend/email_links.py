@@ -29,6 +29,13 @@ TTL = timedelta(minutes=15)
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
+def account_key(email: str) -> str:
+    # Shared with the retained Build 78 signup endpoint. The per-email
+    # transaction lock only covers new links; the intrinsic unique _id also
+    # prevents old-OTP/new-link creation races without a live index migration.
+    # Public user IDs remain random, especially after deletion/recreation.
+    return "email:" + digest(email.strip().lower())
+
 
 def utc(value):
     return value.replace(tzinfo=timezone.utc) if value and value.tzinfo is None else value
@@ -254,7 +261,7 @@ def build_router(db, get_current_user, send_email, make_token, public_user):
                     ZoneInfo(tz)
                 except (ValueError, ZoneInfoNotFoundError):
                     tz = "UTC"
-                user = {"id": str(uuid.uuid4()), "email": rec["email"], "full_name": name,
+                user = {"_id": account_key(rec["email"]), "id": str(uuid.uuid4()), "email": rec["email"], "full_name": name,
                         "location_sharing_enabled": False,
                         "timezone": tz, "push_tokens": [], "created_at": datetime.now(timezone.utc)}
                 await tx.users.insert_one(user)

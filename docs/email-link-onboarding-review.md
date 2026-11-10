@@ -49,6 +49,9 @@ An ordinary deep link is not deferred-install attribution.
 - New invited accounts, their family assignment, invitation consumption, and
   consent-disabled self-member creation commit together or roll back together.
 - Existing accounts keep their identity, session behavior and entitlements.
+  New account insertion also uses the same intrinsic per-email database key
+  in both the retained OTP and email-link paths, preventing cross-protocol
+  duplicate account creation. Public account IDs remain fresh random IDs.
   Changing family requires an authenticated confirmation of the intended and
   previous family. Owners of populated families cannot silently abandon them.
   Another person's linked records are not transferred merely because the
@@ -73,11 +76,11 @@ An ordinary deep link is not deferred-install attribution.
 
 ## Automated evidence
 
-- Backend: **162 passed** across email-link endpoint/security/rollback,
+- Backend: **163 passed** across email-link endpoint/security/rollback,
   membership, family authorization, medication occurrence reliability, SOS,
   subscription webhook reconciliation, check-in privacy and family diagnostics
   privacy suites.
-- Frontend: **209 passed**, 11 suites, including real callback-screen cold and
+- Frontend: **212 passed**, 12 suites, including real callback-screen cold and
   warm handling, device proof, startup restoration, referrer/consumed-invite
   handling, real root/permission recovery, explicit consent, SOS and medication
   notification routing.
@@ -88,6 +91,19 @@ An ordinary deep link is not deferred-install attribution.
   signature error in `src/__tests__/schedulingTracing.test.ts:68`.
   No new application type errors were reported. This is not a clean full
   typecheck and must not be reported as one.
+
+## Native build compatibility correction
+
+The first Build 79 attempt failed: the pinned GitHub Hermes archive now unpacks
+under `meta-hermes-…`, while React Native's existing extraction predicate only
+recognized `facebook-hermes-…`. Direct inspection of the downloaded pinned
+archive confirmed the new root name. The Gradle failure was a missing top-level
+`CMakeLists.txt`, not an onboarding JavaScript failure.
+
+The diagnostic source-build plugin now recognizes both observed prefixes. It
+does not change the Hermes pin, compiler, native APIs or release process.
+Idempotency, exact limited replacement and fail-closed anchor tests cover this
+compatibility correction. Build 78 remains untouched.
 
 ## Boundaries and remaining acceptance work
 

@@ -136,6 +136,7 @@ includeBuild('../node_modules/react-native') {
 }
 `;
 const transforms = [
+  ['ReactAndroid/hermes-engine/build.gradle.kts', hermesArchiveRoot],
   ['ReactCommon/react/runtime/TimerManager.h', h.timerHeader],
   ['ReactCommon/react/runtime/TimerManager.cpp', h.timerCpp],
   ['ReactCommon/react/runtime/ReactInstance.cpp', h.instanceCpp],
@@ -149,6 +150,13 @@ const transforms = [
       '// TODO(janzer): Lazily create runtime',
       'kinnship78::initialize(); // explicit instance lifecycle, never a producer\n  // TODO(janzer): Lazily create runtime')],
 ];
+function hermesArchiveRoot(contents) {
+  const old = 'this.path.startsWith("facebook-hermes-")';
+  const replacement = '(this.path.startsWith("facebook-hermes-") || this.path.startsWith("meta-hermes-"))';
+  if (contents.includes(replacement)) return contents;
+  if (!contents.includes(old)) throw new Error('Pinned Hermes archive extraction anchor changed');
+  return contents.replace(old, replacement);
+}
 function apply(root) {
   const rn = path.join(root, 'node_modules/react-native');
   if (JSON.parse(fs.readFileSync(path.join(rn, 'package.json'))).version !== '0.81.5') throw Error('Build78 requires pinned RN 0.81.5');
@@ -196,4 +204,4 @@ function plugin(config) {
   }]);
 }
 module.exports = plugin;
-Object.assign(module.exports, { apply, transforms, monitorGradle, settings, injectApplication });
+Object.assign(module.exports, { apply, transforms, monitorGradle, settings, injectApplication, hermesArchiveRoot });

@@ -1825,6 +1825,7 @@ async def verify_otp(data: OtpVerify):
 
         user_id = str(uuid.uuid4())
         doc = {
+            "_id": el.account_key(email),
             "id": user_id,
             "email": email,
             "full_name": (rec.get("full_name") or "Friend").strip(),
