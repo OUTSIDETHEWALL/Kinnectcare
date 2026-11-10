@@ -12,7 +12,8 @@
     "ota:publish": "bash scripts/publish-ota.sh",
     "normalize-lockfile": "bash scripts/normalize-lockfile.sh",
     "build:android": "bash scripts/build-android.sh",
-    "test": "jest"
+    "test": "jest",
+    "verify:diagnostic78": "bash scripts/verify-diagnostic78-gate.sh"
   },
   "dependencies": {
     "@babel/runtime": "^7.20.6",
@@ -32,6 +33,7 @@
     "expo-clipboard": "~8.0.8",
     "expo-constants": "~18.0.13",
     "expo-contacts": "~15.0.11",
+    "expo-crypto": "~15.0.9",
     "expo-dev-client": "~6.0.21",
     "expo-device": "~8.0.10",
     "expo-file-system": "~19.0.23",
@@ -83,7 +85,9 @@
   "expo": {
     "autolinking": {
       "android": {
-        "buildFromSource": ["expo-sharing"]
+        "buildFromSource": [
+          "expo-sharing"
+        ]
       }
     }
   },

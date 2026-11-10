@@ -1,5 +1,10 @@
 const ENGINE_LOG_KEY = '@kinnship/location_engine_log_v1';
 const BATTERY_LOG_KEY = '@kinnship/battery_task_log_v1';
+jest.mock('expo', () => ({ requireOptionalNativeModule: () => ({
+  ...require('../__mocks__/trackingNative').trackingNative,
+  headlessTaskCurrent: (token: string) => token === 'native-active',
+  headlessTaskEnd: jest.fn(),
+}) }));
 // These tests isolate transport/cadence after recovery authorization.
 // Real ownership, cold boot and independent-wake guards are covered separately.
 jest.mock('../androidTrackingRecovery', () => ({
@@ -105,6 +110,7 @@ describe('minimum device-presence freshness', () => {
     });
 
     await mockHeadlessTask!({
+      kcTaskLifetime: 'native-active',
       name: 'heartbeat',
       params: {
         location: {

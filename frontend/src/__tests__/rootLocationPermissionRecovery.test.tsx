@@ -177,6 +177,10 @@ describe('RootNav location recovery independent of notification onboarding', () 
     }));
     jest.doMock('../backgroundLocation', () => ({
       stopBackgroundLocation: jest.fn(async () => true), startBackgroundLocation: jest.fn(async () => true),
+      setLocationSharingEnabled: jest.fn(async (next: boolean) => {
+        sharing = next;
+        await jest.requireActual('../backgroundLocation').setLocationSharingEnabled(next);
+      }),
     }));
     jest.doMock('../batteryTask', () => ({
       configureBatteryTask: jest.fn(async () => {}), BATTERY_OPT_PROMPTED_KEY: 'kc_battery_opt_prompted_v1',
@@ -415,6 +419,19 @@ describe('RootNav location recovery independent of notification onboarding', () 
       expect(button).toBeDefined();
       await act(async () => { button!.props.onPress(); });
       await flush();
+      await chooseSharing();
+    }
+    async function chooseSharing() {
+      const choices = tree!.root.findAllByType('TouchableOpacity');
+      const label = grants.foreground === 'granted' ? 'Share my location' : 'Keep location sharing off';
+      const choice = choices.find((node: any) =>
+        node.findAllByType('Text').some((text: any) => text.children.join('') === label));
+      if (!choice) return;
+      // Permission completion alone is no longer consent. The real screen
+      // must receive an explicit choice before its original completion checks.
+      expect(data.get('@kinnship/permissions_handled_v1')).not.toBe('true');
+      await act(async () => { await choice.props.onPress(); });
+      await flush();
     }
     it.each(['granted', 'denied', 'reject', 'never'])(
       'starts and repairs while a real notification request is pending, then %s', async outcome => {
@@ -441,6 +458,7 @@ describe('RootNav location recovery independent of notification onboarding', () 
         expect(sdk.start).toHaveBeenCalledTimes(starts);
         expect(enabled).toBe(true);
         if (outcome !== 'granted') await clickContinue();
+        else await chooseSharing();
         expect(data.get('@kinnship/permissions_handled_v1')).toBe('true');
         expect(router.replace).toHaveBeenCalledWith('/(tabs)/dashboard');
         expect((global.fetch as jest.Mock).mock.calls.every(([url]) => url.startsWith(base))).toBe(true);

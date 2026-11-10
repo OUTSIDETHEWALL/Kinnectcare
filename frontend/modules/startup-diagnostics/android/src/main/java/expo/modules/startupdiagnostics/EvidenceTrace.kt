@@ -1,12 +1,7 @@
 package expo.modules.startupdiagnostics
 
 import android.content.Context
-import android.os.Handler
-import android.os.HandlerThread
 import android.os.SystemClock
-import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.UUID
@@ -19,15 +14,18 @@ import org.json.JSONObject
  * Death can lose queued/unflushed events; export reports queue/loss/IO coverage.
  */
 object EvidenceTrace {
-  private val lock = Any()
-  private val process = UUID.randomUUID().toString()
-  private val thread by lazy { HandlerThread("kinnship-evidence", android.os.Process.THREAD_PRIORITY_BACKGROUND).apply { start() } }
-  private val writer by lazy { Handler(thread.looper) }
-  @Volatile private var context: Context? = null
+  private val process = UUID(System.currentTimeMillis(), System.nanoTime()).toString()
+  private val writer = RecorderWorker("kinnship-evidence")
+  private val installed = AtomicBoolean()
+  @JvmStatic fun startWorker() {
+    if (writer.start()) { draining.set(false); if (pending.isNotEmpty()) scheduleDrain() }
+  }
+  @Volatile private var cachedSnapshot = """{"available":false,"reason":"observer_initializing"}"""
+  private var restoreFailures = 0L
   private lateinit var store: EvidenceStore
   private data class Pending(val channel: String, val stage: String, val id: String, val detail: String,
     val wall: Long, val elapsed: Long)
-  private val pending = ArrayBlockingQueue<Pending>(1024)
+  private val pending = RecorderQueue<Pending>(1024)
   private val draining = AtomicBoolean()
   private val queueDropped = AtomicLong()
   private var previousDropped = 0L
@@ -67,12 +65,10 @@ object EvidenceTrace {
     "invalid_owner", "session_rejected", "permission_denied", "no_session", "invalid_backend",
     "obsolete_owner", "authenticated_owner", "native_unavailable", "other")
   @JvmStatic fun install(ctx: Context) {
-    if (context != null) return
-    synchronized(lock) {
-      if (context != null) return
-      context = ctx.applicationContext
-      writer.post {
-        store = EvidenceStore(requireNotNull(context).filesDir)
+    if (!installed.compareAndSet(false, true)) return
+    if (!writer.initialize {
+      try {
+        store = EvidenceStore(ctx.applicationContext.filesDir)
         val restored = store.load()
         // Re-sanitize restored rows; malformed/unknown persisted fields never export.
         fun restore(rows: JSONArray, capacity: Int): JSONArray {
@@ -99,8 +95,9 @@ object EvidenceTrace {
         httpOrdinal = (0 until http.length()).maxOfOrNull { http.getJSONObject(it).getLong("ordinal") + 1 } ?: 0
         gpsOrdinal = (0 until gps.length()).maxOfOrNull { gps.getJSONObject(it).getLong("ordinal") + 1 } ?: 0
         previousDropped = store.loadLoss()
-      }
-    }
+      } catch (_: Throwable) { restoreFailures++ }
+      refreshSnapshot()
+    }) { installed.set(false); queueDropped.incrementAndGet() }
   }
 
   @JvmStatic fun record(ctx: Context, channel: String, stage: String, id: String, detail: String) {
@@ -115,7 +112,7 @@ object EvidenceTrace {
   }
 
   private fun scheduleDrain() {
-    if (draining.compareAndSet(false, true)) writer.post {
+    if (draining.compareAndSet(false, true) && !writer.post {
       try {
         // A finite slice lets delayed flush/export work run even under a flood.
         repeat(128) {
@@ -130,7 +127,7 @@ object EvidenceTrace {
         }
         if (pending.isNotEmpty()) scheduleDrain()
       }
-    }
+    }) { draining.set(false); queueDropped.incrementAndGet() }
   }
 
   private fun sanitize(input: JSONObject): JSONObject {
@@ -217,23 +214,21 @@ object EvidenceTrace {
       store.save(http, gps, hours, dirtyHttp, dirtyGps, dirtyHours, previousDropped + queueDropped.get())
       dirtyHttp.clear(); dirtyGps.clear(); dirtyHours.clear()
     } catch (_: Exception) { writeFailures++ }
+    finally { refreshSnapshot() }
   }
 
-  @JvmStatic fun read(ctx: Context): String {
-    return try {
-      install(ctx)
-      val result = CompletableFuture<String>()
-      writer.post {
-        try { result.complete(JSONObject().put("available", true).put("version", 1)
+  private fun refreshSnapshot() {
+    try {
+      cachedSnapshot = JSONObject().put("available", true).put("version", 1)
         .put("http", JSONArray(http.toString())).put("gps", JSONArray(gps.toString()))
         .put("hourlyCounts", JSONObject(hours.toString()))
           .put("httpObserverStatus", httpObserverStatus).put("pendingEvents", pending.size)
           .put("queueDropped", previousDropped + queueDropped.get()).put("writeFailures", writeFailures)
-          .put("readFailures", store.readFailures)
+          .put("readFailures", restoreFailures + if (::store.isInitialized) store.readFailures else 0)
+          .put("queueHighWater", pending.highWater.get()).put("workerFailures", writer.failures.get())
           .put("limits", "512 HTTP / 2048 sampled GPS rows; 48 hours, 256 counter keys/hour plus overflow; 1024 pending events; buffered/unflushed events may be lost on death; absence is not proof without coverage")
-          .toString()) } catch (_: Exception) { result.complete("""{"available":false,"reason":"snapshot_failed"}""") }
-      }
-      result.get(750, TimeUnit.MILLISECONDS)
-    } catch (_: Exception) { """{"available":false,"reason":"observer_busy_or_unavailable"}""" }
+          .toString()
+    } catch (_: Throwable) { writeFailures++ }
   }
+  @JvmStatic fun read(ctx: Context): String = cachedSnapshot
 }

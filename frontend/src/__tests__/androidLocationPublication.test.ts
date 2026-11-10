@@ -24,6 +24,11 @@ describe('Android one-shot publication across real independent paths', () => {
 
   beforeEach(async () => {
     jest.resetModules();
+    jest.doMock('expo', () => ({ requireOptionalNativeModule: () => ({
+      ...require('../__mocks__/trackingNative').trackingNative,
+      headlessTaskCurrent: (execution: string) => execution === 'native-active',
+      headlessTaskEnd: jest.fn(),
+    }) }));
     position.timestamp = new Date().toISOString();
     process.env.EXPO_PUBLIC_BACKEND_URL = base;
     storage = new Map();
@@ -116,6 +121,7 @@ describe('Android one-shot publication across real independent paths', () => {
     if (path === 'silent') return engine.recoverAndRefreshFromIndependentWake('silent');
     const callback = sdk.registerHeadlessTask.mock.calls[0][0];
     return callback({
+      kcTaskLifetime: 'native-active',
       name: path, params: path === 'heartbeat'
         ? { location: { battery: position.battery } } : { isMoving: true },
     });

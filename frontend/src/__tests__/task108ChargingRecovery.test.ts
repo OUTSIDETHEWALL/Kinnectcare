@@ -11,6 +11,11 @@
  */
 
 import { getBatteryDisplay } from '../batteryStatus';
+jest.mock('expo', () => ({ requireOptionalNativeModule: () => ({
+  ...require('../__mocks__/trackingNative').trackingNative,
+  headlessTaskCurrent: (token: string) => token === 'native-active',
+  headlessTaskEnd: jest.fn(),
+}) }));
 
 const BATTERY_URL = 'https://api.example.com/api/members/member-001/battery';
 const LOG_KEY = '@kinnship/location_engine_log_v1';
@@ -85,7 +90,7 @@ describe('Task 108 — headless charging recovery', () => {
     (globalThis as { fetch?: unknown }).fetch = fetchMock;
 
     let headlessTask:
-      | ((event: { name: string }) => Promise<void>)
+      | ((event: { name: string; kcTaskLifetime: string }) => Promise<void>)
       | undefined;
     const getCurrentPosition = jest.fn().mockResolvedValue({
       battery: { level: 0.18, is_charging: true },
@@ -148,7 +153,7 @@ describe('Task 108 — headless charging recovery', () => {
     const pluggedInAt = Date.now();
     jest.advanceTimersByTime(60_000);
     const heartbeatAt = Date.now();
-    await headlessTask!({ name: 'heartbeat' });
+    await headlessTask!({ name: 'heartbeat', kcTaskLifetime: 'native-active' });
     await flushPromises();
 
     expect(heartbeatAt - pluggedInAt).toBeLessThanOrEqual(2 * 60_000);

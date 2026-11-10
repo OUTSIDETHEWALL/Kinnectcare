@@ -24,6 +24,8 @@ import { Colors } from '../../src/theme';
 import { markPermissionsHandled, LocationPermissionDecisionChangedError } from '../../src/permissionsStore';
 import { useAuth } from '../../src/AuthContext';
 import { notificationPermission, readPermissionSnapshot, requestOnboardingLocation } from '../../src/permissionCoordinator';
+import { updatePreferences } from '../../src/preferences';
+import { setLocationSharingEnabled } from '../../src/backgroundLocation';
 
 type PermissionStage =
   | 'loading'           // brief pause — user reads context before OS dialog
@@ -33,6 +35,7 @@ type PermissionStage =
   | 'notification-context' // show notifications explanation
   | 'notification-denied'
   | 'save-failed'
+  | 'sharing-choice'
   | 'done';             // mark handled, route to dashboard
 
 export default function Permissions() {
@@ -45,6 +48,8 @@ export default function Permissions() {
   const [locationGranted, setLocationGranted] = useState(false);
   const fired = useRef(false);
   const saving = useRef(false);
+  const sharingChosen = useRef(false);
+  const [sharingBusy, setSharingBusy] = useState(false);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -152,6 +157,10 @@ export default function Permissions() {
   }, [stage]);
 
   const finish = async () => {
+    if (!sharingChosen.current) {
+      setStage('sharing-choice');
+      return;
+    }
     if (Platform.OS !== 'android') {
       // Preserve the original iOS completion path.
       await markPermissionsHandled();
@@ -196,6 +205,43 @@ export default function Permissions() {
   };
 
   // ── Renderers ────────────────────────────────────────────────────────────
+
+  if (stage === 'sharing-choice') {
+    const chooseSharing = async (enabled: boolean) => {
+      if (sharingBusy || !user?.id) return;
+      const requestingOwner = user.id;
+      setSharingBusy(true);
+      try {
+        if (owner.current !== requestingOwner) return;
+        await updatePreferences({ location_sharing_enabled: enabled });
+        if (!mounted.current || owner.current !== requestingOwner) return;
+        await setLocationSharingEnabled(enabled);
+        if (!mounted.current || owner.current !== requestingOwner) return;
+        sharingChosen.current = true;
+        await finish();
+      } catch {
+        Alert.alert('Choice could not be saved', 'We could not finish saving your choice. Please try again before continuing.');
+      } finally {
+        if (mounted.current) setSharingBusy(false);
+      }
+    };
+    return <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      <View style={styles.center}>
+        <Text style={styles.title}>Share your location with your family?</Text>
+        <Text style={styles.body}>
+          Your family can see your location on their Kinnship map, including while the app is closed.
+          Granting Android permission alone does not turn sharing on. You can change this choice in Me → Privacy.
+        </Text>
+        {locationGranted && <TouchableOpacity disabled={sharingBusy} style={styles.primaryBtn} onPress={() => chooseSharing(true)}>
+          <Text style={styles.primaryBtnText}>Share my location</Text>
+        </TouchableOpacity>}
+        <TouchableOpacity disabled={sharingBusy} style={styles.secondaryBtn} onPress={() => chooseSharing(false)}>
+          <Text style={styles.secondaryBtnText}>Keep location sharing off</Text>
+        </TouchableOpacity>
+        {sharingBusy && <ActivityIndicator color={Colors.primary} />}
+      </View>
+    </SafeAreaView>;
+  }
 
   if (stage === 'loading' || stage === 'done') {
     return (

@@ -47,7 +47,7 @@ function formatLockMs(ms: number): string {
 
 export default function PinLogin() {
   const router = useRouter();
-  const { user, loading, logout, requestOtp } = useAuth();
+  const { user, loading, logout } = useAuth();
   const padRef = useRef<PinPadHandle>(null);
   const [busy, setBusy] = useState(false);
   const [hint, setHint] = useState<string>('');
@@ -114,7 +114,7 @@ export default function PinLogin() {
         setHintTone('normal');
         return;
       }
-      setHint(`Too many wrong PINs. Try again in ${formatLockMs(remainingMs)} — or tap "Email me a code" below.`);
+      setHint(`Too many wrong PINs. Try again in ${formatLockMs(remainingMs)} — or tap "Sign in with an email link" below.`);
       setHintTone('error');
     };
     tick();
@@ -231,7 +231,7 @@ export default function PinLogin() {
   };
 
   const goToEmailLogin = async () => {
-    // Email-code sign-in remains the recovery route if someone has forgotten
+    // Email-link sign-in remains the recovery route if someone has forgotten
     // their optional App Lock PIN.
     const email = user?.email;
     if (!email) {
@@ -239,16 +239,10 @@ export default function PinLogin() {
       router.replace('/(auth)/login');
       return;
     }
-    try {
-      await requestOtp({ email, purpose: 'login' });
-    } catch (_e) {
-      // Even if the request silently fails (network, etc.), still
-      // route to the verify screen — the user can press Resend.
-    }
     await logout();
     router.push({
-      pathname: '/(auth)/otp-verify',
-      params: { email, purpose: 'login' },
+      pathname: '/(auth)/login',
+      params: { email },
     } as any);
   };
 
@@ -332,7 +326,7 @@ export default function PinLogin() {
             activeOpacity={0.6}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
-            <Text style={styles.fallbackText}>Email me a code instead</Text>
+            <Text style={styles.fallbackText}>Sign in with an email link</Text>
           </TouchableOpacity>
           <TouchableOpacity
             testID="pin-login-forgot"

@@ -31,6 +31,13 @@ jest.mock('../permissionCoordinator', () => ({
 }));
 
 describe('headless activity wake recovery', () => {
+  beforeEach(() => {
+    jest.doMock('expo', () => ({ requireOptionalNativeModule: () => ({
+      ...require('../__mocks__/trackingNative').trackingNative,
+      headlessTaskCurrent: (token: string) => token === 'test-active',
+      headlessTaskEnd: jest.fn(),
+    }) }));
+  });
   afterEach(() => {
     jest.resetModules();
     jest.restoreAllMocks();
@@ -104,6 +111,7 @@ describe('headless activity wake recovery', () => {
 
     expect(headlessTask).toBeDefined();
     await headlessTask!({
+      kcTaskLifetime: 'test-active',
       name: eventName,
       params,
     });
@@ -172,6 +180,7 @@ describe('headless activity wake recovery', () => {
     });
 
     await headlessTask!({
+      kcTaskLifetime: 'test-active',
       name: eventName,
       params,
     });

@@ -100,7 +100,7 @@ describe('native evidence source contracts (not native compilation)', () => {
     expect(producer).toContain('pending.offer');
     expect(producer).not.toContain('JSONObject');
     expect(producer).not.toContain('synchronized(lock)');
-    expect(source).toContain('ArrayBlockingQueue<Pending>(1024)');
+    expect(source).toContain('RecorderQueue<Pending>(1024)');
     expect(source).toContain('counters.length() < 256');
   });
   it('observes the existing client without modifying transport policy', () => {

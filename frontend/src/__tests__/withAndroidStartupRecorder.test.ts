@@ -114,7 +114,13 @@ describe('withAndroidStartupRecorder', () => {
     expect(moduleGradle).toContain('versionCode 1');
     expect(moduleGradle).toContain("versionName '1.0.0'");
     expect(source).toContain('class StartupDiagnosticsModule : Module()');
-    expect(source.match(/Function\("/g)).toHaveLength(22);
+    // Existing API plus the five passive Build78 scheduling observer functions.
+    expect(source.match(/Function\("/g)).toHaveLength(37);
+    for (const method of ['originVersion', 'originBind', 'originRecord', 'originRead',
+      'headlessTaskCurrent', 'headlessTaskEnd', 'deepRecord', 'deepRead', 'deepBodyBind', 'deepBindRequest',
+      'schedulingBegin', 'schedulingEnd', 'schedulingCallback', 'schedulingProgress', 'schedulingRead']) {
+      expect(source).toContain(`Function("${method}")`);
+    }
     expect(source).not.toContain('AsyncFunction');
     expect(source).not.toContain('@ReactMethod');
     expect(source).not.toContain('ReactPackage');

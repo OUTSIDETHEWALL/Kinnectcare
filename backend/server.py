@@ -1811,6 +1811,8 @@ async def verify_otp(data: OtpVerify):
             if not target_group:
                 logger.warning("[invite-accept] invite_lookup_failed path=signup_new")
                 raise HTTPException(status_code=404, detail="Invite code not found")
+            if accepted_invite and accepted_invite["invitee_email"].strip().lower() != email:
+                raise HTTPException(403, "This invitation is for a different email address.")
             logger.info(
                 "[invite-accept] invite_located path=signup_new invite=%s group=%s",
                 (
@@ -2018,6 +2020,8 @@ async def verify_otp(data: OtpVerify):
                 user.get("id", "")[:8],
             )
             _ei_target, _ei_accepted = await fg.resolve_invite_code(db, _ei_code)
+            if _ei_accepted and _ei_accepted["invitee_email"].strip().lower() != email:
+                raise HTTPException(403, "This invitation is for a different email address.")
             if not _ei_target:
                 logger.warning(
                     "[invite-accept] invite_lookup_failed path=signup_existing user=%s",
@@ -7669,6 +7673,9 @@ async def reset_test_user(data: _ResetTestUserRequest, request: Request):
 
 
 # Register family group routes (multi-user family invite & membership)
+import email_links as el
+api_router.include_router(el.build_router(db, get_current_user, send_email_via_resend_async, create_access_token, _user_response))
+el.install_public_routes(app)
 api_router.include_router(fg.build_router(db, get_current_user, push_to_user=push_to_user, send_email=send_email_via_resend_async))
 
 
@@ -7724,7 +7731,7 @@ async def invite_landing_page(token: str):
     # Sanitize — keep only the alnum + hyphen chars an invite token can
     # ever legitimately contain.  Prevents HTML injection via crafted
     # URL like /invite/<script>alert(1)</script>.
-    safe = "".join(ch for ch in (token or "") if ch.isalnum() or ch == "-")[:64]
+    safe = "".join(ch for ch in (token or "") if ch.isalnum() or ch == "-")[:128]
 
     play_store_url = (
         os.environ.get("KINNSHIP_PLAY_STORE_URL")
@@ -8185,6 +8192,8 @@ async def _ensure_alert_dedup_index():
         # expireAfterSeconds=0 makes Mongo delete the doc the
         # moment expires_at is in the past.
         ("otp_codes",          "expires_at", 0,             None),
+        ("email_links",        "expires_at", 0,             None),
+        ("email_link_limits",  "expires_at", 0,             None),
         # Check-ins — 90 days after creation
         ("checkins",           "created_at", 90 * 86400,    None),
         # Alerts — 30 days after RESOLUTION (resolved_at must

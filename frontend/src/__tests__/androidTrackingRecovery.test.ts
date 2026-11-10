@@ -16,6 +16,11 @@ describe('owned Android cold tracking recovery', () => {
   };
   beforeEach(async () => {
     jest.resetModules();
+    jest.doMock('expo', () => ({ requireOptionalNativeModule: () => ({
+      ...require('../__mocks__/trackingNative').trackingNative,
+      headlessTaskCurrent: (execution: string) => execution === 'native-active',
+      headlessTaskEnd: jest.fn(),
+    }) }));
     store = new Map();
     token = 'current-app-session';
     permissions = { foreground: 'granted', background: 'granted', notifications: 'denied' };
@@ -99,9 +104,9 @@ describe('owned Android cold tracking recovery', () => {
   it.each(['boot', 'terminate'])('restarts from the real %s headless handler without mounting UI', async name => {
     require('../locationEngine');
     const handler = sdk.registerHeadlessTask.mock.calls[0][0];
-    await handler({ name });
+    await handler({ name, kcTaskLifetime: 'native-active' });
     expect(sdk.start).toHaveBeenCalledTimes(1);
-    await handler({ name });
+    await handler({ name, kcTaskLifetime: 'native-active' });
     expect(sdk.start).toHaveBeenCalledTimes(1);
     expect(sdk.getCurrentPosition).not.toHaveBeenCalled();
   });
