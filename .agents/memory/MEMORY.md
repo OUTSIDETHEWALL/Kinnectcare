@@ -40,3 +40,5 @@
 - [Startup latency attribution](startup-latency-attribution.md) — protect tracking; separate API promise time from secure storage, transport, scheduling and response persistence.
 - [Native observer safety](native-observer-safety.md) — keep tracing off critical paths; preserve callbacks; test blocked consumers and actual compiled hooks.
 - [Ownership-sharing acceptance](ownership-sharing-acceptance.md) — follow physical attribution; synthetic queue reduction is not phone-performance acceptance or release authorization.
+- [Email-link onboarding security](email-link-onboarding-security.md) — no typed codes; invitation context is not identity proof; Play verification and release approval remain separate.
+- [Hermes archive provenance](hermes-archive-provenance.md) — a pinned revision can acquire a different archive root after a repository ownership change.

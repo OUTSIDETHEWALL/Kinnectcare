@@ -8,9 +8,11 @@ type NativeObserver = {
   originBind?: (request: number, detail: string) => void;
   originRecord?: (kind: string, id: string, stage: string, detail: string) => void;
   originRead?: () => string;
+  deepBindRequest?: (request: number, id: string) => void;
 };
 export type RequestOrigin = {
   operation: string; origin: string; phase?: string; wake?: string | null; generation?: number;
+  asyncRequest?: string; flight?: string;
 };
 const opaqueId = () => Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
 const runtime = opaqueId();
@@ -34,8 +36,9 @@ function installBinding(): void {
   target.__kinnshipBindRequestOrigin = request => {
     try {
       const native = observer();
+      try { if (current?.asyncRequest) native?.deepBindRequest?.(request, current.asyncRequest); } catch {}
       if (native) native.originBind?.(request, JSON.stringify({
-        ...(current ?? { origin: 'unattributed' }), runtime, request: opaqueId(),
+        ...(current ?? { origin: 'unattributed' }), runtime, request: current?.asyncRequest ?? opaqueId(),
       }));
     } catch { /* No observer failure changes dispatch. */ }
   };
@@ -75,3 +78,5 @@ export function readRequestOrigins(): unknown {
 }
 // Install the optional callback before a headless task's early-return path.
 installBinding();
+// Used only synchronously while constructing an existing fetch/XHR.
+try { (globalThis as any).__kinnshipAsyncCurrent = () => current?.asyncRequest; } catch {}

@@ -88,6 +88,7 @@ type AuthCtx = {
   requestOtp: (args: RequestOtpArgs) => Promise<{ ok: boolean; message: string; expiresInSeconds: number }>;
   resendOtp: (args: RequestOtpArgs) => Promise<{ ok: boolean; message: string; expiresInSeconds: number }>;
   verifyOtp: (args: { email: string; code: string }) => Promise<void>;
+  acceptEmailSession: (data: { access_token: string; user: User }) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
 };
@@ -513,6 +514,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (_e) {}
   };
 
+  const acceptEmailSession = async (data: { access_token: string; user: User }) => {
+    const lifetime = ++sessionLifetime.current;
+    const requireCurrent = () => {
+      if (sessionLifetime.current !== lifetime) throw new Error('Sign-in was cancelled. Request a fresh email link.');
+    };
+    if (!data.access_token || !data.user?.id) throw new Error('The email link did not return a valid session.');
+    if (user && user.id !== data.user.id) {
+      throw new Error('You are already signed in to a different account. Sign out before opening this email link.');
+    }
+    if (wasFreshInstallThisLaunch()) {
+      await clearPin(data.user.id);
+      requireCurrent();
+      consumeFreshInstallFlag();
+    }
+    if (await hasPinForUser(data.user.id)) markUnlocked(data.user.id);
+    requireCurrent();
+    await saveToken(data.access_token);
+    requireCurrent();
+    await writeUserCache(data.user);
+    requireCurrent();
+    // Membership has settled transactionally on the server, or requires an
+    // explicit invitation confirmation. Never auto-join a cached token here.
+    setUser(data.user);
+  };
+
   const logout = async () => {
     sessionLifetime.current += 1;
     forgetSessionUnlock(user?.id);
@@ -539,7 +565,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <Ctx.Provider value={{ user, loading, requestOtp, resendOtp, verifyOtp, logout, refreshUser }}>
+    <Ctx.Provider value={{ user, loading, requestOtp, resendOtp, verifyOtp, acceptEmailSession, logout, refreshUser }}>
       {children}
     </Ctx.Provider>
   );

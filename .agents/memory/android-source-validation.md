@@ -72,3 +72,69 @@ ignoring closure boundaries can falsely combine unrelated call sites.
 
 **How to apply:** Inspect the delivered bundle, require both names and real
 call sites, and distinguish verifier corrections from application repairs.
+
+## Packaged Expo runtime identity
+
+The embedded Android asset manifest may contain only asset metadata, without
+runtimeVersion. Verify the native runtime through the manifest's referenced
+Android string resource, and verify the channel through the updates request
+headers.
+
+**Why:** Assuming a runtimeVersion field in the embedded asset manifest can
+make the verifier fail even when the delivered native runtime is correct.
+
+**How to apply:** Resolve the packaged resource rather than inferring runtime
+identity from a missing JSON field or from the EAS profile alone.
+
+## EAS archive inspection can retain empty excluded directories
+
+When auditing exclusions in an inspected source archive, test for forbidden
+files and material, not just directory existence.
+
+**Why:** The EAS archive inspection copier retained empty directory skeletons
+for excluded workspace tooling and generated-output paths. A directory-only
+check falsely reported their inclusion even though none of their files shipped.
+
+**How to apply:** Inspect contents recursively, verify critical source hashes,
+and fail any upload gate with a nonzero exit that actually stops submission.
+
+## Verify profile activation, not just a transform in isolation
+
+Every new diagnostic profile must activate the complete config-plugin chain,
+including dependency-JS patches and Gradle ASM registration.
+
+**Why:** A legacy exact-profile check skipped both transformations for a newer
+profile, even while standalone real-RN-class transformation tests passed.
+Only the delivered AAB exposed the missing native and Hermes call sites.
+
+**How to apply:** Test the real profile-specific plugin entrypoint and inspect
+generated native configuration before submission; retain actual delivered-Dex
+and Hermes coverage gates. A passing transformer test cannot replace either.
+
+## Packaged ELF instruction decoding and symbol coverage
+
+Include weak function symbols as well as ordinary text symbols. Match nested
+constructor closures in raw mangled form when LLVM cannot demangle them.
+Bind packaged debug metadata to the shipped ELF by build ID, normalize ARM
+Thumb symbol addresses, and explicitly select Thumb decoding for Thumb code
+in stripped ARM libraries that lack local mapping symbols.
+
+**Why:** Otherwise present runtime-executor hooks can look absent, and ARM
+instruction bytes can decode as unrelated instructions. A clean forbidden-call
+scan over incorrectly decoded instructions is not meaningful safety evidence.
+
+**How to apply:** Inspect the actual packaged ELF at the bound symbol ranges;
+validate decoding with recognizable instructions and real diagnostic call
+targets before accepting presence or producer-safety results.
+
+## Hermes property-call witnesses
+
+Follow full string operands in both property loads and string loads when
+looking for executable diagnostic witnesses. Require actual call instructions
+in the same function, not merely a string-table match.
+
+**Why:** Calls through global diagnostic properties compile as GetById rather
+than LoadConstString. A string-load-only scanner misses genuine timer hooks.
+
+**How to apply:** Preserve bytecode-reader storage while parsing functions,
+and validate the scanner against known packaged positive controls.

@@ -62,14 +62,16 @@ that honors Content-Encoding before interpreting their contents.
 
 ## Protected diagnostic baseline and coordinated approval
 
-Build 70 remains the protected known-good moving-GPS baseline. Building a
+Build 77 is the current physical-phone baseline; the owner confirmed both existing
+Android test phones are running it through the Google Play testing workflow.
+Building a
 diagnostic artifact does not authorize installing it, deploying its backend
 correlation observer, publishing an OTA or changing production configuration.
 Client/server evidence collection requires separate coordinated approval after
 the artifact review.
 
-**Why:** The owner requires inspection before authorizing the Railway
-instrumentation and diagnostic phone update together.
+**Why:** The owner separately authorized artifact inspection and Play testing
+distribution, while withholding authorization for backend deployment or OTA changes.
 
 **How to apply:** Preserve the baseline during preparation. Report bundle
 upload-signing continuity separately from the Play-installed app signing

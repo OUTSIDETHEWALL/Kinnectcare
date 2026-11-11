@@ -83,6 +83,35 @@ describe('real initial ownership verification with runtime-local pending reads',
     jest.useRealTimers();
   });
 
+  it('diagnoses one pending triplet member and observes followers resuming without extra reads', async () => {
+    const stages: any[] = [];
+    (native as any).deepRecord = jest.fn((kind, id, stage, detail) => {
+      stages.push({ kind, id, stage, ...JSON.parse(detail) });
+    });
+    const body = deferred<any>();
+    const pending = Array.from({ length: 4 }, (_, i) => recovery.evaluateWakeAuthorization(() => true, {
+      operation: (i + 1).toString(16).padStart(32, '0'), origin: 'sdk-headless',
+      wake: (i + 20).toString(16).padStart(32, '0'), phase: 'initial-ownership',
+    }, 1));
+    await flush();
+    expect(reads).toHaveLength(3);
+    reads.forEach(read => read.resolve(read.url.endsWith('/members')
+      ? { ok: true, status: 200, json: () => body.promise } : result(read)));
+    await flush();
+    expect(stages.filter(r => r.stage === 'helper_fulfilled')).toHaveLength(2);
+    const members = stages.find(r => r.stage === 'helper_entered' && r.endpoint === 'members');
+    expect(members).toBeDefined();
+    expect(stages.some(r => r.id === members.id && r.stage === 'helper_fulfilled')).toBe(false);
+    expect(stages.filter(r => r.stage === 'flight_created')).toHaveLength(1);
+    expect(stages.filter(r => r.stage === 'flight_joined')).toHaveLength(3);
+    expect(stages.some(r => r.stage === 'aggregate_fulfilled')).toBe(false);
+    body.resolve([{ id: 'member', user_id: 'owner', location_consent_generation: 4 }]);
+    expect((await Promise.all(pending)).every(v => v.state === 'AUTHORIZED')).toBe(true);
+    expect(stages.filter(r => r.stage === 'consumer_resumed')).toHaveLength(4);
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    delete (native as any).deepRecord;
+  });
+
   it.each([2, 4, 7, 10, 100])('%i equivalent consumers issue exactly three HTTP reads', async count => {
     const pending = Array.from({ length: count }, () => verify());
     await flush();

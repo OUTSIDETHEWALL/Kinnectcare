@@ -48,6 +48,7 @@ import { isBackgroundLocationDisclosureAcknowledged } from '../src/backgroundLoc
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { logStartupEvent } from '../src/startupDiagnostics';
 import { recordNativeStartupCheckpoint } from '../src/nativeStartupRecorder';
+import { captureEmailLink } from '../src/emailLinks';
 
 // This is the first executed JS-side checkpoint in the root bundle.
 recordNativeStartupCheckpoint('js_runtime_initialized');
@@ -301,6 +302,10 @@ function RootNav() {
     };
 
     const consumeInviteUrl = async (url: string | null, coldStart = false) => {
+      if (captureEmailLink(url)) {
+        if (!coldStart) router.push('/auth/email-link' as any);
+        return;
+      }
       const token = extractInviteToken(url);
       recordNativeStartupCheckpoint('deep_link_detected', {
         coldStart,
@@ -1452,7 +1457,8 @@ function RootNav() {
     const isDisclaimer = segments[0] === 'disclaimer';
     const isInviteRoute = segments[0] === 'invite';
     const isPublic =
-      segments[0] === 'privacy-policy' || segments[0] === 'terms-of-service';
+      segments[0] === 'privacy-policy' || segments[0] === 'terms-of-service'
+      || (segments[0] === ('auth' as any) && segments[1] === ('email-link' as any));
 
     // ===== FIRST-LAUNCH HEALTH DISCLAIMER GATE (v1.1.7) =====
     // Must run BEFORE the onboarding / auth checks below so the very

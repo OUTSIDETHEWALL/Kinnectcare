@@ -36,3 +36,227 @@ mtime_ms = 1792622280131
 storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/c13f0bc6-94f3-47d9-83bd-f57b83d949aa/0a83fca8-c0e3-4625-9b95-acc109a26050"
 storage_version_token = "1792622324002378"
 content_type = "text/markdown"
+
+[[outputs]]
+id = "aAU8OlVxsDI0G2OPT64Cl"
+uri = "file://.cache/kinnship-eas-build74/build74-artifact-review.html"
+type = "html"
+title = "Build 74 — delivered artifact PASS and physical test plan"
+description = "Pinned source and tree, actual AAB native/JS inspection, Build 73 comparison, signing, checksum, exact committed files, test results, and a physical validation plan that has not been executed."
+logical_id = "a33c010f-a307-422b-9b11-85bae70c4b80"
+content_hash = "sha256:b1b520faa0b96bd4d1039c45a5872ab80edcd8eb96c4030c756c1f7f26493443"
+size = 17426
+mtime_ms = 1792788259742
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/a33c010f-a307-422b-9b11-85bae70c4b80/4a878e42-a07c-45b8-ad5f-44eec6f7e3f4"
+storage_version_token = "1792788303026300"
+content_type = "text/html"
+
+[[outputs]]
+id = "WYl62YfWfx4d4TWkBl4W_"
+uri = "file://generated-artifacts/build75/Build-75-inspection-report.md"
+type = "text"
+title = "Build 75 — delivered artifact report"
+description = "Full artifact identity, inspection results, unresolved cold-initialization safety gate, and conditional physical-validation instructions. Not cleared for distribution."
+logical_id = "d30be126-b847-4297-a78b-1579611d245e"
+content_hash = "sha256:b811f1012d45e1d27fa68ed9272acf363790b644aab3540ef2f930d9eb74ce1c"
+size = 11418
+mtime_ms = 1792878557821
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/d30be126-b847-4297-a78b-1579611d245e/2a8dc37b-1ce3-430c-b7d3-e7948777b9e6"
+storage_version_token = "1792878576829124"
+content_type = "text/markdown"
+
+[[outputs]]
+id = "qXM1TWFWEdzxMxBQtJHTX"
+uri = "file://generated-artifacts/build76/Build-76-inspection-report.html"
+type = "html"
+title = "Build 76 — Rejection and Inspection Report"
+description = "Failed visibility-preservation gate. Includes AAB identity, signer, source, missing native/JavaScript hooks, independent producer-safety audit, baseline comparisons and test evidence. Not approved for distribution or installation."
+logical_id = "b8e98a01-5b88-47d3-bf1f-d806a2b4bb3d"
+content_hash = "sha256:2ebfe3384a87df04dec29a10fbac2db56e4d5a4f640432dc3e2ce3c9e807a70a"
+size = 31571
+mtime_ms = 1792883160590
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/b8e98a01-5b88-47d3-bf1f-d806a2b4bb3d/3e0b065e-bf0a-4ca3-8287-1861e54f1b7f"
+storage_version_token = "1792883296927933"
+content_type = "text/html"
+
+[[outputs]]
+id = "9veGJFIEB0u38KqI6LoEU"
+uri = "file://generated-artifacts/build77/Build-77-inspection-report.html"
+type = "html"
+title = "Build 77 — Delivered AAB Inspection Report"
+description = "Both acceptance gates passed: 5/5 response hooks, 11/11 FileReader hooks, 95/95 JS marker types, and preserved nonblocking recorder safety. Includes identity, signing, baseline comparisons and test evidence. Physical distribution requires separate authorization."
+logical_id = "41b5ef9f-f180-4e03-82df-8abcf41c9d2e"
+content_hash = "sha256:115c4df79cd2ea09ab1ea5984c93a15a9da5a412359c2edf0f49d4a1ef3fa9ad"
+size = 36382
+mtime_ms = 1792886374076
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/41b5ef9f-f180-4e03-82df-8abcf41c9d2e/40f615ae-3b43-46db-9b65-924e1b60a861"
+storage_version_token = "1792886399533198"
+content_type = "text/html"
+
+[[outputs]]
+id = "_ph43YUdW8DSMdTqNRpfr"
+uri = "file://generated-artifacts/build77-forensics/Build-77-Circle-forensic-report.txt"
+type = "text"
+title = "Build 77 — Circle forensic report"
+description = "Analysis-only reconstruction, all ten final determinations, exact async gaps, 36 second-ownership operations and 32 native wake/task lifecycles. Distinguishes proven congestion from unresolved upstream scheduling."
+logical_id = "7c2950d6-52f5-453f-92ae-4cb7a5a4e1ba"
+content_hash = "sha256:ccf6c76b5cd81a0c1ecf8801b384e61d9a303c81da8423697419cedea0c5a09e"
+size = 33274
+mtime_ms = 1792947478365
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/7c2950d6-52f5-453f-92ae-4cb7a5a4e1ba/45b40ef1-289a-4774-a0ea-7a5507d18f35"
+storage_version_token = "1792947487337595"
+content_type = "text/plain"
+
+[[outputs]]
+id = "UGiTCy8Pjj4FUBKzalip1"
+uri = "file://generated-artifacts/build77-forensics/Build-77-Circle-operation-ledger.csv"
+type = "table"
+title = "Build 77 — 101-operation forensic ledger"
+description = "Per-operation request counts, second-ownership triplets, endpoints, wake identities, native tasks and lifetime bounds."
+logical_id = "9c642e3f-bb40-4967-b651-4f93c44946d6"
+content_hash = "sha256:7e36a398af4af76204514e21399b24675c3d833d0e5c23fb0f6e46c768089a98"
+size = 22951
+mtime_ms = 1792947478369
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/9c642e3f-bb40-4967-b651-4f93c44946d6/2ac34008-c2c4-48de-aff9-d1e71caaf511"
+storage_version_token = "1792947487945089"
+content_type = "text/csv"
+
+[[outputs]]
+id = "5B58CXCfiuIOgJ1Jd7RbM"
+uri = "file://generated-artifacts/build77-forensics/Build-77-Circle-request-ledger.csv"
+type = "table"
+title = "Build 77 — Request and peak-queue ledger"
+description = "194 retained records: 192 proven native calls plus two binding-only records. Identifies all 109 peak-queued calls and five reconstructed running calls."
+logical_id = "477ff2de-fbab-4e3b-8240-3eecceaba29a"
+content_hash = "sha256:057b1886aa0fb52ed389e376ef12c3b9665912d76bd84ab4620fda5db2406e81"
+size = 65415
+mtime_ms = 1792947478365
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/477ff2de-fbab-4e3b-8240-3eecceaba29a/017470b1-0a7b-46dc-9116-eec731f2f4c2"
+storage_version_token = "1792947488439262"
+content_type = "text/csv"
+
+[[outputs]]
+id = "6AyYewXVZ1obMIsu0aMpQ"
+uri = "file://generated-artifacts/build77-forensics/Build-77-Upstream-release-report.txt"
+type = "text"
+title = "Build 77 — Upstream release forensic report"
+description = "All eight determinations, two distinct batching boundaries, retained Activity/render evidence, exact async gaps, implementation candidate classifications and the remaining release blind spot."
+logical_id = "32f9bb09-d988-47fd-aefc-cf103f06479b"
+content_hash = "sha256:eda0a0e2dd74d2c3bb75e9a4d19de82fb3df635dab338395b0d913463587ba46"
+size = 21680
+mtime_ms = 1792949587534
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/32f9bb09-d988-47fd-aefc-cf103f06479b/c4243ebb-e8b5-4cec-99f2-511fde469c5b"
+storage_version_token = "1792949594813266"
+content_type = "text/plain"
+
+[[outputs]]
+id = "MVUfGqZxbZwPtr8jsME9j"
+uri = "file://generated-artifacts/build77-forensics/Build-77-Upstream-operation-timelines.csv"
+type = "table"
+title = "Upstream timelines — 36 operations"
+description = "Individual native/JS wake timing where retained, flight association, authorization publication and second-stage admissions. Missing initial continuation markers are explicitly identified."
+logical_id = "64ebdcec-94fd-4651-a74b-7a1f2047b2d9"
+content_hash = "sha256:9c507f1618a8c570b0b36d50d0257157d6a64959d6c4f4a14f0019f3eac34dd4"
+size = 20918
+mtime_ms = 1792949587539
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/64ebdcec-94fd-4651-a74b-7a1f2047b2d9/6d6536eb-a238-43f0-acf3-7072ccb4715f"
+storage_version_token = "1792949595342035"
+content_type = "text/csv"
+
+[[outputs]]
+id = "1_EqnvF1MUlmayYdOLdop"
+uri = "file://generated-artifacts/build77-forensics/Build-77-Upstream-initial-request-stages.csv"
+type = "table"
+title = "Initial ownership — six complete retained request traces"
+description = "183 stage records across the old and newer shared flights, including native admission/execution, XHR/fetch callbacks, FileReader, JSON and promise settlement."
+logical_id = "a03b1092-1a01-4ce7-9ec1-469397b44049"
+content_hash = "sha256:02df3724efa62061dbb72559379597f989e1790c9698c907c4a4fc07565b0d78"
+size = 32603
+mtime_ms = 1792949587544
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/a03b1092-1a01-4ce7-9ec1-469397b44049/2ced1e2b-db29-40f7-b1df-97e447106849"
+storage_version_token = "1792949595823658"
+content_type = "text/csv"
+
+[[outputs]]
+id = "HGkQKY-ak7lR6q_zMwBqe"
+uri = "file://generated-artifacts/build77-forensics/Build-77-Upstream-lifecycle-checkpoints.csv"
+type = "table"
+title = "Captured launch — 28 lifecycle checkpoints"
+description = "Native Activity creation, root/dashboard mount and first usable-family render markers retained for the original Circle event."
+logical_id = "2cdc41c6-a937-473d-9395-ef21ed93cd11"
+content_hash = "sha256:d7a11b5d15d21e59b3e97fd56ad60658058d7a57f4d179d7b7d67d284fdd8e24"
+size = 2380
+mtime_ms = 1792949587546
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/2cdc41c6-a937-473d-9395-ef21ed93cd11/c9512034-fe21-4c10-a97f-f049b7c9a556"
+storage_version_token = "1792949596306507"
+content_type = "text/csv"
+
+[[outputs]]
+id = "4s0yZiJTaFSchugVyso1Q"
+uri = "file://generated-artifacts/build78-design/Build-78-Diagnostic-Design.txt"
+type = "text"
+title = "Build 78 Diagnostic Design"
+description = "Source-inspected proposal: exact timer/runtime/lifecycle markers, passive execution evidence, nonblocking safety, bounded retention, artifact and physical validation, and correction decision rules. Design only; not implemented."
+logical_id = "d80f4271-2e06-4f5c-ae5e-84481d0b3da0"
+content_hash = "sha256:95c0cd0bb96ab83f893b99834f01ae6b62608b88bf3715c8e4a18b7bcbc3b844"
+size = 50474
+mtime_ms = 1792953547718
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/d80f4271-2e06-4f5c-ae5e-84481d0b3da0/3af3e824-6af5-4802-8014-981f1b3d9731"
+storage_version_token = "1792953558958070"
+content_type = "text/plain"
+
+[[outputs]]
+id = "Nl7nvqFQylMQTx7HqTQTj"
+uri = "file://generated-artifacts/build78-implementation/Build-78-Implementation-Report.txt"
+type = "text"
+title = "Build 78 — Ten-section implementation report"
+description = "Exact changed files, marker semantics, correlation, safety and retention limits, test totals, native artifact verification procedure, and build recommendation."
+logical_id = "3df0d42d-51dc-4a81-ad02-a7198f25ec41"
+content_hash = "sha256:5cabaac211abae447b522ac952af10a1fb0414317d6a58f3d71c46cdff7def7b"
+size = 21541
+mtime_ms = 1792956262054
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/3df0d42d-51dc-4a81-ad02-a7198f25ec41/9226bbcc-b47d-4fea-8f35-ddb20e7d447f"
+storage_version_token = "1792956300607083"
+content_type = "text/plain"
+
+[[outputs]]
+id = "s70Q4_0iEE4UTawgXpIjB"
+uri = "file://generated-artifacts/build78-native-gate/Build-78-Prebuild-Gate-Report.txt"
+type = "text"
+title = "Build 78 pre-build gate report"
+description = "A–J findings, exact test totals, toolchain and source paths, cold-TLS evidence, diagnostic-only corrections, and remaining artifact/device gates."
+logical_id = "81d3a618-24e4-4102-a7e2-a91971bf2da7"
+content_hash = "sha256:750a716b126578cbf7243bfba0aec127b6e6f0b8dc9c3bce2f7b73a00536b3f5"
+size = 11805
+mtime_ms = 1792959545663
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/81d3a618-24e4-4102-a7e2-a91971bf2da7/fb8e9b68-a289-4490-a69c-d4cf789218a7"
+storage_version_token = "1792959578233724"
+content_type = "text/plain"
+
+[[outputs]]
+id = "WYkw773bDVXT7aQjsnh89"
+uri = "file://generated-artifacts/build78-native-gate/tls-correction/Build-78-TLS-Correction-Report.txt"
+type = "text"
+title = "Build 78 — TLS correction and verification report"
+description = "Implementation, four-ABI cold execution, regression results, evidence boundaries and remaining pre-build blocker. No AAB created."
+logical_id = "1cb8e7ef-a2b3-468c-9d67-8a9bc4ec58d4"
+content_hash = "sha256:9ff2ff28714eefc9ee0d363140f4f233726cb060a67c6ca2c2926ed872f72f62"
+size = 7596
+mtime_ms = 1792962430731
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/1cb8e7ef-a2b3-468c-9d67-8a9bc4ec58d4/5c5b3573-217b-469d-a485-baf16f5a8c26"
+storage_version_token = "1792962455416012"
+content_type = "text/plain"
+
+[[outputs]]
+id = "5e69AyJJ45LWIkwOIqjm8"
+uri = "file://generated-artifacts/build78-artifact/Build-78-artifact-verification-report.html"
+type = "html"
+title = "Build 78 — Delivered AAB verification report"
+description = "Complete artifact identity, source freeze, 96 passing checks, four-ABI native evidence, Build 77 comparison, signing and verification limitations. No upload or installation performed."
+logical_id = "e1cb64cb-d0c8-4519-900c-2433060f951f"
+content_hash = "sha256:e897849df75ca52bf366b749b9eb3ccc056c6eeee2b54fe8f16029fbf44ffe59"
+size = 21290
+mtime_ms = 1792972184722
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/e1cb64cb-d0c8-4519-900c-2433060f951f/546529d2-eaed-46a2-94ef-091a7ef02693"
+storage_version_token = "1792972194473321"
+content_type = "text/html"

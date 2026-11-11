@@ -16,6 +16,7 @@ describe('fresh onboarding location permission order', () => {
   let platform: { OS: string };
   let tree: any;
   let appStateListeners: Set<(state: string) => void>;
+  let updateSharing: jest.Mock;
 
   beforeEach(() => {
     jest.resetModules();
@@ -42,6 +43,7 @@ describe('fresh onboarding location permission order', () => {
     };
     alert = jest.fn();
     markHandled = jest.fn().mockResolvedValue(undefined);
+    updateSharing = jest.fn().mockResolvedValue({});
     replace = jest.fn();
     jest.doMock('react-native', () => ({
       View: 'View', Text: 'Text', TouchableOpacity: 'TouchableOpacity',
@@ -64,6 +66,8 @@ describe('fresh onboarding location permission order', () => {
     jest.doMock('../AuthContext', () => ({
       useAuth: () => ({ user: { id: 'owner' }, loading: false }),
     }));
+    jest.doMock('../preferences', () => ({ updatePreferences: updateSharing }));
+    jest.doMock('../backgroundLocation', () => ({ setLocationSharingEnabled: jest.fn().mockResolvedValue(undefined) }));
     jest.doMock('../permissionsStore', () => ({
       markPermissionsHandled: markHandled,
       LocationPermissionDecisionChangedError: jest.requireActual('../permissionsStore').LocationPermissionDecisionChangedError,
@@ -86,6 +90,14 @@ describe('fresh onboarding location permission order', () => {
   async function acknowledge() {
     await renderer.act(async () => { alert.mock.calls[0][2][0].onPress(); });
   }
+  async function chooseSharing(enabled = false) {
+    if (!tree) return;
+    const label = enabled ? 'Share my location' : 'Keep location sharing off';
+    const button = tree.root.findAllByType('TouchableOpacity').find((node: any) =>
+      node.findAllByType('Text').some((text: any) => text.props.children === label));
+    if (!button) return;
+    await renderer.act(async () => { await button.props.onPress(); });
+  }
 
   it.each([null, 'true'])(
     'blocks the first Android request until Continue (saved acknowledgment: %s)',
@@ -100,6 +112,9 @@ describe('fresh onboarding location permission order', () => {
       await acknowledge();
       expect(location.requestForegroundPermissionsAsync).toHaveBeenCalledTimes(1);
       expect(notifications.requestPermissionsAsync).toHaveBeenCalledTimes(1);
+      expect(updateSharing).not.toHaveBeenCalled();
+      expect(markHandled).not.toHaveBeenCalled();
+      await chooseSharing();
       expect(markHandled).toHaveBeenCalledTimes(1);
       expect(replace).toHaveBeenCalledWith('/(tabs)/dashboard');
     },
@@ -144,6 +159,7 @@ describe('fresh onboarding location permission order', () => {
     const continueButton = tree.root.findAllByType('TouchableOpacity').find((node: any) =>
       node.findAllByType('Text').some((text: any) => text.props.children === 'Continue Anyway'));
     await renderer.act(async () => { continueButton.props.onPress(); });
+    await chooseSharing();
     expect(markHandled).toHaveBeenCalledTimes(1);
     expect(replace).toHaveBeenCalledWith('/(tabs)/dashboard');
   });
@@ -160,6 +176,7 @@ describe('fresh onboarding location permission order', () => {
       for (const listener of [...appStateListeners]) listener('background');
       for (const listener of [...appStateListeners]) listener('active');
     });
+    await chooseSharing();
     expect(location.requestBackgroundPermissionsAsync).toHaveBeenCalledTimes(1);
     expect(markHandled).toHaveBeenCalledTimes(1);
     expect(replace).toHaveBeenCalledWith('/(tabs)/dashboard');
@@ -191,6 +208,7 @@ describe('fresh onboarding location permission order', () => {
           for (const listener of [...appStateListeners]) listener('active');
         });
       }
+      await chooseSharing();
       expect(replace).not.toHaveBeenCalled();
       expect(tree.root.findAllByType('ActivityIndicator')).toHaveLength(0);
       expect(JSON.stringify(tree.toJSON())).toContain('Setup could not be saved');
@@ -231,6 +249,7 @@ describe('fresh onboarding location permission order', () => {
       markHandled.mockImplementation(() => realStore.markPermissionsHandled());
       await reachLocationStage();
       await acknowledge();
+      await chooseSharing();
       expect(replace).not.toHaveBeenCalled();
       const retry = tree.root.findAllByType('TouchableOpacity').find((node: any) =>
         node.findAllByType('Text').some((text: any) => text.props.children === 'Continue'));
@@ -269,6 +288,7 @@ describe('fresh onboarding location permission order', () => {
     expect(alert).not.toHaveBeenCalled();
     expect(location.requestForegroundPermissionsAsync).toHaveBeenCalledTimes(1);
     expect(notifications.requestPermissionsAsync).toHaveBeenCalledTimes(1);
+    await chooseSharing();
     expect(markHandled).toHaveBeenCalledTimes(1);
   });
 
@@ -276,6 +296,7 @@ describe('fresh onboarding location permission order', () => {
     platform.OS = 'ios';
     notifications.requestPermissionsAsync.mockRejectedValue(new Error('notification request unavailable'));
     await reachLocationStage();
+    await chooseSharing();
     expect(markHandled).toHaveBeenCalledTimes(1);
     expect(replace).toHaveBeenCalledWith('/(tabs)/dashboard');
   });

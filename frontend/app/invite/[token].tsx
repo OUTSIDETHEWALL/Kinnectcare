@@ -21,7 +21,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Colors } from '../../src/theme';
-import { api, joinFamilyGroup } from '../../src/api';
+import { api } from '../../src/api';
+import { emailLinkError, requestEmailLink } from '../../src/emailLinks';
 import { useAuth } from '../../src/AuthContext';
 import {
   setPendingInvite,
@@ -33,6 +34,7 @@ import {
 type VerifyResult = {
   valid: boolean;
   family_name?: string;
+  family_group_id?: string;
   inviter_name?: string | null;
   invitee_email?: string | null;
   code_type?: 'per-invite' | 'family-wide';
@@ -42,7 +44,7 @@ type VerifyResult = {
 export default function InviteAcceptScreen() {
   const router = useRouter();
   const { token: rawToken } = useLocalSearchParams<{ token: string }>();
-  const { user, loading: isLoading } = useAuth();
+  const { user, loading: isLoading, refreshUser } = useAuth();
   const token = String(rawToken || '').trim().toUpperCase();
 
   const [verifying, setVerifying] = useState(true);
@@ -74,7 +76,7 @@ export default function InviteAcceptScreen() {
       }
       try { await setPendingInvite(token); } catch (_e) {}
       try {
-        const r = await api.get(`/family-group/verify-invite/${token}`);
+        const r = await api.post('/auth/email-link/invitation', { invite_token: token });
         if (!cancelled) setVerify(r.data);
       } catch (e: any) {
         if (!cancelled) setVerify({
@@ -98,17 +100,15 @@ export default function InviteAcceptScreen() {
     if (!verify?.valid || !token) return;
 
     if (!user) {
-      // Not signed in — hand the token to signup. verifyOtp() will
-      // auto-join after the account is created or the user signs in.
-      router.replace({
-        pathname: '/(auth)/signup',
-        params: {
-          invite_token: token,
-          email: verify.invitee_email || '',
-          family_name: verify.family_name || '',
-          inviter_name: verify.inviter_name || '',
-        },
-      } as any);
+      setJoining(true);
+      setJoinError(null);
+      try {
+        // Only the server resolves the recipient. Forwarding this invitation
+        // never authenticates its holder or changes the recipient mailbox.
+        await requestEmailLink({ inviteToken: token });
+        router.replace({ pathname: '/(auth)/login', params: { invite_token: token, sent: '1' } } as any);
+      } catch (e) { setJoinError(emailLinkError(e)); }
+      finally { setJoining(false); }
       return;
     }
 
@@ -116,7 +116,12 @@ export default function InviteAcceptScreen() {
     setJoining(true);
     setJoinError(null);
     try {
-      const result = await joinFamilyGroup(token);
+      const response = await api.post('/auth/email-link/join', {
+        invite_token: token, expected_family_id: verify.family_group_id,
+        previous_family_id: user.family_group_id || null, confirmed: true,
+      });
+      const result = response.data;
+      await refreshUser();
       await markInviteConsumed(token);
       try { await clearPendingInvite(); } catch (_e) {}
       if (result.already_member) {
@@ -252,6 +257,17 @@ export default function InviteAcceptScreen() {
             and location sharing during emergencies.
           </Text>
         </View>
+        {user && user.family_group_id !== verify.family_group_id && (
+          <Text style={styles.subtitle}>
+            You are signed in as {user.full_name}. Joining {familyName} will leave your current family
+            and move your own reminders, check-ins and member records to this family.
+            Location sharing will be off until you choose to enable it again.
+          </Text>
+        )}
+        {!user && <Text style={styles.subtitle}>
+          To protect your family, we’ll send a fresh secure link to the invited email.
+          Tap that link on this phone. No password or code is needed.
+        </Text>}
 
         {joinError ? (
           <View style={styles.errorBox}>

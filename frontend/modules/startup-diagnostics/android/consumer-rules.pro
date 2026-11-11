@@ -1,3 +1,5 @@
+-keep class expo.modules.startupdiagnostics.SchedulingBridge { *; }
+-keep class com.facebook.react.runtime.SchedulingProbe { *; }
 # Native vendor observation calls this one observer reflectively.
 -keep class expo.modules.startupdiagnostics.EvidenceTrace {
     public static void record(android.content.Context, java.lang.String, java.lang.String, java.lang.String, java.lang.String);
@@ -9,3 +11,8 @@
     public static void install(android.content.Context);
     public static void record(java.lang.String, java.lang.String, java.lang.String, java.lang.String);
 }
+-keep class expo.modules.startupdiagnostics.HeadlessTaskLifetimes {
+    public static java.lang.String begin(int, java.util.function.BooleanSupplier);
+    public static void end(java.lang.String);
+}
+-keep class expo.modules.startupdiagnostics.DeepAsyncTrace { *; }

@@ -119,7 +119,7 @@ async def _generate_unique_invite_code(db) -> str:
 
 
 def generate_invite_token() -> str:
-    code = "".join(secrets.choice(INVITE_ALPHABET) for _ in range(INVITE_LEN))
+    code = secrets.token_hex(32).upper()
     return f"{PER_INVITE_PREFIX}-{code}"
 
 
@@ -466,20 +466,10 @@ def _invite_email_body(
         </table>
       </td></tr>
 
-      <!-- Recovery code — hidden behind a disclosure toggle.
-           Codes are a support/recovery mechanism only; they should
-           not be part of the standard user journey. -->
       <tr><td style="padding:24px 32px 8px 32px;text-align:center;">
-        <details style="display:inline-block;text-align:left;max-width:420px;width:100%;">
-          <summary style="font-size:12px;color:#999;cursor:pointer;list-style:none;text-align:center;padding:6px 0;">
-            Can&apos;t tap the button? &#9654; Show backup code
-          </summary>
-          <div style="margin-top:12px;background-color:#fafbfa;border:1px dashed #cfd6cf;border-radius:10px;padding:14px 16px;">
-            <div style="font-size:11px;color:#888;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;">Backup code</div>
-            <div style="font-family:'SFMono-Regular',Consolas,Menlo,'Courier New',monospace;font-size:18px;font-weight:700;color:#333;letter-spacing:2px;">{token}</div>
-            <div style="font-size:11px;color:#888;margin-top:6px;">Open Kinnship, tap &ldquo;Having trouble joining?&rdquo; and enter this code.</div>
-          </div>
-        </details>
+        <p style="font-size:15px;color:#555;line-height:1.5;">Just installed Kinnship?
+          Return to this email and tap Accept Invitation again if your invitation
+          does not open automatically. No code is needed.</p>
       </td></tr>
 
       <!-- Expiry/ignore note -->
@@ -850,6 +840,8 @@ def build_router(
             current.get("id", "")[:8],
         )
         old_gid = current.get("family_group_id")
+        if accepted_invite and (current.get("email") or "").strip().lower() != accepted_invite["invitee_email"].strip().lower():
+            raise HTTPException(403, "This invitation is for a different email address.")
         if target["id"] == old_gid:
             await ensure_self_member_row(
                 db, current, target["id"], accepted_invite, caller="join_already_member"
@@ -1248,9 +1240,10 @@ def build_router(
         if inv.get("status") != "pending":
             return {"ok": True, "status": inv.get("status")}
         await db.family_invites.update_one(
-            {"id": invite_id}, {"$set": {"status": "revoked"}}
+            {"id": invite_id, "status": "pending"}, {"$set": {"status": "revoked"}}
         )
-        return {"ok": True, "status": "revoked"}
+        saved = await db.family_invites.find_one({"id": invite_id}, {"_id": 0, "status": 1})
+        return {"ok": True, "status": (saved or {}).get("status", "revoked")}
 
     return router
 
