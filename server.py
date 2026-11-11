@@ -962,11 +962,11 @@ def _send_email_via_resend(
             return True
         logger.warning(
             f"[email] Resend rejected: HTTP {r.status_code} "
-            f"body={r.text[:300]!r} to={to_email} from={sender!r}"
+            f"to={to_email} from={sender!r}"
         )
         return False
     except Exception as e:
-        logger.warning(f"[email] Resend HTTP send failed to={to_email}: {e}")
+        logger.warning(f"[email] Resend HTTP send failed to={to_email}: {type(e).__name__}")
         return False
 
 
@@ -999,7 +999,7 @@ def _send_otp_via_resend(to_email: str, code: str, purpose: str) -> bool:
         )
     else:
         logger.warning(
-            f"[OTP] Resend send failed.  Code for {to_email}: {code}"
+            f"[OTP] Resend send failed for {to_email} (purpose={purpose})"
         )
     return ok
 
@@ -1036,7 +1036,7 @@ def _send_otp_via_smtp(to_email: str, code: str, purpose: str) -> bool:
         return True
     except Exception as e:
         logger.warning(
-            f"[OTP] SMTP send failed: {e}.  Code for {to_email}: {code}"
+            f"[OTP] SMTP send failed for {to_email}: {type(e).__name__}"
         )
         return False
 
@@ -1047,7 +1047,7 @@ async def _deliver_otp_email(to_email: str, code: str, purpose: str) -> bool:
     Order of preference:
       1. Resend (HTTPS, port 443)        — Railway-friendly, recommended.
       2. SMTP   (port 587 with STARTTLS) — local dev / self-hosted fallback.
-      3. Log-only                        — if neither is configured.
+      3. Report failure without logging the code.
 
     NOTE: this is meant to be invoked via BackgroundTasks so a slow
     handshake (e.g. an upstream provider hiccup) doesn't block the API
@@ -1060,7 +1060,7 @@ async def _deliver_otp_email(to_email: str, code: str, purpose: str) -> bool:
     if _send_otp_via_smtp(to_email, code, purpose):
         return True
     logger.warning(
-        f"[OTP] No email transport configured.  Code for {to_email}: {code}"
+        f"[OTP] No email transport succeeded for {to_email} (purpose={purpose})"
     )
     return False
 
@@ -1077,7 +1077,7 @@ def _deliver_otp_email_sync(to_email: str, code: str, purpose: str) -> None:
     if _send_otp_via_smtp(to_email, code, purpose):
         return
     logger.warning(
-        f"[OTP] No email transport configured.  Code for {to_email}: {code}"
+        f"[OTP] No email transport succeeded for {to_email} (purpose={purpose})"
     )
 
 

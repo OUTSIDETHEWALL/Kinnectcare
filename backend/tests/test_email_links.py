@@ -23,6 +23,10 @@ import family_group as fg
 
 def matches(doc, query):
     for key, expected in query.items():
+        if key == "$nor":
+            if any(matches(doc, clause) for clause in expected):
+                return False
+            continue
         actual = doc.get(key)
         if isinstance(expected, dict):
             for operator, value in expected.items():
@@ -394,10 +398,10 @@ def test_old_and_new_creation_share_a_normalized_intrinsic_account_key():
 
 
 @pytest.mark.asyncio
-async def test_transfer_does_not_move_other_peoples_records_or_enable_location():
+async def test_non_owner_transfer_preserves_other_peoples_records_and_family():
     db, _, inv, user, client = setup()
     db.users.rows.append(copy.deepcopy(user))
-    db.family_groups.rows.append({"id": "solo", "owner_user_id": user["id"]})
+    db.family_groups.rows.append({"id": "solo", "owner_user_id": "another-owner"})
     db.members.rows.extend([
         {"id": "self", "user_id": user["id"], "owner_id": user["id"], "family_group_id": "solo",
          "latitude": 12, "longitude": 13, "location_sharing_enabled": True},
@@ -422,3 +426,101 @@ async def test_transfer_does_not_move_other_peoples_records_or_enable_location()
     assert other["latitude"] == 22
     assert db.reminders.rows[0]["family_group_id"] == "family"
     assert db.reminders.rows[1]["family_group_id"] == "solo"
+    assert any(group["id"] == "solo" for group in db.family_groups.rows)
+
+
+def stored_rows(db):
+    return copy.deepcopy({name: coll.rows for name, coll in db.collections.items() if coll.rows})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("linked_account", [None, "dependent-without-login-row"])
+async def test_owner_transfer_with_dependent_is_rejected_without_any_mutation(linked_account):
+    db, _, inv, user, client = setup()
+    db.users.rows.append(copy.deepcopy(user))
+    db.family_groups.rows.append({"id": "solo", "owner_user_id": user["id"]})
+    db.members.rows.extend([
+        {"id": "self", "user_id": user["id"], "owner_id": user["id"], "family_group_id": "solo",
+         "latitude": 12, "longitude": 13, "location_sharing_enabled": True},
+        {"id": "dependent", "owner_id": user["id"], "family_group_id": "solo",
+         **({"user_id": linked_account} if linked_account else {})},
+    ])
+    db.reminders.rows.append({"id": "med", "member_id": "dependent", "owner_id": user["id"], "family_group_id": "solo"})
+    before = stored_rows(db)
+    async with client:
+        result = await client.post("/api/auth/email-link/join", json={
+            "invite_token": inv["token"], "expected_family_id": "family",
+            "previous_family_id": "solo", "confirmed": True,
+        })
+    assert result.status_code == 409, result.text
+    assert stored_rows(db) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collection", [name for name in fg.DATA_COLLECTIONS if name != "members"])
+@pytest.mark.parametrize("record", [
+    {"member_id": "missing-dependent", "owner_id": "existing"},
+    {"member_id": "self", "owner_id": "another-owner"},
+    {},
+])
+async def test_owner_transfer_rejects_any_care_record_that_would_remain(collection, record):
+    db, _, inv, user, client = setup()
+    db.users.rows.append(copy.deepcopy(user))
+    db.family_groups.rows.append({"id": "solo", "owner_user_id": user["id"]})
+    db.members.rows.append({"id": "self", "user_id": user["id"], "owner_id": user["id"], "family_group_id": "solo"})
+    db[collection].rows.append({"id": "care", "family_group_id": "solo", **record})
+    before = stored_rows(db)
+    async with client:
+        result = await client.post("/api/auth/email-link/join", json={
+            "invite_token": inv["token"], "expected_family_id": "family",
+            "previous_family_id": "solo", "confirmed": True,
+        })
+    assert result.status_code == 409, result.text
+    assert stored_rows(db) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_self_records", [False, True])
+async def test_empty_or_self_only_owner_transfer_still_succeeds(with_self_records):
+    db, _, inv, user, client = setup()
+    db.users.rows.append(copy.deepcopy(user))
+    db.family_groups.rows.append({"id": "solo", "owner_user_id": user["id"]})
+    if with_self_records:
+        db.members.rows.append({
+            "id": "self", "user_id": user["id"], "owner_id": user["id"],
+            "family_group_id": "solo", "latitude": 12, "longitude": 13, "location_sharing_enabled": True,
+        })
+        for collection in fg.DATA_COLLECTIONS:
+            if collection != "members":
+                db[collection].rows.append({
+                    "id": collection, "member_id": "self", "owner_id": user["id"], "family_group_id": "solo",
+                })
+    async with client:
+        result = await client.post("/api/auth/email-link/join", json={
+            "invite_token": inv["token"], "expected_family_id": "family",
+            "previous_family_id": "solo", "confirmed": True,
+        })
+    assert result.status_code == 200, result.text
+    assert not any(group["id"] == "solo" for group in db.family_groups.rows)
+    assert db.users.rows[-1]["family_group_id"] == "family"
+    assert db.family_invites.rows[0]["status"] == "accepted"
+    assert db.members.rows[0]["location_sharing_enabled"] is False
+    for collection in fg.DATA_COLLECTIONS:
+        assert all(row.get("family_group_id") != "solo" for row in db[collection].rows)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collection", fg.DATA_COLLECTIONS)
+async def test_cleanup_never_deletes_a_family_with_remaining_records(collection):
+    db, _, inv, user, client = setup()
+    db.users.rows.append(copy.deepcopy(user))
+    db.family_groups.rows.append({"id": "solo", "owner_user_id": "missing-account"})
+    db[collection].rows.append({"id": "remaining", "family_group_id": "solo"})
+    async with client:
+        result = await client.post("/api/auth/email-link/join", json={
+            "invite_token": inv["token"], "expected_family_id": "family",
+            "previous_family_id": "solo", "confirmed": True,
+        })
+    assert result.status_code == 200, result.text
+    assert any(group["id"] == "solo" for group in db.family_groups.rows)
+    assert any(row["id"] == "remaining" and row["family_group_id"] == "solo" for row in db[collection].rows)

@@ -111,16 +111,26 @@ async def join_verified(db, user, inv, target):
     old_gid = user.get("family_group_id")
     if old_gid and old_gid != target["id"]:
         old = await db.family_groups.find_one({"id": old_gid})
-        if old and old.get("owner_user_id") == user["id"]:
-            others = await db.users.count_documents({"family_group_id": old_gid, "id": {"$ne": user["id"]}})
-            if others:
-                raise HTTPException(409, "Transfer ownership of your current family before joining another family.")
-        # Unlike the legacy helper, do not swallow failed writes. Every owned
-        # collection moves, or the entire family transition rolls back.
         self_rows = await db.members.find(
             {"user_id": user["id"], "family_group_id": old_gid}, {"id": 1},
         ).to_list(100)
         self_ids = [row["id"] for row in self_rows]
+        if old and old.get("owner_user_id") == user["id"]:
+            others = await db.users.count_documents({"family_group_id": old_gid, "id": {"$ne": user["id"]}})
+            if others:
+                raise HTTPException(409, "Transfer ownership of your current family before joining another family.")
+            # Dependents need not have login accounts. Reject before moving
+            # anything if people or care records would lose their family owner.
+            for collection in fg.DATA_COLLECTIONS:
+                remaining = {"family_group_id": old_gid}
+                if collection == "members":
+                    remaining["user_id"] = {"$ne": user["id"]}
+                else:
+                    remaining["$nor"] = [{"owner_id": user["id"], "member_id": {"$in": self_ids}}]
+                if await db[collection].find_one(remaining, {"_id": 1}):
+                    raise HTTPException(409, "Your current family still has members or care records. Transfer ownership before joining another family.")
+        # Unlike the legacy helper, do not swallow failed writes. Every owned
+        # collection moves, or the entire family transition rolls back.
         # A caregiver can own records about other people. Account ownership is
         # not permission to transfer those people's health/location data.
         await db.members.update_many(
@@ -158,7 +168,12 @@ async def join_verified(db, user, inv, target):
     user["family_group_role"] = "owner" if target.get("owner_user_id") == user["id"] else "member"
     await fg.ensure_self_member_row(db, user, target["id"], inv, caller="email_link")
     if old_gid and old_gid != target["id"] and not await db.users.count_documents({"family_group_id": old_gid}):
-        await db.family_groups.delete_one({"id": old_gid})
+        # A missing owner/account row is not proof that a family is empty.
+        for collection in fg.DATA_COLLECTIONS:
+            if await db[collection].find_one({"family_group_id": old_gid}, {"_id": 1}):
+                break
+        else:
+            await db.family_groups.delete_one({"id": old_gid})
     return user
 
 
