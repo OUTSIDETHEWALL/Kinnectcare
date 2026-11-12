@@ -57,6 +57,9 @@ class StartupDiagnosticsModule : Module() {
       appContext.reactContext?.let { EvidenceTrace.read(it) } ?: """{"available":false}"""
     }
 
+    Function("motionRecoveryArm") { owner: String, generation: Long ->
+      NativeMotionRecovery.arm(requireNotNull(appContext.reactContext), owner, generation)
+    }
     Function("trackingRead") {
       TrackingReliability.read(requireNotNull(appContext.reactContext))
     }
@@ -88,7 +91,9 @@ class StartupDiagnosticsModule : Module() {
       TrackingReliability.record(requireNotNull(appContext.reactContext), event, detail)
     }
     Function("trackingEvidence") {
-      TrackingReliability.evidence(requireNotNull(appContext.reactContext))
+      val context = requireNotNull(appContext.reactContext)
+      JSONObject(TrackingReliability.evidence(context))
+        .put("nativeMotionRecovery", NativeMotionRecovery.evidence(context)).toString()
     }
     Function("trackingObserve") { owner: String, generation: Long, capturedAt: Long, moving: Boolean ->
       TrackingReliability.observe(requireNotNull(appContext.reactContext), owner, generation, capturedAt, moving)

@@ -27,6 +27,7 @@ export type OperationalRecoveryReport = {
 };
 type ReliabilityModule = {
   trackingRead(): string;
+  motionRecoveryArm?(owner: string, generation: number): boolean;
   trackingAuthorize(owner: string, expectedGeneration: number): string;
   trackingRevoke(reason: string): string;
   trackingRevokeIfCurrent(owner: string, generation: number, reason: string, operation: string): boolean;
@@ -57,6 +58,26 @@ export function readTrackingAuthority(): TrackingAuthority | null {
   const module = native();
   if (!module) return null;
   return JSON.parse(module.trackingRead());
+}
+
+export function armNativeMotionRecovery(expected: TrackingAuthority): void {
+  const authority = readTrackingAuthority();
+  if (!authority || authority.revoked || authority.owner !== expected.owner
+    || authority.generation !== expected.generation) return;
+  const module = native();
+  if (!module?.motionRecoveryArm) {
+    recordTrackingEvidence('native_motion_recovery', { reason: 'new_binary_required' });
+    return;
+  }
+  try {
+    if (!module.motionRecoveryArm(authority.owner, authority.generation)) {
+      recordTrackingEvidence('native_motion_recovery', { reason: 'registration_not_authorized' });
+    }
+  } catch {
+    // A missing Play service/storage failure must not stop the SDK that has
+    // already started. Keep the recovery failure explicit, not a healthy claim.
+    recordTrackingEvidence('native_motion_recovery', { reason: 'registration_failed' });
+  }
 }
 
 export function authorizeNativeTracking(owner: string, expectedGeneration: number): TrackingAuthority | null {

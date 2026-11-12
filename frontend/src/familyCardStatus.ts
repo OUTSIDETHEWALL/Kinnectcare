@@ -11,6 +11,7 @@ export type FamilyCardStatus = {
   locationAgeLabel: string | null;
   battery: BatteryDisplay | null;
   hasActiveProblem: boolean;
+  indicator: 'healthy' | 'warning' | 'danger' | 'unknown' | 'private';
 };
 
 const MAX_CLOCK_SKEW_MS = 5_000;
@@ -53,7 +54,18 @@ export function getFamilyCardStatus(
       }, nowMs)
     : null;
 
+  // One verdict drives BOTH dots. Contact alone cannot certify fresh GPS,
+  // and a stored "healthy" value cannot overrule a current communication gap.
+  const indicator: FamilyCardStatus['indicator'] = member.location_sharing_enabled === false ? 'private'
+    : member.status === 'critical' || issues.some(issue => issue.severity === 'critical') || device.kind === 'not-responding'
+      || locationStatus.kind === 'not-responding' ? 'danger'
+    : member.status === 'warning' || issues.length > 0 || device.kind === 'delayed'
+      || locationStatus.kind === 'delayed' ? 'warning'
+    : member.status !== 'healthy' || device.kind !== 'healthy' || locationStatus.kind !== 'healthy' ? 'unknown'
+    : 'healthy';
+
   return {
+    indicator,
     device,
     contactLabel,
     locationLabel: locationStatus.kind === 'healthy' ? 'Location' : 'Last known location',

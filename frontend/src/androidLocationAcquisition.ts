@@ -14,6 +14,7 @@ import { appendEngineEvidence } from './engineEvidenceJournal';
 import { nextSeq } from './diagSeq';
 import { recordEvidence, startupTraceId } from './evidenceTrace';
 import { operationOrigin, originPhase, withRequestOrigin } from './requestOrigin';
+import { backgroundHttp } from './backgroundHttp';
 
 export const GUARDED_POSITION_MARKER = 'kc_guarded_one_shot';
 type PositionOptions = { samples?: number; timeout?: number; extras?: Record<string, unknown> };
@@ -117,7 +118,7 @@ export async function acquireAndUploadAndroidPosition(
   try {
     recordTrackingEvidence('upload_attempt', { operation, generation: authority.generation, capturedAt });
     recordEvidence('gps', 'publication_attempt', evidenceId, { generation: authority.generation });
-    const response = await withRequestOrigin(originPhase(diagnostic, 'location-publication'), () => fetch(
+    const response = await withRequestOrigin(originPhase(diagnostic, 'location-publication'), () => backgroundHttp(
       `${transport.baseUrl}/api/members/${encodeURIComponent(transport.memberId)}/location`,
       {
         method: 'PUT', signal: controller.signal,

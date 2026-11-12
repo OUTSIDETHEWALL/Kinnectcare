@@ -68,6 +68,7 @@ import { operationOrigin, originEvent, originPhase, withRequestOrigin } from './
 import { deepStage } from './deepAsyncTrace';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nextSeq } from './diagSeq';
+import { backgroundHttp } from './backgroundHttp';
 import { DIAG_BUFFER_SIZES, pruneBuffer } from './diagBufferConfig';
 import { readPermissionSnapshot } from './permissionCoordinator';
 import {
@@ -83,7 +84,7 @@ import type { AuthorizedBatteryTransport, RevocationReason } from './androidTrac
 import { fenceNativeSdk, interruptNativeTracking } from './androidNativeShutdown';
 import { recordTrackingEvidence, observeTrackingMovement,
   completeNativeTrackingShutdown, recordTrackingRecoveryFailure, readTrackingAuthority,
-  describeOperationalRecovery, observeNativeEnabledState, withTrackingConfiguration,
+  describeOperationalRecovery, observeNativeEnabledState, withTrackingConfiguration, armNativeMotionRecovery,
   withConfirmedTrackingShutdown } from './trackingReliability';
 import type { TrackingAuthority } from './trackingReliability';
 import { acquireAndUploadAndroidPosition, GUARDED_POSITION_MARKER } from './androidLocationAcquisition';
@@ -359,7 +360,8 @@ async function patchHeadlessHeartbeatPresence(
     const response = await Promise.race([
       withRequestOrigin(operationOrigin('sdk-headless-battery', event?.kcEvidenceWakeId), () => {
         if (!executionCurrent()) throw new Error('headless_task_obsolete');
-        return fetch(`${baseUrl}/api/members/${memberId}/battery`, {
+        return backgroundHttp(`${baseUrl}/api/members/${memberId}/battery`, {
+        timeoutMs: 6000,
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -1119,7 +1121,8 @@ export async function pushBatteryUpdate(
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 6000);
       try {
-        const response = await withRequestOrigin(operationOrigin('background-battery'), () => fetch(`${transport.baseUrl}/api${url}`, {
+        const response = await withRequestOrigin(operationOrigin('background-battery'), () => backgroundHttp(`${transport.baseUrl}/api${url}`, {
+          timeoutMs: 6000,
           method: 'PATCH', signal: controller.signal,
           headers: {
             'Content-Type': 'application/json',
@@ -2023,6 +2026,8 @@ async function startConfiguredEngine(cfg: LocationEngineConfig, generation: numb
     if (await stopIfObsolete()) return 'failed';
     const state = await lib.start();
     if (await stopIfObsolete()) return 'failed';
+    if (Platform.OS === 'android' && state?.enabled === true && startAuthority
+      && startAuthority.owner === `${cfg.ownerUserId}:${cfg.memberId}`) armNativeMotionRecovery(startAuthority);
     await logEvent('started_ok', {
       enabled: !!state?.enabled,
       trackingMode: state?.trackingMode,
