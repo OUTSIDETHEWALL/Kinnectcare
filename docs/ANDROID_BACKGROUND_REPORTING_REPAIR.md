@@ -1,7 +1,7 @@
 # Android background reporting repair
 
-Status: **candidate source repair; not physical-device accepted; not authorized
-for merge, deployment, OTA, or Build 80.**
+Status: **source checks passed; owner authorized PR merge and Android Build 80.
+Not physical-device accepted. No OTA or Google Play upload authorized.**
 
 ## Confirmed mechanisms
 
@@ -63,9 +63,10 @@ backend code, family records, build identity or production settings changed.
 
 ## Android build boundary
 
-The native receivers/module code require a new Android binary: **Build 80** when
-separately authorized. An OTA cannot install this correction. Build 78/79
-artifacts stay immutable. Do not start a build or publish an update from this PR.
+The native receivers/module code require a new Android binary: **Build 80**,
+now authorized with Build 79's package and existing Play signing configuration.
+An OTA cannot install this correction. Build 78/79 artifacts stay immutable.
+Build the AAB and inspect it; do not publish an OTA or upload to Google Play.
 
 ## Required acceptance before the launch blocker can close
 
