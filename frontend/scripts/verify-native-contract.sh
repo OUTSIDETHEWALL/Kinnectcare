@@ -8,7 +8,9 @@ curl -fLsS https://repo.maven.apache.org/maven2/com/google/android/android/4.1.1
 curl -fLsS https://repo.maven.apache.org/maven2/org/json/json/20240303/json-20240303.jar -o "$work/json.jar"
 classpath="$work/android.jar:$work/json.jar"
 kotlinc -classpath "$classpath" \
+  scripts/native-contract/EvidenceTrace.kt \
   modules/startup-diagnostics/android/src/main/java/expo/modules/startupdiagnostics/TrackingReliability.kt \
+  modules/startup-diagnostics/android/src/main/java/expo/modules/startupdiagnostics/NativeMotionPolicy.kt \
   -d "$work/tracking.jar"
 echo "PASS production TrackingReliability.kt compilation against Android API"
 mkdir "$work/substitutes"
@@ -19,4 +21,7 @@ for stage in seed recreate; do
   kotlin -classpath "$runtime:$work/harness.jar" TrackingHarnessKt "$work/state.properties" "$stage"
 done
 kotlin -classpath "$runtime:$work/harness.jar" TrackingHarnessKt "$work/policy.properties" policy
-echo "LIMIT: fake storage/clock; Expo app, ReactHost, chooser, Android scheduling NOT verified"
+kotlin -classpath "$runtime:$work/harness.jar" TrackingHarnessKt "$work/motion-state.properties" native-motion
+kotlinc -classpath "$runtime" scripts/native-contract/NativeMotionHarness.kt -d "$work/motion.jar"
+kotlin -classpath "$runtime:$work/motion.jar" NativeMotionHarnessKt
+echo "LIMIT: fake storage/clock and evidence recorder; Expo app, ReactHost, chooser, Android scheduling NOT verified"

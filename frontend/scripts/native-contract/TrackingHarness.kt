@@ -8,6 +8,25 @@ fun main(args: Array<String>) {
   val context = Context(File(args[0]))
   val owner = "test-owner:test-member"
   val now = System.currentTimeMillis()
+  if (args[1] == "native-motion") {
+    Tracking.authorize(context, owner, 0)
+    var ran = false
+    check(Tracking.nativeRecoveryBinding(context, owner, 0) { ran = true })
+    check(ran)
+    check(!Tracking.nativeRecoveryBinding(context, "obsolete:member", 0) { error("wrong binding") })
+    check(Tracking.claim(context, owner, 0, "motion", now, true))
+    check(!Tracking.nativeRecoveryBinding(context, owner, 0) { error("mutation pending") })
+    check(Tracking.nativeRecoveryCommand(context, owner, 0, "motion") { ran = true })
+    Tracking.revoke(context, "consent")
+    check(!Tracking.nativeRecoveryCommand(context, owner, 0, "motion") { error("revoked SDK call") })
+    check(JSONObject(Tracking.authorize(context, "replacement:member", 1)).optString("owner") != "replacement:member")
+    check(!Tracking.nativeRecoveryCleanup(context, "wrong-operation") { error("stop unrelated owner") })
+    check(Tracking.nativeRecoveryCleanup(context, "motion") { ran = true })
+    Tracking.complete(context, "motion", "operation_discarded", 0, false)
+    check(!Tracking.nativeRecoveryCleanup(context, "motion") { error("late callback after quarantine") })
+    println("PASS actual native command/revocation quarantine, stale cleanup and replacement exclusion")
+    return
+  }
   if (args[1] == "policy") {
     Tracking.authorize(context, owner, 0)
     check(Tracking.claim(context, owner, 0, "initial", now))

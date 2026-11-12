@@ -101,7 +101,7 @@
         "buildType": "app-bundle"
       },
       "env": {
-        "KINNSHIP_DIAGNOSTIC_BUILD": "79",
+        "KINNSHIP_DIAGNOSTIC_BUILD": "80",
         "EXPO_PUBLIC_BACKEND_URL": "https://kinnectcare-production.up.railway.app",
         "EXPO_PUBLIC_GOOGLE_MAPS_API_KEY": "AIzaSyBeIZ4yanf7KrSzOaGpGoqsoBWbnyBsc_I"
       }

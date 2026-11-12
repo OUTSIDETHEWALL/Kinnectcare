@@ -41,6 +41,26 @@ function issue(kind: 'battery' | 'device', title: string): NeedsAttentionIssue {
 }
 
 describe('Family card caregiver presentation', () => {
+  it('never paints stored healthy status green over a three-hour communication gap', () => {
+    expect(getFamilyCardStatus(member({
+      status: 'healthy', device_presence_at: ago(180), last_seen: ago(180),
+      coordinate_captured_at: ago(180), battery_updated_at: ago(180),
+    }), [], NOW)).toMatchObject({ device: { kind: 'delayed' }, indicator: 'warning' });
+  });
+  it('does not let fresh battery/contact hide twelve-hour-old coordinates', () => {
+    expect(getFamilyCardStatus(member({
+      coordinate_captured_at: ago(720), is_moving: true,
+    }), [], NOW).indicator).toBe('danger');
+  });
+  it('retains privacy neutrality and never paints missing GPS evidence green', () => {
+    expect(getFamilyCardStatus(member({ location_sharing_enabled: false }), [], NOW).indicator).toBe('private');
+    expect(getFamilyCardStatus(member({ coordinate_captured_at: null }), [], NOW).indicator).toBe('unknown');
+  });
+  it('preserves critical conditions and recovers green only when evidence recovers', () => {
+    expect(getFamilyCardStatus(member({ status: 'critical' }), [], NOW).indicator).toBe('danger');
+    expect(getFamilyCardStatus(member(), [issue('battery', 'Battery Low')], NOW).indicator).toBe('warning');
+    expect(getFamilyCardStatus(member(), [], NOW).indicator).toBe('healthy');
+  });
   it('shows a healthy device with current battery and location', () => {
     expect(getFamilyCardStatus(member(), [], NOW)).toMatchObject({
       device: { label: 'Device communicating' },

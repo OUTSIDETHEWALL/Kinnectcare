@@ -8,6 +8,7 @@ import {
 } from './trackingReliability';
 import type { TrackingAuthority } from './trackingReliability';
 import { operationOrigin, originPhase, withRequestOrigin, type RequestOrigin } from './requestOrigin';
+import { backgroundHttp } from './backgroundHttp';
 import { initialOwnershipReads, ownershipSession, ownershipSessionCurrent } from './initialOwnershipReads';
 import { deepStage, diagnosticId } from './deepAsyncTrace';
 import { timerBegin, timerEnd, timerCallback } from './schedulingTrace';
@@ -450,7 +451,7 @@ async function authenticatedGet(
     const response = await withRequestOrigin(diagnostic, () => {
       // No asynchronous gap between execution liveness and request creation.
       if (!dispatchCurrent()) throw new Error('ownership_operation_obsolete');
-      return fetch(url, {
+      return backgroundHttp(url, {
         headers: { Authorization: `Bearer ${token}` }, signal: controller.signal,
       });
     });

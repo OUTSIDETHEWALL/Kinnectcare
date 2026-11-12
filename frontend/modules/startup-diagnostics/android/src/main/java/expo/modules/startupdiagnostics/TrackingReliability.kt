@@ -46,6 +46,42 @@ object TrackingReliability {
 
   fun read(context: Context): String = synchronized(lock) { state(context).toString() }
 
+  fun nativeRecoveryBinding(context: Context, owner: String, generation: Long, action: () -> Unit): Boolean =
+    synchronized(lock) {
+      val s = state(context)
+      if (!NativeMotionPolicy.allowed(s.optString("owner"), s.optLong("generation", -1),
+          s.optBoolean("revoked", true), s.optBoolean("shutdownPending", false) ||
+            (s.optJSONObject("shutdowns")?.length() ?: 0) > 0,
+          s.has("pendingMutation"), owner, generation, true)) return@synchronized false
+      action()
+      true
+    }
+
+  /**
+   * A native recovery command shares JS's configuration quarantine. Revocation
+   * invalidates authority immediately, while replacement stays blocked until
+   * the actual SDK callbacks (including any stale-start cleanup) have settled.
+   */
+  fun nativeRecoveryCommand(context: Context, owner: String, generation: Long, operation: String,
+    action: () -> Unit): Boolean = synchronized(lock) {
+    val s = state(context)
+    if (s.optString("pendingMutation") != operation || s.optString("owner") != owner ||
+      s.optLong("generation") != generation || s.optBoolean("revoked", true) ||
+      s.optBoolean("shutdownPending", false) || (s.optJSONObject("shutdowns")?.length() ?: 0) > 0) {
+      return@synchronized false
+    }
+    action()
+    true
+  }
+
+  fun nativeRecoveryCleanup(context: Context, operation: String, action: () -> Unit): Boolean = synchronized(lock) {
+    // An operation cannot stop a replacement owner. Its quarantine must still
+    // belong to it, even when the original generation has since been revoked.
+    if (state(context).optString("pendingMutation") != operation) return@synchronized false
+    action()
+    true
+  }
+
   fun authorize(context: Context, owner: String, expectedGeneration: Long): String = synchronized(lock) {
     val s = state(context)
     if (s.getLong("generation") != expectedGeneration) return@synchronized s.toString()

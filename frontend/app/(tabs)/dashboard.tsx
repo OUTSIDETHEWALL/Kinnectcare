@@ -1287,13 +1287,6 @@ function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfa
   // status still lives underneath — we just don't paint it in a
   // colour that could be misread as "location tracking is fine".
   const sharingOff = (member as any).location_sharing_enabled === false;
-  const dot = sharingOff
-    ? '🔒'
-    : member.status === 'healthy'
-      ? '🟢'
-      : member.status === 'warning'
-        ? '🟡'
-        : '🔴';
 
   // v1.3.2 — live refresh indicator + relative "last updated" timestamp.
   // The "X min ago" age label is derived from member.last_seen at render time.
@@ -1307,6 +1300,9 @@ function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfa
   const ageLabel = seenMs ? formatTimeAgo(seenMs) : '';
   const cardStatus = getFamilyCardStatus(member, issues);
   const deviceStatus = cardStatus.device;
+  const dot = { private: '🔒', unknown: '⚪', healthy: '🟢', warning: '🟡', danger: '🔴' }[cardStatus.indicator];
+  const dotColor = cardStatus.indicator === 'private' || cardStatus.indicator === 'unknown'
+    ? '#9CA3AF' : StatusColor(cardStatus.indicator === 'danger' ? 'critical' : cardStatus.indicator);
 
   // v1.2.0 (44) — log every render with the exact prop value the card
   // received and the ageLabel it rendered.  Fire-and-forget; the helper
@@ -1343,7 +1339,7 @@ function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfa
               // respects Location Sharing.  Grey ring when sharing
               // is off (matches the top-right 🔒 glyph and the
               // dedicated privacy row below).
-              backgroundColor: sharingOff ? '#9CA3AF' : StatusColor(member.status),
+              backgroundColor: dotColor,
             },
           ]} />
         </View>

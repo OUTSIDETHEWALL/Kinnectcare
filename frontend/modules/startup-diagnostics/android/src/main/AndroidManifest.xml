@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- No new permissions. Both receivers fail closed without the app's existing
+       background-location and activity-recognition grants and durable owner. -->
+  <application>
+    <receiver android:name=".NativeMotionReceiver" android:exported="false" />
+    <receiver android:name=".NativeMotionBootReceiver" android:exported="false">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+        <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+      </intent-filter>
+    </receiver>
+  </application>
+</manifest>

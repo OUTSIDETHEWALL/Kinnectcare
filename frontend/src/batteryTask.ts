@@ -25,6 +25,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { operationOrigin, withRequestOrigin } from './requestOrigin';
 import { Platform } from 'react-native';
+import { backgroundHttp } from './backgroundHttp';
 import { deepStage } from './deepAsyncTrace';
 import { recordEvidence } from './evidenceTrace';
 import type { AuthorizedBatteryTransport } from './androidTrackingRecovery';
@@ -431,7 +432,7 @@ async function publishTaskBattery(
         try {
           deepStage(execution.diagnostic, 'battery_patch_entered');
           const resp = await Promise.race([
-            withRequestOrigin(execution.diagnostic, () => fetch(battUrl, {
+            withRequestOrigin(execution.diagnostic, () => backgroundHttp(battUrl, {
               method: 'PATCH',
               headers: {
                 'Content-Type': 'application/json',
