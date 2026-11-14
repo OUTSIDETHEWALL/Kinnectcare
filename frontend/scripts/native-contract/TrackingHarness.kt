@@ -46,12 +46,25 @@ fun main(args: Array<String>) {
     val moving = Context(File(args[0] + ".moving"))
     Tracking.authorize(moving, owner, 0)
     check(Tracking.claim(moving, owner, 0, "moving-seed", now))
-    val movingCapture = System.currentTimeMillis() - 9 * 60000
+    val movingCapture = System.currentTimeMillis() - 4 * 60000
     Tracking.complete(moving, "moving-seed", "fresh_fix_delivered", movingCapture, false)
     Tracking.movement(moving, owner, 0, true)
-    check(!Tracking.claim(moving, owner, 0, "moving-early", movingCapture + 10 * 60000 - 1))
-    check(Tracking.claim(moving, owner, 0, "moving-due", movingCapture + 10 * 60000))
+    check(!Tracking.claim(moving, owner, 0, "moving-early", movingCapture + 5 * 60000 - 1))
+    check(Tracking.claim(moving, owner, 0, "moving-due", movingCapture + 5 * 60000))
     Tracking.complete(moving, "moving-due", "operation_discarded", 0, true)
+    // No new motion event for half an hour is NOT a stationary transition.
+    check(Tracking.claim(moving, owner, 0, "aged-moving", movingCapture + 30 * 60000))
+    Tracking.complete(moving, "aged-moving", "operation_discarded", 0, true)
+    Tracking.movement(moving, owner, 0, false)
+    check(!Tracking.claim(moving, owner, 0, "stationary-again", movingCapture + 60 * 60000 - 1))
+    check(Tracking.claim(moving, owner, 0, "stationary-hour", movingCapture + 60 * 60000))
+    Tracking.complete(moving, "stationary-hour", "operation_discarded", 0, false)
+    // Revoked and wrong-generation movement cannot overwrite the real state.
+    Tracking.movement(moving, owner, 1, true)
+    check(!JSONObject(Tracking.read(moving)).getBoolean("moving"))
+    Tracking.revoke(moving, "consent")
+    Tracking.movement(moving, owner, 0, true)
+    check(!Tracking.claim(moving, owner, 0, "revoked-moving", movingCapture + 120 * 60000))
 
     val failures = Context(File(args[0] + ".failures"))
     Tracking.authorize(failures, owner, 0)
@@ -65,7 +78,7 @@ fun main(args: Array<String>) {
       check(!Tracking.claim(failures, owner, 0, "backoff-early", eligible - 1))
       at = eligible
     }
-    println("PASS native stationary 60m/reset/11h eligibility, recent-moving 10m and 5/15/30m backoff")
+    println("PASS native stationary 60m/reset/11h, moving 5m without age expiry, explicit stop, authority and 5/15/30m backoff")
     return
   }
   if (args[1] == "seed") {

@@ -448,11 +448,16 @@ function registerHeadlessTaskOnce(): void {
 
       if (Platform.OS === 'android' && (name === 'motionchange' || name === 'activitychange')) {
         await logEvent(name === 'motionchange' ? 'sdk_onMotionChange' : 'sdk_onActivityChange', {
-          isMoving: event?.params?.isMoving, activity: event?.params?.activity, origin: 'headless',
+          ...(name === 'motionchange' ? { isMoving: event?.params?.isMoving }
+            : { activity: event?.params?.activity, confidence: event?.params?.confidence }),
+          origin: 'headless',
         });
         if (!executionCurrent()) return;
-        const activity = event?.params?.activity;
-        observeTrackingMovement(event?.params?.isMoving === true || ['in_vehicle', 'on_bicycle', 'on_foot', 'walking', 'running'].includes(activity));
+        // Activity classification is not the SDK's moving/stationary state.
+        // In particular, "still" can precede the SDK's stop-timeout transition.
+        if (name === 'motionchange' && typeof event?.params?.isMoving === 'boolean') {
+          observeTrackingMovement(event.params.isMoving);
+        }
       }
       if (Platform.OS === 'android' && ['terminate', 'boot', 'heartbeat', 'motionchange', 'activitychange'].includes(name)) {
         if (!executionCurrent()) {
@@ -1005,13 +1010,11 @@ export function setDeviceInfo(info: DeviceInfo): void {
   _deviceInfo = info;
 }
 
-// Activity-change dedup — onActivityChange fires every
-// activityRecognitionInterval (10 s) even when the activity is
-// unchanged.  Only log when the type OR the moving-state changes so the
+// Activity-change dedup — repeated activity classifications are not SDK
+// moving/stationary transitions. Only log when the activity type changes so the
 // 50-entry ring buffer stays useful across a full trip rather than being
 // consumed in the first few minutes.
 let _lastActivityType: string | null = null;
-let _lastActivityIsMoving: boolean | null = null;
 // Cooldown gate shared by the headless motionchange handler and the
 // JS-alive onMotionChange listener.  Both live in the same JS module
 // scope so a single variable covers both paths within a process lifetime.
@@ -1304,7 +1307,10 @@ function attachSdkListeners(lib: any): void {
     );
     lib.onMotionChange(async (evt: any) => {
       recordPipelineTs('motion');
-      void logEvent('sdk_onMotionChange', { isMoving: !!evt?.isMoving });
+      void logEvent('sdk_onMotionChange', { isMoving: evt?.isMoving });
+      if (Platform.OS === 'android' && typeof evt?.isMoving === 'boolean') {
+        observeTrackingMovement(evt.isMoving);
+      }
       // Sprint 1 stale-location fix — JS-alive path.
       // Mirror of the headless motionchange handler: when JS is alive and
       // the SDK transitions to moving, force an immediate GPS sample so
@@ -1575,7 +1581,7 @@ function attachSdkListeners(lib: any): void {
     //
     // This is the first link in the stationary→moving transition chain:
     //   Activity Recognition detects IN_VEHICLE
-    //   → SDK evaluates confidence vs minimumActivityRecognitionConfidence
+    //   → SDK evaluates its native motion-detection policy
     //   → SDK fires onMotionChange(isMoving=true)
     //   → GPS active, distanceFilter applies, uploads begin
     //
@@ -1587,13 +1593,10 @@ function attachSdkListeners(lib: any): void {
       lib.onActivityChange((evt: any) => {
         const activity: string = String(evt?.activity ?? 'unknown');
         const confidence: number = typeof evt?.confidence === 'number' ? evt.confidence : 0;
-        const isMoving: boolean = !!evt?.isMoving;
-        if (activity !== _lastActivityType || isMoving !== _lastActivityIsMoving) {
+        if (activity !== _lastActivityType) {
           _lastActivityType = activity;
-          _lastActivityIsMoving = isMoving;
           recordPipelineTs('activity');
-          void logEvent('sdk_onActivityChange', { activity, confidence, isMoving });
-          if (Platform.OS === 'android' && confidence >= 75) observeTrackingMovement(isMoving);
+          void logEvent('sdk_onActivityChange', { activity, confidence });
         }
       });
     }

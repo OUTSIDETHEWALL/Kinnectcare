@@ -19,6 +19,7 @@ import com.transistorsoft.locationmanager.adapter.BackgroundGeolocation
 import com.transistorsoft.locationmanager.adapter.callback.TSCallback
 import com.transistorsoft.locationmanager.config.TSConfig
 import org.json.JSONObject
+import org.json.JSONArray
 import java.util.UUID
 
 /**
@@ -51,18 +52,50 @@ object NativeMotionRecovery {
     Intent(c, NativeMotionReceiver::class.java).setAction(ACTION),
     PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0))
 
-  private fun record(c: Context, result: String) {
+  private fun record(c: Context, result: String, operation: String = "", trigger: String = "",
+    activity: Int = -1, ageMs: Long = -1) {
     val at = System.currentTimeMillis()
+    val elapsed = SystemClock.elapsedRealtime()
     // No recorder/JSON/IO inside the authority-command critical section.
     main.post {
       try {
-        prefs(c).edit().putString("lastResult", result).putLong("lastResultAt", at).apply()
+        val p = prefs(c)
+        val edit = p.edit().putString("lastResult", result).putLong("lastResultAt", at)
+        if (operation.isEmpty()) {
+          // Registration acknowledgments must not erase the recovery outcome.
+          edit.putString("lastRegistrationResult", result).putLong("lastRegistrationAt", at)
+        } else {
+          val attempts = JSONArray(p.getString("attempts", "[]"))
+          var attempt: JSONObject? = null
+          for (index in 0 until attempts.length()) {
+            if (attempts.getJSONObject(index).optString("operation") == operation) {
+              attempt = attempts.getJSONObject(index)
+              break
+            }
+          }
+          if (attempt == null) {
+            attempt = JSONObject().put("operation", operation).put("trigger", trigger)
+              .put("receivedAt", at).put("stages", JSONArray())
+            attempts.put(attempt)
+          }
+          if (activity >= 0) attempt.put("activity", activity).put("transitionAgeMs", ageMs)
+          val stages = attempt.getJSONArray("stages")
+          stages.put(JSONObject().put("stage", result).put("at", at).put("elapsedMs", elapsed))
+          val boundedStages = JSONArray()
+          for (index in maxOf(0, stages.length() - 24) until stages.length()) boundedStages.put(stages.get(index))
+          attempt.put("stages", boundedStages).put("lastStage", result).put("lastStageAt", at)
+          val boundedAttempts = JSONArray()
+          for (index in maxOf(0, attempts.length() - 16) until attempts.length()) boundedAttempts.put(attempts.get(index))
+          edit.putString("attempts", boundedAttempts.toString())
+            .putString("lastRecoveryResult", result).putLong("lastRecoveryAt", at)
+        }
+        edit.apply()
         TrackingReliability.record(c, "native_motion_recovery", JSONObject().put("reason", result).toString())
       } catch (_: Exception) { /* observation cannot alter tracking */ }
     }
   }
 
-  fun receiverFailed(c: Context) = record(c, "receiver_failed")
+  fun receiverFailed(c: Context) = record(c, "receiver_failed", "native-motion-${UUID.randomUUID()}", "receiver")
 
   /** Called only AFTER JS has configured/started the SDK for this exact owner. */
   fun arm(c: Context, owner: String, generation: Long): Boolean {
@@ -107,39 +140,50 @@ object NativeMotionRecovery {
 
   fun receive(c: Context, i: Intent, finished: () -> Unit) {
     val boot = i.action == Intent.ACTION_BOOT_COMPLETED || i.action == Intent.ACTION_MY_PACKAGE_REPLACED
+    val operation = "native-motion-${UUID.randomUUID()}"
+    val trigger = when (i.action) {
+      Intent.ACTION_BOOT_COMPLETED -> "boot"
+      Intent.ACTION_MY_PACKAGE_REPLACED -> "package_replaced"
+      else -> "motion"
+    }
+    fun trace(result: String) = record(c, result, operation, trigger)
+    trace("receiver_received")
     if (boot) migrateBinding(c)
-    if (!eligible(c, snapshot(c))) { record(c, "not_authorized"); finished(); return }
+    if (!eligible(c, snapshot(c))) { trace("not_authorized"); finished(); return }
     if (boot) register(c)
     val moving = if (boot) false else {
-      if (i.action != ACTION || !ActivityTransitionResult.hasResult(i)) { finished(); return }
+      if (i.action != ACTION || !ActivityTransitionResult.hasResult(i)) { trace("transition_missing"); finished(); return }
       val event = ActivityTransitionResult.extractResult(i)?.transitionEvents?.lastOrNull {
         it.transitionType == ActivityTransition.ACTIVITY_TRANSITION_ENTER &&
           it.activityType in listOf(DetectedActivity.IN_VEHICLE, DetectedActivity.ON_BICYCLE,
             DetectedActivity.ON_FOOT, DetectedActivity.WALKING, DetectedActivity.RUNNING)
-      } ?: run { finished(); return }
+      } ?: run { trace("movement_transition_missing"); finished(); return }
       val now = SystemClock.elapsedRealtimeNanos()
+      record(c, "transition_received", operation, trigger, event.activityType,
+        (now - event.elapsedRealTimeNanos) / 1_000_000)
       if (!NativeMotionPolicy.freshTransition(event.elapsedRealTimeNanos, prefs(c).getLong("lastEvent", 0), now)) {
-        record(c, "replayed_transition"); finished(); return
+        trace("replayed_transition"); finished(); return
       }
+      trace("transition_accepted")
       prefs(c).edit().putLong("lastEvent", event.elapsedRealTimeNanos).apply()
       true
     }
     val s = snapshot(c)
-    if (!eligible(c, s)) { record(c, "not_authorized"); finished(); return }
+    if (!eligible(c, s)) { trace("not_authorized"); finished(); return }
     val owner = s.optString("owner")
     val generation = s.optLong("generation")
-    val operation = "native-motion-${UUID.randomUUID()}"
     if (!TrackingReliability.claim(c, owner, generation, operation, System.currentTimeMillis(), true)) {
-      record(c, "configuration_busy"); finished(); return
+      trace("configuration_busy"); finished(); return
     }
+    trace("configuration_claimed")
     // Bound BroadcastReceiver lifetime, NOT the SDK mutation quarantine.
     // An overdue SDK callback must never unquarantine a still-pending start.
     val timeout = Handler(Looper.getMainLooper())
-    val finish = Runnable { finished() }
+    val finish = Runnable { trace("receiver_timeout"); finished() }
     timeout.postDelayed(finish, 8_000)
     var sdk: BackgroundGeolocation? = null
     fun done(result: String) {
-      record(c, result)
+      trace(result)
       TrackingReliability.complete(c, operation, "operation_discarded", 0, false)
       timeout.removeCallbacks(finish)
       finished()
@@ -152,30 +196,40 @@ object NativeMotionRecovery {
           override fun onSuccess() = done("obsolete_owner_stopped")
           override fun onFailure(error: String?) {
             // Retain quarantine: an unconfirmed stop cannot authorize rebind.
-            record(c, "cleanup_failed")
+            trace("cleanup_failed")
             finished()
           }
         })
       }
-      if (!cleanup) finished()
+      if (!cleanup) { trace("cleanup_not_admitted"); finished() }
     }
     fun command(action: () -> Unit) {
-      if (!permissions(c) || !TrackingReliability.nativeRecoveryCommand(c, owner, generation, operation, action)) stale()
+      if (!permissions(c) || !TrackingReliability.nativeRecoveryCommand(c, owner, generation, operation, action)) {
+        trace("command_not_admitted")
+        stale()
+      }
     }
     fun settle(result: String) = command { done(result) }
     try {
       command {
         val instance = BackgroundGeolocation.getInstance(c)
         sdk = instance
+        trace("ready_requested")
         instance.ready(object : TSCallback {
           override fun onSuccess() = command {
+            trace("ready_succeeded")
+            trace("start_requested")
             instance.start(object : TSCallback {
               override fun onSuccess() = command {
+                trace("start_succeeded")
                 if (!moving) settle("boot_start_requested")
-                else instance.changePace(true, object : TSCallback {
-                  override fun onSuccess() = settle("movement_requested")
-                  override fun onFailure(error: String?) = settle("movement_failed")
-                })
+                else {
+                  trace("change_pace_requested")
+                  instance.changePace(true, object : TSCallback {
+                    override fun onSuccess() = settle("movement_requested")
+                    override fun onFailure(error: String?) = settle("movement_failed")
+                  })
+                }
               }
               override fun onFailure(error: String?) = settle("start_failed")
             })
@@ -189,6 +243,11 @@ object NativeMotionRecovery {
   fun evidence(c: Context): JSONObject = JSONObject()
     .put("available", true).put("lastResult", prefs(c).getString("lastResult", "not_armed"))
     .put("lastResultAt", prefs(c).getLong("lastResultAt", 0))
+    .put("lastRegistrationResult", prefs(c).getString("lastRegistrationResult", "unknown"))
+    .put("lastRegistrationAt", prefs(c).getLong("lastRegistrationAt", 0))
+    .put("lastRecoveryResult", prefs(c).getString("lastRecoveryResult", "unknown"))
+    .put("lastRecoveryAt", prefs(c).getLong("lastRecoveryAt", 0))
+    .put("attempts", JSONArray(prefs(c).getString("attempts", "[]")))
 }
 
 open class NativeMotionReceiver : BroadcastReceiver() {

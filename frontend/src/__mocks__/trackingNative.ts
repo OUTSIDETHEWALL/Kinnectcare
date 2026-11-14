@@ -39,8 +39,7 @@ export const trackingNative = {
     }
     if (state.operation && now - state.claimedAt < 60_000) return false;
     if (state.nextEligibleAt > now && state.nextEligibleAt - now <= 1_800_000) return false;
-    const moving = state.moving && state.movementAt <= now && now - state.movementAt < 600_000;
-    if (!configurationOnly && state.capturedAt > 0 && state.capturedAt <= now && now - state.capturedAt < (moving ? 600_000 : 3_600_000)) return false;
+    if (!configurationOnly && state.capturedAt > 0 && state.capturedAt <= now && now - state.capturedAt < (state.moving ? 300_000 : 3_600_000)) return false;
     state = { ...state, operation, claimedAt: now, pendingMutation: configurationOnly ? operation : undefined };
     return true;
   },

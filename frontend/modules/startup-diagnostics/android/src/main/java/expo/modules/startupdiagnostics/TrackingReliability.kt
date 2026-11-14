@@ -213,9 +213,9 @@ object TrackingReliability {
     val next = s.optLong("nextEligibleAt", 0)
     if (next > now && next - now <= 30 * 60000) return@synchronized decision(false, "backoff")
     val capture = s.optLong("capturedAt", 0)
-    val movement = s.optLong("movementAt", 0)
-    val recentMoving = s.optBoolean("moving", false) && movement <= now && now - movement < 10 * 60000
-    val threshold = if (recentMoving) 10 * 60000 else 60 * 60000
+    // SDK state persists until an observed transition; an old movement stamp
+    // does not establish that a moving phone became genuinely stationary.
+    val threshold = if (s.optBoolean("moving", false)) 5 * 60000 else 60 * 60000
     if (!configurationOnly && capture > 0 && capture <= now && now - capture < threshold) return@synchronized decision(false, "capture_recent")
     s.put("operation", operation).put("claimedElapsed", elapsed)
     save(context, s)

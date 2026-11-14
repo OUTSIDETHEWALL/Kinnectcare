@@ -73,7 +73,7 @@ describe('owned Android cold tracking recovery', () => {
       })),
       ready: jest.fn(async () => ({ enabled })),
     };
-    for (const name of ['onLocation', 'onMotionChange', 'onProviderChange', 'onHttp', 'onHeartbeat', 'onActivityChange']) {
+    for (const name of ['onLocation', 'onMotionChange', 'onProviderChange', 'onHttp', 'onHeartbeat', 'onActivityChange', 'onEnabledChange']) {
       sdk[name] = jest.fn(() => ({ remove: jest.fn() }));
     }
     jest.doMock('react-native', () => ({
@@ -92,6 +92,50 @@ describe('owned Android cold tracking recovery', () => {
   });
   const run = (current = () => true) =>
     recovery.recoverUnexpectedlyDisabledTracking(sdk, current);
+
+  it.each(['live', 'headless'])('uses actual SDK state, not activity classification, in the %s path', async path => {
+    const engine = require('../locationEngine') as typeof import('../locationEngine');
+    const native = require('../__mocks__/trackingNative').trackingNative;
+    const movement = jest.spyOn(native, 'trackingMovement');
+    if (path === 'live') {
+      expect(await engine.start({ ...config, jwt: token! })).toBe('background-ready');
+    }
+    const emit = async (name: string, params: any) => {
+      if (path === 'headless') {
+        await sdk.registerHeadlessTask.mock.calls[0][0]({ name, params, kcTaskLifetime: 'native-active' });
+      } else {
+        const listener = name === 'motionchange' ? sdk.onMotionChange : sdk.onActivityChange;
+        await listener.mock.calls[0][0](params);
+      }
+    };
+    // Exclude existing GPS/server publication: exercise the event contract only.
+    sdk.getCurrentPosition.mockRejectedValue(new Error('test: no acquired position'));
+    await emit('motionchange', { isMoving: true });
+    expect(movement).toHaveBeenLastCalledWith('owner-a:member-a', expect.any(Number), true);
+    const calls = movement.mock.calls.length;
+    for (const activity of ['still', 'walking', 'unknown', 'in_vehicle']) {
+      await emit('activitychange', { activity, confidence: 100 });
+    }
+    // Neither a synthetic field on activitychange nor missing/invalid SDK state
+    // may manufacture a state transition, even at high activity confidence.
+    await emit('activitychange', { activity: 'still', confidence: 100, isMoving: false });
+    await emit('motionchange', {});
+    await emit('motionchange', { isMoving: 'false' });
+    expect(movement).toHaveBeenCalledTimes(calls);
+    await emit('motionchange', { isMoving: false });
+    expect(movement).toHaveBeenLastCalledWith('owner-a:member-a', expect.any(Number), false);
+    expect(movement).toHaveBeenCalledTimes(calls + 1);
+    if (path === 'headless') {
+      await sdk.registerHeadlessTask.mock.calls[0][0]({
+        name: 'motionchange', params: { isMoving: true }, kcTaskLifetime: 'obsolete',
+      });
+      expect(movement).toHaveBeenCalledTimes(calls + 1);
+    }
+    await recovery.revokeTrackingIntent('consent');
+    await emit('motionchange', { isMoving: true });
+    expect(movement).toHaveBeenCalledTimes(calls + 1);
+    movement.mockRestore();
+  });
 
   function seedLegacy() {
     store.delete(recovery.TRACKING_INTENT_KEY);
