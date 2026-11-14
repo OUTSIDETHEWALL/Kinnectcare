@@ -9,6 +9,22 @@ Kinnship is a mobile app, not a Replit Web Publish deployment. After every appro
 
 **How to apply:** After a merge, inspect the merged diff before taking any release action. Interpret “publish,” “deploy,” “ship,” “release,” and “go live” as the established Kinnship workflow, never Replit Web Publish. Use Replit Web Publish only when the user explicitly says: “Publish the website to Replit.” For a backend-only release, deploy Railway and verify health. For a mobile-only release, publish the OTA. For both, complete and verify Railway before publishing the OTA. For tests, documentation, diagnostics planning, or project memory only, do nothing operationally. For an OTA, use the repository's established publish script, verify the production API URL and runtime version, clear Metro cache as required, and report the OTA group ID, platform update IDs, runtime version, and commit SHA.
 
+## Manual Google Play uploads
+
+The owner downloads the verified AAB and manually uploads it to Google Play
+Console. The agent builds only when explicitly authorized, verifies the artifact,
+provides the direct EAS AAB download link, and then stops for instructions.
+Do not automate Play uploads or request, create, replace, or modify Google Play
+service-account credentials. Production settings and live acceptance
+configurations require separate approval.
+
+**Why:** The owner explicitly corrected the release workflow: manual Play
+uploads are the established process, not automated submission.
+
+**How to apply:** Keep build monitoring and artifact verification separate from
+distribution. Report the exact source, identity, signing continuity and warnings;
+never infer permission to upload, start another build or change live services.
+
 ## Device evidence chronology
 
 Respect platform-specific release authorization even when the production channel
