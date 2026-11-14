@@ -74,14 +74,37 @@ describe('native evidence source contracts (not native compilation)', () => {
     expect(result.indexOf('NativeHttpEvidence.install')).toBeLessThan(result.indexOf('super.onCreate'));
     expect(startupPlugin.injectMainApplication(result)).toBe(result);
   });
-  it('retains the hourly gate, expiry and backoff exactly', () => {
+  it('retains hourly stationary eligibility, lease expiry and backoff with a five-minute moving gate', () => {
     const source = read(`${native}/TrackingReliability.kt`);
     expect(source).toContain('elapsed - claimed < 60000');
     expect(source).toContain('next - now <= 30 * 60000');
-    expect(source).toContain('if (recentMoving) 10 * 60000 else 60 * 60000');
+    expect(source).toContain('if (s.optBoolean("moving", false)) 5 * 60000 else 60 * 60000');
+    expect(source).not.toContain('recentMoving');
     for (const reason of ['revoked', 'generation_mismatch', 'owner_mismatch', 'mutation_pending',
       'shutdown_pending', 'lease_active', 'backoff', 'capture_recent']) {
       expect(source).toContain(`decision(false, "${reason}")`);
+    }
+  });
+  it('bounds correlated receiver stages separately from registration and preserves native control calls', () => {
+    const source = read(`${native}/NativeMotionRecovery.kt`);
+    expect(source).toContain('stages.length() - 24');
+    expect(source).toContain('attempts.length() - 16');
+    expect(source).toContain('if (operation.isEmpty())');
+    expect(source).toContain('.put("attempts", JSONArray(');
+    for (const stage of ['receiver_received', 'transition_received', 'transition_accepted', 'configuration_claimed',
+      'ready_requested', 'ready_succeeded', 'start_requested', 'start_succeeded',
+      'change_pace_requested', 'receiver_timeout', 'command_not_admitted']) {
+      expect(source).toContain(`"${stage}"`);
+    }
+    const timeout = source.slice(source.indexOf('val finish = Runnable'), source.indexOf('timeout.postDelayed'));
+    expect(timeout).not.toContain('TrackingReliability.complete');
+    const observer = source.slice(source.indexOf('private fun record('), source.indexOf('fun receiverFailed'));
+    expect(observer.indexOf('main.post')).toBeLessThan(observer.indexOf('JSONObject('));
+    expect(observer.indexOf('main.post')).toBeLessThan(observer.indexOf('p.edit()'));
+    expect(observer).not.toMatch(/latitude|longitude|error\.message|owner/);
+    for (const call of ['instance.ready(object : TSCallback', 'instance.start(object : TSCallback',
+      'instance.changePace(true, object : TSCallback']) {
+      expect(source.split(call)).toHaveLength(2);
     }
   });
   it('keeps evidence outside authority storage and off the producer disk path', () => {
