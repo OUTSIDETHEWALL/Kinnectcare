@@ -4,11 +4,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Colors } from './theme';
 import { emailLinkError, requestEmailLink } from './emailLinks';
+import { getPendingInvite, isInviteConsumed } from './pendingInvite';
 
 export default function EmailSignInScreen({ createFamily = false }: { createFamily?: boolean }) {
   const router = useRouter();
   const params = useLocalSearchParams<{ email?: string; invite_token?: string; family_name?: string; sent?: string }>();
-  const inviteToken = String(params.invite_token || '');
+  const [inviteToken, setInviteToken] = useState(String(params.invite_token || ''));
+  const [inviteChecked, setInviteChecked] = useState(false);
   const [email, setEmail] = useState(String(params.email || ''));
   const [name, setName] = useState('');
   const [sent, setSent] = useState(params.sent === '1');
@@ -17,6 +19,18 @@ export default function EmailSignInScreen({ createFamily = false }: { createFami
   const [retryAfter, setRetryAfter] = useState(params.sent === '1' ? Date.now() + 60000 : 0);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
+    let cancelled = false;
+    setInviteChecked(false);
+    (async () => {
+      const token = String(params.invite_token || '') || (await getPendingInvite())?.token || '';
+      const consumed = token ? await isInviteConsumed(token) : false;
+      if (cancelled) return;
+      setInviteToken(consumed ? '' : token);
+      setInviteChecked(true);
+    })();
+    return () => { cancelled = true; };
+  }, [params.invite_token]);
+  useEffect(() => {
     if (!retryAfter) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
@@ -24,7 +38,7 @@ export default function EmailSignInScreen({ createFamily = false }: { createFami
   const remaining = Math.max(0, Math.ceil((retryAfter - now) / 1000));
 
   async function send() {
-    if (busy || Date.now() < retryAfter) return;
+    if (!inviteChecked || busy || Date.now() < retryAfter) return;
     setError('');
     if (!inviteToken && !/^\S+@\S+\.\S+$/.test(email.trim())) {
       setError('Please enter your email address.'); return;
@@ -52,8 +66,8 @@ export default function EmailSignInScreen({ createFamily = false }: { createFami
       {!inviteToken && <><Text style={styles.label}>Email address</Text><TextInput accessibilityLabel="Email address" style={styles.input} value={email} onChangeText={setEmail} autoCapitalize="none" autoComplete="email" keyboardType="email-address" /></>}
     </>}
     {!!error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
-    <TouchableOpacity accessibilityRole="button" disabled={busy || remaining > 0} style={styles.button} onPress={send}>
-      {busy ? <ActivityIndicator color="white" /> : <Text style={styles.buttonText}>{remaining > 0 ? `Send again in ${remaining}s` : sent ? 'Send another email link' : 'Email me a secure link'}</Text>}
+    <TouchableOpacity accessibilityRole="button" disabled={!inviteChecked || busy || remaining > 0} style={styles.button} onPress={send}>
+      {!inviteChecked || busy ? <ActivityIndicator color="white" /> : <Text style={styles.buttonText}>{remaining > 0 ? `Send again in ${remaining}s` : sent ? 'Send another email link' : 'Email me a secure link'}</Text>}
     </TouchableOpacity>
     {sent && <Text style={styles.copy}>If it hasn’t arrived, check spam and wait one minute before sending again. Open your most recent link. You can close Kinnship while you check your email.</Text>}
     <Text style={styles.copy}>An invitation does not turn on location sharing. You choose whether to share during setup.</Text>

@@ -1611,16 +1611,29 @@ function RootNav() {
       return;
     }
 
-    if (user && !needsAppLockUnlock && !onPinScreen && !onPermissionsScreen && (inAuthGroup || isWelcome || isOnboarding)) {
-      // Do not race a voluntary PIN setup/change screen. Otherwise an
-      // authenticated session opens the app immediately by default. Release
-      // any queued notification response after scheduling this replacement:
-      // push.ts dispatches on the next task, so a valid deep-link becomes the
-      // final route instead of remaining stranded behind the dashboard.
-      logRootDecision('authenticated_start_route', '/(tabs)/dashboard', 'navigate');
-      router.replace('/(tabs)/dashboard');
-      setAppReadyForDeepLink(true);
-      return;
+    const onDashboard = segments[0] === '(tabs)' && segments[1] === 'dashboard';
+    if (user && !needsAppLockUnlock && !onPinScreen && !onPermissionsScreen
+      && (inAuthGroup || isWelcome || isOnboarding || onDashboard)) {
+      // Authentication can finish before first-install permissions. The
+      // permission screen's normal dashboard replacement must not abandon an
+      // invitation deferred for this existing account's explicit confirmation.
+      let cancelled = false;
+      (async () => {
+        const pending = await getPendingInvite();
+        const consumed = pending ? await isInviteConsumed(pending.token) : false;
+        if (cancelled) return;
+        if (pending && !consumed) {
+          logRootDecision('authenticated_invitation_resumed', `/invite/${pending.token}`, 'navigate');
+          router.replace(`/invite/${pending.token}` as any);
+        } else if (inAuthGroup || isWelcome || isOnboarding) {
+          logRootDecision('authenticated_start_route', '/(tabs)/dashboard', 'navigate');
+          router.replace('/(tabs)/dashboard');
+        } else {
+          logRootDecision('all_navigation_gates_cleared', pathname || '/', 'ready');
+        }
+        setAppReadyForDeepLink(true);
+      })();
+      return () => { cancelled = true; };
     }
     // GATE CLEARED — let push.ts flush any queued notification
     // deep-link so the user lands directly on the acknowledge / alerts
