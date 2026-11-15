@@ -167,6 +167,75 @@ async def verify(client, token, **kwargs):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["accepted", "revoked", "pending"])
+async def test_invitation_status_recovers_current_family_without_writing(status):
+    db, _, inv, signed_in, client = setup()
+    signed_in["family_group_id"] = inv["family_group_id"]
+    db.users.rows.append(copy.deepcopy(signed_in))
+    inv.update(status=status, accepted_by_user_id=signed_in["id"],
+               expires_at=datetime.now(timezone.utc) - timedelta(days=1))
+    before = {name: copy.deepcopy(collection.rows) for name, collection in db.collections.items()}
+    async with client:
+        response = await client.post("/api/auth/email-link/invitation/status", json={"invite_token": inv["token"]})
+    assert response.status_code == 200, response.text
+    assert response.json()["already_member"] is True
+    assert response.json()["family_group_id"] == "family"
+    assert {name: collection.rows for name, collection in db.collections.items()} == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["accepted", "revoked", "expired", "invalid"])
+async def test_invitation_status_does_not_disclose_inactive_target_to_other_families(status):
+    db, _, inv, signed_in, client = setup()
+    db.users.rows.append(copy.deepcopy(signed_in))
+    inv["status"] = "pending" if status == "expired" else status
+    inv["accepted_by_user_id"] = signed_in["id"]
+    inv["expires_at"] = datetime.now(timezone.utc) - timedelta(days=1)
+    token = "INV-MISSING" if status == "invalid" else inv["token"]
+    before = {name: copy.deepcopy(collection.rows) for name, collection in db.collections.items()}
+    async with client:
+        response = await client.post("/api/auth/email-link/invitation/status", json={"invite_token": token})
+    assert response.status_code == 410
+    assert "family_group_id" not in response.json()
+    assert {name: collection.rows for name, collection in db.collections.items()} == before
+
+
+@pytest.mark.asyncio
+async def test_invitation_status_uses_current_database_membership_not_stale_auth_claim():
+    db, _, inv, signed_in, client = setup()
+    db.users.rows.append(copy.deepcopy(signed_in))
+    signed_in["family_group_id"] = "family"  # stale authentication object
+    async with client:
+        response = await client.post("/api/auth/email-link/invitation/status", json={"invite_token": inv["token"]})
+    assert response.status_code == 200, response.text
+    assert response.json()["already_member"] is False
+    assert db.users.rows[-1]["family_group_id"] == "solo"
+    assert db.members.rows == []
+
+
+@pytest.mark.asyncio
+async def test_public_preview_still_does_not_reveal_an_accepted_invitation():
+    db, _, inv, _, client = setup()
+    inv.update(status="accepted", accepted_by_user_id="existing")
+    async with client:
+        response = await client.post("/api/auth/email-link/invitation", json={"invite_token": inv["token"]})
+    assert response.status_code == 410
+
+
+@pytest.mark.asyncio
+async def test_invitation_status_requires_authenticated_user():
+    from fastapi import HTTPException
+    db, _, _, _, _ = setup()
+    async def deny():
+        raise HTTPException(401, "Please sign in.")
+    app = FastAPI()
+    app.include_router(links.build_router(db, deny, AsyncMock(), lambda uid: uid, lambda u: u), prefix="/api")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test") as client:
+        response = await client.post("/api/auth/email-link/invitation/status", json={"invite_token": "INV-MISSING"})
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_new_invitation_creates_only_intended_family_atomically():
     db, send, inv, _, client = setup()
     async with client:

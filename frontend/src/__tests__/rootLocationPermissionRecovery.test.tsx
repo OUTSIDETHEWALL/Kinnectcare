@@ -363,6 +363,53 @@ describe('RootNav location recovery independent of notification onboarding', () 
   });
 
   describe('real permissions screen → RootNav → native recovery', () => {
+    it('reproduces the legacy Close flicker: welcome plus an uncleared invite returns to the invitation', async () => {
+      realPermissionScreen = true;
+      segments = ['invite', '[token]'];
+      pendingInvite = { token: 'INV-INACTIVE', savedAt: new Date().toISOString() };
+      await mount();
+      await act(async () => { router.replace('/'); });
+      await flush();
+      expect(router.replace).toHaveBeenCalledWith('/invite/INV-INACTIVE');
+      expect(segments).toEqual(['invite', '[token]']);
+    });
+
+    it('keeps repeated authenticated exits on the dashboard instead of reopening a pending invitation', async () => {
+      realPermissionScreen = true;
+      segments = ['invite', '[token]'];
+      pendingInvite = { token: 'INV-INACTIVE', savedAt: new Date().toISOString() };
+      await mount();
+      // Model repeated taps from the real screen: clear pending then replace
+      // directly with the normal family dashboard, never the welcome route.
+      pendingInvite = null;
+      for (let tap = 0; tap < 3; tap++) {
+        await act(async () => { router.replace('/(tabs)/dashboard'); });
+        await flush();
+      }
+      expect(segments).toEqual(['(tabs)', 'dashboard']);
+      expect(router.replace).not.toHaveBeenCalledWith('/invite/INV-INACTIVE');
+    });
+
+    it('does not restore a dismissed cold-start invite when the signed-out user returns to Kinnship', async () => {
+      auth.user = null;
+      token = null;
+      realPermissionScreen = true;
+      segments = ['invite', '[token]'];
+      require('react-native').Linking.getInitialURL.mockResolvedValue('kinnship://invite/INV-DISMISSED');
+      require('../pendingInvite').setPendingInvite.mockImplementation(async (value: string) => {
+        pendingInvite = { token: value, savedAt: new Date().toISOString() };
+      });
+      await mount();
+      expect(pendingInvite?.token).toBe('INV-DISMISSED');
+      pendingInvite = null; // the real invite screen's exit clears storage
+      router.replace.mockClear();
+      await act(async () => { router.replace('/'); });
+      await flush();
+      expect(router.replace).not.toHaveBeenCalledWith('/invite/INV-DISMISSED');
+      expect(segments).toEqual(['index']);
+      expect(sdk.start).not.toHaveBeenCalled();
+    });
+
     it('resumes an existing-account invitation after the actual first-install permission screens', async () => {
       pendingInvite = { token: 'INV-ONBOARDING', savedAt: new Date().toISOString() };
       auth.user.family_group_id = 'separate-solo-family';
