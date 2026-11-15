@@ -22,6 +22,18 @@ could otherwise update iOS too and rely on stale remote-tracking state.
 before publication. Do not treat runtime compatibility as authority to release
 to an additional platform.
 
+For Android OTA delivery, resolve `android.runtimeVersion` before the top-level
+runtime. Use the checked-in production build selector for both preflight and
+the publishing child process; reject a conflicting shell selector.
+
+**Why:** The app's displayed version can differ from its Android native runtime,
+and EAS Update does not automatically apply `build.production.env`. Checking
+only the top-level policy can miss the intended binary or target older binaries.
+
+**How to apply:** Keep runtime evaluation and publication in the same pinned
+selector environment. Reject unsupported runtime policies rather than falling
+back, and retain the independent published-receipt runtime check.
+
 An earlier diagnostic export does not establish which OTA is active during a later physical test. Confirm the software diagnostics screen's installed update and runtime at the time of the test before attributing results to a release.
 
 **Why:** A physical test confirmed the expected OTA was active after an earlier export had been captured; treating the older export as current would have misclassified a validated notification-routing correction as absent.

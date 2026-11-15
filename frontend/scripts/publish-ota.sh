@@ -107,18 +107,41 @@ verify_reviewed_source() {
 verify_reviewed_source
 ok "Verified reviewed commit ${REVIEWED_COMMIT} / tree ${REVIEWED_TREE}"
 
-# Check 4 — checked-in EAS production target must still be production
+# Check 4 — use the production binary's identity for BOTH config evaluation
+# and the eventual EAS Update child process. EAS Update does not apply the
+# build.production.env selector automatically. Never inherit a different
+# diagnostic identity from the caller or silently target the legacy runtime.
 EAS_CHANNEL=$(cd "$FRONTEND_DIR" && node -p "require('./eas.json').build.production.channel || ''")
+PRODUCTION_DIAGNOSTIC_BUILD=$(cd "$FRONTEND_DIR" && node -e "
+  const profile = require('./eas.json').build.production;
+  const selector = profile.env?.KINNSHIP_DIAGNOSTIC_BUILD;
+  if (selector !== undefined
+    && require('./plugins/diagnosticBuild').diagnosticBuild({ KINNSHIP_DIAGNOSTIC_BUILD: selector }) === null) {
+    throw new Error('Invalid production Android build selector');
+  }
+  process.stdout.write(selector || '');
+") || fail "Cannot resolve the production Android build selector."
+if [[ "${KINNSHIP_DIAGNOSTIC_BUILD+x}" == "x" && "${KINNSHIP_DIAGNOSTIC_BUILD:-}" != "$PRODUCTION_DIAGNOSTIC_BUILD" ]]; then
+  fail "Shell Android build selector conflicts with the checked-in production profile."
+fi
+# Pin even an absent selector to empty: Expo must not pick a different
+# diagnostic identity from a local .env file later during publication.
+export KINNSHIP_DIAGNOSTIC_BUILD="$PRODUCTION_DIAGNOSTIC_BUILD"
 APP_PACKAGE=$(cd "$FRONTEND_DIR" && node -e "
   const app = require('./app.config.js')({ config: {} }).expo;
   process.stdout.write(app.android?.package || '');
 ")
 EXPECTED_RUNTIME=$(cd "$FRONTEND_DIR" && node -e "
   const app = require('./app.config.js')({ config: {} }).expo;
-  const runtime = typeof app.runtimeVersion === 'string' ? app.runtimeVersion
-    : app.runtimeVersion?.policy === 'appVersion' ? app.version : '';
+  const setting = Object.prototype.hasOwnProperty.call(app.android || {}, 'runtimeVersion')
+    ? app.android.runtimeVersion : app.runtimeVersion;
+  const runtime = typeof setting === 'string' ? setting
+    : setting?.policy === 'appVersion' ? app.version : '';
+  if (typeof runtime !== 'string' || !runtime.trim() || runtime.trim() !== runtime) {
+    throw new Error('Unsupported Android OTA runtime: expected a non-empty string or appVersion policy');
+  }
   process.stdout.write(runtime || '');
-")
+") || fail "Cannot resolve the effective Android OTA runtime."
 if [[ "$EAS_CHANNEL" != "production" ]]; then
   fail "Production profile targets EAS channel '${EAS_CHANNEL}', not 'production'."
 fi
