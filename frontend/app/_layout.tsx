@@ -82,6 +82,7 @@ function RootNav() {
   // navigate away while the invite token is still being persisted.
   const [initialLinkChecked, setInitialLinkChecked] = useState(false);
   const [coldStartInviteToken, setColdStartInviteToken] = useState<string | null>(null);
+  const invitationPermissionHandoffRef = useRef<string | null>(null);
   const routeDecisionRef = useRef(0);
   const rootMountedRecordedRef = useRef(false);
 
@@ -1592,7 +1593,11 @@ function RootNav() {
     // screen is picked up as soon as segments change after its
     // router.replace('/(tabs)/dashboard').
     const onPermissionsScreen = inAuthGroup && authSubroute === 'permissions';
+    if (!user || invitationPermissionHandoffRef.current !== user.id) {
+      invitationPermissionHandoffRef.current = null;
+    }
     if (user && onPermissionsScreen) {
+      invitationPermissionHandoffRef.current = user.id;
       // Keep the exact pending medication occurrence queued until the user
       // finishes (or explicitly declines) setup. The screen is not readiness.
       setAppReadyForDeepLink(Platform.OS !== 'android');
@@ -1611,16 +1616,38 @@ function RootNav() {
       return;
     }
 
-    if (user && !needsAppLockUnlock && !onPinScreen && !onPermissionsScreen && (inAuthGroup || isWelcome || isOnboarding)) {
-      // Do not race a voluntary PIN setup/change screen. Otherwise an
-      // authenticated session opens the app immediately by default. Release
-      // any queued notification response after scheduling this replacement:
-      // push.ts dispatches on the next task, so a valid deep-link becomes the
-      // final route instead of remaining stranded behind the dashboard.
-      logRootDecision('authenticated_start_route', '/(tabs)/dashboard', 'navigate');
-      router.replace('/(tabs)/dashboard');
-      setAppReadyForDeepLink(true);
-      return;
+    const onDashboard = segments[0] === '(tabs)' && segments[1] === 'dashboard';
+    const invitationPermissionHandoff = !!user && onDashboard
+      && invitationPermissionHandoffRef.current === user.id;
+    if (!onDashboard && !onPermissionsScreen) {
+      invitationPermissionHandoffRef.current = null;
+    }
+    if (user && !needsAppLockUnlock && !onPinScreen && !onPermissionsScreen
+      && (inAuthGroup || isWelcome || isOnboarding || invitationPermissionHandoff)) {
+      // Authentication can finish before first-install permissions. The
+      // permission screen's normal dashboard replacement must not abandon an
+      // invitation deferred for this existing account's explicit confirmation.
+      let cancelled = false;
+      (async () => {
+        const pending = await getPendingInvite();
+        const consumed = pending ? await isInviteConsumed(pending.token) : false;
+        if (cancelled) return;
+        // Only the permission screen's immediate handoff may redirect a
+        // dashboard visit. Later navigation from Alerts/SOS/acknowledgment
+        // must remain untouched even when an invitation is still pending.
+        invitationPermissionHandoffRef.current = null;
+        if (pending && !consumed) {
+          logRootDecision('authenticated_invitation_resumed', `/invite/${pending.token}`, 'navigate');
+          router.replace(`/invite/${pending.token}` as any);
+        } else if (inAuthGroup || isWelcome || isOnboarding) {
+          logRootDecision('authenticated_start_route', '/(tabs)/dashboard', 'navigate');
+          router.replace('/(tabs)/dashboard');
+        } else {
+          logRootDecision('all_navigation_gates_cleared', pathname || '/', 'ready');
+        }
+        setAppReadyForDeepLink(true);
+      })();
+      return () => { cancelled = true; };
     }
     // GATE CLEARED — let push.ts flush any queued notification
     // deep-link so the user lands directly on the acknowledge / alerts

@@ -295,6 +295,95 @@ async def test_existing_account_requires_explicit_family_confirmation():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["senior", "family"])
+async def test_invited_profile_completion_never_creates_an_independent_family(role):
+    db, send, inv, _, client = setup()
+    inv.update(invitee_name="", role=role)
+    async with client:
+        token = await request(client, send, invite_token=inv["token"])
+        profile = await verify(client, token)
+        assert profile.json() == {"needs_profile": True, "invited": True}
+        assert db.family_invites.rows[0]["status"] == "pending"
+        result = await verify(client, token, full_name="Invited Person", create_family=False)
+    assert result.status_code == 200, result.text
+    assert result.json()["user"]["family_group_id"] == "family"
+    assert result.json()["invite_pending"] is False
+    assert len(db.family_groups.rows) == 1
+    assert db.members.rows[0]["role"] == role
+    assert db.family_invites.rows[0]["status"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_transferred_self_role_and_confirmation_are_idempotent_without_deleting_records():
+    db, _, inv, user, client = setup()
+    inv.update(role="senior", relationship="Parent")
+    db.users.rows.append(copy.deepcopy(user))
+    db.family_groups.rows.append({"id": "solo", "owner_user_id": user["id"]})
+    db.members.rows.append({"id": "self", "user_id": user["id"], "owner_id": user["id"],
+                            "family_group_id": "solo", "role": "family"})
+    db.checkins.rows.append({"id": "history", "member_id": "self", "owner_id": user["id"],
+                            "family_group_id": "solo", "note": "preserved"})
+    payload = {"invite_token": inv["token"], "expected_family_id": "family",
+               "previous_family_id": "solo", "confirmed": True}
+    async with client:
+        first = await client.post("/api/auth/email-link/join", json=payload)
+        assert first.status_code == 200, first.text
+        member = db.members.rows[0]
+        assert member["role"] == "senior"
+        assert member["relationship"] == "Parent"
+        accepted_at = db.family_invites.rows[0]["accepted_at"]
+        member["relationship"] = "Updated after acceptance"
+        responses = await asyncio.gather(*[
+            client.post("/api/auth/email-link/join", json=payload) for _ in range(2)
+        ])
+    assert all(r.status_code == 200 for r in responses)
+    assert len(db.members.rows) == 1
+    assert db.members.rows[0]["relationship"] == "Updated after acceptance"
+    assert db.family_invites.rows[0]["accepted_at"] == accepted_at
+    assert db.checkins.rows == [{"id": "history", "member_id": "self", "owner_id": user["id"],
+                                 "family_group_id": "family", "note": "preserved"}]
+
+
+@pytest.mark.asyncio
+async def test_invite_stays_pending_until_membership_exists_and_failed_join_can_retry(monkeypatch):
+    db, _, inv, user, client = setup()
+    db.users.rows.append(copy.deepcopy(user))
+    original = fg.ensure_self_member_row
+
+    async def observe_pending(*args, **kwargs):
+        assert db.family_invites.rows[0]["status"] == "pending"
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(fg, "ensure_self_member_row", observe_pending)
+    payload = {"invite_token": inv["token"], "expected_family_id": "family",
+               "previous_family_id": "solo", "confirmed": True}
+    async with client:
+        db.members.fail = True
+        assert (await client.post("/api/auth/email-link/join", json=payload)).status_code == 500
+        assert db.family_invites.rows[0]["status"] == "pending"
+        assert db.users.rows[-1]["family_group_id"] == "solo"
+        db.members.fail = False
+        result = await client.post("/api/auth/email-link/join", json=payload)
+    assert result.status_code == 200, result.text
+    assert db.family_invites.rows[0]["status"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_an_old_accepted_invitation_cannot_move_an_account_again():
+    db, _, inv, user, client = setup()
+    db.users.rows.append(copy.deepcopy(user))
+    inv.update(status="accepted", accepted_by_user_id=user["id"])
+    async with client:
+        result = await client.post("/api/auth/email-link/join", json={
+            "invite_token": inv["token"], "expected_family_id": "family",
+            "previous_family_id": "solo", "confirmed": True,
+        })
+    assert result.status_code == 409
+    assert db.users.rows[-1]["family_group_id"] == "solo"
+    assert db.members.rows == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("changed", ["deleted", "recreated"])
 async def test_old_link_cannot_revive_deleted_identity(changed):
     db, send, _, user, client = setup()

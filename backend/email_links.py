@@ -109,6 +109,8 @@ async def join_verified(db, user, inv, target):
     if user["email"].strip().lower() != inv["invitee_email"].strip().lower():
         raise HTTPException(403, "This invitation is for a different email address. Sign in with the invited email.")
     old_gid = user.get("family_group_id")
+    if inv.get("status") == "accepted" and old_gid != target["id"]:
+        raise HTTPException(409, "This invitation was already accepted and your family has since changed. Ask for a new invitation.")
     if old_gid and old_gid != target["id"]:
         old = await db.family_groups.find_one({"id": old_gid})
         self_rows = await db.members.find(
@@ -152,7 +154,35 @@ async def join_verified(db, user, inv, target):
              "$inc": {"location_consent_generation": 1}},
         )
         await db.users.update_one({"id": user["id"]}, {"$set": {"location_sharing_enabled": False}})
+    membership_write = await db.users.update_one({"id": user["id"]}, {"$set": {
+        "family_group_id": target["id"],
+        "family_group_role": "owner" if target.get("owner_user_id") == user["id"] else "member",
+    }})
+    if membership_write.matched_count != 1:
+        raise RuntimeError("Family membership update did not match the invited account")
+    user["family_group_id"] = target["id"]
+    user["family_group_role"] = "owner" if target.get("owner_user_id") == user["id"] else "member"
+    member = await fg.ensure_self_member_row(db, user, target["id"], inv, caller="email_link")
+    if not member or member.get("user_id") != user["id"] or member.get("family_group_id") != target["id"]:
+        raise RuntimeError("Invitation acceptance did not leave the expected member row")
     if inv.get("status") != "accepted":
+        # A transferred self row already exists, so the creation-only helper
+        # deliberately leaves it unchanged. Apply the invitation's care role
+        # here, but never replay it over later edits on an accepted retry.
+        assigned = {}
+        if inv.get("role") in ("senior", "family"):
+            assigned["role"] = inv["role"]
+        if inv.get("relationship"):
+            assigned["relationship"] = inv["relationship"]
+        if assigned:
+            role_write = await db.members.update_one(
+                {"id": member["id"], "user_id": user["id"], "family_group_id": target["id"]},
+                {"$set": assigned},
+            )
+            if role_write.matched_count != 1:
+                raise RuntimeError("Invitation role update did not match the member row")
+        # All writes share the caller's transaction. Publish accepted only
+        # after both account membership and the assigned member role exist.
         result = await db.family_invites.update_one(
             {"id": inv["id"], "status": "pending", "expires_at": {"$gt": datetime.now(timezone.utc)}},
             {"$set": {"status": "accepted", "accepted_by_user_id": user["id"],
@@ -160,13 +190,6 @@ async def join_verified(db, user, inv, target):
         )
         if result.modified_count != 1:
             raise HTTPException(410, "This invitation is no longer available.")
-    await db.users.update_one({"id": user["id"]}, {"$set": {
-        "family_group_id": target["id"],
-        "family_group_role": "owner" if target.get("owner_user_id") == user["id"] else "member",
-    }})
-    user["family_group_id"] = target["id"]
-    user["family_group_role"] = "owner" if target.get("owner_user_id") == user["id"] else "member"
-    await fg.ensure_self_member_row(db, user, target["id"], inv, caller="email_link")
     if old_gid and old_gid != target["id"] and not await db.users.count_documents({"family_group_id": old_gid}):
         # A missing owner/account row is not proof that a family is empty.
         for collection in fg.DATA_COLLECTIONS:

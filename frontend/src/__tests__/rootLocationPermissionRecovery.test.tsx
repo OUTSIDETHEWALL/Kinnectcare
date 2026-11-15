@@ -24,6 +24,8 @@ describe('RootNav location recovery independent of notification onboarding', () 
   let realPermissionScreen: boolean;
   let segments: string[];
   let memberStoreApi: any;
+  let pendingInvite: { token: string; savedAt: string } | null;
+  let consumedInvites: Set<string>;
   const originalFetch = global.fetch;
   const originalBase = process.env.EXPO_PUBLIC_BACKEND_URL;
   const base = 'https://example.test';
@@ -52,11 +54,14 @@ describe('RootNav location recovery independent of notification onboarding', () 
     stateListeners = new Set();
     memberListeners = new Set();
     realPermissionScreen = false;
+    pendingInvite = null;
+    consumedInvites = new Set();
     segments = ['(tabs)', 'dashboard'];
     router = { replace: jest.fn((path: string) => {
       if (!realPermissionScreen) return;
       const next = path === '/(tabs)/dashboard' ? ['(tabs)', 'dashboard']
-        : path === '/(auth)/permissions' ? ['(auth)', 'permissions'] : ['index'];
+        : path === '/(auth)/permissions' ? ['(auth)', 'permissions']
+        : path.startsWith('/invite/') ? ['invite', '[token]'] : ['index'];
       if (next.join('/') === segments.join('/')) return;
       segments = next;
       tree?.update(<Root />);
@@ -195,8 +200,8 @@ describe('RootNav location recovery independent of notification onboarding', () 
       subscribeDisclaimerAck: jest.fn(() => () => {}),
     }));
     jest.doMock('../pendingInvite', () => ({
-      getPendingInvite: jest.fn(async () => null), setPendingInvite: jest.fn(async () => {}),
-      isInviteConsumed: jest.fn(async () => false),
+      getPendingInvite: jest.fn(async () => pendingInvite), setPendingInvite: jest.fn(async () => {}),
+      isInviteConsumed: jest.fn(async (token: string) => consumedInvites.has(token)),
     }));
     jest.doMock('../resumeDiagnostics', () => ({ logResumeDecision: jest.fn(), isAlertDismissed: jest.fn(async () => false) }));
     jest.doMock('../activeEmergency', () => ({ setActiveEmergency: jest.fn() }));
@@ -358,6 +363,53 @@ describe('RootNav location recovery independent of notification onboarding', () 
   });
 
   describe('real permissions screen → RootNav → native recovery', () => {
+    it('resumes an existing-account invitation after the actual first-install permission screens', async () => {
+      pendingInvite = { token: 'INV-ONBOARDING', savedAt: new Date().toISOString() };
+      auth.user.family_group_id = 'separate-solo-family';
+      await beginNotificationRequest();
+      notifications.requestPermissionsAsync.mockResolvedValue({ status: 'granted' });
+      await clickContinue();
+      expect(data.get('@kinnship/permissions_handled_v1')).toBe('true');
+      expect(router.replace).toHaveBeenCalledWith('/invite/INV-ONBOARDING');
+      expect(segments).toEqual(['invite', '[token]']);
+      expect(pendingInvite?.token).toBe('INV-ONBOARDING');
+    });
+
+    it('does not replay an accepted invitation when a new member finishes permissions', async () => {
+      pendingInvite = { token: 'INV-ACCEPTED', savedAt: new Date().toISOString() };
+      consumedInvites.add(pendingInvite.token);
+      await beginNotificationRequest();
+      notifications.requestPermissionsAsync.mockResolvedValue({ status: 'granted' });
+      await clickContinue();
+      expect(segments).toEqual(['(tabs)', 'dashboard']);
+      expect(router.replace).not.toHaveBeenCalledWith('/invite/INV-ACCEPTED');
+    });
+
+    it.each([['sos-sending'], ['(modals)', 'acknowledge'], ['(tabs)', 'alerts']])(
+      'does not redirect an active protected action to a saved invitation: %s',
+      async (...route) => {
+        pendingInvite = { token: 'INV-LATER', savedAt: new Date().toISOString() };
+        segments = route;
+        await mount();
+        expect(router.replace).not.toHaveBeenCalledWith('/invite/INV-LATER');
+      },
+    );
+
+    it.each([['sos-sending'], ['(modals)', 'acknowledge'], ['(tabs)', 'alerts']])(
+      'does not reopen a saved invitation when returning from %s to Dashboard',
+      async (...route) => {
+        pendingInvite = { token: 'INV-LATER', savedAt: new Date().toISOString() };
+        segments = route;
+        await mount();
+        router.replace.mockClear();
+        segments = ['(tabs)', 'dashboard'];
+        await act(async () => { tree!.update(<Root />); });
+        await flush();
+        expect(router.replace).not.toHaveBeenCalledWith('/invite/INV-LATER');
+        expect(segments).toEqual(['(tabs)', 'dashboard']);
+      },
+    );
+
     // Hold ownership-fetch completion until the real notification OS request
     // has begun. Otherwise startup could win the race before the old queue was
     // occupied and a test would falsely pass.

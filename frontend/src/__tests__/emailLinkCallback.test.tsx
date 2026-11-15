@@ -79,4 +79,30 @@ describe('real email callback screen cold and warm delivery', () => {
     expect(JSON.stringify(tree!.toJSON())).toContain('Create my family');
     expect(mockAccept).not.toHaveBeenCalled();
   });
+  it('completes an invited profile without offering or requesting a separate family', async () => {
+    mockPost.mockResolvedValueOnce({ data: { needs_profile: true, invited: true } });
+    mockURL = link('6'.repeat(64));
+    await act(async () => { tree = create(<Callback />); });
+    expect(JSON.stringify(tree!.toJSON())).toContain('Join my family');
+    expect(JSON.stringify(tree!.toJSON())).not.toContain('Create my family');
+    await act(async () => { tree!.root.findByType('TextInput' as any).props.onChangeText('Invited Person'); });
+    const button = tree!.root.findAllByType('TouchableOpacity' as any).find(node =>
+      node.findAllByType('Text' as any).some(text => text.children.join('') === 'Join my family'));
+    await act(async () => { await button!.props.onPress(); });
+    expect(mockPost.mock.calls[1][1]).toMatchObject({ full_name: 'Invited Person', create_family: false });
+    expect(mockAccept).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves deferred invitation context before installing an existing-account session', async () => {
+    const { setPendingInvite } = require('../pendingInvite');
+    mockPost.mockResolvedValueOnce({ data: {
+      access_token: 'session', user: { id: 'existing', family_group_id: 'solo' },
+      invite_pending: true, invite_token: 'INV-DEFERRED',
+    } });
+    mockURL = link('7'.repeat(64));
+    await act(async () => { tree = create(<Callback />); });
+    expect(setPendingInvite).toHaveBeenCalledWith('INV-DEFERRED');
+    expect(setPendingInvite.mock.invocationCallOrder.at(-1)).toBeLessThan(mockAccept.mock.invocationCallOrder[0]);
+    expect(mockReplace).toHaveBeenCalledWith('/invite/INV-DEFERRED');
+  });
 });

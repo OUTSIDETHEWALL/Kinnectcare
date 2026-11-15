@@ -15,6 +15,7 @@ export default function EmailLinkCallback() {
   const { loading, user, acceptEmailSession } = useAuth();
   const [error, setError] = useState('');
   const [needsProfile, setNeedsProfile] = useState(false);
+  const [invitedProfile, setInvitedProfile] = useState(false);
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const active = useRef(false);
@@ -29,8 +30,8 @@ export default function EmailLinkCallback() {
     active.current = true;
     setBusy(true); setError('');
     try {
-      const data = await redeemEmailLink(parsed.token, parsed.state, profile ? { fullName: name, createFamily: true } : undefined);
-      if (data.needs_profile) { setNeedsProfile(true); return; }
+      const data = await redeemEmailLink(parsed.token, parsed.state, profile ? { fullName: name, createFamily: !invitedProfile } : undefined);
+      if (data.needs_profile) { setInvitedProfile(!!data.invited); setNeedsProfile(true); return; }
       if (data.invite_token) {
         if (data.invite_pending) await setPendingInvite(data.invite_token);
         else { await markInviteConsumed(data.invite_token); await clearPendingInvite(); }
@@ -45,6 +46,7 @@ export default function EmailLinkCallback() {
     if (loading || active.current || !callbackKey || attempted.current === callbackKey) return;
     attempted.current = callbackKey;
     setNeedsProfile(false);
+    setInvitedProfile(false);
     void finish();
     // Callback lifetime is keyed to the actual link, not changing auth state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -55,9 +57,11 @@ export default function EmailLinkCallback() {
     {(busy || loading) && <ActivityIndicator size="large" />}
     {!parsed && !loading && <Text style={styles.copy}>Open the secure link in your email on the phone where you requested it.</Text>}
     {needsProfile && <>
-      <Text style={styles.copy}>There is no current account for this email. Enter your name to create a new family. Deleted history will not be restored. To join someone else’s family, open their invitation instead.</Text>
+      <Text style={styles.copy}>{invitedProfile
+        ? 'Enter your name to finish joining the family that invited you. You will not create a separate family.'
+        : 'There is no current account for this email. Enter your name to create a new family. Deleted history will not be restored. To join someone else’s family, open their invitation instead.'}</Text>
       <TextInput accessibilityLabel="Your name" placeholder="Your name" style={styles.input} value={name} onChangeText={setName} maxLength={80} />
-      <TouchableOpacity disabled={busy || !name.trim()} style={styles.button} onPress={() => finish(true)}><Text style={styles.buttonText}>Create my family</Text></TouchableOpacity>
+      <TouchableOpacity disabled={busy || !name.trim()} style={styles.button} onPress={() => finish(true)}><Text style={styles.buttonText}>{invitedProfile ? 'Join my family' : 'Create my family'}</Text></TouchableOpacity>
     </>}
     {!!error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
     {!!error && parsed && !needsProfile && !user && <TouchableOpacity disabled={busy} style={styles.button} onPress={() => finish()}><Text style={styles.buttonText}>Try again</Text></TouchableOpacity>}
