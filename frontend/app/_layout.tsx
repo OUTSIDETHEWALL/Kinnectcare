@@ -82,6 +82,7 @@ function RootNav() {
   // navigate away while the invite token is still being persisted.
   const [initialLinkChecked, setInitialLinkChecked] = useState(false);
   const [coldStartInviteToken, setColdStartInviteToken] = useState<string | null>(null);
+  const invitationPermissionHandoffRef = useRef<string | null>(null);
   const routeDecisionRef = useRef(0);
   const rootMountedRecordedRef = useRef(false);
 
@@ -1592,7 +1593,11 @@ function RootNav() {
     // screen is picked up as soon as segments change after its
     // router.replace('/(tabs)/dashboard').
     const onPermissionsScreen = inAuthGroup && authSubroute === 'permissions';
+    if (!user || invitationPermissionHandoffRef.current !== user.id) {
+      invitationPermissionHandoffRef.current = null;
+    }
     if (user && onPermissionsScreen) {
+      invitationPermissionHandoffRef.current = user.id;
       // Keep the exact pending medication occurrence queued until the user
       // finishes (or explicitly declines) setup. The screen is not readiness.
       setAppReadyForDeepLink(Platform.OS !== 'android');
@@ -1612,8 +1617,13 @@ function RootNav() {
     }
 
     const onDashboard = segments[0] === '(tabs)' && segments[1] === 'dashboard';
+    const invitationPermissionHandoff = !!user && onDashboard
+      && invitationPermissionHandoffRef.current === user.id;
+    if (!onDashboard && !onPermissionsScreen) {
+      invitationPermissionHandoffRef.current = null;
+    }
     if (user && !needsAppLockUnlock && !onPinScreen && !onPermissionsScreen
-      && (inAuthGroup || isWelcome || isOnboarding || onDashboard)) {
+      && (inAuthGroup || isWelcome || isOnboarding || invitationPermissionHandoff)) {
       // Authentication can finish before first-install permissions. The
       // permission screen's normal dashboard replacement must not abandon an
       // invitation deferred for this existing account's explicit confirmation.
@@ -1622,6 +1632,10 @@ function RootNav() {
         const pending = await getPendingInvite();
         const consumed = pending ? await isInviteConsumed(pending.token) : false;
         if (cancelled) return;
+        // Only the permission screen's immediate handoff may redirect a
+        // dashboard visit. Later navigation from Alerts/SOS/acknowledgment
+        // must remain untouched even when an invitation is still pending.
+        invitationPermissionHandoffRef.current = null;
         if (pending && !consumed) {
           logRootDecision('authenticated_invitation_resumed', `/invite/${pending.token}`, 'navigate');
           router.replace(`/invite/${pending.token}` as any);

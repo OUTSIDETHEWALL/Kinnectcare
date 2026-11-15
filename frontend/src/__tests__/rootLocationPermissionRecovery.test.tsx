@@ -395,6 +395,21 @@ describe('RootNav location recovery independent of notification onboarding', () 
       },
     );
 
+    it.each([['sos-sending'], ['(modals)', 'acknowledge'], ['(tabs)', 'alerts']])(
+      'does not reopen a saved invitation when returning from %s to Dashboard',
+      async (...route) => {
+        pendingInvite = { token: 'INV-LATER', savedAt: new Date().toISOString() };
+        segments = route;
+        await mount();
+        router.replace.mockClear();
+        segments = ['(tabs)', 'dashboard'];
+        await act(async () => { tree!.update(<Root />); });
+        await flush();
+        expect(router.replace).not.toHaveBeenCalledWith('/invite/INV-LATER');
+        expect(segments).toEqual(['(tabs)', 'dashboard']);
+      },
+    );
+
     // Hold ownership-fetch completion until the real notification OS request
     // has begun. Otherwise startup could win the race before the old queue was
     // occupied and a test would falsely pass.
