@@ -1541,9 +1541,20 @@ function RootNav() {
     // route stable. The pending token remains persisted for verifyOtp(), so
     // redirecting back to the invite card only interrupts authentication.
     if (!user && coldStartInviteToken && !inAuthGroup && !isInviteRoute && !isPublic) {
-      logRootDecision('cold_start_invite_ready', `/invite/${coldStartInviteToken}`, 'navigate');
-      router.replace(`/invite/${coldStartInviteToken}` as any);
-      return;
+      let cancelled = false;
+      (async () => {
+        // The invite screen may have dismissed/consumed this launch token.
+        // An in-memory initial URL is not authority to restore it.
+        const pending = await getPendingInvite();
+        if (cancelled) return;
+        if (pending?.token !== coldStartInviteToken) {
+          setColdStartInviteToken(null);
+          return;
+        }
+        logRootDecision('cold_start_invite_ready', `/invite/${coldStartInviteToken}`, 'navigate');
+        router.replace(`/invite/${coldStartInviteToken}` as any);
+      })();
+      return () => { cancelled = true; };
     }
     // DEFENSIVE: an unauthenticated user must NEVER be on a PIN
     // screen. PIN is per-account; without an account there's

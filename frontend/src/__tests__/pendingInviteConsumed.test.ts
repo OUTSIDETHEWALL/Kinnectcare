@@ -46,4 +46,21 @@ describe('consumed invitation replay guard', () => {
 
     expect((await getPendingInvite())?.token).toBe('INV-NEW456');
   });
+
+  test('an interrupted old release leaving pending and consumed records recovers after restart', async () => {
+    await setPendingInvite('INV-ACCEPTED');
+    await markInviteConsumed('INV-ACCEPTED');
+    // Same persisted storage, fresh module lifetime as after an OTA/restart.
+    jest.resetModules();
+    const reopened = require('../pendingInvite');
+    expect(await reopened.getPendingInvite()).toBeNull();
+    expect(await reopened.isInviteConsumed('INV-ACCEPTED')).toBe(true);
+    expect(mockStorage.has('@kinnship/pending_invite_v1')).toBe(false);
+  });
+
+  test('closing an older route preserves a different pending invitation', async () => {
+    await setPendingInvite('INV-NEW456');
+    await clearPendingInvite('INV-OLD123');
+    expect((await getPendingInvite())?.token).toBe('INV-NEW456');
+  });
 });

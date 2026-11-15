@@ -33,6 +33,8 @@ import {
 
 type VerifyResult = {
   valid: boolean;
+  already_member?: boolean;
+  unavailable?: boolean;
   family_name?: string;
   family_group_id?: string;
   inviter_name?: string | null;
@@ -51,22 +53,25 @@ export default function InviteAcceptScreen() {
   const [verify, setVerify] = useState<VerifyResult | null>(null);
   const [joining, setJoining] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
-  const [joined, setJoined] = useState(false);
-  const [alreadyMember, setAlreadyMember] = useState(false);
   const [consumed, setConsumed] = useState(false);
 
   // Verify the token. Persist it first so auth flows can resume
   // the invite even if this screen is closed mid-flow.
   useEffect(() => {
+    if (isLoading) return;
     let cancelled = false;
     (async () => {
       setVerifying(true);
+      setVerify(null);
+      setConsumed(false);
+      setJoinError(null);
       if (!token) {
         setVerify({ valid: false, reason: 'Missing invitation code.' });
         setVerifying(false);
         return;
       }
       if (await isInviteConsumed(token)) {
+        await clearPendingInvite(token);
         if (!cancelled) {
           console.info('[invite-accept] consumed_route_ignored');
           setConsumed(true);
@@ -74,13 +79,25 @@ export default function InviteAcceptScreen() {
         }
         return;
       }
+      if (cancelled) return;
       try { await setPendingInvite(token); } catch (_e) {}
+      if (cancelled) return;
       try {
-        const r = await api.post('/auth/email-link/invitation', { invite_token: token });
+        const r = await api.post(user ? '/auth/email-link/invitation/status' : '/auth/email-link/invitation', { invite_token: token });
+        if (cancelled) return;
+        if (r.data.already_member && user) {
+          await markInviteConsumed(token);
+          await clearPendingInvite(token);
+          if (r.data.family_group_id !== user.family_group_id) await refreshUser();
+          if (!cancelled) setConsumed(true);
+          return;
+        }
         if (!cancelled) setVerify(r.data);
       } catch (e: any) {
+        if ([400, 404, 410].includes(e?.response?.status)) await clearPendingInvite(token);
         if (!cancelled) setVerify({
           valid: false,
+          unavailable: ![400, 404, 410].includes(e?.response?.status),
           reason:
             e?.response?.data?.reason
             || e?.response?.data?.detail
@@ -91,7 +108,7 @@ export default function InviteAcceptScreen() {
       }
     })();
     return () => { cancelled = true; };
-  }, [token]);
+  }, [token, isLoading, user?.id, user?.family_group_id]);
 
   const familyName = verify?.family_name || 'their family';
   const inviterName = verify?.inviter_name;
@@ -116,20 +133,16 @@ export default function InviteAcceptScreen() {
     setJoining(true);
     setJoinError(null);
     try {
-      const response = await api.post('/auth/email-link/join', {
+      await api.post('/auth/email-link/join', {
         invite_token: token, expected_family_id: verify.family_group_id,
         previous_family_id: user.family_group_id || null, confirmed: true,
       });
-      const result = response.data;
-      await refreshUser();
+      // Acceptance is committed now. Retire navigation before a refresh that
+      // can fail or re-render the root; it must not offer this token again.
       await markInviteConsumed(token);
-      try { await clearPendingInvite(); } catch (_e) {}
-      if (result.already_member) {
-        setAlreadyMember(true);
-      } else {
-        setJoined(true);
-        setTimeout(() => router.replace('/(tabs)/dashboard'), 1200);
-      }
+      await clearPendingInvite(token);
+      await refreshUser();
+      router.replace('/(tabs)/dashboard');
     } catch (e: any) {
       setJoinError(
         e?.response?.data?.detail
@@ -147,9 +160,21 @@ export default function InviteAcceptScreen() {
   }, [consumed, isLoading, router, user]);
 
   const onDecline = async () => {
-    try { await clearPendingInvite(); } catch (_e) {}
-    router.replace('/');
+    await clearPendingInvite(token);
+    router.replace(user ? '/(tabs)/dashboard' : '/');
   };
+
+  const exitButton = (
+    <TouchableOpacity
+      testID="invite-invalid-close"
+      accessibilityRole="button"
+      style={styles.secondaryBtn}
+      onPress={onDecline}
+      activeOpacity={0.85}
+    >
+      <Text style={styles.secondaryBtnText}>{user ? 'Go to Family' : 'Back to Kinnship'}</Text>
+    </TouchableOpacity>
+  );
 
   // ── Loading ──────────────────────────────────────────────────────
   if (verifying || isLoading) {
@@ -158,6 +183,7 @@ export default function InviteAcceptScreen() {
         <View style={styles.centerBox}>
           <ActivityIndicator size="large" color={Colors.primary} />
           <Text style={styles.loadingText}>Checking your invitation…</Text>
+          {exitButton}
         </View>
       </SafeAreaView>
     );
@@ -174,63 +200,19 @@ export default function InviteAcceptScreen() {
     );
   }
 
-  // ── Already a member ─────────────────────────────────────────────
-  if (alreadyMember) {
-    return (
-      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-        <View style={styles.centerBox}>
-          <Text style={styles.emojiHero}>💚</Text>
-          <Text style={styles.title}>
-            You&apos;re already part of {familyName}
-          </Text>
-          <TouchableOpacity
-            testID="already-member-open-btn"
-            style={styles.primaryBtn}
-            onPress={() => router.replace('/(tabs)/dashboard')}
-            activeOpacity={0.85}
-          >
-            <Text style={styles.primaryBtnText}>Open Family</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  // ── Success (just joined) ─────────────────────────────────────────
-  if (joined) {
-    return (
-      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-        <View style={styles.centerBox}>
-          <Text style={styles.emojiHero}>🎉</Text>
-          <Text style={styles.title}>Welcome to the family!</Text>
-          <Text style={styles.subtitle}>
-            Opening {familyName}…
-          </Text>
-          <ActivityIndicator style={{ marginTop: 12 }} color={Colors.primary} />
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   // ── Invalid / expired invite ──────────────────────────────────────
   if (!verify?.valid) {
     return (
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
         <View style={styles.centerBox}>
           <Text style={styles.emojiHero}>😕</Text>
-          <Text style={styles.title}>This invitation is no longer active</Text>
+          <Text style={styles.title}>{verify?.unavailable
+            ? "We couldn't check this invitation"
+            : 'This invitation is no longer active'}</Text>
           <Text style={styles.subtitle}>
-            Ask the person who invited you to send a new one. It only takes
-            a moment.
+            {verify?.reason || 'This invitation is invalid or no longer available. Ask your family for a new invitation.'}
           </Text>
-          <TouchableOpacity
-            testID="invite-invalid-close"
-            style={styles.secondaryBtn}
-            onPress={() => router.replace('/')}
-            activeOpacity={0.85}
-          >
-            <Text style={styles.secondaryBtnText}>Close</Text>
-          </TouchableOpacity>
+          {exitButton}
         </View>
       </SafeAreaView>
     );
@@ -272,6 +254,7 @@ export default function InviteAcceptScreen() {
         {joinError ? (
           <View style={styles.errorBox}>
             <Text style={styles.errorText}>{joinError}</Text>
+            {exitButton}
           </View>
         ) : null}
 

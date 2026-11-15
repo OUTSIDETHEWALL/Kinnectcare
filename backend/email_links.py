@@ -222,6 +222,27 @@ def build_router(db, get_current_user, send_email, make_token, public_user):
         return {"valid": True, "family_name": group.get("name") or "Your family",
                 "family_group_id": group["id"], "inviter_name": inv.get("inviter_name")}
 
+    @router.post("/auth/email-link/invitation/status")
+    async def invitation_status(data: dict, current=Depends(get_current_user)):
+        # Read-only recovery for accepted links, including installations that
+        # lost their local consumed marker. Never join or repair membership.
+        user = await db.users.find_one({"id": current["id"]})
+        if not user:
+            raise HTTPException(401, "Please sign in again.")
+        token = fg.normalize_invite_code(str(data.get("invite_token") or "")[:128])
+        inv = await db.family_invites.find_one({"token": token})
+        if inv and user.get("family_group_id") and user["family_group_id"] == inv.get("family_group_id"):
+            group = await db.family_groups.find_one({"id": user["family_group_id"]})
+            if group:
+                return {"valid": True, "already_member": True,
+                        "family_name": group.get("name") or "Your family",
+                        "family_group_id": group["id"]}
+        # Do not disclose accepted/revoked invitation details to outsiders.
+        inv, group = await invitation(db, token)
+        return {"valid": True, "already_member": False,
+                "family_name": group.get("name") or "Your family",
+                "family_group_id": group["id"], "inviter_name": inv.get("inviter_name")}
+
     @router.post("/auth/email-link/request")
     async def request_link(data: LinkRequest, request: Request):
         # Use the actual peer, never a caller-controlled forwarding header.

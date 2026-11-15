@@ -52,6 +52,12 @@ export async function getPendingInvite(): Promise<PendingInvite | null> {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as PendingInvite;
     if (!parsed?.token) return null;
+    // Older releases (or an interrupted acceptance) can leave both records.
+    // Consumed evidence wins across restarts and OTA upgrades.
+    if (await isInviteConsumed(parsed.token)) {
+      await clearPendingInvite(parsed.token);
+      return null;
+    }
     const age = Date.now() - new Date(parsed.savedAt).getTime();
     if (Number.isFinite(age) && age > MAX_AGE_MS) {
       await clearPendingInvite();
@@ -63,8 +69,13 @@ export async function getPendingInvite(): Promise<PendingInvite | null> {
   }
 }
 
-export async function clearPendingInvite(): Promise<void> {
+export async function clearPendingInvite(token?: string): Promise<void> {
   try {
+    // Avoid clearing a different invitation already saved by another screen.
+    if (token) {
+      const raw = await AsyncStorage.getItem(KEY);
+      if (!raw || JSON.parse(raw)?.token?.trim().toUpperCase() !== token.trim().toUpperCase()) return;
+    }
     await AsyncStorage.removeItem(KEY);
   } catch (_e) { /* non-fatal */ }
 }

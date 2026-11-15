@@ -46,3 +46,15 @@ it over deliberate Dashboard navigation interrupts ordinary protected workflows.
 membership/role creation before invitation acceptance. Keep unrelated protected
 actions out of invitation redirects; validate the real root and permission-screen
 handoff, not only the token helpers. Never silently repair a live account.
+
+An invitation error after a successful join is navigation recovery, not permission
+to repeat a transfer or repair production membership. Recognize current membership
+read-only and keep every invitation error dismissible.
+
+**Why:** The owner reported a successful family join followed by an inactive-link
+screen whose Close button reopened the same screen, and expressly prohibited
+changing live membership or protected care features to resolve it.
+
+**How to apply:** Separate committed membership from local invitation navigation.
+Keep the recovery inside onboarding simplification, preserve GPS/SOS/medications,
+and obtain separate merge and release approval after reporting findings.

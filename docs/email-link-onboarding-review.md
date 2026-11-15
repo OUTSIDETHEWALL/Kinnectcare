@@ -1,5 +1,31 @@
 # Email-link onboarding — review and release boundaries
 
+## Invitation dismissal in the upcoming onboarding simplification
+
+Accepted invitations must not trap members on an inactive-link screen. This is
+part of onboarding simplification, not a membership repair or tracking change.
+
+- On acceptance, record the handled token and clear matching pending navigation
+  before refreshing the signed-in user. Dashboard navigation must not rely on a timer.
+- For a restored invitation route without a local marker (including an OTA or
+  app restart), use an authenticated, read-only server check of current membership.
+  If the user already belongs to the intended family, retire the route and open
+  the family dashboard. Do not join again or change roles.
+- Public preview must not disclose accepted invitations. Invalid, revoked and
+  expired links need a clear explanation and an exit that clears their pending
+  state: **Go to Family** when signed in, **Back to Kinnship** otherwise.
+- An initial launch URL must not restore an invitation dismissed during that
+  launch. Transient verification failures must also remain dismissible.
+- Keep the existing durable storage keys so earlier pending/consumed records are
+  reconciled after an OTA. Reopening a handled email invitation must not join twice.
+- Preserve GPS, SOS and medication behavior. Do not modify live family data.
+
+Release remains separately gated: review/merge approval, then backend deployment
+approval before the matching Android OTA. Automated screen, storage, root-navigation
+and read-only endpoint tests are not physical-device acceptance. After a separately
+approved release, verify restart, original invitation/email reopening and OTA
+activation on disposable accounts before attributing success to this correction.
+
 ## Baseline and diagnosis
 
 The verified completed Android baseline is Build 78, EAS build
