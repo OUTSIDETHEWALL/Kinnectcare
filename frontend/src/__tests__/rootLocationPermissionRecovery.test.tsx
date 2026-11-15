@@ -385,7 +385,7 @@ describe('RootNav location recovery independent of notification onboarding', () 
       expect(router.replace).not.toHaveBeenCalledWith('/invite/INV-ACCEPTED');
     });
 
-    it.each([['sos-sending'], ['medication-ack'], ['(tabs)', 'alerts']])(
+    it.each([['sos-sending'], ['(modals)', 'acknowledge'], ['(tabs)', 'alerts']])(
       'does not redirect an active protected action to a saved invitation: %s',
       async (...route) => {
         pendingInvite = { token: 'INV-LATER', savedAt: new Date().toISOString() };
