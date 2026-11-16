@@ -50,12 +50,14 @@ export default function AddFamilyMember() {
     | { kind: 'pending_invite'; inviteId: string };
   const [duplicateState, setDuplicateState] = useState<DuplicateState | null>(null);
   const [resending, setResending] = useState(false);
+  const [resendError, setResendError] = useState<string | null>(null);
 
   const emailValid = /\S+@\S+\.\S+/.test(email.trim());
   const canSubmit = !!name.trim() && emailValid && !loading;
 
   const onSubmit = async () => {
     setError(null);
+    setResendError(null);
     const n = name.trim();
     const e = email.trim().toLowerCase();
     if (n.length < 2) { setError('Please enter their name.'); return; }
@@ -103,6 +105,7 @@ export default function AddFamilyMember() {
     const inviteId = id || (duplicateState?.kind === 'pending_invite' ? duplicateState.inviteId : '');
     if (!inviteId || resending) return;
     setResending(true);
+    setResendError(null);
     try {
       const r = await resendFamilyInvite(inviteId);
       setSentInfo({
@@ -114,9 +117,9 @@ export default function AddFamilyMember() {
       setDuplicateState(null);
       setSuccessOpen(true);
     } catch (err: any) {
-      setDuplicateState(null);
-      setSuccessOpen(false);
-      setError(err?.response?.data?.detail || 'Could not resend. Please try again.');
+      const detail = err?.response?.data?.detail;
+      setResendError(typeof detail === 'string'
+        ? detail : 'Could not resend right now. Please try again. Your invitation is still saved.');
     } finally {
       setResending(false);
     }
@@ -343,8 +346,9 @@ export default function AddFamilyMember() {
             </Text>
             <Text style={styles.modalBody}>
               An invitation was already sent to {email.trim().toLowerCase()}.
-              You can resend it to deliver a fresh link.
+              You can resend the same invitation. The earlier email will still work.
             </Text>
+            {!!resendError && <Text accessibilityRole="alert" style={styles.errorText}>{resendError}</Text>}
             <TouchableOpacity
               testID="pending-invite-resend"
               style={[styles.modalPrimary, resending && { opacity: 0.7 }]}
@@ -394,6 +398,7 @@ export default function AddFamilyMember() {
                 The original invitation will still work if the email arrives later.
               </Text>
             )}
+            {!!resendError && <Text accessibilityRole="alert" style={styles.errorText}>{resendError}</Text>}
             {!sentInfo?.delivered && (
               <TouchableOpacity
                 testID="invite-delivery-retry"

@@ -48,6 +48,36 @@ code paths. The exact historical phone error remains unproven.
 - Successful email-session cleanup clears only the matching invitation, not a
   different invitation saved concurrently.
 
+## Authorized corrections after final review
+
+Two defects were identified in the final read-only review and separately
+authorized for correction in this draft PR:
+
+- **High, high confidence — removal authority:** a member who joined through
+  another path could retain a pending email invitation and reuse it after the
+  owner removed them. Removal now atomically revokes pending invitations for
+  that recipient and family, moves membership, and preserves the existing data
+  transfer scope. Any failed write rolls the entire removal back.
+- Recipient-invitation acceptance on retained `/family-group/join` and OTP
+  signup paths now uses the same transactional mailbox, membership, role,
+  ownership and dependent-record checks as the new email-link path. This is
+  necessary to prevent older installed clients from bypassing removal. Ordinary
+  OTP login and family-wide-code entry are unchanged.
+- Real-MongoDB barriers cover acceptance paused before its writes while removal
+  commits, and removal overlapping acceptance's uncommitted writes. Both orders
+  leave the recipient removed after successful removal; old invitations cannot
+  restore access. Accepted-token retries cannot move an account back either.
+- Current-member invitation recovery stays read-only. This is **not** a startup
+  migration, historical cleanup, or repair of existing production invitations.
+- **Medium, high confidence — resend recovery:** throttle/network errors now
+  stay inside the existing delivery-failure or duplicate-invitation prompt.
+  The original invitation ID and retry action remain available. Waiting and
+  retrying does not resubmit the form or generate a replacement invitation.
+
+**Scoped security assessment:** both authorized defects are corrected with
+passing regressions. This is not overall release approval: the full-suite
+baseline failures and physical-phone/Play-signing gates below remain outstanding.
+
 ## Security boundaries
 
 An invitation supplies family context, not mailbox identity. Signed-in users do
@@ -128,19 +158,31 @@ not an AAB change.
 
 ## Verification
 
-- **178 frontend tests passed across 12 suites:** invitation screens, both email
+- **181 frontend tests passed across the 12 invitation/onboarding suites:** invitation screens, both email
   callback/sign-in recovery paths, delivery/resend forms, durable pending and
   consumed markers, install-referrer handling, real root/permission handoff,
   family-role permissions, location disclosure, and SOS permission regressions.
   Jest used the existing `--forceExit` workaround for open handles; this is not
   evidence that the unrelated test-runner shutdown issue is fixed.
+- **Full frontend run:** 1,174 passed and 8 failed, across 100 passing and
+  4 failing suites (1,182 tests / 104 suites total). The same 8 failures were
+  reproduced from an isolated checkout of the PR's `main` base, with the same
+  installed dependencies: 5 in `deepAsyncTrace`, 1 in
+  `withAndroidStartupRecorder`, 1 in `schedulingTracing`, and 1 in
+  `legacyArtifactRepositoryAudit`. None of these tests or their protected
+  implementations were changed. The full suite is **not green**; reproducing
+  failures on the base is attribution evidence, not a waiver for public release.
 - **73 backend/template tests passed:** email identity boundaries, new/existing
   users, role preservation, read-only status recovery, ownership restrictions,
   failed delivery/resend, expiration/revocation, throttling, and escaping.
-- **16 real MongoDB integration tests passed** against a disposable loopback
+- **38 real MongoDB integration tests passed** against disposable loopback
   replica set with synthetic data only: transactional rollback, concurrent
   acceptance/redemption, retries, assigned roles, existing records and later
-  role edits. No production URI is used by these integration tests.
+  role edits, alternate-path entry followed by removal, revoked-token reuse,
+  overlapping removal/acceptance through all three recipient-invitation entry
+  points, removal rollback, owner authorization, preissued email verification,
+  retained OTP account creation and retained-client idempotency.
+  No production URI is used by these integration tests.
 - Python compilation and `git diff --check` passed.
 - Full TypeScript checking remains blocked by one pre-existing error in
   `src/__tests__/schedulingTracing.test.ts:68` (Jest callback tuple typing).
@@ -155,6 +197,9 @@ Reproduce:
 
 ```sh
 cd frontend
+# Full suite: retains the eight separately reproduced baseline failures above.
+npm test -- --runInBand --forceExit
+# Scoped invitation/onboarding check:
 npm test -- --runInBand --forceExit --runTestsByPath \
   src/__tests__/invitationDelivery.test.tsx \
   src/__tests__/inviteTerminalNavigation.test.tsx \
@@ -175,8 +220,27 @@ PYTHONPATH=backend:backend/tests python -m pytest \
   backend/tests/test_invitation_resend.py \
   tests/test_invitation_presentation.py -q
 KINNSHIP_RUN_LOCAL_MONGO_TESTS=1 PYTHONPATH=backend python -m pytest \
-  backend/tests/test_email_links_mongo_integration.py -q
+    backend/tests/test_email_links_mongo_integration.py \
+    backend/tests/test_invitation_removal_mongo.py -q
 ```
+
+## Release compatibility (read-only inspection)
+
+Deploy the approved Railway backend before the updated client, because the
+client needs the new resend endpoint. Verify health and approved synthetic
+acceptance before any separately authorized Android OTA.
+
+The live EAS production channel pointed only to the production branch, whose
+latest Android update used runtime `1.3.1-diagnostic81`. EAS records Build 81 as
+a store-distributed production-channel binary. Build 77 instead uses channel
+`diagnostic77` and runtime `1.3.1-diagnostic77`. The regular production OTA will
+not update that older binary. Confirm each phone's installed build/runtime and
+active update; do not infer installation from EAS publication.
+
+This PR introduces no native/dependency/config changes requiring an AAB for a
+compatible Build 81 installation. Different native link handlers would require
+separate build approval. An OTA does not alter Play tracks, but reaches every
+compatible installation on its target channel, not only selected test phones.
 
 ## Manual acceptance before release approval
 

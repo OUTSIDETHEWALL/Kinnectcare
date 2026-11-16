@@ -213,6 +213,30 @@ async def rate_limit(db, key: str, limit: int, window: int):
         raise HTTPException(429, "Please wait a minute before requesting another email link.")
 
 
+async def accept_legacy_invitation(db, token, *, user_id=None, new_user=None):
+    """Keep retained clients on the same transactional invitation boundary.
+
+    Called only after existing session/OTP identity proof. Never trust a caller's
+    cached family or invitation: removal can commit while a request is waiting.
+    """
+    async def transaction(session):
+        tx = SessionDatabase(db, session)
+        user = await tx.users.find_one({"id": user_id}) if user_id else None
+        inv, target = await invitation(tx, token, accepted_user=user["id"] if user else None)
+        if not user:
+            if new_user is None:
+                raise HTTPException(401, "Please sign in again.")
+            user = dict(new_user)
+            await tx.users.insert_one(user)
+        already_member = user.get("family_group_id") == target["id"]
+        await join_verified(tx, user, inv, target)
+        return {"user": user, "group": target, "invitation": inv,
+                "already_member": already_member}
+
+    async with await db.client.start_session() as session:
+        return await session.with_transaction(transaction)
+
+
 def build_router(db, get_current_user, send_email, make_token, public_user):
     router = APIRouter()
 

@@ -43,6 +43,8 @@ describe('real invitation delivery and recovery form', () => {
     mockResend.mockResolvedValue({ delivered: true, invite: { id: 'original-invite' } });
   });
   afterEach(async () => { if (tree) await act(async () => tree.unmount()); });
+  const modalVisible = (testID: string) => tree.root.findAllByType('Modal' as any)
+    .find((modal: any) => modal.findAllByProps({ testID }).length > 0)?.props.visible;
   async function send() {
     await act(async () => { tree = create(<Screen />); });
     await act(async () => {
@@ -66,6 +68,39 @@ describe('real invitation delivery and recovery form', () => {
     await act(async () => { await tree.root.findByProps({ testID: 'invite-delivery-retry' }).props.onPress(); });
     expect(JSON.stringify(tree.toJSON())).toContain('Please wait one minute');
     expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+  it.each(['throttle', 'network'])('keeps the original retry prompt through %s and allows retry after waiting', async kind => {
+    jest.useFakeTimers();
+    try {
+      mockResend.mockRejectedValueOnce(kind === 'throttle'
+        ? { response: { status: 429, data: { detail: 'Please wait one minute before resending this invitation.' } } }
+        : new Error('Network Error'));
+      await send();
+      await act(async () => { await tree.root.findByProps({ testID: 'invite-delivery-retry' }).props.onPress(); });
+      expect(modalVisible('invite-success-modal')).toBe(true);
+      expect(JSON.stringify(tree.toJSON())).toContain(kind === 'throttle' ? 'Please wait one minute' : 'Your invitation is still saved');
+      await act(async () => { jest.advanceTimersByTime(61000); });
+      await act(async () => { await tree.root.findByProps({ testID: 'invite-delivery-retry' }).props.onPress(); });
+      expect(mockResend.mock.calls).toEqual([['original-invite'], ['original-invite']]);
+      expect(mockSend).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(tree.toJSON())).toContain('Invitation sent');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+  it('keeps duplicate-invitation recovery open after a temporary resend failure', async () => {
+    mockSend.mockRejectedValue({ response: { data: { detail: {
+      code: 'pending_invite_exists', invite_id: 'original-invite',
+    } } } });
+    mockResend.mockRejectedValueOnce(new Error('Network Error'));
+    await send();
+    await act(async () => { await tree.root.findByProps({ testID: 'pending-invite-resend' }).props.onPress(); });
+    expect(modalVisible('pending-invite-modal')).toBe(true);
+    expect(JSON.stringify(tree.toJSON())).toContain('Your invitation is still saved');
+    await act(async () => { await tree.root.findByProps({ testID: 'pending-invite-resend' }).props.onPress(); });
+    expect(mockResend.mock.calls).toEqual([['original-invite'], ['original-invite']]);
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(tree.toJSON())).toContain('Invitation sent');
   });
   it('the family dashboard handles an existing invitation with same-link resend, not code entry', async () => {
     mockSend.mockRejectedValue({ response: { data: { detail: {

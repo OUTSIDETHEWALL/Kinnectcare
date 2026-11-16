@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 import pytest_asyncio
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
@@ -159,6 +159,13 @@ async def scenario(local_replica):
             db, current_user, send_email, lambda uid: "test-session:" + uid,
             lambda u: {k: v for k, v in u.items() if k != "_id"},
         ), prefix="/api")
+        async def family_actor(request: Request):
+            actor = await db.users.find_one({"id": request.headers.get("x-test-actor", "owner")})
+            if not actor:
+                raise HTTPException(401, "Synthetic session unavailable")
+            return actor
+
+        app.include_router(fg.build_router(db, family_actor), prefix="/api")
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
             base_url="https://test.invalid",

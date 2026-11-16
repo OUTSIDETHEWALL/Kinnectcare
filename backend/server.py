@@ -1789,6 +1789,42 @@ async def verify_otp(data: OtpVerify):
     purpose = rec.get("purpose", "login")
     user = await db.users.find_one({"email": email})
 
+    if purpose == "signup" and fg.normalize_invite_code(rec.get("invite_code") or "").startswith("INV-"):
+        # Retained Play clients can still redeem recipient invitations via OTP.
+        # Do not let this older path restore membership after a removal, or do
+        # any family/member writes outside the invitation transaction.
+        new_user = None
+        if not user:
+            tz = rec.get("timezone") or "UTC"
+            try:
+                ZoneInfo(tz)
+            except (ValueError, ZoneInfoNotFoundError):
+                tz = "UTC"
+            new_user = {
+                "_id": el.account_key(email), "id": str(uuid.uuid4()),
+                "email": email, "full_name": (rec.get("full_name") or "Friend").strip(),
+                "timezone": tz, "push_tokens": [], "location_sharing_enabled": False,
+                "created_at": datetime.now(timezone.utc),
+            }
+        result = await el.accept_legacy_invitation(
+            db, rec["invite_code"], user_id=user["id"] if user else None, new_user=new_user,
+        )
+        user = result["user"]
+        # Preserve the old new-signup invitation notification; existing-user OTP
+        # joins did not send it. Retries cannot create a second new account.
+        inv = result["invitation"]
+        inviter_id = inv.get("invited_by_user_id")
+        if new_user and inviter_id and inviter_id != user["id"]:
+            try:
+                await push_to_user(
+                    inviter_id, "✅ Family invite accepted",
+                    f"{user['full_name']} just joined your Kinnship family.",
+                    {"type": "family_join", "user_id": user["id"], "invite_id": inv["id"]},
+                )
+            except Exception:
+                logger.warning("inviter push failed")
+        return TokenResponse(access_token=create_access_token(user["id"]), user=_user_response(user))
+
     # === SIGNUP path: create the user + family group on the fly. ===
     if purpose == "signup" and not user:
         tz = rec.get("timezone") or "UTC"

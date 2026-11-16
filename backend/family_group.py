@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -542,6 +543,33 @@ def public_member_row(u: dict, owner_user_id: Optional[str]) -> dict:
     }
 
 
+async def notify_family_join(db, user, group, invite, push_to_user):
+    """Retain legacy join notifications, after transactional acceptance commits."""
+    if push_to_user is None:
+        return
+    inviter_id = invite.get("invited_by_user_id")
+    name = user.get("full_name") or "A new family member"
+    try:
+        for uid in await list_group_user_ids(db, group["id"]):
+            if uid not in (user["id"], inviter_id):
+                await push_to_user(
+                    uid, "👋 New family member joined",
+                    f"{name} just joined your Kinnship family.",
+                    {"type": "family_join", "user_id": user["id"]},
+                )
+    except Exception:
+        logger.warning("join push notify failed")
+    if inviter_id and inviter_id != user["id"]:
+        try:
+            await push_to_user(
+                inviter_id, "✅ Family invite accepted",
+                f"{name} just joined your Kinnship family.",
+                {"type": "family_join", "user_id": user["id"], "invite_id": invite["id"]},
+            )
+        except Exception:
+            logger.warning("inviter push failed")
+
+
 # ---------- Routes (registered on /api/family-group) ----------
 def build_router(
     db,
@@ -680,6 +708,18 @@ def build_router(
             "[invite-accept] user_authenticated user=%s",
             current.get("id", "")[:8],
         )
+        if code.startswith(PER_INVITE_PREFIX + "-"):
+            # Old installed clients must not bypass transactional acceptance or
+            # restore membership from a token read before the owner removed it.
+            from email_links import accept_legacy_invitation
+            result = await accept_legacy_invitation(db, code, user_id=current["id"])
+            if not result["already_member"]:
+                await notify_family_join(
+                    db, result["user"], result["group"],
+                    result["invitation"], push_to_user,
+                )
+            return {"ok": True, "already_member": result["already_member"],
+                    "group": public_group(result["group"])}
         # Accept BOTH the family-wide KINN- code AND a per-recipient
         # INV- token (issued via POST /family-group/invite).  The
         # resolver returns (group, invite_doc) — invite_doc is None
@@ -896,19 +936,43 @@ def build_router(
         data: FamilyGroupMemberRemove,
         current=Depends(get_current_user),
     ):
-        group = await require_group_owner(db, current)
-        gid = group["id"]
         if data.user_id == current["id"]:
             raise HTTPException(400, "Cannot remove yourself; use leave instead")
-        target_user = await db.users.find_one(
-            {"id": data.user_id, "family_group_id": gid}, {"_id": 0}
-        )
-        if not target_user:
-            raise HTTPException(404, "User is not in your family group")
-        # Move the removed user to a fresh solo group (preserves their own data).
-        solo = await create_group_for_user(db, target_user)
-        await transfer_data_to_group(db, target_user["id"], solo["id"])
-        return {"ok": True, "removed_user_id": data.user_id}
+        from email_links import SessionDatabase
+
+        async def transaction(session):
+            tx = SessionDatabase(db, session)
+            owner = await tx.users.find_one({"id": current["id"]})
+            if not owner:
+                raise HTTPException(401, "Please sign in again.")
+            group = await require_group_owner(tx, owner)
+            target_user = await tx.users.find_one(
+                {"id": data.user_id, "family_group_id": group["id"]}, {"_id": 0},
+            )
+            if not target_user:
+                raise HTTPException(404, "User is not in your family group")
+            # Both acceptance and removal write this user's membership and the
+            # invitation inside a transaction. A stale acceptance must retry
+            # against the revoked token, never commit after a successful removal.
+            email = (target_user.get("email") or "").strip()
+            if email:
+                await tx.family_invites.update_many({
+                    "family_group_id": group["id"], "status": "pending",
+                    "invitee_email": re.compile(r"^" + re.escape(email) + r"$", re.IGNORECASE),
+                }, {"$set": {"status": "revoked"}})
+            solo = await create_group_for_user(tx, target_user)
+            # Preserve the existing removal's data scope, but never swallow a
+            # partial write: membership, invitation revocation and moves settle
+            # together, or all roll back.
+            for collection in DATA_COLLECTIONS:
+                await tx[collection].update_many(
+                    {"owner_id": target_user["id"]},
+                    {"$set": {"family_group_id": solo["id"]}},
+                )
+            return {"ok": True, "removed_user_id": data.user_id}
+
+        async with await db.client.start_session() as session:
+            return await session.with_transaction(transaction)
 
     # ----- Email invitations (per-recipient tokens) -----
     async def deliver_invitation(inv, group):
