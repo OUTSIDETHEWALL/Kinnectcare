@@ -25,6 +25,7 @@ import {
   leaveFamilyGroup,
   removeFamilyMember,
   sendFamilyInvite,
+  resendFamilyInvite,
   listFamilyInvites,
   revokeFamilyInvite,
   FamilyGroupResponse,
@@ -129,22 +130,42 @@ export default function FamilyGroupScreen() {
       setInviteName('');
       setInviteEmail('');
       await loadInvites();
-      if (r.delivered) {
-        Alert.alert(
-          'Invite sent ✉',
-          `${name} will receive an email with their invite code:\n\n${r.invite.token}\n\nThis code expires in 7 days.`,
-        );
-      } else {
-        Alert.alert(
-          'Invite saved — email not delivered',
-          `Email transport unavailable right now. Share this code with ${name} manually:\n\n${r.invite.token}`,
-        );
-      }
+      showInvitationDelivery(name, r);
     } catch (e: any) {
-      setInviteError(e?.response?.data?.detail || e?.message || 'Failed to send invite');
+      const detail = e?.response?.data?.detail;
+      if (detail?.code === 'pending_invite_exists') {
+        setInviteOpen(false);
+        Alert.alert('Invitation already sent', 'Resend the same invitation? The earlier email will still work.', [
+          { text: 'Not now', style: 'cancel' },
+          { text: 'Resend invitation', onPress: async () => {
+            try { showInvitationDelivery(name, await resendFamilyInvite(detail.invite_id)); }
+            catch (error: any) { Alert.alert('Could not resend', error?.response?.data?.detail || 'Please try again in a minute.'); }
+          } },
+        ]);
+      } else {
+        setInviteError((typeof detail === 'string' ? detail : detail?.message) || e?.message || 'Failed to send invitation');
+      }
     } finally {
       setInviteBusy(false);
     }
+  };
+
+  const showInvitationDelivery = (name: string, result: { delivered: boolean; invite: FamilyInvite }) => {
+    if (result.delivered) {
+      Alert.alert('Invitation sent', `${name} can tap Join Family in their email. If they need to install Kinnship, they can use Download Kinnship and then return to that same email.`);
+      return;
+    }
+    Alert.alert(
+      'Email not delivered',
+      'Your invitation is saved. Wait one minute, then resend it. No invitation code needs to be entered.',
+      [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Resend invitation', onPress: async () => {
+          try { showInvitationDelivery(name, await resendFamilyInvite(result.invite.id)); }
+          catch (e: any) { Alert.alert('Could not resend', e?.response?.data?.detail || 'Please try again in a minute.'); }
+        } },
+      ],
+    );
   };
 
   const onRevokeInvite = (inv: FamilyInvite) => {
@@ -690,8 +711,9 @@ export default function FamilyGroupScreen() {
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Invite a family member</Text>
             <Text style={styles.modalBody}>
-              We&apos;ll email them a unique invite code. They can use it on the
-              Kinnship sign-up screen and will auto-join your family.
+              We&apos;ll email them Download Kinnship and Join Your Family buttons.
+              If they need to install the app, they can return to that same email
+              to join. No invitation code needs to be entered.
             </Text>
             <TextInput
               style={styles.input}

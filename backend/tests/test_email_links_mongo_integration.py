@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 import pytest_asyncio
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
@@ -159,6 +159,13 @@ async def scenario(local_replica):
             db, current_user, send_email, lambda uid: "test-session:" + uid,
             lambda u: {k: v for k, v in u.items() if k != "_id"},
         ), prefix="/api")
+        async def family_actor(request: Request):
+            actor = await db.users.find_one({"id": request.headers.get("x-test-actor", "owner")})
+            if not actor:
+                raise HTTPException(401, "Synthetic session unavailable")
+            return actor
+
+        app.include_router(fg.build_router(db, family_actor), prefix="/api")
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
             base_url="https://test.invalid",
@@ -181,6 +188,22 @@ async def snapshot(db):
 
 async def join(scenario):
     return await scenario.http.post("/api/auth/email-link/join", json=scenario.payload)
+
+
+@pytest.mark.asyncio
+async def test_real_concurrent_current_member_confirmation_preserves_later_role_edits(scenario):
+    s = scenario
+    await s.db.users.update_one({"id": "invitee"}, {"$set": {"family_group_id": "target", "family_group_role": "member"}})
+    await s.db.members.update_one({"id": "self"}, {"$set": {
+        "family_group_id": "target", "role": "family", "relationship": "Sibling",
+    }})
+    before = await s.db.members.find_one({"id": "self"})
+    responses = await asyncio.gather(*[join(s) for _ in range(5)])
+    assert all(r.status_code == 200 for r in responses), [r.text for r in responses]
+    assert await s.db.members.find_one({"id": "self"}) == before
+    invite = await s.db.family_invites.find_one({"id": "invitation"})
+    assert invite["status"] == "accepted" and invite["accepted_by_user_id"] == "invitee"
+    assert s.sent == []
 
 
 @pytest.mark.asyncio

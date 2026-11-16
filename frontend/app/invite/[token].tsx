@@ -8,15 +8,14 @@
  *   - One screen, one decision, one primary action.
  *   - The confirmation card is shown to ALL users — authenticated or not.
  *     No one is redirected without a conscious tap.
- *   - Unauthenticated → "Join Family" navigates to signup with family
- *     context pre-filled. verifyOtp() auto-joins after account creation.
- *   - Authenticated → "Join Family" calls /family-group/join directly.
- *   - Already a member → distinct friendly card; no error language.
- *   - "Decline" clears the pending invite and returns to welcome.
+ *   - Signed out → device-bound mailbox verification, preserving invitation.
+ *   - Signed in → explicit confirmation and transactional /auth/email-link/join.
+ *   - Already a member → read-only recognition and dashboard recovery.
+ *   - "Not now" clears pending navigation and returns to family/welcome.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, ActivityIndicator,
+  View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -54,6 +53,8 @@ export default function InviteAcceptScreen() {
   const [joining, setJoining] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [consumed, setConsumed] = useState(false);
+  const [verificationAttempt, setVerificationAttempt] = useState(0);
+  const joinInFlight = useRef(false);
 
   // Verify the token. Persist it first so auth flows can resume
   // the invite even if this screen is closed mid-flow.
@@ -108,13 +109,14 @@ export default function InviteAcceptScreen() {
       }
     })();
     return () => { cancelled = true; };
-  }, [token, isLoading, user?.id, user?.family_group_id]);
+  }, [token, isLoading, user?.id, user?.family_group_id, verificationAttempt]);
 
   const familyName = verify?.family_name || 'their family';
   const inviterName = verify?.inviter_name;
 
   const onJoin = async () => {
-    if (!verify?.valid || !token) return;
+    if (!verify?.valid || !token || joinInFlight.current) return;
+    joinInFlight.current = true;
 
     if (!user) {
       setJoining(true);
@@ -125,7 +127,7 @@ export default function InviteAcceptScreen() {
         await requestEmailLink({ inviteToken: token });
         router.replace({ pathname: '/(auth)/login', params: { invite_token: token, sent: '1' } } as any);
       } catch (e) { setJoinError(emailLinkError(e)); }
-      finally { setJoining(false); }
+      finally { joinInFlight.current = false; setJoining(false); }
       return;
     }
 
@@ -150,6 +152,7 @@ export default function InviteAcceptScreen() {
         || 'Could not accept invitation. Please try again.',
       );
     } finally {
+      joinInFlight.current = false;
       setJoining(false);
     }
   };
@@ -212,6 +215,16 @@ export default function InviteAcceptScreen() {
           <Text style={styles.subtitle}>
             {verify?.reason || 'This invitation is invalid or no longer available. Ask your family for a new invitation.'}
           </Text>
+          {verify?.unavailable && (
+            <TouchableOpacity
+              testID="invite-retry"
+              accessibilityRole="button"
+              style={styles.primaryBtn}
+              onPress={() => setVerificationAttempt(attempt => attempt + 1)}
+            >
+              <Text style={styles.primaryBtnText}>Try again</Text>
+            </TouchableOpacity>
+          )}
           {exitButton}
         </View>
       </SafeAreaView>
@@ -221,8 +234,7 @@ export default function InviteAcceptScreen() {
   // ── Confirmation card ─────────────────────────────────────────────
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-      <View style={styles.centerBox}>
-        <Text style={styles.emojiHero}>💚</Text>
+      <ScrollView contentContainerStyle={styles.centerBox}>
 
         <Text style={styles.inviterLine}>
           {inviterName ? `${inviterName} invited you` : "You're invited"}
@@ -241,14 +253,16 @@ export default function InviteAcceptScreen() {
         </View>
         {user && user.family_group_id !== verify.family_group_id && (
           <Text style={styles.subtitle}>
-            You are signed in as {user.full_name}. Joining {familyName} will leave your current family
-            and move your own reminders, check-ins and member records to this family.
-            Location sharing will be off until you choose to enable it again.
+            You are signed in as {user.full_name}.{'\n\n'}
+            {user.family_group_id
+              ? `Joining ${familyName} will leave your current family and move only your own member records, reminders and check-ins to this family. Your current family’s other records will stay there. Location sharing will be off until you choose to enable it again.`
+              : `Joining will add your account to ${familyName}.`}
           </Text>
         )}
         {!user && <Text style={styles.subtitle}>
-          To protect your family, we’ll send a fresh secure link to the invited email.
-          Tap that link on this phone. No password or code is needed.
+          To make sure it’s you, we’ll send a secure sign-in link to the invited email.
+          Open that email on this phone and tap Continue to Kinnship.
+          You won’t need a password, a code, or a separate family.
         </Text>}
 
         {joinError ? (
@@ -267,7 +281,8 @@ export default function InviteAcceptScreen() {
         >
           {joining
             ? <ActivityIndicator color={Colors.surface} />
-            : <Text style={styles.primaryBtnText}>Join Family</Text>}
+            : <Text style={styles.primaryBtnText}>{user && user.family_group_id !== verify.family_group_id
+              ? 'Confirm and join family' : 'Join Family'}</Text>}
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -276,9 +291,9 @@ export default function InviteAcceptScreen() {
           activeOpacity={0.7}
           style={styles.declineBtn}
         >
-          <Text style={styles.declineBtnText}>Decline</Text>
+          <Text style={styles.declineBtnText}>Not now</Text>
         </TouchableOpacity>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -286,7 +301,7 @@ export default function InviteAcceptScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
   centerBox: {
-    flex: 1, paddingHorizontal: 28, paddingVertical: 28,
+    flexGrow: 1, paddingHorizontal: 28, paddingVertical: 28,
     alignItems: 'center', justifyContent: 'center',
   },
   emojiHero: { fontSize: 56, marginBottom: 12 },
@@ -300,8 +315,8 @@ const styles = StyleSheet.create({
     textAlign: 'center', marginBottom: 20, lineHeight: 32,
   },
   subtitle: {
-    fontSize: 15, color: Colors.textSecondary, textAlign: 'center',
-    lineHeight: 22, marginBottom: 28, paddingHorizontal: 8,
+    fontSize: 18, color: Colors.textSecondary, textAlign: 'center',
+    lineHeight: 27, marginBottom: 28, paddingHorizontal: 8,
   },
   card: {
     width: '100%', maxWidth: 380,

@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, create, ReactTestRenderer } from 'react-test-renderer';
+import { act, create } from 'react-test-renderer';
 
 const mockStorage = new Map<string, string>();
 const mockPost = jest.fn();
@@ -14,7 +14,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
   removeItem: jest.fn(async (key: string) => { mockStorage.delete(key); }),
 }));
 jest.mock('react-native', () => ({
-  View: 'View', Text: 'Text', TouchableOpacity: 'TouchableOpacity',
+  View: 'View', Text: 'Text', TouchableOpacity: 'TouchableOpacity', ScrollView: 'ScrollView',
   ActivityIndicator: 'ActivityIndicator', StyleSheet: { create: (s: any) => s },
 }));
 jest.mock('react-native-safe-area-context', () => ({ SafeAreaView: 'SafeAreaView' }));
@@ -32,7 +32,7 @@ import { clearPendingInvite, getPendingInvite, isInviteConsumed, setPendingInvit
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 const pendingKey = '@kinnship/pending_invite_v1';
 describe('real invitation screen with durable navigation storage', () => {
-  let tree: ReactTestRenderer | undefined;
+  let tree: ReturnType<typeof create> | undefined;
   const mount = async () => { await act(async () => { tree = create(<Screen />); }); };
   const pressExit = async () => {
     await act(async () => { await tree!.root.findByProps({ testID: 'invite-invalid-close' }).props.onPress(); });
@@ -152,6 +152,43 @@ describe('real invitation screen with durable navigation storage', () => {
     expect(JSON.stringify(tree!.toJSON())).not.toContain('This invitation is no longer active');
     await pressExit();
     expect(await getPendingInvite()).toBeNull();
+  });
+
+  it('retries an offline invitation check in place without losing the invitation', async () => {
+    mockPost.mockRejectedValueOnce(new Error('offline'));
+    await mount();
+    expect((await getPendingInvite())?.token).toBe(mockToken);
+    await act(async () => { tree!.root.findByProps({ testID: 'invite-retry' }).props.onPress(); });
+    expect(mockPost).toHaveBeenCalledTimes(2);
+    expect(tree!.root.findByProps({ testID: 'invite-join-btn' })).toBeTruthy();
+  });
+
+  it('a secure signed-in user joins with no verification email, even on concurrent taps', async () => {
+    const { requestEmailLink } = require('../emailLinks');
+    mockUser = { id: 'invited-user', full_name: 'Invited Person', family_group_id: 'previous-family' };
+    await mount();
+    expect(JSON.stringify(tree!.toJSON())).toContain('Confirm and join family');
+    let resolve: any;
+    mockPost.mockImplementation(() => new Promise(done => { resolve = done; }));
+    const join = tree!.root.findByProps({ testID: 'invite-join-btn' }).props.onPress;
+    let pending: Promise<any>;
+    await act(async () => { pending = join(); void join(); });
+    expect(mockPost.mock.calls.filter(([path]) => path === '/auth/email-link/join')).toHaveLength(1);
+    await act(async () => { resolve({ data: { ok: true } }); await pending!; });
+    expect(requestEmailLink).not.toHaveBeenCalled();
+    expect(mockReplace).toHaveBeenCalledWith('/(tabs)/dashboard');
+  });
+
+  it('a signed-out invite requests proof only for that invitation, never family creation', async () => {
+    const { requestEmailLink } = require('../emailLinks');
+    mockUser = null;
+    await mount();
+    await act(async () => { await tree!.root.findByProps({ testID: 'invite-join-btn' }).props.onPress(); });
+    expect(requestEmailLink).toHaveBeenCalledWith({ inviteToken: mockToken });
+    expect(mockReplace).toHaveBeenCalledWith({
+      pathname: '/(auth)/login', params: { invite_token: mockToken, sent: '1' },
+    });
+    expect(mockPost.mock.calls.filter(([path]) => path === '/auth/email-link/join')).toHaveLength(0);
   });
 
   it('dismissing an old error screen preserves another saved invitation', async () => {

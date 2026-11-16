@@ -698,3 +698,8 @@ export async function revokeFamilyInvite(id: string): Promise<{ ok: boolean; sta
   const r = await api.delete(`/family-group/invites/${id}`);
   return r.data;
 }
+
+export async function resendFamilyInvite(id: string) {
+  const r = await api.post(`/family-group/invites/${encodeURIComponent(id)}/resend`);
+  return r.data;
+}

@@ -4,7 +4,11 @@ import { act, create } from 'react-test-renderer';
 const mockRequest = jest.fn();
 const mockPending = jest.fn();
 const mockConsumed = jest.fn();
+const mockReplace = jest.fn();
+let mockUser: any = null;
+let mockAuthLoading = false;
 let mockParams: any = {};
+jest.mock('../AuthContext', () => ({ useAuth: () => ({ user: mockUser, loading: mockAuthLoading }) }));
 jest.mock('react-native', () => ({
   ActivityIndicator: 'ActivityIndicator', ScrollView: 'ScrollView', Text: 'Text',
   TextInput: 'TextInput', TouchableOpacity: 'TouchableOpacity',
@@ -12,7 +16,7 @@ jest.mock('react-native', () => ({
 }));
 jest.mock('react-native-safe-area-context', () => ({ SafeAreaView: 'SafeAreaView' }));
 jest.mock('expo-router', () => ({
-  useRouter: () => ({ replace: jest.fn(), push: jest.fn() }),
+  useRouter: () => ({ replace: mockReplace, push: jest.fn() }),
   useLocalSearchParams: () => mockParams,
 }));
 jest.mock('../emailLinks', () => ({
@@ -30,14 +34,29 @@ describe('invitation context on sign-in recovery', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockParams = {};
+    mockUser = null; mockAuthLoading = false;
     mockPending.mockResolvedValue({ token: 'INV-SAVED' });
     mockConsumed.mockResolvedValue(false);
     mockRequest.mockResolvedValue(undefined);
   });
   afterEach(async () => { if (tree) await act(async () => tree.unmount()); });
   function sendButton() {
-    return tree.root.findAllByType('TouchableOpacity' as any).find(n => n.props.onPress && n.props.disabled !== undefined)!;
+    return tree.root.findAllByType('TouchableOpacity' as any).find((n: any) => n.props.onPress && n.props.disabled !== undefined)!;
   }
+  it('resumes an invitation using a restored secure session without another email', async () => {
+    mockUser = { id: 'existing' };
+    await act(async () => { tree = create(<Screen createFamily />); });
+    await act(async () => { await sendButton().props.onPress(); });
+    expect(mockReplace).toHaveBeenCalledWith('/invite/INV-SAVED');
+    expect(mockRequest).not.toHaveBeenCalled();
+    expect(JSON.stringify(tree.toJSON())).not.toContain('Create your family');
+  });
+  it('does not send email while the existing secure session is being restored', async () => {
+    mockAuthLoading = true;
+    await act(async () => { tree = create(<Screen />); });
+    await act(async () => { await sendButton().props.onPress(); });
+    expect(mockRequest).not.toHaveBeenCalled();
+  });
   it('uses durable invitation context even after route parameters are lost on create-family entry', async () => {
     await act(async () => { tree = create(<Screen createFamily />); });
     expect(JSON.stringify(tree.toJSON())).toContain('Join your family');

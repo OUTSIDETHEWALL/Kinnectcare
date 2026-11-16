@@ -23,6 +23,10 @@ import family_group as fg
 
 def matches(doc, query):
     for key, expected in query.items():
+        if key == "$or":
+            if not any(matches(doc, clause) for clause in expected):
+                return False
+            continue
         if key == "$nor":
             if any(matches(doc, clause) for clause in expected):
                 return False
@@ -30,6 +34,10 @@ def matches(doc, query):
         actual = doc.get(key)
         if isinstance(expected, dict):
             for operator, value in expected.items():
+                if operator == "$exists" and (key in doc) != value:
+                    return False
+                if operator == "$lt" and (actual is None or actual >= value):
+                    return False
                 if operator == "$ne" and actual == value:
                     return False
                 if operator == "$gt" and (actual is None or actual <= value):
@@ -220,6 +228,28 @@ async def test_public_preview_still_does_not_reveal_an_accepted_invitation():
     async with client:
         response = await client.post("/api/auth/email-link/invitation", json={"invite_token": inv["token"]})
     assert response.status_code == 410
+
+
+@pytest.mark.asyncio
+async def test_current_member_confirmation_consumes_pending_invite_without_overwriting_current_role():
+    db, send, inv, signed_in, client = setup()
+    signed_in["family_group_id"] = "family"
+    db.users.rows.append(copy.deepcopy(signed_in))
+    inv.update(role="senior", relationship="Parent")
+    db.members.rows.append({"id": "self", "user_id": signed_in["id"], "family_group_id": "family",
+                            "role": "family", "relationship": "Sibling", "preserve": "caregiver edits"})
+    before = copy.deepcopy(db.members.rows)
+    async with client:
+        payload = {"invite_token": inv["token"], "expected_family_id": "family",
+                   "previous_family_id": "family", "confirmed": True}
+        results = await asyncio.gather(*[
+            client.post("/api/auth/email-link/join", json=payload) for _ in range(3)
+        ])
+    assert all(r.status_code == 200 for r in results)
+    assert db.members.rows == before
+    assert db.family_invites.rows[0]["status"] == "accepted"
+    assert db.family_invites.rows[0]["accepted_by_user_id"] == signed_in["id"]
+    send.assert_not_called()
 
 
 @pytest.mark.asyncio

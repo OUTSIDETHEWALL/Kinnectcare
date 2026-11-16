@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -54,6 +55,8 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 from pymongo.errors import DuplicateKeyError
+
+import invitation_presentation
 
 logger = logging.getLogger(__name__)
 
@@ -362,135 +365,15 @@ def _invite_email_body(
     *, inviter_name: str, group_name: str, token: str, invitee_name: str,
     expires_at: datetime, relationship: Optional[str] = None,
 ) -> Tuple[str, str, str]:
-    """Build (subject, plain-text body, HTML body) for the invite email.
-
-    Modern mail clients (Gmail, Apple Mail, Outlook) render the HTML
-    version; plain-text clients and screen readers fall back to text.
-
-    Build #59 — completely redesigned for one-tap onboarding:
-      • A single, unmissable "Accept Invitation" button that opens
-        the app via the ``kinnship://invite/{token}`` deep link when
-        Kinnship is already installed.
-      • Immediately below: a Google Play Store button (configurable
-        via the ``KINNSHIP_PLAY_STORE_URL`` env var) so first-time
-        users are one tap away from installing.
-      • The manual invite code becomes a small "backup only" footer
-        instead of the visual hero — because most users should never
-        need to type it.
-
-    The possessive form always appends `'s` (e.g. "Charles" → "Charles's",
-    "Bob" → "Bob's") — modern Chicago Manual of Style.
-    """
-    inviter_possessive = f"{inviter_name}'s"
-    rel_line = f" as their {relationship}" if relationship else ""
-    subject = f"{inviter_name} invited you to join Kinnship"
-    exp_str = expires_at.strftime("%B %d, %Y")
-
-    # Deep link back into the app (see /app/frontend/app.json → scheme).
-    # Build #60 — the PRIMARY button in the email now points at the
-    # HTTPS landing page served by the backend at ``/invite/{token}``.
-    # That page tries ``kinnship://invite/{token}`` first (works
-    # instantly if the app is installed), and falls back to the Play
-    # Store (with install-referrer carrying the token) if not.  This
-    # is what closes the "fresh install can't accept an invite" gap:
-    # HTTPS always resolves in the user's mail client; ``kinnship://``
-    # does not.
-    web_base = (
-        os.environ.get("KINNSHIP_WEB_BASE")
-        or os.environ.get("BACKEND_BASE_URL")
-        or "https://kinnectcare-production.up.railway.app"
-    ).rstrip("/")
-    accept_url = f"{web_base}/invite/{token}"
-    # NOTE: since Build #60 the primary CTA points at the HTTPS
-    # landing page (accept_url), which itself tries kinnship://…
-    # and falls back to Play Store.  We no longer bake the raw
-    # scheme URL or Play Store URL into the email at all — both
-    # live behind the landing page.  Kept the import site of
-    # KINNSHIP_PLAY_STORE_URL / KINNSHIP_WEB_BASE in one place (the
-    # /invite/{token} route in server.py) to avoid config drift.
-
-    # ---- Plain-text version (fallback) ----
-    text_body = (
-        f"Hi {invitee_name},\n\n"
-        f"{inviter_name} has invited you to join {inviter_possessive} "
-        f"family on Kinnship{rel_line}.\n\n"
-        f"Tap the link below on your phone to join:\n"
-        f"  {accept_url}\n\n"
-        f"This invitation expires on {exp_str}.\n\n"
-        f"If this link doesn't work, contact the person who invited you "
-        f"and ask them to send a new one.\n\n"
-        f"If you didn't expect this email, you can safely ignore it — "
-        f"no account will be created.\n\n"
-        f"Welcome to the family,\n"
-        f"— The Kinnship team"
+    """Build invitation email content using the shared presentation helper."""
+    return invitation_presentation.invite_email_body(
+        inviter_name=inviter_name,
+        group_name=group_name,
+        token=token,
+        invitee_name=invitee_name,
+        expires_at=expires_at,
+        relationship=relationship,
     )
-
-    # ---- HTML version (primary, used by modern clients) ----
-    html_body = f"""<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>{subject}</title></head>
-<body style="margin:0;padding:0;background-color:#f4f6f4;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;line-height:1.5;">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color:#f4f6f4;padding:32px 12px;">
-  <tr><td align="center">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="560" style="max-width:560px;background-color:#ffffff;border-radius:14px;box-shadow:0 2px 8px rgba(27,94,53,0.08);overflow:hidden;">
-
-      <!-- Header band -->
-      <tr><td style="background-color:#1B5E35;padding:36px 32px 30px 32px;text-align:center;">
-        <div style="color:#ffffff;font-size:32px;font-weight:800;letter-spacing:-0.5px;line-height:1;">Kinnship</div>
-        <div style="color:#a5d6a7;font-size:13px;margin-top:8px;letter-spacing:0.8px;text-transform:uppercase;">Family safety · Senior wellness</div>
-      </td></tr>
-
-      <!-- Greeting + intro -->
-      <tr><td style="padding:36px 32px 8px 32px;">
-        <p style="margin:0 0 14px 0;font-size:18px;color:#1a1a1a;">Hi {invitee_name},</p>
-        <p style="margin:0 0 24px 0;font-size:17px;color:#333;line-height:1.55;">
-          <strong>{inviter_name}</strong> has invited you to join
-          <strong>{inviter_possessive} family</strong> on Kinnship{rel_line}.
-        </p>
-      </td></tr>
-
-      <!-- Primary CTA: Accept Invitation — HTTPS landing page.
-           This URL works everywhere the email client can open a
-           link: installed app is launched via custom-scheme redirect
-           on the landing page, and if not installed the page auto-
-           forwards to Play Store with the invite token as install
-           referrer.  Zero manual typing required either way. -->
-      <tr><td style="padding:8px 32px 8px 32px;">
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-          <tr><td align="center">
-            <a href="{accept_url}"
-               style="display:inline-block;background-color:#1B5E35;color:#ffffff;font-size:19px;font-weight:700;text-decoration:none;padding:18px 40px;border-radius:14px;box-shadow:0 4px 12px rgba(27,94,53,0.28);">
-              ✓ Accept Invitation
-            </a>
-          </td></tr>
-        </table>
-      </td></tr>
-
-      <tr><td style="padding:24px 32px 8px 32px;text-align:center;">
-        <p style="font-size:15px;color:#555;line-height:1.5;">Just installed Kinnship?
-          Return to this email and tap Accept Invitation again if your invitation
-          does not open automatically. No code is needed.</p>
-      </td></tr>
-
-      <!-- Expiry/ignore note -->
-      <tr><td style="padding:20px 32px 30px 32px;">
-        <p style="margin:0;font-size:13px;color:#666;line-height:1.55;">
-          This invitation expires on <strong>{exp_str}</strong>. If you didn't expect
-          this email, you can safely ignore it — no account will be created.
-        </p>
-      </td></tr>
-
-      <!-- Footer -->
-      <tr><td style="background-color:#fafbfa;padding:22px 32px;text-align:center;border-top:1px solid #e8eae8;">
-        <p style="margin:0;font-size:12px;color:#999;">Welcome to the Kinnship family,</p>
-        <p style="margin:4px 0 0 0;font-size:12px;color:#999;">— The Kinnship team</p>
-      </td></tr>
-    </table>
-  </td></tr>
-</table>
-</body>
-</html>"""
-    return subject, text_body, html_body
 
 
 def _default_group_name(user: dict) -> str:
@@ -660,6 +543,33 @@ def public_member_row(u: dict, owner_user_id: Optional[str]) -> dict:
     }
 
 
+async def notify_family_join(db, user, group, invite, push_to_user):
+    """Retain legacy join notifications, after transactional acceptance commits."""
+    if push_to_user is None:
+        return
+    inviter_id = invite.get("invited_by_user_id")
+    name = user.get("full_name") or "A new family member"
+    try:
+        for uid in await list_group_user_ids(db, group["id"]):
+            if uid not in (user["id"], inviter_id):
+                await push_to_user(
+                    uid, "👋 New family member joined",
+                    f"{name} just joined your Kinnship family.",
+                    {"type": "family_join", "user_id": user["id"]},
+                )
+    except Exception:
+        logger.warning("join push notify failed")
+    if inviter_id and inviter_id != user["id"]:
+        try:
+            await push_to_user(
+                inviter_id, "✅ Family invite accepted",
+                f"{name} just joined your Kinnship family.",
+                {"type": "family_join", "user_id": user["id"], "invite_id": invite["id"]},
+            )
+        except Exception:
+            logger.warning("inviter push failed")
+
+
 # ---------- Routes (registered on /api/family-group) ----------
 def build_router(
     db,
@@ -798,6 +708,18 @@ def build_router(
             "[invite-accept] user_authenticated user=%s",
             current.get("id", "")[:8],
         )
+        if code.startswith(PER_INVITE_PREFIX + "-"):
+            # Old installed clients must not bypass transactional acceptance or
+            # restore membership from a token read before the owner removed it.
+            from email_links import accept_legacy_invitation
+            result = await accept_legacy_invitation(db, code, user_id=current["id"])
+            if not result["already_member"]:
+                await notify_family_join(
+                    db, result["user"], result["group"],
+                    result["invitation"], push_to_user,
+                )
+            return {"ok": True, "already_member": result["already_member"],
+                    "group": public_group(result["group"])}
         # Accept BOTH the family-wide KINN- code AND a per-recipient
         # INV- token (issued via POST /family-group/invite).  The
         # resolver returns (group, invite_doc) — invite_doc is None
@@ -1014,21 +936,65 @@ def build_router(
         data: FamilyGroupMemberRemove,
         current=Depends(get_current_user),
     ):
-        group = await require_group_owner(db, current)
-        gid = group["id"]
         if data.user_id == current["id"]:
             raise HTTPException(400, "Cannot remove yourself; use leave instead")
-        target_user = await db.users.find_one(
-            {"id": data.user_id, "family_group_id": gid}, {"_id": 0}
-        )
-        if not target_user:
-            raise HTTPException(404, "User is not in your family group")
-        # Move the removed user to a fresh solo group (preserves their own data).
-        solo = await create_group_for_user(db, target_user)
-        await transfer_data_to_group(db, target_user["id"], solo["id"])
-        return {"ok": True, "removed_user_id": data.user_id}
+        from email_links import SessionDatabase
+
+        async def transaction(session):
+            tx = SessionDatabase(db, session)
+            owner = await tx.users.find_one({"id": current["id"]})
+            if not owner:
+                raise HTTPException(401, "Please sign in again.")
+            group = await require_group_owner(tx, owner)
+            target_user = await tx.users.find_one(
+                {"id": data.user_id, "family_group_id": group["id"]}, {"_id": 0},
+            )
+            if not target_user:
+                raise HTTPException(404, "User is not in your family group")
+            # Both acceptance and removal write this user's membership and the
+            # invitation inside a transaction. A stale acceptance must retry
+            # against the revoked token, never commit after a successful removal.
+            email = (target_user.get("email") or "").strip()
+            if email:
+                await tx.family_invites.update_many({
+                    "family_group_id": group["id"], "status": "pending",
+                    "invitee_email": re.compile(r"^" + re.escape(email) + r"$", re.IGNORECASE),
+                }, {"$set": {"status": "revoked"}})
+            solo = await create_group_for_user(tx, target_user)
+            # Preserve the existing removal's data scope, but never swallow a
+            # partial write: membership, invitation revocation and moves settle
+            # together, or all roll back.
+            for collection in DATA_COLLECTIONS:
+                await tx[collection].update_many(
+                    {"owner_id": target_user["id"]},
+                    {"$set": {"family_group_id": solo["id"]}},
+                )
+            return {"ok": True, "removed_user_id": data.user_id}
+
+        async with await db.client.start_session() as session:
+            return await session.with_transaction(transaction)
 
     # ----- Email invitations (per-recipient tokens) -----
+    async def deliver_invitation(inv, group):
+        if send_email is None:
+            return False
+        try:
+            subject, text_body, html_body = _invite_email_body(
+                inviter_name=inv["inviter_name"],
+                group_name=group.get("name") or "Family",
+                token=inv["token"],
+                invitee_name=inv["invitee_name"],
+                expires_at=inv["expires_at"],
+                relationship=inv.get("relationship"),
+            )
+            return bool(await send_email(
+                inv["invitee_email"], subject, text_body, html=html_body,
+                from_override=os.environ.get("RESEND_INVITE_FROM") or os.environ.get("RESEND_FROM"),
+            ))
+        except Exception:
+            logger.warning("family invitation email delivery failed")
+            return False
+
     @router.post("/invite")
     async def send_invite(
         data: FamilyInviteCreate,
@@ -1082,7 +1048,7 @@ def build_router(
 
         # Duplicate guard 2 — a valid pending invite already exists for
         # this email in this group.  Return a structured 409 so the
-        # client can offer "Resend Invitation" (revoke old → re-create)
+        # client can offer "Resend Invitation" using the SAME valid link,
         # rather than silently creating a second pending token.
         now_check = datetime.now(timezone.utc)
         existing_invite = await db.family_invites.find_one(
@@ -1108,7 +1074,6 @@ def build_router(
         now = datetime.now(timezone.utc)
         expires = now + timedelta(days=INVITE_TTL_DAYS)
         inviter_name = (current.get("full_name") or "A Kinnship user").strip()
-        group_name = group.get("name") or "Family"
 
         invite_doc = {
             "id": str(uuid.uuid4()),
@@ -1127,44 +1092,43 @@ def build_router(
             "expires_at": expires,
             "accepted_by_user_id": None,
             "accepted_at": None,
+            "last_email_attempt_at": now,
         }
         await db.family_invites.insert_one(invite_doc)
 
-        # Send the email out-of-band.  Don't fail the request if the
-        # transport is misconfigured — the invite row is persisted and
-        # the inviter can copy the token to share manually as fallback.
-        #
-        # `RESEND_INVITE_FROM` lets the operator use a different verified
-        # sender for invites than for OTPs (e.g. `Kinnship <hello@kinnship.app>`
-        # for invites, `Kinnship <noreply@resend.dev>` for OTPs).  Falls
-        # back to `RESEND_FROM` if not configured.
-        delivered = False
-        if send_email is not None:
-            try:
-                subject, text_body, html_body = _invite_email_body(
-                    inviter_name=inviter_name,
-                    group_name=group_name,
-                    token=token,
-                    invitee_name=name,
-                    expires_at=expires,
-                    relationship=relationship,
-                )
-                invite_from = (
-                    os.environ.get("RESEND_INVITE_FROM")
-                    or os.environ.get("RESEND_FROM")
-                )
-                delivered = bool(await send_email(
-                    email, subject, text_body,
-                    html=html_body, from_override=invite_from,
-                ))
-            except Exception as e:
-                logger.warning(f"family invite email send failed: {e}")
-                delivered = False
+        # Delivery failure is explicit and retryable, never a manual-entry flow.
+        delivered = await deliver_invitation(invite_doc, group)
         return {
             "ok": True,
             "delivered": delivered,
             "invite": _public_invite(invite_doc),
         }
+
+    @router.post("/invites/{invite_id}/resend")
+    async def resend_invite(invite_id: str, current=Depends(get_current_user)):
+        """Resend the original invitation without invalidating earlier emails."""
+        group = await require_group_owner(db, current)
+        now = datetime.now(timezone.utc)
+        query = {
+            "id": invite_id, "family_group_id": group["id"],
+            "invited_by_user_id": current["id"],
+            "status": "pending", "expires_at": {"$gt": now},
+        }
+        inv = await db.family_invites.find_one(query, {"_id": 0})
+        if not inv:
+            raise HTTPException(410, "This invitation is no longer active. Send a new invitation.")
+        # Claim one mail attempt, not membership. Concurrent taps cannot spam.
+        claimed = await db.family_invites.update_one({
+            **query,
+            "$or": [
+                {"last_email_attempt_at": {"$exists": False}},
+                {"last_email_attempt_at": {"$lt": now - timedelta(seconds=60)}},
+            ],
+        }, {"$set": {"last_email_attempt_at": now}})
+        if claimed.modified_count != 1:
+            raise HTTPException(429, "Please wait one minute before resending this invitation.")
+        delivered = await deliver_invitation(inv, group)
+        return {"ok": True, "delivered": delivered, "invite": _public_invite(inv)}
 
     @router.get("/invites")
     async def list_invites(current=Depends(get_current_user)):

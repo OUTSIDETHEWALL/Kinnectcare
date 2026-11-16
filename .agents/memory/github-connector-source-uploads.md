@@ -9,6 +9,16 @@ GitHub Git Data API blob writes through the connector can be rejected by the Rep
 
 **How to apply:** First confirm GitHub reads and unrelated writes work. Use Base64 blob encoding and isolate the rejected file by chunks. If an embedded script boundary is the trigger, construct that tag from harmless string fragments without changing runtime output, then rerun type and behavior checks before publishing.
 
+Preserve the commit message's final newline when reconstructing commits through
+Git Data, not just file contents. Pass that newline explicitly to create-commit.
+
+**Why:** Shell output transport trimmed the final newline, so a correct tree and
+matching author/date fields still produced a different commit ID. Including the
+original trailing newline reproduced the exact local commit without rewriting it.
+
+**How to apply:** Transport commit bytes with Base64 when exact formatting
+matters; verify the returned commit ID before creating or advancing any branch.
+
 Preserve exact source bytes when reconstructing local commits through Git Data:
 verify every uploaded blob, then the tree and commit IDs, before updating a ref.
 

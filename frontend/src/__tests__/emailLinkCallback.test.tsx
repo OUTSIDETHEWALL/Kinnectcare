@@ -17,6 +17,7 @@ jest.mock('expo-linking', () => ({ useURL: () => mockURL }));
 jest.mock('../EmailSignInScreen', () => ({ styles: {} }));
 jest.mock('../AuthContext', () => ({ useAuth: () => ({ loading: false, user: mockUser, acceptEmailSession: mockAccept }) }));
 jest.mock('../pendingInvite', () => ({
+  getPendingInvite: jest.fn().mockResolvedValue(null),
   setPendingInvite: jest.fn().mockResolvedValue(undefined),
   clearPendingInvite: jest.fn().mockResolvedValue(undefined),
   markInviteConsumed: jest.fn().mockResolvedValue(undefined),
@@ -71,6 +72,7 @@ describe('real email callback screen cold and warm delivery', () => {
     await act(async () => { tree = create(<Callback />); });
     expect(mockPost).not.toHaveBeenCalled();
     expect(mockAccept).not.toHaveBeenCalled();
+    expect(mockReplace).toHaveBeenCalledWith('/(tabs)/dashboard');
   });
   it('keeps missing-account creation explicit after email proof', async () => {
     mockPost.mockResolvedValueOnce({ data: { needs_profile: true } });
@@ -86,8 +88,8 @@ describe('real email callback screen cold and warm delivery', () => {
     expect(JSON.stringify(tree!.toJSON())).toContain('Join my family');
     expect(JSON.stringify(tree!.toJSON())).not.toContain('Create my family');
     await act(async () => { tree!.root.findByType('TextInput' as any).props.onChangeText('Invited Person'); });
-    const button = tree!.root.findAllByType('TouchableOpacity' as any).find(node =>
-      node.findAllByType('Text' as any).some(text => text.children.join('') === 'Join my family'));
+    const button = tree!.root.findAllByType('TouchableOpacity' as any).find((node: any) =>
+      node.findAllByType('Text' as any).some((text: any) => text.children.join('') === 'Join my family'));
     await act(async () => { await button!.props.onPress(); });
     expect(mockPost.mock.calls[1][1]).toMatchObject({ full_name: 'Invited Person', create_family: false });
     expect(mockAccept).toHaveBeenCalledTimes(1);
