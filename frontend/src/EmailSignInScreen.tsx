@@ -5,9 +5,11 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Colors } from './theme';
 import { emailLinkError, requestEmailLink } from './emailLinks';
 import { getPendingInvite, isInviteConsumed } from './pendingInvite';
+import { useAuth } from './AuthContext';
 
 export default function EmailSignInScreen({ createFamily = false }: { createFamily?: boolean }) {
   const router = useRouter();
+  const { user, loading: authLoading } = useAuth();
   const params = useLocalSearchParams<{ email?: string; invite_token?: string; family_name?: string; sent?: string }>();
   const [inviteToken, setInviteToken] = useState(String(params.invite_token || ''));
   const [inviteChecked, setInviteChecked] = useState(false);
@@ -37,8 +39,16 @@ export default function EmailSignInScreen({ createFamily = false }: { createFami
   }, [retryAfter]);
   const remaining = Math.max(0, Math.ceil((retryAfter - now) / 1000));
 
+  useEffect(() => {
+    if (!authLoading && user && inviteChecked) {
+      router.replace(inviteToken ? `/invite/${inviteToken}` as any : '/(tabs)/dashboard');
+    }
+  }, [authLoading, user?.id, inviteChecked, inviteToken]);
+
   async function send() {
-    if (!inviteChecked || busy || Date.now() < retryAfter) return;
+    // A restored authenticated session is already identity proof. Resume the
+    // invitation's explicit confirmation instead of sending redundant mail.
+    if (authLoading || user || !inviteChecked || busy || Date.now() < retryAfter) return;
     setError('');
     if (!inviteToken && !/^\S+@\S+\.\S+$/.test(email.trim())) {
       setError('Please enter your email address.'); return;
@@ -56,18 +66,18 @@ export default function EmailSignInScreen({ createFamily = false }: { createFami
   }
   return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
     <TouchableOpacity accessibilityRole="button" onPress={() => router.replace('/')} style={styles.linkButton}><Text style={styles.link}>Back</Text></TouchableOpacity>
-    <Text style={styles.title}>{sent ? 'Check your email' : inviteToken ? 'Join your family' : createFamily ? 'Create your family' : 'Welcome back'}</Text>
+    <Text style={styles.title}>{!inviteChecked || authLoading || user ? 'Opening Kinnship' : sent ? 'Check your email' : inviteToken ? 'Join your family' : createFamily ? 'Create your family' : 'Welcome back'}</Text>
     <Text style={styles.copy}>{sent
       ? 'Tap “Continue to Kinnship” in your email on this phone. No code to enter. The link works for 15 minutes.'
       : inviteToken ? 'We’ll send a secure link to the email address your family invited. Tap it on this phone to continue.'
       : 'We’ll email you a secure sign-in link. No password or code to remember.'}</Text>
-    {!sent && <>
+    {inviteChecked && !authLoading && !user && !sent && <>
       {createFamily && !inviteToken && <><Text style={styles.label}>Your name</Text><TextInput accessibilityLabel="Your name" style={styles.input} value={name} onChangeText={setName} maxLength={80} autoComplete="name" /></>}
       {!inviteToken && <><Text style={styles.label}>Email address</Text><TextInput accessibilityLabel="Email address" style={styles.input} value={email} onChangeText={setEmail} autoCapitalize="none" autoComplete="email" keyboardType="email-address" /></>}
     </>}
     {!!error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
-    <TouchableOpacity accessibilityRole="button" disabled={!inviteChecked || busy || remaining > 0} style={styles.button} onPress={send}>
-      {!inviteChecked || busy ? <ActivityIndicator color="white" /> : <Text style={styles.buttonText}>{remaining > 0 ? `Send again in ${remaining}s` : sent ? 'Send another email link' : 'Email me a secure link'}</Text>}
+    <TouchableOpacity accessibilityRole="button" disabled={authLoading || !!user || !inviteChecked || busy || remaining > 0} style={styles.button} onPress={send}>
+      {!inviteChecked || authLoading || user || busy ? <ActivityIndicator color="white" /> : <Text style={styles.buttonText}>{remaining > 0 ? `Send again in ${remaining}s` : sent ? 'Send another email link' : 'Email me a secure link'}</Text>}
     </TouchableOpacity>
     {sent && <Text style={styles.copy}>If it hasn’t arrived, check spam and wait one minute before sending again. Open your most recent link. You can close Kinnship while you check your email.</Text>}
     <Text style={styles.copy}>An invitation does not turn on location sharing. You choose whether to share during setup.</Text>

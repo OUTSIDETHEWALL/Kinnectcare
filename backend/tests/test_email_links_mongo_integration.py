@@ -184,6 +184,22 @@ async def join(scenario):
 
 
 @pytest.mark.asyncio
+async def test_real_concurrent_current_member_confirmation_preserves_later_role_edits(scenario):
+    s = scenario
+    await s.db.users.update_one({"id": "invitee"}, {"$set": {"family_group_id": "target", "family_group_role": "member"}})
+    await s.db.members.update_one({"id": "self"}, {"$set": {
+        "family_group_id": "target", "role": "family", "relationship": "Sibling",
+    }})
+    before = await s.db.members.find_one({"id": "self"})
+    responses = await asyncio.gather(*[join(s) for _ in range(5)])
+    assert all(r.status_code == 200 for r in responses), [r.text for r in responses]
+    assert await s.db.members.find_one({"id": "self"}) == before
+    invite = await s.db.family_invites.find_one({"id": "invitation"})
+    assert invite["status"] == "accepted" and invite["accepted_by_user_id"] == "invitee"
+    assert s.sent == []
+
+
+@pytest.mark.asyncio
 async def test_success_preserves_records_and_other_families(scenario, monkeypatch):
     s = scenario
     before = await snapshot(s.db)

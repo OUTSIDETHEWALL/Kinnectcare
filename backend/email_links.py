@@ -168,11 +168,12 @@ async def join_verified(db, user, inv, target):
     if inv.get("status") != "accepted":
         # A transferred self row already exists, so the creation-only helper
         # deliberately leaves it unchanged. Apply the invitation's care role
-        # here, but never replay it over later edits on an accepted retry.
+        # here, but never replay it over later edits on an accepted retry or
+        # an account that already belonged to the intended family.
         assigned = {}
-        if inv.get("role") in ("senior", "family"):
+        if old_gid != target["id"] and inv.get("role") in ("senior", "family"):
             assigned["role"] = inv["role"]
-        if inv.get("relationship"):
+        if old_gid != target["id"] and inv.get("relationship"):
             assigned["relationship"] = inv["relationship"]
         if assigned:
             role_write = await db.members.update_one(

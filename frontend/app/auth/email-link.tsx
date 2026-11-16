@@ -5,7 +5,7 @@ import * as Linking from 'expo-linking';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../../src/AuthContext';
 import { clearReceivedEmailLink, emailLinkError, getReceivedEmailLink, parseEmailLink, redeemEmailLink, subscribeEmailLinks } from '../../src/emailLinks';
-import { clearPendingInvite, markInviteConsumed, setPendingInvite } from '../../src/pendingInvite';
+import { clearPendingInvite, getPendingInvite, markInviteConsumed, setPendingInvite } from '../../src/pendingInvite';
 import { styles } from '../../src/EmailSignInScreen';
 
 export default function EmailLinkCallback() {
@@ -26,7 +26,14 @@ export default function EmailLinkCallback() {
   async function finish(profile = false) {
     if (!parsed || active.current || loading) return;
     // A link must not silently switch an already authenticated installation.
-    if (user) { setError('You are already signed in. Return to Kinnship, or sign out before using an email sign-in link.'); return; }
+    if (user) {
+      // Keep the secure current identity. An old sign-in email is not a reason
+      // to authenticate again or strand a member in a sign-in error screen.
+      const pending = await getPendingInvite();
+      clearReceivedEmailLink(parsed.token);
+      router.replace(pending ? `/invite/${pending.token}` as any : '/(tabs)/dashboard');
+      return;
+    }
     active.current = true;
     setBusy(true); setError('');
     try {
@@ -34,7 +41,7 @@ export default function EmailLinkCallback() {
       if (data.needs_profile) { setInvitedProfile(!!data.invited); setNeedsProfile(true); return; }
       if (data.invite_token) {
         if (data.invite_pending) await setPendingInvite(data.invite_token);
-        else { await markInviteConsumed(data.invite_token); await clearPendingInvite(); }
+        else { await markInviteConsumed(data.invite_token); await clearPendingInvite(data.invite_token); }
       }
       await acceptEmailSession(data);
       clearReceivedEmailLink(parsed.token);

@@ -58,6 +58,7 @@ from expo_push import (
 )
 import billing
 import family_group as fg
+import invitation_presentation
 import sms
 import med_scheduler
 import geocoding
@@ -7720,150 +7721,16 @@ from fastapi.responses import HTMLResponse  # noqa: E402
 
 @app.get("/invite/{token}", response_class=HTMLResponse, include_in_schema=False)
 async def invite_landing_page(token: str):
-    """HTML bridge: tries the custom scheme, falls back to Play Store.
-
-    Serves regardless of whether the token is valid — an invalid token
-    still needs to open the app so the app can show a friendly
-    "Invitation not valid" message rather than a browser 404.  If we
-    404'd invalid tokens here, we'd break the semantic contract that
-    every email link goes SOMEWHERE.
-    """
-    # Sanitize — keep only the alnum + hyphen chars an invite token can
-    # ever legitimately contain.  Prevents HTML injection via crafted
-    # URL like /invite/<script>alert(1)</script>.
-    safe = "".join(ch for ch in (token or "") if ch.isalnum() or ch == "-")[:128]
-
-    play_store_url = (
-        os.environ.get("KINNSHIP_PLAY_STORE_URL")
-        or "https://play.google.com/store/apps/details?id=app.kinnship.client"
+    """Show the explicit-choice invitation fallback without consuming the invite."""
+    return HTMLResponse(
+        content=invitation_presentation.invite_landing_html(token),
+        status_code=200,
+        headers={
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+        },
     )
-    # Play Store install-referrer carries the token so a fresh install
-    # can auto-resume the invite on first launch.
-    referrer = f"invite_token%3D{safe}"
-    if "?" in play_store_url:
-        play_store_url_with_referrer = f"{play_store_url}&referrer={referrer}"
-    else:
-        play_store_url_with_referrer = f"{play_store_url}?referrer={referrer}"
-
-    app_scheme_url = f"kinnship://invite/{safe}"
-
-    html = f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>Accept your Kinnship invitation</title>
-<style>
-  * {{ box-sizing: border-box; }}
-  html, body {{ margin: 0; padding: 0; height: 100%; }}
-  body {{
-    font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    background: #f4f6f4;
-    color: #1a1a1a;
-    -webkit-text-size-adjust: 100%;
-  }}
-  .wrap {{
-    min-height: 100%;
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    padding: 32px 20px;
-  }}
-  .card {{
-    width: 100%; max-width: 380px;
-    background: #fff; border-radius: 20px;
-    box-shadow: 0 4px 20px rgba(27,94,53,0.10);
-    overflow: hidden;
-  }}
-  .header {{
-    background: #1B5E35; color: #fff;
-    text-align: center; padding: 32px 24px 26px;
-  }}
-  .brand {{
-    font-size: 30px; font-weight: 800; letter-spacing: -0.5px;
-  }}
-  .tagline {{
-    color: #a5d6a7; font-size: 12px;
-    letter-spacing: 1px; text-transform: uppercase;
-    margin-top: 6px;
-  }}
-  .body {{ padding: 36px 24px 32px; text-align: center; }}
-  h1 {{
-    margin: 0 0 8px; font-size: 18px;
-    color: #1B5E35; font-weight: 700;
-  }}
-  /* CSS spinner */
-  .spinner {{
-    width: 44px; height: 44px;
-    border: 4px solid #d4e8d4;
-    border-top-color: #1B5E35;
-    border-radius: 50%;
-    animation: spin 0.75s linear infinite;
-    margin: 20px auto 8px;
-  }}
-  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-  /* Play Store button — hidden until JS reveals it */
-  .store-btn {{
-    display: none;
-    margin-top: 24px; width: 100%;
-    padding: 16px 20px;
-    background: #1B5E35; color: #fff;
-    font-size: 16px; font-weight: 700;
-    text-align: center; text-decoration: none;
-    border-radius: 14px;
-    box-shadow: 0 4px 14px rgba(27,94,53,0.22);
-  }}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="card">
-    <div class="header">
-      <div class="brand">Kinnship</div>
-      <div class="tagline">Family safety · Senior wellness</div>
-    </div>
-    <div class="body">
-      <h1 id="heading">Opening Kinnship…</h1>
-      <div class="spinner" id="spinner"></div>
-      <a id="storeBtn" class="store-btn" href="{play_store_url_with_referrer}">
-        Open in Play Store
-      </a>
-    </div>
-  </div>
-</div>
-
-<script>
-  (function() {{
-    var scheme  = "{app_scheme_url}";
-    var store   = "{play_store_url_with_referrer}";
-    var heading = document.getElementById("heading");
-    var spinner = document.getElementById("spinner");
-    var storeBtn = document.getElementById("storeBtn");
-
-    var didBackground = false;
-    document.addEventListener("visibilitychange", function() {{
-      if (document.hidden) didBackground = true;
-    }});
-
-    // Try the custom scheme. If the app is installed, it opens and the
-    // page is backgrounded. We detect success via visibilitychange.
-    setTimeout(function() {{ window.location.href = scheme; }}, 120);
-
-    // After 2 s, if still foreground, the app isn't installed.
-    // Reveal the Play Store button and auto-navigate after a brief pause
-    // so the user sees where they're going.
-    setTimeout(function() {{
-      if (!didBackground) {{
-        if (spinner)  spinner.style.display  = "none";
-        if (heading)  heading.textContent    = "Get Kinnship from Google Play";
-        if (storeBtn) storeBtn.style.display = "block";
-        setTimeout(function() {{ window.location.href = store; }}, 1800);
-      }}
-    }}, 2000);
-  }})();
-</script>
-</body>
-</html>"""
-    return HTMLResponse(content=html, status_code=200)
 
 app.add_middleware(
     CORSMiddleware, allow_credentials=True, allow_origins=["*"],

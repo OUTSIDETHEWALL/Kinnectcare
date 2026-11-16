@@ -16,8 +16,7 @@
  *   4. Caregiver returns to Dashboard where the pending invite now
  *      shows as "🟡 Invitation Pending" until accepted.
  *
- * Manual code-typing is preserved as a fallback ONLY — the primary
- * onboarding path is one tap.
+ * Email delivery failures offer same-link resend, never manual entry.
  */
 import { useState } from 'react';
 import {
@@ -28,7 +27,7 @@ import { useRouter } from 'expo-router';
 import { Icon } from '../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../src/theme';
-import { sendFamilyInvite, revokeFamilyInvite, isPaywall } from '../src/api';
+import { sendFamilyInvite, resendFamilyInvite, isPaywall } from '../src/api';
 
 type Role = 'family' | 'senior';
 
@@ -43,7 +42,7 @@ export default function AddFamilyMember() {
   const [error, setError] = useState<string | null>(null);
   const [paywallMsg, setPaywallMsg] = useState<string | null>(null);
   const [successOpen, setSuccessOpen] = useState(false);
-  const [sentInfo, setSentInfo] = useState<{ name: string; email: string; delivered: boolean; token: string } | null>(null);
+  const [sentInfo, setSentInfo] = useState<{ name: string; email: string; delivered: boolean; inviteId: string } | null>(null);
 
   // Duplicate-invite state: set when the backend returns a structured 409.
   type DuplicateState =
@@ -73,7 +72,7 @@ export default function AddFamilyMember() {
         name: n,
         email: e,
         delivered: !!r.delivered,
-        token: r.invite?.token || '',
+        inviteId: r.invite?.id || '',
       });
       setSuccessOpen(true);
     } catch (err: any) {
@@ -99,28 +98,24 @@ export default function AddFamilyMember() {
     }
   };
 
-  // Resend: revoke the existing pending invite then re-create.
-  const onResend = async () => {
-    if (!duplicateState || duplicateState.kind !== 'pending_invite') return;
+  // Reuse the original valid link so earlier invitation emails keep working.
+  const onResend = async (id?: string) => {
+    const inviteId = id || (duplicateState?.kind === 'pending_invite' ? duplicateState.inviteId : '');
+    if (!inviteId || resending) return;
     setResending(true);
     try {
-      await revokeFamilyInvite(duplicateState.inviteId);
-      const r = await sendFamilyInvite({
-        name: name.trim(),
-        email: email.trim().toLowerCase(),
-        relationship: relationship.trim() || undefined,
-        role,
-      });
+      const r = await resendFamilyInvite(inviteId);
       setSentInfo({
         name: name.trim(),
         email: email.trim().toLowerCase(),
         delivered: !!r.delivered,
-        token: r.invite?.token || '',
+        inviteId: r.invite?.id || inviteId,
       });
       setDuplicateState(null);
       setSuccessOpen(true);
     } catch (err: any) {
       setDuplicateState(null);
+      setSuccessOpen(false);
       setError(err?.response?.data?.detail || 'Could not resend. Please try again.');
     } finally {
       setResending(false);
@@ -150,9 +145,9 @@ export default function AddFamilyMember() {
             <Text style={styles.heroEmoji}>✉️</Text>
             <Text style={styles.heroTitle}>Send them an invitation</Text>
             <Text style={styles.heroSub}>
-              We&apos;ll email a one-tap join link. They open the email, tap
-              <Text style={{ fontWeight: '800' }}> Accept Invitation</Text>,
-              and join your family automatically.
+              We&apos;ll email two clear buttons: Download Kinnship and
+              <Text style={{ fontWeight: '800' }}> Join Your Family</Text>.
+              They won&apos;t need to copy or enter an invitation code.
             </Text>
           </View>
 
@@ -353,7 +348,7 @@ export default function AddFamilyMember() {
             <TouchableOpacity
               testID="pending-invite-resend"
               style={[styles.modalPrimary, resending && { opacity: 0.7 }]}
-              onPress={onResend}
+              onPress={() => onResend()}
               disabled={resending}
               activeOpacity={0.85}
             >
@@ -383,23 +378,31 @@ export default function AddFamilyMember() {
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard} testID="invite-success-modal">
             <Text style={styles.modalEmoji}>✅</Text>
-            <Text style={styles.modalTitle}>Invitation sent!</Text>
+            <Text style={styles.modalTitle}>{sentInfo?.delivered ? 'Invitation sent' : 'Email not delivered'}</Text>
             {sentInfo?.delivered ? (
               <Text style={styles.modalBody}>
                 We emailed <Text style={{ fontWeight: '700' }}>{sentInfo.name}</Text>{'\n'}
                 at <Text style={{ fontWeight: '700' }}>{sentInfo.email}</Text>.{'\n\n'}
                 Ask them to open the email and tap the big green
-                <Text style={{ fontWeight: '800' }}> Accept Invitation </Text>
-                button — they&apos;ll join automatically.
+                <Text style={{ fontWeight: '800' }}> Join Family </Text>
+                button. If needed, they can download Kinnship first and return to that same email.
               </Text>
             ) : (
               <Text style={styles.modalBody}>
                 We saved the invitation, but couldn&apos;t deliver the email
-                right now.{'\n\n'}Share this backup code with{' '}
-                <Text style={{ fontWeight: '700' }}>{sentInfo?.name}</Text>{' '}
-                so they can enter it manually during sign-up:{'\n\n'}
-                <Text style={styles.tokenCode}>{sentInfo?.token}</Text>
+                right now. Please wait one minute and tap Resend invitation.
+                The original invitation will still work if the email arrives later.
               </Text>
+            )}
+            {!sentInfo?.delivered && (
+              <TouchableOpacity
+                testID="invite-delivery-retry"
+                disabled={resending}
+                style={styles.modalPrimary}
+                onPress={() => onResend(sentInfo?.inviteId)}
+              >
+                <Text style={styles.modalPrimaryText}>{resending ? 'Sending…' : 'Resend invitation'}</Text>
+              </TouchableOpacity>
             )}
             <TouchableOpacity
               testID="invite-success-done"
