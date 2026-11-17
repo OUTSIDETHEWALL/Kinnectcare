@@ -260,3 +260,17 @@ mtime_ms = 1792972184722
 storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/e1cb64cb-d0c8-4519-900c-2433060f951f/546529d2-eaed-46a2-94ef-091a7ef02693"
 storage_version_token = "1792972194473321"
 content_type = "text/html"
+
+[[outputs]]
+id = "lJ-YuZG0k9-mZnWiLmasi"
+uri = "file://frontend/.expo/release-receipts/b8873460-publication-receipt.txt"
+type = "text"
+title = "Android OTA publication receipt"
+description = "Verified update ID, Build 81 runtime, production channel, approved source commit and publication time."
+logical_id = "e3d8eb21-bbee-40a8-a593-2bfa2e1b73ad"
+content_hash = "sha256:0debef3f4b53d6201063bb46a0844cbbf1a5fc38b0b94de4301588bf79c2e7aa"
+size = 757
+mtime_ms = 1794945927814
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:8ec7b323-74a1-4e9d-94a2-ddc404bedebd/e3d8eb21-bbee-40a8-a593-2bfa2e1b73ad/2e924ecd-a5f7-42c8-be1d-264ab628526a"
+storage_version_token = "1794945944498256"
+content_type = "text/plain"
