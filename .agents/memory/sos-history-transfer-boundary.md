@@ -3,6 +3,19 @@ name: SOS history transfer boundary
 description: Approved history-retention constraints and the concurrency boundary for family transitions
 ---
 
+## Current product retention decision
+
+Resolved SOS history is retained for 30 days and then automatically expires.
+Permanent SOS retention is not required. Keep the existing production MongoDB
+TTL index unchanged unless the user separately authorizes a change.
+
+**Why:** The user explicitly chose 30-day retention instead of permanent history.
+
+**How to apply:** Transfer-time preservation below means preserving records
+within their retention period, not indefinite retention. The earlier proposal
+to remove the alerts TTL is superseded. Verify active-SOS safety separately:
+the existing filter checks only that resolved_at exists, not resolved status.
+
 Qualifying resolved self-SOS history must stay unchanged in its existing family
 when its subject joins or is removed from a family. Both verified account-ID and
 self-member-ID subjects are legitimate. Historical ownership is not authority
@@ -49,9 +62,9 @@ does not disable a TTL index already installed in a database.
 **Why:** An existing Mongo index can delete history without any application
 writer running, even after the startup migration that installed it is retired.
 
-**How to apply:** Treat existing-index verification and retirement as an
-explicit, separately approved operational step; do not infer production index
-state from source changes or from a fresh test database.
+**How to apply:** Verify existing index metadata rather than inferring it from
+source or a fresh test database. Under the current product decision, do not
+retire the existing index merely because it expires resolved SOS.
 
 Railway's read-only project connector can identify the live service by its
 domain and source branch, but its OAuth variable listing returns names only.
