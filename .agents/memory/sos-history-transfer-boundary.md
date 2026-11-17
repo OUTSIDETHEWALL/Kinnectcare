@@ -41,3 +41,14 @@ enroll ordinary GPS, battery sample persistence or polling in structural fences.
 Measure SOS persistence overhead, keep external emergency delivery outside retry
 callbacks, preserve fresh post-acquisition authority, and require separate merge
 and release approval.
+
+When preserving SOS history, inspect automatic expiration and unrelated
+startup repairs as well as family endpoints. Removing TTL creation from code
+does not disable a TTL index already installed in a database.
+
+**Why:** An existing Mongo index can delete history without any application
+writer running, even after the startup migration that installed it is retired.
+
+**How to apply:** Treat existing-index verification and retirement as an
+explicit, separately approved operational step; do not infer production index
+state from source changes or from a fresh test database.

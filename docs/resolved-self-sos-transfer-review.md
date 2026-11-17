@@ -1,8 +1,44 @@
 # Resolved self-SOS transfer correction — draft, NOT CLEAN
 
+## Corrective revision after the independent review of `35e0c02a`
+
+- Alert listing now reads a consistent snapshot and rechecks current family
+  authority before returning SOS details. Acknowledgment checks authority
+  under the family fence; the already-resolved SOS response also takes the
+  fenced path. Clear-all does not delete SOS.
+- Leave shares the verified join departure and self-record movement rules;
+  it rejects unresolved or ambiguous owned SOS and does not move SOS history.
+- Legacy family setup and its care backfill run together. Unscoped SOS is
+  not attributed to a newly created family. Legacy SOS promotion/pruning and
+  demo-data purge no longer run at startup; date repair skips SOS.
+- Account/member deletion performs admitted database mutations atomically
+  under the family fence. Ambiguous linked records cause rejection rather
+  than partial deletion. SOS is retained; Stripe cleanup follows commit.
+
+**Evidence:** 303 backend tests passed, plus 11 GPS consent/publication
+regressions and 112 frontend tests. The two original raw-Mongo tests were
+unchanged and still expected 409 but received 200. New tests cover overlapping
+archive access and transfer, leave with an active SOS for another member,
+startup repair versus join, deletion rollback and conflicting writes.
+On a disposable local replica, 30 samples per path measured raw SOS insert
+at 3.70 ms median / 5.37 ms p95 and fenced persistence at 7.31 ms median /
+13.72 ms p95. One forced contention schedule took 200.38 ms. Internal retry
+tests passed; this does not establish production latency or cross-request
+exactly-once delivery. No production system was tested or changed.
+
+**Fresh independent verdict: NOT CLEAN.** The review identified two
+application-level blockers outside the requested correction: owner-initiated
+removal still uses an unscoped ownership selector that can move records from
+another family, and ordinary (non-SOS) alert resolution can use stale
+membership. The reviewer also flagged that a non-owner departure can leave
+dependent obligations behind. The old `alerts` TTL index is no longer
+created, but an already-installed index can still remove SOS; it requires
+separate approval to inspect and retire in production. These risks are
+distinct from the two accepted raw-Mongo limitations. Stop for approval.
+
 ## Current family-write-fence revision
 
-This section supersedes the historical baseline below. The owner approved
+This section records the preceding `35e0c02a` revision. The owner approved
 cooperative writer changes, including SOS persistence, while expressly retaining
 the two direct-Mongo reproductions as limitations. Nothing here authorizes a
 merge, production data change, configuration change, build or release.

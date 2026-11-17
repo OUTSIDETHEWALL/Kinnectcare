@@ -74,17 +74,17 @@ async def run(db, family_ids, action, *, timeout=2.0):
         raise HTTPException(503, "Family operation timed out; check its status before retrying.") from error
 
 
-async def transaction(db, callback, *, timeout=1.0):
+async def transaction(db, callback, *, timeout=1.0, **options):
     """Bound an existing session-style transfer callback without nesting."""
     try:
         async with asyncio.timeout(timeout):
             async with await db.client.start_session() as session:
-                return await _known_commit(session, callback)
+                return await _known_commit(session, callback, **options)
     except TimeoutError as error:
         raise HTTPException(503, "Transfer timed out; check your family before retrying.") from error
 
 
-async def _known_commit(session, callback):
+async def _known_commit(session, callback, **options):
     """Commit before Motor's transaction context can auto-commit on exit.
 
     The installed Motor context commits outside its own commit-retry loop.
@@ -103,7 +103,7 @@ async def _known_commit(session, callback):
                 if not error.has_error_label("UnknownTransactionCommitResult"):
                     raise
                 await asyncio.sleep(0)
-    return await session.with_transaction(execute)
+    return await session.with_transaction(execute, **options)
 
 
 async def actor_in_family(tx, actor_id, gid, *, owner=False):
@@ -212,7 +212,8 @@ async def change_sos_resolution(db, family_id, alert_id, actor_id, updates):
         if not alert:
             raise HTTPException(404, "Alert not found")
         # Departed-owner historical incidents are never reactivated or disclosed.
-        await actor_in_family(tx, alert["owner_id"], family_id)
+        if not await tx.users.find_one({"id": alert.get("owner_id"), "family_group_id": family_id}, {"_id": 1}):
+            raise HTTPException(404, "Alert not found")
         if updates["resolved"] is False:
             # Reopening is only an internal owner/subject action, not broad
             # caregiver authority over a retired incident.

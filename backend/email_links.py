@@ -106,47 +106,10 @@ async def join_verified(db, user, inv, target, *, family_code=None):
     if inv and inv.get("status") == "accepted" and old_gid != target["id"]:
         raise HTTPException(409, "This invitation was already accepted and your family has since changed. Ask for a new invitation.")
     if old_gid and old_gid != target["id"]:
-        old = await db.family_groups.find_one({"id": old_gid})
-        self_ids, subjects = await sh.verified_subjects(db, user["id"], old_gid)
-        history = sh.resolved_self_sos(user["id"], subjects, old_gid)
-        # A non-owner also must not silently move an unresolved/self-ambiguous
-        # SOS while leaving that incident's family behind.
-        unsafe_sos = {"family_group_id": old_gid, "owner_id": user["id"],
-                      "type": "sos", "$nor": [history]}
-        if await db.alerts.find_one(unsafe_sos, {"_id": 1}):
-            raise HTTPException(409, "Resolve or review your current family's SOS before joining another family.")
-        if old and old.get("owner_user_id") == user["id"]:
-            others = await db.users.count_documents({"family_group_id": old_gid, "id": {"$ne": user["id"]}})
-            if others:
-                raise HTTPException(409, "Transfer ownership of your current family before joining another family.")
-            # Dependents need not have login accounts. Reject before moving
-            # anything if people or care records would lose their family owner.
-            for collection in fg.DATA_COLLECTIONS:
-                remaining = {"family_group_id": old_gid}
-                if collection == "members":
-                    remaining["user_id"] = {"$ne": user["id"]}
-                else:
-                    allowed = [sh.movable_records(collection, user["id"], self_ids, old_gid)]
-                    if collection == "alerts":
-                        allowed.append(history)
-                    remaining["$nor"] = allowed
-                if await db[collection].find_one(remaining, {"_id": 1}):
-                    raise HTTPException(409, "Your current family still has members or care records. Transfer ownership before joining another family.")
-        # Unlike the legacy helper, do not swallow failed writes. Every owned
-        # collection moves, or the entire family transition rolls back.
-        # A caregiver can own records about other people. Account ownership is
-        # not permission to transfer those people's health/location data.
-        await db.members.update_many(
-            {"user_id": user["id"], "family_group_id": old_gid},
-            {"$set": {"family_group_id": target["id"]}},
+        self_ids = await sh.verify_departure(db, user["id"], old_gid, fg.DATA_COLLECTIONS)
+        await sh.move_verified_self_records(
+            db, user["id"], old_gid, target["id"], self_ids, fg.DATA_COLLECTIONS,
         )
-        for collection in fg.DATA_COLLECTIONS:
-            if collection == "members":
-                continue
-            await db[collection].update_many(
-                sh.movable_records(collection, user["id"], self_ids, old_gid),
-                {"$set": {"family_group_id": target["id"]}},
-            )
         # Never publish prior-family coordinates into a new consent lifetime.
         await db.members.update_many(
             {"user_id": user["id"], "family_group_id": target["id"]},

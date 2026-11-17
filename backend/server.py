@@ -2330,10 +2330,8 @@ async def delete_account(
 ):
     """Permanently delete the authenticated user and ALL of their data.
 
-    Steps:
-      1. Cancel active Stripe subscription (best-effort).
-      2. Delete all user-owned collections.
-      3. Delete the user document.
+    Delete eligible data and the account in one transaction, retaining SOS.
+    Stripe cleanup is best-effort and only runs after the database commits.
     """
     user_id = current["id"]
     payload = data or DeleteAccountRequest()
@@ -2343,7 +2341,8 @@ async def delete_account(
             detail='Confirmation required. Send {"confirm":"DELETE"} to proceed.',
         )
 
-    sub = (current.get("subscription") or {})
+    fresh, deleted_counts = await sh.delete_account_records(db, user_id, current.get("family_group_id"))
+    sub = (fresh.get("subscription") or {})
     sub_id = sub.get("stripe_subscription_id")
     customer_id = sub.get("stripe_customer_id")
     stripe_canceled = False
@@ -2362,25 +2361,6 @@ async def delete_account(
                 customer_deleted = True
         except Exception as e:
             logger.warning(f"Stripe customer delete failed for {user_id}: {e}")
-
-    # Delete all user-owned data.
-    deleted_counts = {}
-    for coll in [
-        "members",
-        "reminders",
-        "checkins",
-        "alerts",
-        "medication_logs",
-    ]:
-        try:
-            r = await db[coll].delete_many({"owner_id": user_id})
-            deleted_counts[coll] = r.deleted_count
-        except Exception as e:
-            logger.warning(f"Failed to delete from {coll} for {user_id}: {e}")
-            deleted_counts[coll] = 0
-
-    # Finally delete the user.
-    await db.users.delete_one({"id": user_id})
 
     logger.info(
         f"Account deleted: user={user_id} stripe_sub_canceled={stripe_canceled} "
@@ -2761,28 +2741,8 @@ async def delete_member(member_id: str, current=Depends(get_current_user)):
     All scoped to the caller's family_group_id so a user can never
     accidentally (or deliberately) wipe another family's data.
     """
-    await require_family_owner(current)
     fgid = current["family_group_id"]
-    r = await db.members.delete_one({"id": member_id, "family_group_id": fgid})
-    if r.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Member not found")
-    # Cascade — best-effort per collection, log any individual failures
-    # but never abort the whole request (we already deleted the member).
-    cascade_counts: dict = {}
-    for coll, query in (
-        ("reminders",            {"family_group_id": fgid, "member_id": member_id}),
-        ("checkins",             {"family_group_id": fgid, "member_id": member_id}),
-        ("alerts",               {"family_group_id": fgid, "member_id": member_id}),
-        ("medication_logs",      {"family_group_id": fgid, "member_id": member_id}),
-        ("med_notifications",    {"family_group_id": fgid, "member_id": member_id}),
-        ("medication_occurrences", {"member_id": member_id}),
-    ):
-        try:
-            res = await db[coll].delete_many(query)
-            cascade_counts[coll] = res.deleted_count
-        except Exception as e:
-            logger.warning(f"cascade delete failed for {coll} member={member_id}: {e}")
-            cascade_counts[coll] = 0
+    cascade_counts = await sh.delete_dependent_records(db, current["id"], fgid, member_id)
     logger.info(
         f"Member deleted with cascade: member_id={member_id} family_group={fgid} "
         f"counts={cascade_counts}"
@@ -4277,20 +4237,13 @@ async def update_checkin_settings(member_id: str, data: CheckinSettings, current
 @api_router.get("/alerts", response_model=List[Alert])
 async def list_alerts(current=Depends(get_current_user)):
     await detect_missed_checkins(current["family_group_id"], current)
-    scope = await sh.family_alert_query(db, current["family_group_id"])
-    docs = await db.alerts.find(scope, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    docs = await sh.read_family_alerts(db, current["id"], current["family_group_id"])
     return [Alert(**d) for d in docs]
 
 
 @api_router.post("/alerts/{alert_id}/ack")
 async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
-    scope = await sh.family_alert_query(db, current["family_group_id"])
-    alert = await db.alerts.find_one(
-        {"id": alert_id, **scope},
-        {"_id": 0},
-    )
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
+    alert = await sh.acknowledge_in_family(db, current["id"], current["family_group_id"], alert_id)
 
     # Only the exact self-due medication row is an actionable occurrence, not
     # a caregiver-facing missed/escalation or legacy medication banner.
@@ -4336,12 +4289,9 @@ async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
             enforce_self_target=False,
         )
 
-    r = await db.alerts.update_one(
-        {"id": alert_id, **scope},
-        {"$set": {"acknowledged": True}},
-    )
-    if r.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Alert not found")
+        await sh.acknowledge_in_family(
+            db, current["id"], current["family_group_id"], alert_id, finish_medication=True,
+        )
     return {"ok": True, **({"status": "taken"} if alert.get("type") == "medication" and alert.get("self_due") is True else {})}
 
 
@@ -4373,8 +4323,8 @@ async def resolve_alert(alert_id: str, current=Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    # Idempotent short-circuit — already resolved.
-    if doc.get("resolved"):
+    # SOS must take the fenced path even for an idempotent response.
+    if doc.get("resolved") and doc.get("type") != "sos":
         return {"ok": True, "alert": Alert(**doc).model_dump(mode="json"), "already_resolved": True}
 
     resolver_name = current.get("full_name") or current.get("email") or "A family member"
@@ -4392,6 +4342,7 @@ async def resolve_alert(alert_id: str, current=Depends(get_current_user)):
         )
         if not changed:
             return {"ok": True, "alert": Alert(**committed).model_dump(mode="json"), "already_resolved": True}
+        doc = committed
     else:
         await db.alerts.update_one(
             {"id": alert_id, "family_group_id": current["family_group_id"]},
@@ -4436,14 +4387,12 @@ async def resolve_alert(alert_id: str, current=Depends(get_current_user)):
 @api_router.delete("/alerts")
 async def clear_all_alerts(current=Depends(get_current_user)):
     """
-    Delete every alert in the caller's family group. Used by the
-    "Clear All" button in the Alerts tab. Scoped to family_group_id
-    so a user cannot wipe another family's alerts.
+    Clear ordinary family alerts without deleting SOS incidents or history.
     """
     async def clear(tx):
         await fw.actor_in_family(tx, current["id"], current["family_group_id"])
         scope = await sh.family_alert_query(tx, current["family_group_id"])
-        return await tx.alerts.delete_many(scope)
+        return await tx.alerts.delete_many({**scope, "type": {"$ne": "sos"}})
     r = await fw.run(db, [current["family_group_id"]], clear)
     return {"ok": True, "deleted": r.deleted_count}
 
@@ -5502,7 +5451,7 @@ async def send_checkin_request(member_id: str, current=Depends(get_current_user)
         member_name=target["name"],
         target_user_id=target_user_id,
     )
-    await db.checkin_requests.insert_one(req.model_dump())
+    await fw.insert_record(db, "checkin_requests", req.model_dump(), actor_id=current["id"], owner=True)
 
     if not target_user_id:
         return {"ok": True, "request_id": req.id, "skipped_push": "no_user_link"}
@@ -7640,14 +7589,7 @@ async def _migrate_family_groups():
         logger.info(f"Backfilling family_group_id for {len(legacy)} legacy users…")
         for user in legacy:
             try:
-                group = await fg.create_group_for_user(db, user)
-                gid = group["id"]
-                # Backfill data
-                for coll in fg.DATA_COLLECTIONS:
-                    await db[coll].update_many(
-                        {"owner_id": user["id"], "family_group_id": {"$exists": False}},
-                        {"$set": {"family_group_id": gid}},
-                    )
+                await fg.ensure_family_group(db, user)
             except Exception as e:
                 logger.warning(f"Migration failed for user {user.get('id')}: {e}")
         logger.info("Family group migration complete.")
@@ -7905,7 +7847,6 @@ async def _ensure_alert_dedup_index():
     # Tuning rationale:
     #   otp_codes:           10 min   — short-lived secrets
     #   checkins:            90 days  — long enough for trend UI
-    #   resolved alerts:     30 days  — audit trail + ack history
     #   med_notifications:   30 days  — escalation history
     ttl_indexes = [
         # OTP codes — expire from their own expires_at field
@@ -7917,9 +7858,8 @@ async def _ensure_alert_dedup_index():
         ("email_link_limits",  "expires_at", 0,             None),
         # Check-ins — 90 days after creation
         ("checkins",           "created_at", 90 * 86400,    None),
-        # Alerts — 30 days after RESOLUTION (resolved_at must
-        # exist, so partial-filter on that)
-        ("alerts",             "resolved_at", 30 * 86400,   {"resolved_at": {"$exists": True}}),
+        # Do not install an alerts TTL that can delete historical SOS. An
+        # existing database index requires a separately approved migration.
         # Medication notifications — 30 days after creation
         ("med_notifications",  "created_at", 30 * 86400,    None),
         # Build 53 — Location ingest diagnostic log + blank-push drops.
@@ -8026,120 +7966,9 @@ async def _migrate_dedupe_push_tokens():
         logger.warning(f"push_tokens dedupe migration skipped: {e}")
 
 
-# =========================================================================
-# Build 50 hotfix — Alerts backfill + ancient-cleanup migration.
-#
-# Problem observed in the field: pre-Build-50 SOS alerts stored in Mongo
-# have no `resolved` field.  The frontend auto-resume detector treats
-# every SOS with `resolved` != true as "unresolved", so any legacy
-# record (from days-old testing) was being resurfaced on cold-start,
-# trapping the user on an incident screen for an alert nobody was
-# handling.
-#
-# SAFETY MODEL — this migration must NEVER accidentally mark a truly
-# active unresolved SOS as resolved.  Two safeguards:
-#
-#   A. SENTINEL DOC — a marker in the `migrations` collection.  When
-#      present, the migration short-circuits on subsequent boots (true
-#      one-shot semantics).  Even if the marker is manually removed
-#      (e.g. for a re-run in a dev env), safeguard B still holds.
-#
-#   B. SAFETY WINDOW — the promotion step (acknowledged → resolved)
-#      ONLY affects SOS alerts older than 1 hour.  A genuine emergency
-#      response completes in minutes; anything acknowledged-but-not-
-#      resolved after 1 h is stale.  This bounds the worst-case damage
-#      even if the sentinel is deleted AND the migration is re-run
-#      moments after a caregiver ack'd a real SOS via a legacy bundle.
-#
-# Steps (each idempotent independently, so re-running is safe):
-#   1. DELETE alerts older than 30 days (opportunistic housekeeping —
-#      Kinnship maintains a clean DB; obsolete test data serves no
-#      caregiver purpose).
-#   2. BACKFILL `resolved: False` on any alert missing the field.
-#   3. MARK legacy `sos` alerts that are (acknowledged AND created ≥1h
-#      ago) as `resolved: True` with `resolved_at = created_at`.
-#      Missed-checkin / medication / routine alerts are NOT affected —
-#      they use `acknowledged` semantics only.
-# =========================================================================
-MIGRATION_ID_ALERTS_V50 = "alerts_backfill_v50"
-MIGRATION_PROMOTE_MIN_AGE = timedelta(hours=1)
-
-
-@app.on_event("startup")
-async def _migrate_alerts_backfill_v50():
-    try:
-        # Safeguard A — sentinel doc.  If this migration has already
-        # completed on this deployment, short-circuit.
-        marker = await db.migrations.find_one({"_id": MIGRATION_ID_ALERTS_V50})
-        if marker:
-            return
-
-        now = datetime.now(timezone.utc)
-
-        # 1. Housekeeping — delete alerts older than 30 days.
-        cutoff = now - timedelta(days=30)
-        del_res = await db.alerts.delete_many({"created_at": {"$lt": cutoff}})
-        if del_res.deleted_count:
-            logger.info(
-                f"alerts housekeeping: removed {del_res.deleted_count} alert(s) "
-                f"older than 30 days"
-            )
-
-        # 2. Backfill `resolved: False` on any record missing the field.
-        backfill_res = await db.alerts.update_many(
-            {"resolved": {"$exists": False}},
-            {"$set": {"resolved": False}},
-        )
-        if backfill_res.modified_count:
-            logger.info(
-                f"alerts backfill: set resolved=False on "
-                f"{backfill_res.modified_count} legacy alert(s)"
-            )
-
-        # 3. Mark legacy acknowledged SOS as resolved — WITH SAFETY WINDOW.
-        #    Only touches alerts older than 1 hour, so an active
-        #    caregiver response ack'd in the last few minutes is never
-        #    accidentally promoted to "resolved".
-        promote_cutoff = now - MIGRATION_PROMOTE_MIN_AGE
-        promote_res = await db.alerts.update_many(
-            {
-                "type": "sos",
-                "acknowledged": True,
-                "resolved": {"$in": [False, None]},
-                "created_at": {"$lt": promote_cutoff},
-            },
-            [
-                {
-                    "$set": {
-                        "resolved": True,
-                        "resolved_at": "$created_at",
-                        "resolved_by_name": "Legacy (pre-Build-50)",
-                    }
-                }
-            ],
-        )
-        if promote_res.modified_count:
-            logger.info(
-                f"alerts backfill: promoted {promote_res.modified_count} legacy "
-                f"acknowledged SOS to resolved (safety window: ≥1h old)"
-            )
-
-        # Record completion so subsequent boots short-circuit (safeguard A).
-        await db.migrations.update_one(
-            {"_id": MIGRATION_ID_ALERTS_V50},
-            {
-                "$set": {
-                    "_id": MIGRATION_ID_ALERTS_V50,
-                    "run_at": now,
-                    "deleted": del_res.deleted_count,
-                    "backfilled": backfill_res.modified_count,
-                    "promoted": promote_res.modified_count,
-                }
-            },
-            upsert=True,
-        )
-    except Exception as e:
-        logger.warning(f"alerts backfill migration skipped: {e}")
+# The old Build 50 alerts migration is intentionally not registered at startup.
+# A rolling startup must not delete SOS history or infer resolution from age
+# and acknowledgment. Preserve existing records and completion markers.
 
 
 # =========================================================================
@@ -8364,8 +8193,11 @@ async def _migrate_iso_string_timestamps_to_date():
     ]
     for coll_name, field in targets:
         try:
+            query = {field: {"$type": "string"}}
+            if coll_name == "alerts":
+                query["type"] = {"$ne": "sos"}
             cursor = db[coll_name].find(
-                {field: {"$type": "string"}},
+                query,
                 {"_id": 1, "id": 1, field: 1},
             )
             converted = 0
@@ -8384,7 +8216,7 @@ async def _migrate_iso_string_timestamps_to_date():
                         parsed = parsed.replace(tzinfo=timezone.utc)
                     parsed_utc = parsed.astimezone(timezone.utc)
                     await db[coll_name].update_one(
-                        {"_id": doc["_id"]},
+                        {**query, "_id": doc["_id"], field: raw},
                         {"$set": {field: parsed_utc}},
                     )
                     converted += 1
@@ -8402,7 +8234,6 @@ async def _migrate_iso_string_timestamps_to_date():
             logger.warning(f"iso→date migration skipped for {coll_name}.{field}: {e}")
 
 
-@app.on_event("startup")
 async def _purge_legacy_demo_data():
     """v1.1.7 one-time DB cleanup.
 
@@ -8414,7 +8245,7 @@ async def _purge_legacy_demo_data():
 
     The seed itself has now been removed (see seed_demo_data above) but
     accounts created before v1.1.7 still carry the demo records.  This
-    handler runs once per process start and PERMANENTLY DELETES every
+    historical helper is no longer registered at startup. It deletes
     legacy demo member plus all documents that referenced them across
     every collection (cascading delete).
 

@@ -5,6 +5,7 @@ are exercised without these seams by test_family_write_fence_mongo.py.
 """
 import copy
 import family_write_fence as fw
+import sos_history as sh
 
 
 def install(monkeypatch):
@@ -26,7 +27,18 @@ def install(monkeypatch):
         await db.alerts.update_one({"id": aid, "family_group_id": gid}, {"$set": updates})
         return {**row, **updates}, True
 
+    async def acknowledge(db, actor_id, gid, aid, *, finish_medication=False):
+        query = {"id": aid, **await sh.family_alert_query(db, gid)}
+        row = await db.alerts.find_one(query)
+        if not row:
+            from fastapi import HTTPException
+            raise HTTPException(404, "Alert not found")
+        if (row.get("type") == "medication" and row.get("self_due") is True) == finish_medication:
+            await db.alerts.update_one(query, {"$set": {"acknowledged": True}})
+        return row
+
     monkeypatch.setattr(fw, "insert_record", insert)
     monkeypatch.setattr(fw, "insert_background_record", background)
     monkeypatch.setattr(fw, "persist_sos", sos)
     monkeypatch.setattr(fw, "change_sos_resolution", resolve)
+    monkeypatch.setattr(sh, "acknowledge_in_family", acknowledge)

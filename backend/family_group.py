@@ -521,31 +521,15 @@ async def ensure_family_group(db, user: dict) -> str:
     user["family_group_role"] = "owner"
     # Backfill family_group_id on this user's existing owned data.
     for coll in DATA_COLLECTIONS:
+        query = {"owner_id": user["id"], "family_group_id": {"$exists": False}}
+        if coll == "alerts":
+            # Ownership alone does not prove the original family of an SOS.
+            query["type"] = {"$ne": "sos"}
         await db[coll].update_many(
-            {"owner_id": user["id"], "family_group_id": {"$exists": False}},
+            query,
             {"$set": {"family_group_id": gid}},
         )
     return gid
-
-
-async def transfer_data_to_group(db, owner_user_id: str, target_group_id: str,
-                                 *, retain_history: bool = False) -> None:
-    """Re-tag this user's owned data into a new group (used when they join)."""
-    if not isinstance(db, fw.SessionDatabase):
-        raise HTTPException(409, "Family moves require the current transactional join flow.")
-    # Legacy family-code/OTP callers have no transactional history admission.
-    # Fail before any move rather than route archived incidents around the
-    # verified invitation guard. Explicit leave retains history in place.
-    _, subjects = await sh.verified_subjects(db, owner_user_id)
-    if not retain_history and await db.alerts.find_one(
-        sh.resolved_self_sos(owner_user_id, subjects), {"_id": 1},
-    ):
-        raise HTTPException(409, "Use your personal emailed invitation to safely join with SOS history.")
-    for coll in DATA_COLLECTIONS:
-        await db[coll].update_many(
-            await sh.removal_move_query(db, owner_user_id, coll),
-            {"$set": {"family_group_id": target_group_id}},
-        )
 
 
 def public_group(group: dict) -> dict:
@@ -886,15 +870,19 @@ def build_router(
             raise HTTPException(400, "You are not in a family group")
         async def leave(tx):
             fresh = await fw.actor_in_family(tx, current["id"], gid)
-            group = await get_group(tx, gid)
-            if group.get("owner_user_id") == fresh["id"]:
-                co_users = await tx.users.count_documents(
-                    {"family_group_id": gid, "id": {"$ne": fresh["id"]}},
-                )
-                if co_users > 0:
-                    raise HTTPException(400, "Transfer ownership or remove other members first.")
+            self_ids = await sh.verify_departure(tx, fresh["id"], gid, DATA_COLLECTIONS)
             new_group = await create_group_for_user(tx, fresh)
-            await transfer_data_to_group(tx, fresh["id"], new_group["id"], retain_history=True)
+            await sh.move_verified_self_records(
+                tx, fresh["id"], gid, new_group["id"], self_ids, DATA_COLLECTIONS,
+            )
+            # Leave starts a new location-consent lifetime just like a join.
+            await tx.members.update_many(
+                {"user_id": fresh["id"], "family_group_id": new_group["id"]},
+                {"$set": {"location_sharing_enabled": False, "latitude": None, "longitude": None,
+                          "coordinate_captured_at": None, "location_name": "Location Sharing Off"},
+                 "$inc": {"location_consent_generation": 1}},
+            )
+            await tx.users.update_one({"id": fresh["id"]}, {"$set": {"location_sharing_enabled": False}})
             if not await tx.users.count_documents({"family_group_id": gid}):
                 for collection in DATA_COLLECTIONS:
                     if await tx[collection].find_one({"family_group_id": gid}, {"_id": 1}):

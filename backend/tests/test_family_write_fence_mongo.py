@@ -22,7 +22,7 @@ import httpx
 from test_email_links_mongo_integration import (
     APP_NAME, fg, links, local_replica, scenario, snapshot, join, pytestmark,
 )
-from test_sos_history_transfer import history
+from test_sos_history_transfer import history, alert_endpoints
 import family_write_fence as fw
 
 
@@ -399,3 +399,183 @@ async def test_leave_collection_failure_rolls_back_all_moves_and_membership(scen
     response = await s.http.post("/api/family-group/leave", headers={"x-test-actor": "invitee"})
     assert response.status_code == 500
     assert await snapshot(s.db) == before
+
+
+async def shared_source(s):
+    await s.db.users.insert_one({"id": "remaining", "family_group_id": "solo"})
+    await s.db.family_groups.update_one({"id": "solo"}, {"$set": {"owner_user_id": "remaining"}})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["list_alerts", "acknowledge_alert"])
+async def test_archive_operation_overlapping_transfer(scenario, monkeypatch, operation):
+    s = scenario
+    await shared_source(s)
+    original = await history(s, acknowledged=False)
+    entered, resume = asyncio.Event(), asyncio.Event()
+    original_query = links.sh.family_alert_query
+
+    async def pause(db, gid):
+        scope = await original_query(db, gid)
+        # The list probes after roster capture; ack probes just before
+        # acquiring its write fence, since a held fence excludes the transfer.
+        if operation == "list_alerts":
+            entered.set()
+            await asyncio.wait_for(resume.wait(), 5)
+        return scope
+
+    if operation == "list_alerts":
+        monkeypatch.setattr(links.sh, "family_alert_query", pause)
+    else:
+        original_ack = links.sh.acknowledge_in_family
+
+        async def pause_ack(*args, **kwargs):
+            entered.set()
+            await asyncio.wait_for(resume.wait(), 5)
+            return await original_ack(*args, **kwargs)
+        monkeypatch.setattr(links.sh, "acknowledge_in_family", pause_ack)
+
+    actor = {"id": "remaining", "family_group_id": "solo"}
+    endpoints = alert_endpoints(s.db)
+    call = endpoints.list_alerts(actor) if operation == "list_alerts" else endpoints.acknowledge_alert(original["id"], actor)
+    task = asyncio.create_task(call)
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert (await join(s)).status_code == 200
+    finally:
+        resume.set()
+    if operation == "list_alerts":
+        assert original["id"] not in str(await task)
+    else:
+        with pytest.raises(HTTPException) as error:
+            await task
+        assert error.value.status_code == 404
+    assert await s.db.alerts.find_one({"id": original["id"]}) == original
+
+
+@pytest.mark.asyncio
+async def test_leave_blocks_active_sos_about_another_member(scenario):
+    s = scenario
+    await shared_source(s)
+    await s.db.members.insert_one({"id": "other-subject", "user_id": "remaining",
+                                   "owner_id": "remaining", "family_group_id": "solo"})
+    await fw.persist_sos(s.db, {"id": "active-other", "type": "sos", "resolved": False},
+                         "invitee", explicit_member_id="other-subject")
+    before = await snapshot(s.db)
+    response = await s.http.post("/api/family-group/leave", headers={"x-test-actor": "invitee"})
+    assert response.status_code == 409
+    assert await snapshot(s.db) == before
+
+
+@pytest.mark.asyncio
+async def test_startup_family_repair_loses_race_without_attributing_history(scenario, monkeypatch):
+    s = scenario
+    await s.db.users.update_one({"id": "invitee"}, {"$unset": {"family_group_id": ""}})
+    await s.db.reminders.insert_one({"id": "unscoped-care", "owner_id": "invitee"})
+    incident = await history(s, id="unscoped-sos")
+    await s.db.alerts.update_one({"id": incident["id"]}, {"$unset": {"family_group_id": ""}})
+    before = await s.db.alerts.find_one({"id": incident["id"]})
+    entered, resume = asyncio.Event(), asyncio.Event()
+    real_create = fg.create_group_for_user
+
+    async def pause(tx, actor):
+        entered.set()
+        await asyncio.wait_for(resume.wait(), 5)
+        return await real_create(tx, actor)
+
+    monkeypatch.setattr(fg, "create_group_for_user", pause)
+    stale = {"id": "invitee"}
+    task = asyncio.create_task(fg.ensure_family_group(s.db, stale))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        payload = {**s.payload, "previous_family_id": None}
+        assert (await s.http.post("/api/auth/email-link/join", json=payload)).status_code == 200
+    finally:
+        resume.set()
+    with pytest.raises(HTTPException) as error:
+        await task
+    assert error.value.status_code == 409
+    assert "family_group_id" not in await s.db.reminders.find_one({"id": "unscoped-care"})
+    assert await s.db.alerts.find_one({"id": incident["id"]}) == before
+
+
+def test_legacy_sos_startup_mutator_is_not_registered():
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "server.py").read_text())
+    assert not any(isinstance(node, ast.AsyncFunctionDef) and node.name == "_migrate_alerts_backfill_v50"
+                   for node in tree.body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["account", "dependent"])
+async def test_deletion_rolls_back_and_retains_history(scenario, monkeypatch, operation):
+    s = scenario
+    original = await history(s)
+    if operation == "account":
+        async def delete():
+            return await links.sh.delete_account_records(s.db, "invitee", "solo")
+    else:
+        await dependent(s)
+
+        async def delete():
+            return await links.sh.delete_dependent_records(s.db, "invitee", "solo", "new-dependent")
+
+    before = await snapshot(s.db)
+    real = fw.SessionCollection.__getattr__
+    with monkeypatch.context() as m:
+        def fail_late(self, name):
+            if self.collection.name == "medication_logs" and name == "delete_many":
+                async def fail(*args, **kwargs):
+                    raise RuntimeError("Synthetic deletion failure")
+                return fail
+            return real(self, name)
+        m.setattr(fw.SessionCollection, "__getattr__", fail_late)
+        with pytest.raises(RuntimeError, match="Synthetic deletion failure"):
+            await delete()
+    assert await snapshot(s.db) == before
+    await delete()
+    assert await s.db.alerts.find_one({"id": original["id"]}) == original
+
+
+@pytest.mark.asyncio
+async def test_account_deletion_with_stale_family_rejects_after_transfer(scenario):
+    s = scenario
+    original = await history(s)
+    assert (await join(s)).status_code == 200
+    with pytest.raises(HTTPException) as error:
+        await links.sh.delete_account_records(s.db, "invitee", "solo")
+    assert error.value.status_code == 409
+    assert await s.db.alerts.find_one({"id": original["id"]}) == original
+
+
+@pytest.mark.asyncio
+async def test_dependent_deletion_serializes_with_fenced_care_insert(scenario, monkeypatch):
+    s = scenario
+    await dependent(s)
+    original = await history(s)
+    entered, resume = asyncio.Event(), asyncio.Event()
+    real = fw.SessionCollection.__getattr__
+
+    def pause_delete(self, name):
+        method = real(self, name)
+        if self.collection.name == "members" and name == "delete_one":
+            async def pause(*args, **kwargs):
+                entered.set()
+                await asyncio.wait_for(resume.wait(), 5)
+                return await method(*args, **kwargs)
+            return pause
+        return method
+
+    monkeypatch.setattr(fw.SessionCollection, "__getattr__", pause_delete)
+    deletion = asyncio.create_task(links.sh.delete_dependent_records(s.db, "invitee", "solo", "new-dependent"))
+    await asyncio.wait_for(entered.wait(), 5)
+    insertion = asyncio.create_task(fw.insert_record(s.db, "checkins", {
+        "id": "raced-checkin", "family_group_id": "solo", "member_id": "new-dependent",
+    }, actor_id="invitee"))
+    await asyncio.sleep(.025)
+    resume.set()
+    await deletion
+    with pytest.raises(HTTPException) as error:
+        await insertion
+    assert error.value.status_code == 409
+    assert await s.db.checkins.find_one({"id": "raced-checkin"}) is None
+    assert await s.db.alerts.find_one({"id": original["id"]}) == original

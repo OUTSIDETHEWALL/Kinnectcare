@@ -130,8 +130,9 @@ async def test_removal_and_leave_preserve_resolved_self_sos(scenario, subject, o
         "family_group_id": "target", "family_group_role": "member",
     }})
     await s.db.members.update_one({"id": "self"}, {"$set": {"family_group_id": "target"}})
-    active = await history(s, id="active-sos", family_group_id="target", resolved=False)
+    active = None
     if operation == "remove":
+        active = await history(s, id="active-sos", family_group_id="target", resolved=False)
         result = await s.http.post("/api/family-group/remove-member", json={"user_id": "invitee"})
     else:
         result = await s.http.post("/api/family-group/leave", headers={"x-test-actor": "invitee"})
@@ -140,7 +141,8 @@ async def test_removal_and_leave_preserve_resolved_self_sos(scenario, subject, o
     solo = (await s.db.users.find_one({"id": "invitee"}))["family_group_id"]
     assert solo != "target"
     # Preserve preexisting handling of active SOS in removal, not SOS sending.
-    assert (await s.db.alerts.find_one({"id": active["id"]}))["family_group_id"] == solo
+    if active:
+        assert (await s.db.alerts.find_one({"id": active["id"]}))["family_group_id"] == solo
     assert (await s.db.members.find_one({"id": "self"}))["family_group_id"] == solo
     assert await s.db.family_groups.find_one({"id": "target"})
 
@@ -243,8 +245,16 @@ async def test_former_and_destination_families_cannot_read_mutate_or_clear_archi
     endpoints = alert_endpoints(s.db)
     for family in ("target", "unrelated"):
         current = {"id": "owner", "family_group_id": family}
-        assert original["id"] not in str(await endpoints.list_alerts(current))
-        for method in (endpoints.acknowledge_alert, endpoints.resolve_alert):
+        if family == "unrelated":
+            for method, args in ((endpoints.list_alerts, (current,)),
+                                 (endpoints.acknowledge_alert, (original["id"], current))):
+                with pytest.raises(HTTPException) as error:
+                    await method(*args)
+                assert error.value.status_code == 409
+        else:
+            assert original["id"] not in str(await endpoints.list_alerts(current))
+        methods = (endpoints.acknowledge_alert, endpoints.resolve_alert) if family == "target" else (endpoints.resolve_alert,)
+        for method in methods:
             with pytest.raises(HTTPException) as error:
                 await method(original["id"], current)
             assert error.value.status_code == 404
