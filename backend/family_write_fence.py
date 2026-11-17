@@ -197,7 +197,7 @@ async def persist_sos(db, document, actor_id, *, explicit_member_id=None):
     raise HTTPException(409, "Your family changed repeatedly; reopen SOS.")
 
 
-async def change_sos_resolution(db, family_id, alert_id, actor_id, updates):
+async def change_sos_resolution(db, family_id, alert_id, actor_id, updates, *, include_ordinary=False):
     """Internal persistence boundary; does not introduce a reopen endpoint."""
     if set(updates) - {"resolved", "resolved_at", "resolved_by_user_id",
                        "resolved_by_name", "acknowledged"}:
@@ -207,12 +207,16 @@ async def change_sos_resolution(db, family_id, alert_id, actor_id, updates):
 
     async def action(tx):
         await actor_in_family(tx, actor_id, family_id)
-        alert = await tx.alerts.find_one({"id": alert_id, "family_group_id": family_id,
-                                         "type": "sos"})
+        selector = {"id": alert_id, "family_group_id": family_id}
+        if not include_ordinary or updates["resolved"] is False:
+            selector["type"] = "sos"
+        alert = await tx.alerts.find_one(selector, {"_id": 0})
         if not alert:
             raise HTTPException(404, "Alert not found")
         # Departed-owner historical incidents are never reactivated or disclosed.
-        if not await tx.users.find_one({"id": alert.get("owner_id"), "family_group_id": family_id}, {"_id": 1}):
+        if alert.get("type") == "sos" and not await tx.users.find_one(
+            {"id": alert.get("owner_id"), "family_group_id": family_id}, {"_id": 1},
+        ):
             raise HTTPException(404, "Alert not found")
         if updates["resolved"] is False:
             # Reopening is only an internal owner/subject action, not broad
@@ -222,7 +226,7 @@ async def change_sos_resolution(db, family_id, alert_id, actor_id, updates):
         if alert.get("resolved") is updates["resolved"]:
             return alert, False
         result = await tx.alerts.update_one(
-            {"id": alert_id, "family_group_id": family_id, "type": "sos"},
+            {**selector, "type": alert.get("type")},
             {"$set": copy.deepcopy(updates)},
         )
         if result.matched_count != 1:

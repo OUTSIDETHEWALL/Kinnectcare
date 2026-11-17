@@ -34,6 +34,27 @@ async def dependent(s):
 
 
 @pytest.mark.asyncio
+async def test_failed_medication_acknowledgment_rolls_back_callback_writes(scenario):
+    s = scenario
+    await s.db.alerts.insert_one({
+        "id": "dose", "family_group_id": "solo", "type": "medication",
+        "self_due": True, "acknowledged": False,
+    })
+
+    async def complete(tx, alert):
+        await tx.medication_occurrences.insert_one({"occurrence_id": "sample-dose"})
+        raise HTTPException(409, "The reminder is no longer available.")
+
+    with pytest.raises(HTTPException) as error:
+        await links.sh.acknowledge_in_family(
+            s.db, "invitee", "solo", "dose", complete_medication=complete,
+        )
+    assert error.value.status_code == 409
+    assert not await s.db.medication_occurrences.find_one({"occurrence_id": "sample-dose"})
+    assert (await s.db.alerts.find_one({"id": "dose"}))["acknowledged"] is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("obligation", ["dependent", "reopened_sos", "new_sos", "care_log"])
 async def test_application_writer_commits_after_transfer_snapshot_and_forces_recheck(
     scenario, monkeypatch, obligation,

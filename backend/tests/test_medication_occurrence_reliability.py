@@ -30,6 +30,10 @@ def isolate_family_persistence(monkeypatch):
 
 def _match(row, query):
     for key, expected in query.items():
+        if key == "$and":
+            if not all(_match(row, option) for option in expected):
+                return False
+            continue
         if key == "$or":
             if not any(_match(row, option) for option in expected):
                 return False
@@ -105,6 +109,9 @@ class Collection:
             if _match(row, query):
                 row.update(update.get("$set", {}))
                 return SimpleNamespace(matched_count=1, modified_count=1)
+        if kwargs.get("upsert"):
+            await self.insert_one({**query, **update.get("$setOnInsert", {}), **update.get("$set", {})})
+            return SimpleNamespace(matched_count=0, modified_count=0, upserted_id=len(self.rows))
         return SimpleNamespace(matched_count=0, modified_count=0)
 
     async def delete_many(self, query):
@@ -840,6 +847,7 @@ def test_acknowledgment_is_allowed_after_family_claim_finalization(monkeypatch):
         })
         db.medication_occurrences.rows.append({
             "occurrence_id": occurrence_id, "family_claimed": True,
+            "reminder_id": "r1", "member_id": "m1",
             "family_state": "sent", "family_send_completed": True, "acknowledged": False,
         })
         monkeypatch.setattr(server, "db", db)

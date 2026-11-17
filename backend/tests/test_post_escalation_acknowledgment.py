@@ -136,16 +136,17 @@ def test_manual_miss_and_late_taken_compete_for_one_atomic_owner(monkeypatch, wi
         occurrence = await server._resolve_mark_occurrence(
             db.reminders.rows[0], body, actor(), datetime.now(timezone.utc),
         )
+        occurrence["family_group_id"] = "g1"
         if winner == "taken":
             await server.mark_reminder("r1", body, actor())
             result, _ = await server._arbitrate_manual_missed_occurrence(
-                occurrence, datetime.now(timezone.utc),
+                db, occurrence, datetime.now(timezone.utc),
             )
             assert result == "acknowledged"
             assert [log["status"] for log in db.medication_logs.rows] == ["taken"]
         else:
             result, _ = await server._arbitrate_manual_missed_occurrence(
-                occurrence, datetime.now(timezone.utc),
+                db, occurrence, datetime.now(timezone.utc),
             )
             assert result == "resume"
             # The miss owns the mutex but has not written its terminal log yet.

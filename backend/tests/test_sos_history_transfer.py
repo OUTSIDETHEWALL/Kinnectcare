@@ -130,9 +130,7 @@ async def test_removal_and_leave_preserve_resolved_self_sos(scenario, subject, o
         "family_group_id": "target", "family_group_role": "member",
     }})
     await s.db.members.update_one({"id": "self"}, {"$set": {"family_group_id": "target"}})
-    active = None
     if operation == "remove":
-        active = await history(s, id="active-sos", family_group_id="target", resolved=False)
         result = await s.http.post("/api/family-group/remove-member", json={"user_id": "invitee"})
     else:
         result = await s.http.post("/api/family-group/leave", headers={"x-test-actor": "invitee"})
@@ -140,9 +138,6 @@ async def test_removal_and_leave_preserve_resolved_self_sos(scenario, subject, o
     assert await s.db.alerts.find_one({"id": original["id"]}) == original
     solo = (await s.db.users.find_one({"id": "invitee"}))["family_group_id"]
     assert solo != "target"
-    # Preserve preexisting handling of active SOS in removal, not SOS sending.
-    if active:
-        assert (await s.db.alerts.find_one({"id": active["id"]}))["family_group_id"] == solo
     assert (await s.db.members.find_one({"id": "self"}))["family_group_id"] == solo
     assert await s.db.family_groups.find_one({"id": "target"})
 
@@ -231,9 +226,27 @@ def alert_endpoints(db):
         pass
     scope = {"db": db, "sh": sh, "fw": links.fw, "HTTPException": HTTPException,
              "get_current_user": lambda: None, "Depends": lambda dep: None,
-             "detect_missed_checkins": missed, "Alert": lambda **row: row}
+             "detect_missed_checkins": missed, "Alert": lambda **row: row,
+             "datetime": datetime, "timezone": timezone}
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(path), "exec"), scope)
     return SimpleNamespace(**{name: scope[name] for name in names})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resolved", [False, True])
+async def test_departed_member_cannot_resolve_ordinary_alert(scenario, resolved):
+    s = scenario
+    assert (await join(s)).status_code == 200
+    original = await history(s, family_group_id="target", owner_id="owner",
+                             type="checkin", resolved=resolved)
+    assert (await s.http.post(
+        "/api/family-group/leave", headers={"x-test-actor": "invitee"},
+    )).status_code == 200
+    endpoints = alert_endpoints(s.db)
+    with pytest.raises(HTTPException) as exc:
+        await endpoints.resolve_alert(original["id"], {"id": "invitee", "family_group_id": "target"})
+    assert exc.value.status_code == 409
+    assert await s.db.alerts.find_one({"id": original["id"]}) == original
 
 
 @pytest.mark.asyncio
@@ -257,7 +270,7 @@ async def test_former_and_destination_families_cannot_read_mutate_or_clear_archi
         for method in methods:
             with pytest.raises(HTTPException) as error:
                 await method(original["id"], current)
-            assert error.value.status_code == 404
+            assert error.value.status_code == (409 if family == "unrelated" else 404)
         if family == "unrelated":
             with pytest.raises(HTTPException) as error:
                 await endpoints.clear_all_alerts(current)

@@ -915,6 +915,7 @@ def build_router(
             )
             if not target_user:
                 raise HTTPException(404, "User is not in your family group")
+            self_ids = await sh.verify_departure(tx, data.user_id, group["id"], DATA_COLLECTIONS)
             # Both acceptance and removal write this user's membership and the
             # invitation inside a transaction. A stale acceptance must retry
             # against the revoked token, never commit after a successful removal.
@@ -925,14 +926,16 @@ def build_router(
                     "invitee_email": re.compile(r"^" + re.escape(email) + r"$", re.IGNORECASE),
                 }, {"$set": {"status": "revoked"}})
             solo = await create_group_for_user(tx, target_user)
-            # Preserve the existing removal's data scope, but never swallow a
-            # partial write: membership, invitation revocation and moves settle
-            # together, or all roll back.
-            for collection in DATA_COLLECTIONS:
-                await tx[collection].update_many(
-                    await sh.removal_move_query(tx, target_user["id"], collection),
-                    {"$set": {"family_group_id": solo["id"]}},
-                )
+            await sh.move_verified_self_records(
+                tx, data.user_id, group["id"], solo["id"], self_ids, DATA_COLLECTIONS,
+            )
+            await tx.members.update_many(
+                {"user_id": data.user_id, "family_group_id": solo["id"]},
+                {"$set": {"location_sharing_enabled": False, "latitude": None, "longitude": None,
+                          "coordinate_captured_at": None, "location_name": "Location Sharing Off"},
+                 "$inc": {"location_consent_generation": 1}},
+            )
+            await tx.users.update_one({"id": data.user_id}, {"$set": {"location_sharing_enabled": False}})
             return {"ok": True, "removed_user_id": data.user_id}
 
         return await fw.transaction(db, transaction)

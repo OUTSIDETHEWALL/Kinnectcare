@@ -58,24 +58,38 @@ def movable_records(collection, user_id, member_ids, family_id):
     return query
 
 
-async def removal_move_query(db, user_id, collection):
-    query = {"owner_id": user_id}
-    if collection == "alerts":
-        _, subjects = await verified_subjects(db, user_id)
-        query["$nor"] = [resolved_self_sos(user_id, subjects)]
-    return query
-
-
 async def verify_departure(db, user_id, family_id, collections):
-    """Shared join/leave admission, called with the source fence held."""
+    """Shared admission for join, leave and removal under the source fence."""
     self_ids, subjects = await verified_subjects(db, user_id, family_id)
     history = resolved_self_sos(user_id, subjects, family_id)
     if await db.alerts.find_one({
-        "family_group_id": family_id, "owner_id": user_id,
-        "type": "sos", "$nor": [history],
+        "family_group_id": family_id, "type": "sos", "$nor": [history],
+        "$or": [{"owner_id": user_id}, {"member_id": {"$in": subjects},
+                                        "$nor": [{"resolved": {"$eq": True, "$type": "bool"}}]}],
     }, {"_id": 1}):
         raise HTTPException(409, "Resolve or review your current family's SOS before leaving it.")
     family = await db.family_groups.find_one({"id": family_id})
+    if not family:
+        raise HTTPException(409, "The source family could not be verified.")
+    for collection, subject in (("members", "user_id"), ("reminders", "member_id")):
+        if collection not in collections:
+            continue
+        own_subjects = [user_id] if collection == "members" else self_ids
+        if await db[collection].find_one({
+            "owner_id": user_id, "family_group_id": family_id,
+            subject: {"$nin": own_subjects},
+        }, {"_id": 1}):
+            raise HTTPException(409, "Hand off dependent care in your current family before leaving it.")
+    if "reminders" in collections and await db.reminders.find_one({
+        "family_group_id": family_id, "member_id": {"$in": self_ids},
+        "owner_id": {"$ne": user_id},
+    }, {"_id": 1}):
+        raise HTTPException(409, "Review reminders assigned by your current family before leaving it.")
+    if self_ids and await db.medication_occurrences.find_one({
+        "member_id": {"$in": self_ids}, "family_state": "sending",
+        "$or": [{"family_group_id": family_id}, {"family_group_id": {"$exists": False}}],
+    }, {"_id": 1}):
+        raise HTTPException(409, "A medication notification is being sent; retry shortly.")
     if family and family.get("owner_user_id") == user_id:
         if await db.users.find_one({"family_group_id": family_id, "id": {"$ne": user_id}}, {"_id": 1}):
             raise HTTPException(409, "Transfer ownership of your current family before leaving it.")
@@ -94,8 +108,22 @@ async def verify_departure(db, user_id, family_id, collections):
 
 
 async def move_verified_self_records(db, user_id, source, target, self_ids, collections):
+    if "reminders" in collections and self_ids:
+        reminders = await db.reminders.find(
+            movable_records("reminders", user_id, self_ids, source), {"id": 1},
+        ).to_list(1001)
+        if len(reminders) > 1000:
+            raise HTTPException(409, "Too many reminders to safely transfer.")
+        related = {"reminder_id": {"$in": [row["id"] for row in reminders]},
+                   "member_id": {"$in": self_ids}, "family_group_id": source}
+        if reminders and await db.medication_occurrences.find_one({
+            **related, "family_group_id": {"$exists": False},
+        }, {"_id": 1}):
+            raise HTTPException(409, "Review legacy medication history before transferring these reminders.")
+        for collection in ("medication_occurrences", "med_notifications"):
+            await db[collection].update_many(related, {"$set": {"family_group_id": target}})
     await db.members.update_many(
-        {"user_id": user_id, "family_group_id": source},
+        {"id": {"$in": self_ids}, "user_id": user_id, "family_group_id": source},
         {"$set": {"family_group_id": target}},
     )
     for collection in collections:
@@ -174,7 +202,7 @@ async def read_family_alerts(db, actor_id, family_id):
             for row in rows if row.get("type") != "sos" or row.get("owner_id") in allowed or row["id"] in active]
 
 
-async def acknowledge_in_family(db, actor_id, family_id, alert_id, *, finish_medication=False):
+async def acknowledge_in_family(db, actor_id, family_id, alert_id, *, complete_medication=None):
     """Check current authority and acknowledge within the transfer fence."""
     async def ack(tx):
         await fw.actor_in_family(tx, actor_id, family_id)
@@ -187,8 +215,13 @@ async def acknowledge_in_family(db, actor_id, family_id, alert_id, *, finish_med
         }, {"_id": 1}):
             raise HTTPException(404, "Alert not found")
         medication = alert.get("type") == "medication" and alert.get("self_due") is True
-        if medication == finish_medication:
-            await tx.alerts.update_one({"id": alert_id, **scope}, {"$set": {"acknowledged": True}})
+        if medication:
+            if complete_medication is None:
+                raise HTTPException(409, "Medication acknowledgment requires an exact occurrence.")
+            await complete_medication(tx, alert)
+        result = await tx.alerts.update_one({"id": alert_id, **scope}, {"$set": {"acknowledged": True}})
+        if result.matched_count != 1:
+            raise HTTPException(409, "Alert changed.")
         return alert
     return await fw.run(db, [family_id], ack)
 
