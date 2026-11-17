@@ -21,6 +21,7 @@ from pydantic import BaseModel, EmailStr, Field
 from pymongo import ReturnDocument
 
 import family_group as fg
+import sos_history as sh
 
 TOKEN_RE = re.compile(r"^[a-f0-9]{64}$")
 TTL = timedelta(minutes=15)
@@ -113,10 +114,14 @@ async def join_verified(db, user, inv, target):
         raise HTTPException(409, "This invitation was already accepted and your family has since changed. Ask for a new invitation.")
     if old_gid and old_gid != target["id"]:
         old = await db.family_groups.find_one({"id": old_gid})
-        self_rows = await db.members.find(
-            {"user_id": user["id"], "family_group_id": old_gid}, {"id": 1},
-        ).to_list(100)
-        self_ids = [row["id"] for row in self_rows]
+        self_ids, subjects = await sh.verified_subjects(db, user["id"], old_gid)
+        history = sh.resolved_self_sos(user["id"], subjects, old_gid)
+        # A non-owner also must not silently move an unresolved/self-ambiguous
+        # SOS while leaving that incident's family behind.
+        unsafe_sos = {"family_group_id": old_gid, "owner_id": user["id"],
+                      "type": "sos", "$nor": [history]}
+        if await db.alerts.find_one(unsafe_sos, {"_id": 1}):
+            raise HTTPException(409, "Resolve or review your current family's SOS before joining another family.")
         if old and old.get("owner_user_id") == user["id"]:
             others = await db.users.count_documents({"family_group_id": old_gid, "id": {"$ne": user["id"]}})
             if others:
@@ -128,7 +133,10 @@ async def join_verified(db, user, inv, target):
                 if collection == "members":
                     remaining["user_id"] = {"$ne": user["id"]}
                 else:
-                    remaining["$nor"] = [{"owner_id": user["id"], "member_id": {"$in": self_ids}}]
+                    allowed = [sh.movable_records(collection, user["id"], self_ids, old_gid)]
+                    if collection == "alerts":
+                        allowed.append(history)
+                    remaining["$nor"] = allowed
                 if await db[collection].find_one(remaining, {"_id": 1}):
                     raise HTTPException(409, "Your current family still has members or care records. Transfer ownership before joining another family.")
         # Unlike the legacy helper, do not swallow failed writes. Every owned
@@ -143,7 +151,7 @@ async def join_verified(db, user, inv, target):
             if collection == "members":
                 continue
             await db[collection].update_many(
-                {"owner_id": user["id"], "member_id": {"$in": self_ids}, "family_group_id": old_gid},
+                sh.movable_records(collection, user["id"], self_ids, old_gid),
                 {"$set": {"family_group_id": target["id"]}},
             )
         # Never publish prior-family coordinates into a new consent lifetime.
@@ -239,6 +247,10 @@ async def accept_legacy_invitation(db, token, *, user_id=None, new_user=None):
 
 def build_router(db, get_current_user, send_email, make_token, public_user):
     router = APIRouter()
+
+    @router.get("/auth/self/sos-history")
+    async def self_sos_history(current=Depends(get_current_user)):
+        return await sh.own_history(db, current["id"])
 
     @router.post("/auth/email-link/invitation")
     async def preview_invitation(data: dict):

@@ -57,6 +57,7 @@ from pydantic import BaseModel, EmailStr
 from pymongo.errors import DuplicateKeyError
 
 import invitation_presentation
+import sos_history as sh
 
 logger = logging.getLogger(__name__)
 
@@ -502,12 +503,21 @@ async def ensure_family_group(db, user: dict) -> str:
     return gid
 
 
-async def transfer_data_to_group(db, owner_user_id: str, target_group_id: str) -> None:
+async def transfer_data_to_group(db, owner_user_id: str, target_group_id: str,
+                                 *, retain_history: bool = False) -> None:
     """Re-tag this user's owned data into a new group (used when they join)."""
+    # Legacy family-code/OTP callers have no transactional history admission.
+    # Fail before any move rather than route archived incidents around the
+    # verified invitation guard. Explicit leave retains history in place.
+    _, subjects = await sh.verified_subjects(db, owner_user_id)
+    if not retain_history and await db.alerts.find_one(
+        sh.resolved_self_sos(owner_user_id, subjects), {"_id": 1},
+    ):
+        raise HTTPException(409, "Use your personal emailed invitation to safely join with SOS history.")
     for coll in DATA_COLLECTIONS:
         try:
             await db[coll].update_many(
-                {"owner_id": owner_user_id},
+                await sh.removal_move_query(db, owner_user_id, coll),
                 {"$set": {"family_group_id": target_group_id}},
             )
         except Exception as e:
@@ -924,11 +934,15 @@ def build_router(
                 )
         # Detach the user's existing data and ship it into a fresh solo group.
         new_group = await create_group_for_user(db, current)
-        await transfer_data_to_group(db, current["id"], new_group["id"])
+        await transfer_data_to_group(db, current["id"], new_group["id"], retain_history=True)
         # If old group has no more users, delete it
         remaining = await db.users.count_documents({"family_group_id": gid})
         if remaining == 0:
-            await db.family_groups.delete_one({"id": gid})
+            for collection in DATA_COLLECTIONS:
+                if await db[collection].find_one({"family_group_id": gid}, {"_id": 1}):
+                    break
+            else:
+                await db.family_groups.delete_one({"id": gid})
         return {"ok": True, "new_group": public_group(new_group)}
 
     @router.post("/remove-member")
@@ -966,7 +980,7 @@ def build_router(
             # together, or all roll back.
             for collection in DATA_COLLECTIONS:
                 await tx[collection].update_many(
-                    {"owner_id": target_user["id"]},
+                    await sh.removal_move_query(tx, target_user["id"], collection),
                     {"$set": {"family_group_id": solo["id"]}},
                 )
             return {"ok": True, "removed_user_id": data.user_id}

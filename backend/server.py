@@ -58,6 +58,7 @@ from expo_push import (
 )
 import billing
 import family_group as fg
+import sos_history as sh
 import invitation_presentation
 import sms
 import med_scheduler
@@ -4476,14 +4477,16 @@ async def update_checkin_settings(member_id: str, data: CheckinSettings, current
 @api_router.get("/alerts", response_model=List[Alert])
 async def list_alerts(current=Depends(get_current_user)):
     await detect_missed_checkins(current["family_group_id"], current)
-    docs = await db.alerts.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    scope = await sh.family_alert_query(db, current["family_group_id"])
+    docs = await db.alerts.find(scope, {"_id": 0}).sort("created_at", -1).to_list(2000)
     return [Alert(**d) for d in docs]
 
 
 @api_router.post("/alerts/{alert_id}/ack")
 async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
+    scope = await sh.family_alert_query(db, current["family_group_id"])
     alert = await db.alerts.find_one(
-        {"id": alert_id, "family_group_id": current["family_group_id"]},
+        {"id": alert_id, **scope},
         {"_id": 0},
     )
     if not alert:
@@ -4534,7 +4537,7 @@ async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
         )
 
     r = await db.alerts.update_one(
-        {"id": alert_id, "family_group_id": current["family_group_id"]},
+        {"id": alert_id, **scope},
         {"$set": {"acknowledged": True}},
     )
     if r.matched_count == 0:
@@ -4562,8 +4565,9 @@ async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
 # =========================================================================
 @api_router.post("/alerts/{alert_id}/resolve")
 async def resolve_alert(alert_id: str, current=Depends(get_current_user)):
+    scope = await sh.family_alert_query(db, current["family_group_id"])
     doc = await db.alerts.find_one(
-        {"id": alert_id, "family_group_id": current["family_group_id"]},
+        {"id": alert_id, **scope},
         {"_id": 0},
     )
     if not doc:
@@ -4629,7 +4633,8 @@ async def clear_all_alerts(current=Depends(get_current_user)):
     "Clear All" button in the Alerts tab. Scoped to family_group_id
     so a user cannot wipe another family's alerts.
     """
-    r = await db.alerts.delete_many({"family_group_id": current["family_group_id"]})
+    scope = await sh.family_alert_query(db, current["family_group_id"])
+    r = await db.alerts.delete_many(scope)
     return {"ok": True, "deleted": r.deleted_count}
 
 

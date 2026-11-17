@@ -44,6 +44,10 @@ def matches(doc, query):
                     return False
                 if operator == "$in" and actual not in value:
                     return False
+                if operator == "$eq" and actual != value:
+                    return False
+                if operator == "$type" and value == "bool" and type(actual) is not bool:
+                    return False
         elif actual != expected:
             return False
     return True
