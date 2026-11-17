@@ -65,7 +65,11 @@ export const PRIVACY_POLICY: LegalSection[] = [
   {
     heading: '6. Data Retention & Security',
     body:
-      `We keep your data for as long as your account is active. You can delete a family member, a ` +
+      `Resolved SOS records are automatically eligible for deletion 30 days after they are resolved, ` +
+      `even while your account is active. Automatic deletion may occur after that point rather than ` +
+      `at an exact time. Active, unresolved SOS records are not subject to this 30-day expiration. ` +
+      `Other data is kept for as long as your account is active, subject to applicable retention periods. ` +
+      `You can delete a family member, a ` +
       `reminder, or your entire account at any time, after which the associated data is removed from ` +
       `our production database within 30 days. We use industry-standard safeguards including ` +
       `encryption in transit (TLS), hashed passwords, and access controls. No system is perfectly ` +

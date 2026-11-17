@@ -7890,8 +7890,9 @@ async def _ensure_alert_dedup_index():
         ("email_link_limits",  "expires_at", 0,             None),
         # Check-ins — 90 days after creation
         ("checkins",           "created_at", 90 * 86400,    None),
-        # Do not install an alerts TTL that can delete historical SOS. An
-        # existing database index requires a separately approved migration.
+        # Product policy: resolved SOS expires 30 days after resolved_at.
+        # Preserve the existing production alerts TTL; do not recreate or alter
+        # it at startup. Active/reopened SOS must have no resolved_at date.
         # Medication notifications — 30 days after creation
         ("med_notifications",  "created_at", 30 * 86400,    None),
         # Build 53 — Location ingest diagnostic log + blank-push drops.

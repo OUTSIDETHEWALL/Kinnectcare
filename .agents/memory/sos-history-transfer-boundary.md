@@ -13,8 +13,10 @@ TTL index unchanged unless the user separately authorizes a change.
 
 **How to apply:** Transfer-time preservation below means preserving records
 within their retention period, not indefinite retention. The earlier proposal
-to remove the alerts TTL is superseded. Verify active-SOS safety separately:
-the existing filter checks only that resolved_at exists, not resolved status.
+to remove the alerts TTL is superseded. Active and reopened SOS must have no
+date-valued resolved_at: the existing filter checks only that resolved_at exists,
+not resolved status. Resolving again starts a new 30-day period; retries of an
+already-resolved incident must not extend its retention timestamp.
 
 Qualifying resolved self-SOS history must stay unchanged in its existing family
 when its subject joins or is removed from a family. Both verified account-ID and
