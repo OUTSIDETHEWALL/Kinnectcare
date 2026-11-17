@@ -93,7 +93,7 @@ describe('owned Android cold tracking recovery', () => {
   const run = (current = () => true) =>
     recovery.recoverUnexpectedlyDisabledTracking(sdk, current);
 
-  it('shares both fresh stages through 30 actual recovery consumers without sharing their verdicts', async () => {
+  it('shares only initial reads through 30 recovery consumers and keeps second checks independent', async () => {
     enabled = true;
     const independentTransport = global.fetch;
     const waiting: { url: string; resolve: (response: any) => void }[] = [];
@@ -114,7 +114,7 @@ describe('owned Android cold tracking recovery', () => {
     await flush();
     expect(global.fetch).toHaveBeenCalledTimes(3); // One pending initial triplet.
     settle(); await flush();
-    expect(global.fetch).toHaveBeenCalledTimes(6); // A NEW pending second triplet.
+    expect(global.fetch).toHaveBeenCalledTimes(93); // Three initial + 90 independent second reads.
     current[0] = false;
     settle();
     // Later FIFO validation is untouched. Let it use the normal transport;
@@ -123,7 +123,7 @@ describe('owned Android cold tracking recovery', () => {
     const results = await Promise.all(pending);
     expect(results[0]).toBe('obsolete_owner');
     expect(results.slice(1).every(value => value === 'already_enabled')).toBe(true);
-    expect(global.fetch).toHaveBeenCalledTimes(9); // Six staged reads + three existing FIFO reads.
+    expect(global.fetch).toHaveBeenCalledTimes(96); // Plus three existing FIFO reads.
     expect(sdk.stop).not.toHaveBeenCalled();
     expect(sdk.start).not.toHaveBeenCalled();
   });

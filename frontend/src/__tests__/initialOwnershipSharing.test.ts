@@ -10,7 +10,7 @@ const deferred = <T,>() => {
 };
 type Read = ReturnType<typeof deferred<any>> & { url: string; signal: AbortSignal };
 
-describe.each(['initial-ownership', 'second-ownership'])(
+describe.each(['initial-ownership'])(
   'real %s verification with runtime-local pending reads', stage => {
   let recovery: typeof import('../androidTrackingRecovery');
   let sharing: typeof import('../initialOwnershipReads');
@@ -175,12 +175,14 @@ describe.each(['initial-ownership', 'second-ownership'])(
 
   it('keeps the existing 8-second timeout, with no retained timed-out result', async () => {
     jest.useFakeTimers();
-    const pending = [verify(), verify()]; await flush();
+    // Non-budgeted initial readers keep their original JS timeout. Budgeted
+    // SDK readers exercise the native XHR timeout in ownershipAdmission.test.
+    const pending = [verify('foreground-position'), verify('foreground-position')]; await flush();
     expect(dispatch).toHaveBeenCalledTimes(3);
     jest.advanceTimersByTime(7999); expect(reads.every(r => !r.signal.aborted)).toBe(true);
     jest.advanceTimersByTime(1);
     expect((await Promise.all(pending)).every(v => v.state === 'UNKNOWN')).toBe(true);
-    const retry = verify(); await flush(); succeed(3);
+    const retry = verify('foreground-position'); await flush(); succeed(3);
     expect((await retry).state).toBe('AUTHORIZED');
     expect(dispatch).toHaveBeenCalledTimes(6);
     expect(jest.getTimerCount()).toBe(0);
@@ -292,7 +294,7 @@ describe.each(['initial-ownership', 'second-ownership'])(
     const second = [verify('sdk-headless', 1, 'second-ownership'), verify('sdk-headless', 1, 'second-ownership')];
     const acquisition = recovery.verifyWakeOwnership(() => true, origin('gps-acquisition', 'acquisition-ownership'), 1);
     await flush();
-    expect(dispatch).toHaveBeenCalledTimes(9);
+    expect(dispatch).toHaveBeenCalledTimes(12);
     succeed();
     expect((await Promise.all([...initial, ...second])).every(v => v.state === 'AUTHORIZED')).toBe(true);
     expect(await acquisition).toBe('allowed');
@@ -321,7 +323,9 @@ describe.each(['initial-ownership', 'second-ownership'])(
     if (kind === 'pending-mutation') native.trackingClaimConfiguration('owner:member', 0, 'configuration', Date.now());
     const pending = Array.from({ length: 2 }, () =>
       recovery.verifyWakeOwnership(() => true, origin(), 1));
-    await flush(); expect(dispatch).toHaveBeenCalledTimes(6); succeed();
+    await flush();
+    // Queued SDK work now fails closed for revoked or mutating native authority.
+    expect(dispatch).toHaveBeenCalledTimes(kind === 'missing-intent' ? 6 : 0); succeed();
     await Promise.all(pending);
   });
 

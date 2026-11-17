@@ -13,6 +13,7 @@ type NativeObserver = {
 export type RequestOrigin = {
   operation: string; origin: string; phase?: string; wake?: string | null; generation?: number;
   asyncRequest?: string; flight?: string;
+  ownershipPriority?: 'motion' | 'other';
 };
 const opaqueId = () => Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
 const runtime = opaqueId();

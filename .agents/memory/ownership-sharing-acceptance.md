@@ -15,14 +15,15 @@ protecting authorization and the working moving-GPS baseline.
 validation. Report synthetic request/queue reductions separately from observed
 phone startup improvement; local success does not authorize a binary or release.
 
-Recovery-stage sharing must be phase-separated: a second ownership check must
-never reuse an initial-stage result. Share only overlapping raw responses for
-equivalent security contexts, not per-consumer verdicts or completed results.
-Acquisition checks remain independent.
+Share INITIAL-stage pending raw reads only. Every valid recovery consumer must
+dispatch independent second-stage ownership reads; matching local context does
+not make another consumer's pending response fresh enough. Acquisition remains
+independent. Bounded admission may queue requests but must not substitute results.
 
-**Why:** The owner approved narrowly scoped second-stage sharing after a later
-physical export established second-stage amplification, while explicitly
-requiring the earlier authorization and freshness guarantees to remain intact.
+**Why:** Adversarial reproductions showed that server-only consent withdrawal or
+owner replacement between consumers is detected by main's fresh second check but
+missed when that consumer joins an older pending response. The owner rejected
+that sharing design and approved a bounded-admission candidate instead.
 
 **How to apply:** Preserve each consumer's session, owner, consent, revocation
 and lifecycle checks. Count XHR test handoffs separately from actual Android

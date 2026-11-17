@@ -1,5 +1,11 @@
 # Second-stage ownership sharing: review and evidence
 
+> **Rejected historical candidate — do not use as the current security review.**
+> Independent review reproduced missed server-only consent withdrawal and owner
+> replacement for a later consumer joining an older pending response. The
+> second-stage sharing implementation has been removed. Current implementation,
+> tests and risks are documented in `ownership-admission-review.md`.
+
 ## Scope and diagnosis
 
 Severity: **Medium** startup-performance defect (startup eventually succeeds).
