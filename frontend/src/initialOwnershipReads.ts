@@ -1,5 +1,6 @@
 /**
- * Runtime-local, pending reads only. Keys contain credentials: never expose,
+ * Runtime-local, INITIAL-stage pending reads only.
+ * Keys contain credentials: never expose,
  * persist or send them to the diagnostic observer.
  */
 import { diagnosticId, deepStage, flightStage } from './deepAsyncTrace';
@@ -7,6 +8,7 @@ import type { RequestOrigin } from './requestOrigin';
 type Reads = [unknown, unknown, unknown];
 const flights = new Map<string, Promise<Reads>>();
 const observations = new WeakMap<Promise<Reads>, { id: string; consumers: number }>();
+const liveConsumers = new WeakMap<Promise<Reads>, (() => boolean)[]>();
 let revision = 0;
 let mutations = 0;
 export type OwnershipSession = { revision: number; mutating: boolean };
@@ -42,9 +44,13 @@ export function beginOwnershipSessionChange(): () => void {
   };
 }
 
-export function initialOwnershipReads(key: string, load: () => Promise<Reads>, diagnostic?: RequestOrigin): Promise<Reads> {
+export function initialOwnershipReads(
+  key: string, load: (anyConsumerCurrent: () => boolean) => Promise<Reads>,
+  diagnostic?: RequestOrigin, isCurrent: () => boolean = () => true,
+): Promise<Reads> {
   const existing = flights.get(key);
   if (existing) {
+    liveConsumers.get(existing)?.push(isCurrent);
     const observation = observations.get(existing);
     if (observation) {
       observation.consumers++;
@@ -55,8 +61,12 @@ export function initialOwnershipReads(key: string, load: () => Promise<Reads>, d
   }
   const observation = { id: diagnosticId(), consumers: 1 };
   if (diagnostic) diagnostic.flight = observation.id;
-  const pending = load();
+  const consumers = [isCurrent];
+  const pending = load(() => consumers.some(current => {
+    try { return current(); } catch { return false; }
+  }));
   flights.set(key, pending);
+  liveConsumers.set(pending, consumers);
   observations.set(pending, observation);
   flightStage(observation.id, 'flight_created', diagnostic, 1);
   deepStage(diagnostic, 'consumer_attached', { flight: observation.id, count: 1 });

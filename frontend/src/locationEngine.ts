@@ -2143,6 +2143,7 @@ export function recoverFromIndependentWake(
       : trigger.includes('patrol') ? 'patrol' : trigger === 'js-position' ? 'foreground-position' : 'independent-other',
     evidenceWakeId, expected?.generation,
   );
+  diagnostic.ownershipPriority = ['sdk-motionchange', 'sdk-activitychange'].includes(trigger) ? 'motion' : 'other';
   const recovery = (async () => {
     const verdict = await evaluateWakeAuthorization(() => generation === engineGeneration && isCurrent(),
       originPhase(diagnostic, 'initial-ownership'), generation);

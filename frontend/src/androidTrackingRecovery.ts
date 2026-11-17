@@ -12,6 +12,7 @@ import { backgroundHttp } from './backgroundHttp';
 import { initialOwnershipReads, ownershipSession, ownershipSessionCurrent } from './initialOwnershipReads';
 import { deepStage, diagnosticId } from './deepAsyncTrace';
 import { timerBegin, timerEnd, timerCallback } from './schedulingTrace';
+import { admitOwnershipHttp } from './ownershipAdmission';
 
 export type AuthorizationVerdict = {
   state: 'AUTHORIZED' | 'UNKNOWN' | 'REVOKED';
@@ -311,7 +312,7 @@ export async function authorizeDeviceContactTransport(
  */
 export async function verifyWakeOwnership(
   isCurrent: () => boolean, origin: RequestOrigin = operationOrigin('ownership-direct'),
-  initialLifecycleGeneration?: number,
+  lifecycleGeneration?: number,
 ): Promise<string> {
   let attached = false;
   const finish = (result: string) => {
@@ -320,11 +321,13 @@ export async function verifyWakeOwnership(
     return result;
   };
   deepStage(origin, 'ownership_entered');
-  // Only the initial recovery stage opts in. Later ownership/acquisition checks
-  // must dispatch new reads even if an initial flight happens to be pending.
-  const initial = initialLifecycleGeneration !== undefined && origin.phase === 'initial-ownership';
-  const session = initial ? ownershipSession() : null;
-  const admittedAuthority = initial ? readTrackingAuthority() : null;
+  // Only initial reads share responses. SDK initial/second transports may wait
+  // for admission; second-stage reads ALWAYS dispatch independently.
+  const initial = lifecycleGeneration !== undefined && origin.phase === 'initial-ownership';
+  const admitted = origin.origin === 'sdk-headless'
+    && (origin.phase === 'initial-ownership' || origin.phase === 'second-ownership');
+  const session = initial || admitted ? ownershipSession() : null;
+  const admittedAuthority = initial || admitted ? readTrackingAuthority() : null;
   const expectedEpoch = trackingIntentEpoch();
   deepStage(origin, 'policy_read_entered');
   const stamp = await trackingPolicyStamp();
@@ -351,37 +354,50 @@ export async function verifyWakeOwnership(
   };
   if (session && !ownershipSessionCurrent(session)) return finish('obsolete_owner');
   const admittedConsent = admittedAuthority ? getVerifiedConsentGeneration(admittedAuthority.owner) : null;
-  const sharingKey = session && intent && admittedAuthority && !admittedAuthority.revoked
+  const sharingKey = initial && session && intent && admittedAuthority && !admittedAuthority.revoked
     && admittedAuthority.owner === `${intent.ownerUserId}:${intent.memberId}`
     && sameAuthority() && stamp === (deepStage(origin, 'eligibility_policy_entered'), await trackingPolicyStamp())
-    ? JSON.stringify([session.revision, token, base, stamp, admittedAuthority.owner,
-      expectedEpoch, initialLifecycleGeneration, admittedConsent])
+    ? JSON.stringify([origin.phase, session.revision, token, base, stamp, admittedAuthority.owner,
+      admittedAuthority.generation, expectedEpoch, lifecycleGeneration, admittedConsent])
     : null;
   deepStage(origin, 'sharing_eligibility_completed', { eligible: !!sharingKey });
   // Loading dispatches synchronously. Fence creation, never abort a pending
   // shared read when its initiator expires: a live follower still needs it.
   // Every consumer separately validates the eventual raw responses below.
-  const load = () => Promise.all([
-    authenticatedGet(`${base}/api/auth/me`, token, origin, isCurrent),
-    authenticatedGet(`${base}/api/members`, token, origin, isCurrent),
-    authenticatedGet(`${base}/api/me/preferences`, token, origin, isCurrent),
-  ]) as Promise<[unknown, unknown, unknown]>;
-  const obsoleteInitial = () => !!session && (!ownershipSessionCurrent(session)
-    || (!!sharingKey && !sameAuthority()));
+  const contextCurrent = () => trackingIntentEpoch() === expectedEpoch
+    && (!session || ownershipSessionCurrent(session))
+    && (admittedAuthority ? sameAuthority() : readTrackingAuthority() === null)
+    && (!admittedAuthority || getVerifiedConsentGeneration(admittedAuthority.owner) === admittedConsent);
+  const load = (consumerCurrent = isCurrent) => {
+    const current = admitted ? () => consumerCurrent() && contextCurrent() : consumerCurrent;
+    return Promise.all([
+      authenticatedGet(`${base}/api/auth/me`, token, origin, current, admitted ? dispatchCheck : undefined),
+      authenticatedGet(`${base}/api/members`, token, origin, current, admitted ? dispatchCheck : undefined),
+      authenticatedGet(`${base}/api/me/preferences`, token, origin, current, admitted ? dispatchCheck : undefined),
+    ]) as Promise<[unknown, unknown, unknown]>;
+  };
+  const dispatchCheck = async () => {
+    const policy = await trackingPolicyStamp();
+    const currentToken = await getCurrentToken();
+    const sharingOff = await AsyncStorage.getItem('@kinnship/location_sharing_off_v1');
+    return policy === stamp && currentToken === token && sharingOff !== '1' && contextCurrent();
+  };
+  const obsoleteSharedContext = () => !!session && (!ownershipSessionCurrent(session)
+    || ((!!sharingKey || admitted) && !sameAuthority()));
   let user: { id?: string }, members: { id: string; user_id: string; location_consent_generation?: number }[], preferences: { location_sharing_enabled?: boolean };
   try {
-    if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteInitial()) return finish('obsolete_owner');
+    if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteSharedContext()) return finish('obsolete_owner');
     attached = true;
     deepStage(origin, sharingKey ? 'flight_await_entered' : 'unshared_load_entered');
     [user, members, preferences] = await (sharingKey
-      ? initialOwnershipReads(sharingKey, load, origin) : load()) as [typeof user, typeof members, typeof preferences];
+      ? initialOwnershipReads(sharingKey, load, origin, isCurrent) : load()) as [typeof user, typeof members, typeof preferences];
     deepStage(origin, 'aggregate_fulfilled');
     deepStage(origin, 'consumer_resumed');
   } catch (error) {
     deepStage(origin, 'aggregate_rejected');
     if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch
       || (deepStage(origin, 'error_token_entered'), await getCurrentToken()) !== token
-      || obsoleteInitial()) return finish('obsolete_owner');
+      || obsoleteSharedContext()) return finish('obsolete_owner');
     deepStage(origin, 'error_token_completed');
     // Only /auth/me 401 confirms session invalidation. A member/preferences
     // 403 can be an endpoint policy failure, not evidence of sign-out.
@@ -394,7 +410,7 @@ export async function verifyWakeOwnership(
   const currentToken = await getCurrentToken();
   deepStage(origin, 'post_token_completed');
   if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || currentStamp !== stamp || currentToken !== token
-    || obsoleteInitial()) return finish('obsolete_owner');
+    || obsoleteSharedContext()) return finish('obsolete_owner');
   deepStage(origin, 'execution_authority_validated');
   if (!user?.id || !Array.isArray(members)
     || members.some(member => !member || typeof member.id !== 'string'
@@ -412,7 +428,7 @@ export async function verifyWakeOwnership(
   if (preferences?.location_sharing_enabled !== true) return finish('ownership_unavailable');
   // A native HTTP receipt has no original dispatch generation. Read the
   // accepted tuple only through this current-token/current-owner operation.
-  if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteInitial()) return finish('obsolete_owner');
+  if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteSharedContext()) return finish('obsolete_owner');
   if (sharingKey && admittedAuthority) {
     const latestConsent = getVerifiedConsentGeneration(admittedAuthority.owner);
     if (latestConsent !== admittedConsent
@@ -427,24 +443,50 @@ export async function verifyWakeOwnership(
 
 async function authenticatedGet(
   url: string, token: string, origin?: RequestOrigin, dispatchCurrent: () => boolean = () => true,
+  admissionCheck?: () => Promise<boolean>,
+  nativeTimeoutOnly = false,
 ): Promise<unknown> {
+  if (admissionCheck) {
+    return admitOwnershipHttp(origin?.ownershipPriority ?? 'other', async () => {
+      if (!dispatchCurrent()) throw new Error('ownership_operation_obsolete');
+      // Start the existing operation timeout only on admission, not while queued.
+      // A late storage result must never dispatch after validation times out.
+      let live = true;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const valid = await Promise.race([
+          admissionCheck(),
+          new Promise<boolean>(resolve => { timeout = setTimeout(() => resolve(false), 8000); }),
+        ]);
+        clearTimeout(timeout);
+        if (!valid || !dispatchCurrent()) throw new Error('ownership_operation_obsolete');
+        return await authenticatedGet(url, token, origin, () => live && dispatchCurrent(), undefined, true);
+      } finally {
+        live = false;
+        clearTimeout(timeout);
+      }
+    });
+  }
   const endpoint = url.endsWith('/api/auth/me') ? 'auth-me'
     : url.endsWith('/api/members') ? 'members' : 'preferences';
   const diagnostic = origin ? { ...origin, asyncRequest: diagnosticId() } : undefined;
   deepStage(diagnostic, 'helper_entered', { endpoint });
   const controller = new AbortController();
-  // Observe the ORIGINAL timer; no extra timeout or scheduling chain.
-  const abortRegistration = timerBegin(diagnostic?.asyncRequest, 2);
   let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    timeout = setTimeout(() => {
-      timerCallback(abortRegistration);
-      deepStage(diagnostic, 'abort_timer_fired');
-      controller.abort();
-    }, 8000);
-  } finally {
-    timerEnd(abortRegistration, typeof timeout === 'number' ? timeout : -1);
+  if (!nativeTimeoutOnly) {
+    const abortRegistration = timerBegin(diagnostic?.asyncRequest, 2);
+    try {
+      timeout = setTimeout(() => {
+        timerCallback(abortRegistration);
+        deepStage(diagnostic, 'abort_timer_fired');
+        controller.abort();
+      }, 8000);
+    } finally {
+      timerEnd(abortRegistration, typeof timeout === 'number' ? timeout : -1);
+    }
   }
+  // Admitted requests retain backgroundHttp's native XHR 8s timeout. Do not
+  // release a permit on a JS abort before native cancellation has been observed.
   let fetchFulfilled = false;
   try {
     deepStage(diagnostic, 'fetch_await_entered');
@@ -637,10 +679,15 @@ export async function recoverUnexpectedlyDisabledTracking(
     let responses: unknown[];
     try {
       const diagnostic = originPhase(origin ?? operationOrigin('recovery'), 'recovery-cache-miss');
+      const boundary = ownershipSession();
+      const dispatchCurrent = () => isCurrent() && ownershipSessionCurrent(boundary)
+        && trackingIntentEpoch() === expectedEpoch;
+      const admission = origin?.origin === 'sdk-headless'
+        ? async () => dispatchCurrent() && await current() : undefined;
       responses = await Promise.all([
-        authenticatedGet(`${base}/api/auth/me`, token, diagnostic, isCurrent),
-        authenticatedGet(`${base}/api/members`, token, diagnostic, isCurrent),
-        authenticatedGet(`${base}/api/me/preferences`, token, diagnostic, isCurrent),
+        authenticatedGet(`${base}/api/auth/me`, token, diagnostic, dispatchCurrent, admission),
+        authenticatedGet(`${base}/api/members`, token, diagnostic, dispatchCurrent, admission),
+        authenticatedGet(`${base}/api/me/preferences`, token, diagnostic, dispatchCurrent, admission),
       ]);
     } catch (error) {
       if (String(error).includes('session_rejected') && await current()) {

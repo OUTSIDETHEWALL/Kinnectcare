@@ -10,7 +10,8 @@ const deferred = <T,>() => {
 };
 type Read = ReturnType<typeof deferred<any>> & { url: string; signal: AbortSignal };
 
-describe('real initial ownership verification with runtime-local pending reads', () => {
+describe.each(['initial-ownership'])(
+  'real %s verification with runtime-local pending reads', stage => {
   let recovery: typeof import('../androidTrackingRecovery');
   let sharing: typeof import('../initialOwnershipReads');
   let native: typeof import('../__mocks__/trackingNative').trackingNative;
@@ -25,11 +26,11 @@ describe('real initial ownership verification with runtime-local pending reads',
     version: 1, ownerUserId: owner, memberId: member,
     backendBaseUrl: 'https://example.test', nonce,
   });
-  const origin = (label = 'sdk-headless', phase = 'initial-ownership'): RequestOrigin => ({
+  const origin = (label = 'sdk-headless', phase = stage): RequestOrigin => ({
     operation: `operation-${active.length}`, origin: label, phase,
     wake: `wake-${active.length}`, generation: 0,
   });
-  const verify = (label = 'sdk-headless', lifecycle = 1, phase = 'initial-ownership') => {
+  const verify = (label = 'sdk-headless', lifecycle = 1, phase = stage) => {
     const id = active.push(true) - 1;
     return recovery.evaluateWakeAuthorization(() => active[id], origin(label, phase), lifecycle);
   };
@@ -112,7 +113,7 @@ describe('real initial ownership verification with runtime-local pending reads',
     delete (native as any).deepRecord;
   });
 
-  it.each([2, 4, 7, 10, 100])('%i equivalent consumers issue exactly three HTTP reads', async count => {
+  it.each([2, 4, 7, 10, 30, 100])('%i equivalent consumers issue exactly three HTTP reads', async count => {
     const pending = Array.from({ length: count }, () => verify());
     await flush();
     expect(dispatch).toHaveBeenCalledTimes(3);
@@ -174,12 +175,14 @@ describe('real initial ownership verification with runtime-local pending reads',
 
   it('keeps the existing 8-second timeout, with no retained timed-out result', async () => {
     jest.useFakeTimers();
-    const pending = [verify(), verify()]; await flush();
+    // Non-budgeted initial readers keep their original JS timeout. Budgeted
+    // SDK readers exercise the native XHR timeout in ownershipAdmission.test.
+    const pending = [verify('foreground-position'), verify('foreground-position')]; await flush();
     expect(dispatch).toHaveBeenCalledTimes(3);
     jest.advanceTimersByTime(7999); expect(reads.every(r => !r.signal.aborted)).toBe(true);
     jest.advanceTimersByTime(1);
     expect((await Promise.all(pending)).every(v => v.state === 'UNKNOWN')).toBe(true);
-    const retry = verify(); await flush(); succeed(3);
+    const retry = verify('foreground-position'); await flush(); succeed(3);
     expect((await retry).state).toBe('AUTHORIZED');
     expect(dispatch).toHaveBeenCalledTimes(6);
     expect(jest.getTimerCount()).toBe(0);
@@ -286,6 +289,31 @@ describe('real initial ownership verification with runtime-local pending reads',
     await Promise.all(independent);
   });
 
+  it('never shares across phases, including when initial and second reads overlap', async () => {
+    const initial = [verify('sdk-headless', 1, 'initial-ownership'), verify('sdk-headless', 1, 'initial-ownership')];
+    const second = [verify('sdk-headless', 1, 'second-ownership'), verify('sdk-headless', 1, 'second-ownership')];
+    const acquisition = recovery.verifyWakeOwnership(() => true, origin('gps-acquisition', 'acquisition-ownership'), 1);
+    await flush();
+    expect(dispatch).toHaveBeenCalledTimes(12);
+    succeed();
+    expect((await Promise.all([...initial, ...second])).every(v => v.state === 'AUTHORIZED')).toBe(true);
+    expect(await acquisition).toBe('allowed');
+  });
+
+  it('a settled second stage dispatches fresh reads even with an initial stage still pending', async () => {
+    const initial = verify('sdk-headless', 1, 'initial-ownership'); await flush();
+    const second = verify('sdk-headless', 1, 'second-ownership'); await flush();
+    expect(dispatch).toHaveBeenCalledTimes(6);
+    succeed(3);
+    expect((await second).state).toBe('AUTHORIZED');
+    const next = verify('sdk-headless', 1, 'second-ownership'); await flush();
+    expect(dispatch).toHaveBeenCalledTimes(9);
+    succeed(6);
+    expect((await next).state).toBe('AUTHORIZED');
+    succeed();
+    expect((await initial).state).toBe('AUTHORIZED');
+  });
+
   it.each(['missing-intent', 'missing-authority', 'pending-mutation'])('does not share an unproven %s context', async kind => {
     if (kind === 'missing-intent') store.delete(recovery.TRACKING_INTENT_KEY);
     if (kind === 'missing-authority') {
@@ -295,7 +323,9 @@ describe('real initial ownership verification with runtime-local pending reads',
     if (kind === 'pending-mutation') native.trackingClaimConfiguration('owner:member', 0, 'configuration', Date.now());
     const pending = Array.from({ length: 2 }, () =>
       recovery.verifyWakeOwnership(() => true, origin(), 1));
-    await flush(); expect(dispatch).toHaveBeenCalledTimes(6); succeed();
+    await flush();
+    // Queued SDK work now fails closed for revoked or mutating native authority.
+    expect(dispatch).toHaveBeenCalledTimes(kind === 'missing-intent' ? 6 : 0); succeed();
     await Promise.all(pending);
   });
 
@@ -305,7 +335,7 @@ describe('real initial ownership verification with runtime-local pending reads',
     const pending = [verify(), verify('foreground-position')]; await flush();
     expect(scope).toHaveBeenCalledTimes(3);
     expect(scope.mock.calls.every(([o]: any) =>
-      o.phase === 'initial-ownership' && o.origin === 'sdk-headless' && o.wake)).toBe(true);
+      o.phase === stage && o.origin === 'sdk-headless' && o.wake)).toBe(true);
     succeed(); await Promise.all(pending);
   });
 
