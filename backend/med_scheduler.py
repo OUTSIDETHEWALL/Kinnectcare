@@ -20,6 +20,7 @@ tab shows a complete history of activity (per user requirement).
 from __future__ import annotations
 
 import asyncio
+import family_write_fence as fw
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -607,7 +608,7 @@ async def _log_alert(
             doc["local_date"] = local_date
         if self_due is not None:
             doc["self_due"] = self_due
-        await db.alerts.insert_one(doc)
+        await fw.insert_record(db, "alerts", doc, actor_id=owner_id or None)
     except Exception as e:
         if raise_on_error:
             raise
@@ -671,7 +672,7 @@ async def _ensure_medication_escalation_alert(
         "occurrence_id": occurrence_id,
     }
     try:
-        await db.alerts.insert_one(doc)
+        await fw.insert_record(db, "alerts", doc, actor_id=owner_id or None)
         return alert_id
     except DuplicateKeyError:
         existing = await db.alerts.find_one(query, {"_id": 0})

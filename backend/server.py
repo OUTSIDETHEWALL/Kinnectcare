@@ -59,6 +59,7 @@ from expo_push import (
 import billing
 import family_group as fg
 import sos_history as sh
+import family_write_fence as fw
 import invitation_presentation
 import sms
 import med_scheduler
@@ -1171,7 +1172,8 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
             doc = a.model_dump()
             doc["slot_key"] = slot_key
             try:
-                await db.alerts.insert_one(doc)
+                if not await fw.insert_background_record(db, "alerts", doc):
+                    continue
             except DuplicateKeyError:
                 # Another concurrent request already inserted + pushed for
                 # this slot.  Do NOT fan out a duplicate push.
@@ -1210,7 +1212,8 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
         doc = a.model_dump()
         doc["slot_key"] = slot_key
         try:
-            await db.alerts.insert_one(doc)
+            if not await fw.insert_background_record(db, "alerts", doc):
+                continue
         except DuplicateKeyError:
             # Another concurrent request already inserted + pushed.
             continue
@@ -1873,123 +1876,22 @@ async def verify_otp(data: OtpVerify):
             "push_tokens": [],
             "created_at": datetime.now(timezone.utc),
         }
-        await db.users.insert_one(doc)
+        if target_group:
+            doc, target_group = await el.join_family_code(
+                db, user_id, fg.normalize_invite_code(invite_code),
+                new_user=doc, link_by_name=True,
+            )
+        else:
+            await db.users.insert_one(doc)
         if invite_code:
             logger.info(
                 "[invite-accept] user_authenticated path=signup_new user=%s",
                 user_id[:8],
             )
         if target_group:
-            assignment = await db.users.update_one(
-                {"id": user_id},
-                {"$set": {
-                    "family_group_id": target_group["id"],
-                    "family_group_role": "member",
-                }},
-            )
-            if assignment.matched_count != 1:
-                raise RuntimeError("Family assignment did not match the new user")
-            assigned = await db.users.find_one(
-                {"id": user_id, "family_group_id": target_group["id"]},
-                {"_id": 0, "id": 1},
-            )
-            if not assigned:
-                raise RuntimeError("Family assignment was not persisted")
-            logger.info(
-                "[invite-accept] family_group_updated path=signup_new user=%s group=%s",
-                user_id[:8],
-                target_group.get("id", "")[:8],
-            )
-            doc["family_group_id"] = target_group["id"]
-            doc["family_group_role"] = "member"
-            # === Member-record auto-linkage ===
-            # When a caregiver pre-created a member row (e.g. "Test Member, 78")
-            # and later invited that person by email, the freshly-signed-up
-            # user account is still NOT linked to the member row — the
-            # `members.user_id` field stays null, blocking self-targeted
-            # pushes (e.g. "you have a med to take in 5 min" landing on
-            # the SENIOR's phone, not the caregiver's).
-            #
-            # Heuristic: within the family_group, find an UNLINKED member
-            # (user_id is null/missing) whose `name` matches the joining
-            # user's full_name (case-insensitive, trimmed).  If exactly
-            # one matches, bind them.  Multiple matches → leave unlinked
-            # and log (manual intervention needed; safer than guessing).
-            try:
-                name_target = (doc.get("full_name") or "").strip().lower()
-                if name_target:
-                    matches = await db.members.find(
-                        {
-                            "family_group_id": target_group["id"],
-                            "$or": [
-                                {"user_id": None},
-                                {"user_id": {"$exists": False}},
-                            ],
-                        },
-                        {"_id": 0, "id": 1, "name": 1},
-                    ).to_list(50)
-                    candidates = [
-                        m for m in matches
-                        if (m.get("name") or "").strip().lower() == name_target
-                    ]
-                    if len(candidates) == 1:
-                        await db.members.update_one(
-                            {"id": candidates[0]["id"]},
-                            {"$set": {"user_id": user_id}},
-                        )
-                        logger.info(
-                            f"member-link: bound member={candidates[0]['id']} "
-                            f"({candidates[0].get('name')}) → user={user_id}"
-                        )
-                    elif len(candidates) > 1:
-                        logger.warning(
-                            f"member-link: AMBIGUOUS — {len(candidates)} unlinked "
-                            f"members named {doc.get('full_name')!r} in group "
-                            f"{target_group['id']}; left unlinked for manual review"
-                        )
-            except Exception as e:
-                logger.warning(f"member-link auto-bind skipped: {e}")
-            # Build #59 hotfix — ensure a self-member row EXISTS.
-            #
-            # The auto-bind above only helps when a caregiver had
-            # pre-created a placeholder members row via the OLD
-            # add-member flow (Build #58 and earlier).  Build #59
-            # rewired add-member.tsx to send an invitation ONLY,
-            # without pre-creating any row, so the auto-bind is
-            # almost always a no-op now.  This call is the safety
-            # net: idempotent (returns the auto-bound row if one
-            # exists, or inserts a fresh row if not).  Without it,
-            # the joiner would be invisible on both dashboards
-            # after signup — the exact user-reported symptom that
-            # motivated this hotfix.
-            await fg.ensure_self_member_row(
-                db, doc, target_group["id"], accepted_invite, caller="signup_invite"
-            )
-            logger.info(
-                "[invite-accept] membership_refreshed path=signup_new user=%s group=%s",
-                user_id[:8],
-                target_group.get("id", "")[:8],
-            )
-            # If they used a per-recipient INV- token, mark it accepted
-            # and notify the inviter via push.  Best-effort — never fail
-            # signup just because the bookkeeping push misfires.
-            if accepted_invite:
-                await fg.accept_invite(db, accepted_invite["id"], user_id)
-                inviter_id = accepted_invite.get("invited_by_user_id")
-                if inviter_id and inviter_id != user_id:
-                    try:
-                        await push_to_user(
-                            inviter_id,
-                            "✅ Family invite accepted",
-                            f"{doc['full_name']} just joined your Kinnship family.",
-                            {
-                                "type": "family_join",
-                                "user_id": user_id,
-                                "invite_id": accepted_invite["id"],
-                            },
-                        )
-                    except Exception as e:
-                        logger.warning(f"inviter push failed: {e}")
+            # INV recipients returned through accept_legacy_invitation above;
+            # family-wide OTP membership and linkage committed together.
+            logger.info("[invite-accept] transactional family-code signup completed")
         else:
             group = await fg.create_group_for_user(db, doc)
             doc["family_group_id"] = group["id"]
@@ -2051,114 +1953,9 @@ async def verify_otp(data: OtpVerify):
     # invite_code present → treat it as a join, identical to
     # POST /family-group/join, so the account ends up in the right group.
     if purpose == "signup" and user and rec.get("invite_code"):
-        try:
-            _ei_code = rec["invite_code"]
-            logger.info(
-                "[invite-accept] user_authenticated path=signup_existing user=%s",
-                user.get("id", "")[:8],
-            )
-            _ei_target, _ei_accepted = await fg.resolve_invite_code(db, _ei_code)
-            if _ei_accepted and _ei_accepted["invitee_email"].strip().lower() != email:
-                raise HTTPException(403, "This invitation is for a different email address.")
-            if not _ei_target:
-                logger.warning(
-                    "[invite-accept] invite_lookup_failed path=signup_existing user=%s",
-                    user.get("id", "")[:8],
-                )
-                raise HTTPException(status_code=404, detail="Invite code not found")
-            logger.info(
-                "[invite-accept] invite_located path=signup_existing invite=%s group=%s user=%s",
-                (
-                    _ei_accepted.get("id", "")[:8]
-                    if _ei_accepted
-                    else "family-code"
-                ),
-                _ei_target.get("id", "")[:8],
-                user.get("id", "")[:8],
-            )
-            if _ei_target["id"] != user.get("family_group_id"):
-                _old_gid = user.get("family_group_id")
-                _can_join = True
-                # Owner of a populated group cannot silently leave it.
-                if _old_gid:
-                    _old_grp = await db.family_groups.find_one(
-                        {"id": _old_gid}, {"_id": 0, "owner_user_id": 1}
-                    )
-                    if _old_grp and _old_grp.get("owner_user_id") == user["id"]:
-                        _co = await db.users.count_documents(
-                            {"family_group_id": _old_gid, "id": {"$ne": user["id"]}}
-                        )
-                        if _co > 0:
-                            _can_join = False
-                            logger.warning(
-                                f"verify-otp join-existing: skipped — user={user['id'][:8]} "
-                                f"is owner of populated group {_old_gid[:8]}"
-                            )
-                if _can_join:
-                    await fg.transfer_data_to_group(db, user["id"], _ei_target["id"])
-                    assignment = await db.users.update_one(
-                        {"id": user["id"]},
-                        {"$set": {
-                            "family_group_id": _ei_target["id"],
-                            "family_group_role": "member",
-                        }},
-                    )
-                    if assignment.matched_count != 1:
-                        raise RuntimeError(
-                            "Family assignment did not match the existing user"
-                        )
-                    assigned = await db.users.find_one(
-                        {
-                            "id": user["id"],
-                            "family_group_id": _ei_target["id"],
-                        },
-                        {"_id": 0, "id": 1},
-                    )
-                    if not assigned:
-                        raise RuntimeError("Family assignment was not persisted")
-                    logger.info(
-                        "[invite-accept] family_group_updated path=signup_existing "
-                        "user=%s group=%s",
-                        user.get("id", "")[:8],
-                        _ei_target.get("id", "")[:8],
-                    )
-                    user = dict(user)
-                    user["family_group_id"] = _ei_target["id"]
-                    user["family_group_role"] = "member"
-                    # Clean up the old solo group if it is now empty.
-                    if _old_gid and _old_gid != _ei_target["id"]:
-                        _remaining = await db.users.count_documents(
-                            {"family_group_id": _old_gid}
-                        )
-                        if _remaining == 0:
-                            await db.family_groups.delete_one({"id": _old_gid})
-                    await fg.ensure_self_member_row(
-                        db, user, _ei_target["id"], _ei_accepted, caller="login_invite"
-                    )
-                    logger.info(
-                        "[invite-accept] membership_refreshed path=signup_existing "
-                        "user=%s group=%s",
-                        user.get("id", "")[:8],
-                        _ei_target.get("id", "")[:8],
-                    )
-                    if _ei_accepted:
-                        await fg.accept_invite(db, _ei_accepted["id"], user["id"])
-                    logger.info(
-                        f"verify-otp: existing user {user['id'][:8]} joined "
-                        f"group {_ei_target['id'][:8]} via invite on login+signup path"
-                    )
-        except Exception as _join_err:
-            logger.error(
-                f"verify-otp join-existing: unexpected error for "
-                f"user={user.get('id','?')[:8]}: {_join_err}",
-                exc_info=True,
-            )
-            if isinstance(_join_err, HTTPException):
-                raise
-            raise HTTPException(
-                status_code=500,
-                detail="Could not complete invitation acceptance",
-            ) from _join_err
+        user, _ = await el.join_family_code(
+            db, user["id"], fg.normalize_invite_code(rec["invite_code"]),
+        )
 
     if not user:
         # purpose=login but the user doesn't exist (or signup race) —
@@ -2832,7 +2629,7 @@ async def create_member(data: FamilyMemberCreate, current=Depends(get_current_us
         daily_checkin_time="09:00" if role == "senior" else None,
         emergency_contact_phone=ec_phone,
     )
-    await db.members.insert_one(member.model_dump())
+    await fw.create_dependent(db, member.model_dump(), current["id"])
     return member
 
 
@@ -3130,7 +2927,8 @@ async def _check_low_battery_legacy(
             ),
         )
         try:
-            await db.alerts.insert_one(a.model_dump())
+            if not await fw.insert_background_record(db, "alerts", a.model_dump()):
+                return {}
         except DuplicateKeyError:
             logger.debug(
                 f"check_low_battery: critical insert deduped for member={member_id}"
@@ -3180,7 +2978,8 @@ async def _check_low_battery_legacy(
             ),
         )
         try:
-            await db.alerts.insert_one(a.model_dump())
+            if not await fw.insert_background_record(db, "alerts", a.model_dump()):
+                return {}
         except DuplicateKeyError:
             logger.debug(
                 f"check_low_battery: warning insert deduped for member={member_id}"
@@ -3399,7 +3198,8 @@ async def _create_battery_alert_if_missing(
             message=message,
         )
         try:
-            await db.alerts.insert_one(alert.model_dump())
+            if not await fw.insert_background_record(db, "alerts", alert.model_dump()):
+                return False
         except DuplicateKeyError:
             logger.debug(
                 f"battery incident insert deduped for member={member_id} tier={tier}"
@@ -4586,10 +4386,17 @@ async def resolve_alert(alert_id: str, current=Depends(get_current_user)):
         "resolved_by_name": resolver_name,
         "acknowledged": True,
     }
-    await db.alerts.update_one(
-        {"id": alert_id, "family_group_id": current["family_group_id"]},
-        {"$set": updates},
-    )
+    if doc.get("type") == "sos":
+        committed, changed = await fw.change_sos_resolution(
+            db, current["family_group_id"], alert_id, current["id"], updates,
+        )
+        if not changed:
+            return {"ok": True, "alert": Alert(**committed).model_dump(mode="json"), "already_resolved": True}
+    else:
+        await db.alerts.update_one(
+            {"id": alert_id, "family_group_id": current["family_group_id"]},
+            {"$set": updates},
+        )
     doc.update(updates)
 
     # Cascade "alert_resolved" push to the entire family group so every
@@ -4633,8 +4440,11 @@ async def clear_all_alerts(current=Depends(get_current_user)):
     "Clear All" button in the Alerts tab. Scoped to family_group_id
     so a user cannot wipe another family's alerts.
     """
-    scope = await sh.family_alert_query(db, current["family_group_id"])
-    r = await db.alerts.delete_many(scope)
+    async def clear(tx):
+        await fw.actor_in_family(tx, current["id"], current["family_group_id"])
+        scope = await sh.family_alert_query(tx, current["family_group_id"])
+        return await tx.alerts.delete_many(scope)
+    r = await fw.run(db, [current["family_group_id"]], clear)
     return {"ok": True, "deleted": r.deleted_count}
 
 
@@ -4674,7 +4484,7 @@ async def create_reminder(data: ReminderCreate, current=Depends(get_current_user
         category=data.category, title=data.title, dosage=data.dosage,
         times=times, time=times[0].time if times else "",
     )
-    await db.reminders.insert_one(rem.model_dump())
+    await fw.insert_record(db, "reminders", rem.model_dump(), actor_id=current["id"], owner=True)
     return rem
 
 
@@ -4934,7 +4744,7 @@ async def _persist_taken_medication_log(rem: dict, current: dict, occurrence: di
     if existing:
         return
     try:
-        await db.medication_logs.insert_one(doc)
+        await fw.insert_record(db, "medication_logs", doc, actor_id=current["id"])
     except DuplicateKeyError:
         # Another delivery won the unique occurrence insert.  This is a
         # successful idempotent retry, not an endpoint failure.
@@ -5029,7 +4839,7 @@ async def _persist_missed_medication_log(
     if existing:
         return
     try:
-        await db.medication_logs.insert_one(doc)
+        await fw.insert_record(db, "medication_logs", doc, actor_id=current["id"])
     except DuplicateKeyError:
         # The partial unique occurrence index makes concurrent/retried
         # requests converge on the first durable missed log.
@@ -5225,7 +5035,7 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
     ):
         await _persist_missed_medication_log(rem, current, occurrence, now)
     else:
-        await db.medication_logs.insert_one({
+        await fw.insert_record(db, "medication_logs", {
             "id": str(uuid.uuid4()),
             "family_group_id": current["family_group_id"],
             "reminder_id": reminder_id,
@@ -5239,7 +5049,7 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
                 "slot_time": occurrence["slot_time"],
                 "occurrence_id": occurrence["occurrence_id"],
             } if occurrence else {}),
-        })
+        }, actor_id=current["id"])
 
     if body.status == "missed":
         # An occurrence-qualified medication miss uses the same durable
@@ -5410,7 +5220,7 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
                 })
                 if occurrence:
                     alert_doc["occurrence_id"] = occurrence["occurrence_id"]
-            await db.alerts.insert_one(alert_doc)
+            await fw.insert_record(db, "alerts", alert_doc, actor_id=current["id"])
             await push_to_family_group(
                 current["family_group_id"],
                 f"💊 {rem['member_name']} missed {rem['title']}",
@@ -5587,7 +5397,7 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
         # atomically authorize a separate collection insert or a later push.
         confirmed_by=member["name"], source="self",
     )
-    await db.checkins.insert_one(ci.model_dump())
+    await fw.insert_record(db, "checkins", ci.model_dump(), actor_id=current["id"])
     update = {"last_seen": datetime.now(timezone.utc), "status": "healthy"}
     await db.members.update_one(
         {"id": member["id"], "family_group_id": current["family_group_id"],
@@ -5869,10 +5679,10 @@ async def respond_to_checkin_request(
     )
     canonical_mongo_id = f"welfare-check:{request_id}"
     try:
-        await db.checkins.insert_one({
+        await fw.insert_record(db, "checkins", {
             **ci.model_dump(),
             "_id": canonical_mongo_id,
-        })
+        }, actor_id=current["id"])
     except Exception:
         # `_id` is MongoDB's durable uniqueness boundary. If a previous attempt
         # inserted the response and then crashed before finalizing the request,
@@ -6212,7 +6022,10 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         message=f"{member_name} triggered SOS at {local_time_str}.{coord_str} Emergency services notified.",
         latitude=data.latitude, longitude=data.longitude,
     )
-    await db.alerts.insert_one(alert.model_dump())
+    committed, current = await fw.persist_sos(
+        db, alert.model_dump(), current["id"], explicit_member_id=data.member_id,
+    )
+    alert.family_group_id = committed["family_group_id"]
 
     # Enhanced push: fan out to ALL users in the family group (every linked
     # family member receives the alert on their own devices).

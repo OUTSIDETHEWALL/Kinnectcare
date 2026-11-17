@@ -20,6 +20,12 @@ from expo_push import _collapse_id  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 from pymongo.errors import DuplicateKeyError  # noqa: E402
 from starlette.requests import Request  # noqa: E402
+from family_fence_unit_seams import install
+
+
+@pytest.fixture(autouse=True)
+def isolate_family_persistence(monkeypatch):
+    install(monkeypatch)
 
 
 def _match(row, query):

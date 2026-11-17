@@ -7,10 +7,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from test_location_consent_write_race import run, server
+from family_fence_unit_seams import install
 
 
 @pytest.fixture
-def sos():
+def sos(monkeypatch):
+    install(monkeypatch)
     current = {"id": "sender", "family_group_id": "sos-family",
                "full_name": "SOS Sender", "timezone": "UTC"}
     insert = AsyncMock()

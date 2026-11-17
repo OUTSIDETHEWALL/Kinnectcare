@@ -22,6 +22,8 @@ from pymongo import ReturnDocument
 
 import family_group as fg
 import sos_history as sh
+from family_write_fence import SessionCollection, SessionDatabase
+import family_write_fence as fw
 
 TOKEN_RE = re.compile(r"^[a-f0-9]{64}$")
 TTL = timedelta(minutes=15)
@@ -65,29 +67,6 @@ class InviteConfirm(BaseModel):
     confirmed: bool = False
 
 
-class SessionCollection:
-    """Run existing consent-safe family helpers inside the same transaction."""
-    def __init__(self, collection, session):
-        self.collection, self.session = collection, session
-
-    def __getattr__(self, name):
-        method = getattr(self.collection, name)
-        def call(*args, **kwargs):
-            return method(*args, **kwargs, session=self.session)
-        return call
-
-
-class SessionDatabase:
-    def __init__(self, db, session):
-        self.db, self.session = db, session
-
-    def __getitem__(self, name):
-        return SessionCollection(self.db[name], self.session)
-
-    def __getattr__(self, name):
-        return self[name]
-
-
 async def invitation(db, token, *, accepted_user=None):
     # The new flow deliberately does not accept family-wide wall codes.
     token = fg.normalize_invite_code(token)
@@ -106,11 +85,25 @@ async def invitation(db, token, *, accepted_user=None):
     return inv, group
 
 
-async def join_verified(db, user, inv, target):
-    if user["email"].strip().lower() != inv["invitee_email"].strip().lower():
+async def join_verified(db, user, inv, target, *, family_code=None):
+    if inv and user["email"].strip().lower() != inv["invitee_email"].strip().lower():
+        raise HTTPException(403, "This invitation is for a different email address. Sign in with the invited email.")
+    if user.get("family_group_id") != target["id"]:
+        await fw.acquire(db, [user.get("family_group_id"), target["id"]])
+        fresh = await db.users.find_one({"id": user["id"]})
+        if not fresh or fresh.get("family_group_id") != user.get("family_group_id"):
+            raise HTTPException(409, "Your family changed; review this invitation again.")
+        user.update(fresh)
+        if family_code:
+            target = await db.family_groups.find_one({"id": target["id"], "invite_code": family_code})
+            if not target:
+                raise HTTPException(410, "Family code changed; reopen the invitation.")
+        else:
+            inv, target = await invitation(db, inv["token"], accepted_user=user["id"])
+    if inv and user["email"].strip().lower() != inv["invitee_email"].strip().lower():
         raise HTTPException(403, "This invitation is for a different email address. Sign in with the invited email.")
     old_gid = user.get("family_group_id")
-    if inv.get("status") == "accepted" and old_gid != target["id"]:
+    if inv and inv.get("status") == "accepted" and old_gid != target["id"]:
         raise HTTPException(409, "This invitation was already accepted and your family has since changed. Ask for a new invitation.")
     if old_gid and old_gid != target["id"]:
         old = await db.family_groups.find_one({"id": old_gid})
@@ -173,7 +166,7 @@ async def join_verified(db, user, inv, target):
     member = await fg.ensure_self_member_row(db, user, target["id"], inv, caller="email_link")
     if not member or member.get("user_id") != user["id"] or member.get("family_group_id") != target["id"]:
         raise RuntimeError("Invitation acceptance did not leave the expected member row")
-    if inv.get("status") != "accepted":
+    if inv and inv.get("status") != "accepted":
         # A transferred self row already exists, so the creation-only helper
         # deliberately leaves it unchanged. Apply the invitation's care role
         # here, but never replay it over later edits on an accepted retry or
@@ -209,6 +202,41 @@ async def join_verified(db, user, inv, target):
     return user
 
 
+async def join_family_code(db, user_id, code, *, new_user=None, link_by_name=False):
+    async def action(tx):
+        user = await tx.users.find_one({"id": user_id})
+        if not user and new_user is None:
+            raise HTTPException(401, "Please sign in again.")
+        target = await tx.family_groups.find_one({"invite_code": code})
+        if not target:
+            raise HTTPException(404, "Invite code not found")
+        await fw.acquire(tx, [user.get("family_group_id") if user else None, target["id"]])
+        target = await tx.family_groups.find_one({"id": target["id"], "invite_code": code})
+        owner = await tx.users.find_one({"id": target["owner_user_id"]}) if target else None
+        if not owner or owner.get("family_group_id") != target["id"]:
+            raise HTTPException(410, "This family code is no longer available.")
+        if user is None:
+            user = dict(new_user)
+            await tx.users.insert_one(user)
+            # Preserve retained OTP's unique-name linkage, but make it part of
+            # the same transaction, after destination admission and validation.
+            if link_by_name:
+                name = (user.get("full_name") or "").strip().lower()
+                rows = await tx.members.find({
+                    "family_group_id": target["id"], "user_id": None,
+                }).to_list(51)
+                matches = [row for row in rows if (row.get("name") or "").strip().lower() == name]
+                if name and len(rows) <= 50 and len(matches) == 1:
+                    result = await tx.members.update_one({
+                        "id": matches[0]["id"], "family_group_id": target["id"], "user_id": None,
+                    }, {"$set": {"user_id": user_id}})
+                    if result.matched_count != 1:
+                        raise HTTPException(409, "The invited member changed; try again.")
+        await join_verified(tx, user, None, target, family_code=code)
+        return user, target
+    return await fw.run(db, [], action, timeout=1.0)
+
+
 async def rate_limit(db, key: str, limit: int, window: int):
     now = datetime.now(timezone.utc)
     bucket = int(now.timestamp()) // window
@@ -241,8 +269,7 @@ async def accept_legacy_invitation(db, token, *, user_id=None, new_user=None):
         return {"user": user, "group": target, "invitation": inv,
                 "already_member": already_member}
 
-    async with await db.client.start_session() as session:
-        return await session.with_transaction(transaction)
+    return await fw.transaction(db, transaction)
 
 
 def build_router(db, get_current_user, send_email, make_token, public_user):
@@ -388,8 +415,7 @@ def build_router(db, get_current_user, send_email, make_token, public_user):
                     "user": public_user(user), "invite_pending": invite_pending,
                     "invite_token": rec.get("invite_token")}
 
-        async with await db.client.start_session() as session:
-            return await session.with_transaction(transaction)
+        return await fw.transaction(db, transaction)
 
     @router.post("/auth/email-link/join")
     async def confirm_invite(data: InviteConfirm, current=Depends(get_current_user)):
@@ -407,8 +433,7 @@ def build_router(db, get_current_user, send_email, make_token, public_user):
                 raise HTTPException(409, "Your current family changed. Please review the invitation again.")
             await join_verified(tx, user, inv, target)
             return {"ok": True, "group": fg.public_group(target)}
-        async with await db.client.start_session() as session:
-            return await session.with_transaction(transaction)
+        return await fw.transaction(db, transaction)
 
     return router
 

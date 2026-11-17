@@ -115,6 +115,9 @@ class Transaction:
     async def __aexit__(self, *args):
         self.db.lock.release()
 
+    async def commit_transaction(self):
+        pass  # Snapshot fake: real commit/retry behavior is covered in Mongo tests.
+
     async def with_transaction(self, callback):
         snapshot = {k: copy.deepcopy(v.rows) for k, v in self.db.collections.items()}
         try:
@@ -451,6 +454,7 @@ async def test_transferred_self_role_and_confirmation_are_idempotent_without_del
 async def test_invite_stays_pending_until_membership_exists_and_failed_join_can_retry(monkeypatch):
     db, _, inv, user, client = setup()
     db.users.rows.append(copy.deepcopy(user))
+    db.family_groups.rows.append({"id": "solo", "owner_user_id": user["id"]})
     original = fg.ensure_self_member_row
 
     async def observe_pending(*args, **kwargs):

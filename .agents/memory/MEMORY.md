@@ -45,3 +45,4 @@
 - [Background recovery boundaries](background-recovery-boundaries.md) — native service-start eligibility and timer-independent transport are separate background-reliability requirements.
 - [Invitation removal authority](invitation-removal-authority.md) — owner removal must invalidate outstanding recipient invitations, including acceptance from retained clients.
 - [SOS history transfer boundary](sos-history-transfer-boundary.md) — retain verified self history without new family access; snapshot transactions do not fence new obligations.
+- [Motor commit retry boundary](motor-commit-retry-boundary.md) — verify unknown-commit retries with a real failpoint; the installed context can auto-commit outside its retry loop.

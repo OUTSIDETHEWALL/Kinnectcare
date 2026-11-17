@@ -239,7 +239,9 @@ async def test_success_preserves_records_and_other_families(scenario, monkeypatc
     assert [u for u in after["users"] if u["id"] != "invitee"] == [
         u for u in before["users"] if u["id"] != "invitee"
     ]
-    assert after["family_groups"] == [g for g in before["family_groups"] if g["id"] != "solo"]
+    expected_groups = [g for g in before["family_groups"] if g["id"] != "solo"]
+    next(g for g in expected_groups if g["id"] == "target")["family_write_epoch"] = 1
+    assert after["family_groups"] == expected_groups
     assert await s.db.family_groups.find_one({"id": "solo"}) is None
     assert (await s.db.family_invites.find_one({"id": "invitation"}))["status"] == "accepted"
 

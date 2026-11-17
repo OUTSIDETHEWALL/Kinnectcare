@@ -194,15 +194,16 @@ async def test_history_read_rejects_deleted_identity_and_ambiguous_subject(scena
 
 
 @pytest.mark.asyncio
-async def test_family_code_cannot_bypass_verified_history_transfer(scenario):
+async def test_family_code_uses_verified_history_transfer(scenario):
     s = scenario
     await history(s)
     await s.db.family_groups.update_one({"id": "target"}, {"$set": {"invite_code": "KINN-TARGET"}})
-    before = await snapshot(s.db)
+    original = await s.db.alerts.find_one({"id": "historical-sos"})
     result = await s.http.post("/api/family-group/join", headers={"x-test-actor": "invitee"},
                                json={"invite_code": "KINN-TARGET"})
-    assert result.status_code == 409
-    assert await snapshot(s.db) == before
+    assert result.status_code == 200, result.text
+    assert await s.db.alerts.find_one({"id": "historical-sos"}) == original
+    assert (await s.db.family_invites.find_one({"id": "invitation"}))["status"] == "pending"
 
 
 @pytest.mark.asyncio
@@ -226,7 +227,7 @@ def alert_endpoints(db):
         node.decorator_list = []
     async def missed(*args):
         pass
-    scope = {"db": db, "sh": sh, "HTTPException": HTTPException,
+    scope = {"db": db, "sh": sh, "fw": links.fw, "HTTPException": HTTPException,
              "get_current_user": lambda: None, "Depends": lambda dep: None,
              "detect_missed_checkins": missed, "Alert": lambda **row: row}
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(path), "exec"), scope)
@@ -247,7 +248,12 @@ async def test_former_and_destination_families_cannot_read_mutate_or_clear_archi
             with pytest.raises(HTTPException) as error:
                 await method(original["id"], current)
             assert error.value.status_code == 404
-        await endpoints.clear_all_alerts(current)
+        if family == "unrelated":
+            with pytest.raises(HTTPException) as error:
+                await endpoints.clear_all_alerts(current)
+            assert error.value.status_code == 409  # Stale/forged auth family.
+        else:
+            await endpoints.clear_all_alerts(current)
         assert await s.db.alerts.find_one({"id": original["id"]}) == original
 
 

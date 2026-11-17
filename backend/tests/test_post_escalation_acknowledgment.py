@@ -7,7 +7,7 @@ import pytest
 import httpx
 from fastapi import HTTPException
 
-from test_medication_occurrence_reliability import DB, med_scheduler, server
+from test_medication_occurrence_reliability import DB, med_scheduler, server, isolate_family_persistence
 
 
 def setup_occurrence(monkeypatch, *, state="sent", purpose=None):
@@ -220,6 +220,10 @@ def test_http_authentication_is_still_required_after_escalation(monkeypatch, pat
 def test_sos_trigger_resolve_and_acknowledge_remain_independent_of_medication(monkeypatch):
     async def scenario():
         db, _ = setup_occurrence(monkeypatch)
+        db.users.rows.extend([
+            {"id": "senior", "family_group_id": "g1"},
+            {"id": "owner", "family_group_id": "g1"},
+        ])
         db.members.rows[0]["name"] = "Test Member"
         pushes = []
 
