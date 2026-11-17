@@ -267,18 +267,20 @@ describe('SDK native lifetime → real headless handler → real ownership/acqui
     ]));
   });
 
-  it.each(['legacy-unconditional', 'native-lifetime'])(
+  it.each(['legacy-unconditional', 'native-lifetime', 'native-live'])(
     '30-recovery reproduction: %s boundary', async mode => {
       hold = phase => phase === 'initial-ownership' || phase === 'second-ownership';
       const events = Array.from({ length: 30 }, (_, i) => begin(`wake-${i}`));
-      // Control reproduces the exact pre-correction unconditional callback.
+      // Control retains the historical unconditional lifetime callback, but
+      // now uses phase-separated sharing. Live native consumers must still run.
       // Both arms use real recovery/ownership/request dispatch, not request-count stubs.
       const pending = events.map(e => mode === 'legacy-unconditional'
         ? engine.recoverFromIndependentWake('sdk-heartbeat', () => true, undefined, e.kcEvidenceWakeId)
         : headless(e));
       await flush(); expect(calls).toHaveLength(3);
-      executions.clear(); release('initial-ownership'); await flush();
-      expect(secondCount()).toBe(mode === 'legacy-unconditional' ? 90 : 0);
+      if (mode !== 'native-live') executions.clear();
+      release('initial-ownership'); await flush();
+      expect(secondCount()).toBe(mode === 'native-lifetime' ? 0 : 3);
       console.info(`30-task reproduction ${mode}: initial=${calls.filter(c => c.phase === 'initial-ownership').length}, second=${secondCount()}`);
       hold = () => false; release('second-ownership');
       await Promise.all(pending);

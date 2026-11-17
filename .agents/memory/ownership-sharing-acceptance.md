@@ -14,3 +14,16 @@ protecting authorization and the working moving-GPS baseline.
 **How to apply:** Keep request-origin diagnostics available through physical
 validation. Report synthetic request/queue reductions separately from observed
 phone startup improvement; local success does not authorize a binary or release.
+
+Recovery-stage sharing must be phase-separated: a second ownership check must
+never reuse an initial-stage result. Share only overlapping raw responses for
+equivalent security contexts, not per-consumer verdicts or completed results.
+Acquisition checks remain independent.
+
+**Why:** The owner approved narrowly scoped second-stage sharing after a later
+physical export established second-stage amplification, while explicitly
+requiring the earlier authorization and freshness guarantees to remain intact.
+
+**How to apply:** Preserve each consumer's session, owner, consent, revocation
+and lifecycle checks. Count XHR test handoffs separately from actual Android
+native dispatches; a mocked native boundary does not satisfy phone acceptance.

@@ -2197,7 +2197,7 @@ export function recoverFromIndependentWake(
     }
     deepStage(diagnostic, 'recovery_second_ownership_entered');
     const ownership = await verifyWakeOwnership(() => generation === engineGeneration && isCurrent(),
-      originPhase(diagnostic, 'second-ownership'));
+      originPhase(diagnostic, 'second-ownership'), generation);
     deepStage(diagnostic, 'recovery_second_ownership_completed');
     if (generation !== engineGeneration || !isCurrent()) return 'obsolete_owner';
     if (ownership !== 'allowed') {

@@ -93,6 +93,41 @@ describe('owned Android cold tracking recovery', () => {
   const run = (current = () => true) =>
     recovery.recoverUnexpectedlyDisabledTracking(sdk, current);
 
+  it('shares both fresh stages through 30 actual recovery consumers without sharing their verdicts', async () => {
+    enabled = true;
+    const independentTransport = global.fetch;
+    const waiting: { url: string; resolve: (response: any) => void }[] = [];
+    global.fetch = jest.fn((url: string) => new Promise(resolve => {
+      waiting.push({ url: String(url), resolve });
+    })) as any;
+    const settle = () => {
+      waiting.splice(0).forEach(({ url, resolve }) => resolve({
+        ok: true, status: 200,
+        json: async () => url.endsWith('/auth/me') ? user
+          : url.endsWith('/members') ? members : { location_sharing_enabled: true },
+      }));
+    };
+    const flush = async () => { for (let i = 0; i < 300; i++) await Promise.resolve(); };
+    const engine = require('../locationEngine') as typeof import('../locationEngine');
+    const current = Array.from({ length: 30 }, () => true);
+    const pending = current.map((_, i) => engine.recoverFromIndependentWake('sdk-terminate', () => current[i]));
+    await flush();
+    expect(global.fetch).toHaveBeenCalledTimes(3); // One pending initial triplet.
+    settle(); await flush();
+    expect(global.fetch).toHaveBeenCalledTimes(6); // A NEW pending second triplet.
+    current[0] = false;
+    settle();
+    // Later FIFO validation is untouched. Let it use the normal transport;
+    // its existing verified-owner behavior is outside this pending-read change.
+    (global.fetch as jest.Mock).mockImplementation(independentTransport);
+    const results = await Promise.all(pending);
+    expect(results[0]).toBe('obsolete_owner');
+    expect(results.slice(1).every(value => value === 'already_enabled')).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(9); // Six staged reads + three existing FIFO reads.
+    expect(sdk.stop).not.toHaveBeenCalled();
+    expect(sdk.start).not.toHaveBeenCalled();
+  });
+
   it.each(['live', 'headless'])('uses actual SDK state, not activity classification, in the %s path', async path => {
     const engine = require('../locationEngine') as typeof import('../locationEngine');
     const native = require('../__mocks__/trackingNative').trackingNative;

@@ -1,5 +1,7 @@
 /**
- * Runtime-local, pending reads only. Keys contain credentials: never expose,
+ * Runtime-local, pending reads only, partitioned by recovery phase by the caller.
+ * The historical name is retained for existing callers and session fencing.
+ * Keys contain credentials: never expose,
  * persist or send them to the diagnostic observer.
  */
 import { diagnosticId, deepStage, flightStage } from './deepAsyncTrace';

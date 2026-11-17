@@ -10,7 +10,8 @@ const deferred = <T,>() => {
 };
 type Read = ReturnType<typeof deferred<any>> & { url: string; signal: AbortSignal };
 
-describe('real initial ownership verification with runtime-local pending reads', () => {
+describe.each(['initial-ownership', 'second-ownership'])(
+  'real %s verification with runtime-local pending reads', stage => {
   let recovery: typeof import('../androidTrackingRecovery');
   let sharing: typeof import('../initialOwnershipReads');
   let native: typeof import('../__mocks__/trackingNative').trackingNative;
@@ -25,11 +26,11 @@ describe('real initial ownership verification with runtime-local pending reads',
     version: 1, ownerUserId: owner, memberId: member,
     backendBaseUrl: 'https://example.test', nonce,
   });
-  const origin = (label = 'sdk-headless', phase = 'initial-ownership'): RequestOrigin => ({
+  const origin = (label = 'sdk-headless', phase = stage): RequestOrigin => ({
     operation: `operation-${active.length}`, origin: label, phase,
     wake: `wake-${active.length}`, generation: 0,
   });
-  const verify = (label = 'sdk-headless', lifecycle = 1, phase = 'initial-ownership') => {
+  const verify = (label = 'sdk-headless', lifecycle = 1, phase = stage) => {
     const id = active.push(true) - 1;
     return recovery.evaluateWakeAuthorization(() => active[id], origin(label, phase), lifecycle);
   };
@@ -112,7 +113,7 @@ describe('real initial ownership verification with runtime-local pending reads',
     delete (native as any).deepRecord;
   });
 
-  it.each([2, 4, 7, 10, 100])('%i equivalent consumers issue exactly three HTTP reads', async count => {
+  it.each([2, 4, 7, 10, 30, 100])('%i equivalent consumers issue exactly three HTTP reads', async count => {
     const pending = Array.from({ length: count }, () => verify());
     await flush();
     expect(dispatch).toHaveBeenCalledTimes(3);
@@ -286,6 +287,31 @@ describe('real initial ownership verification with runtime-local pending reads',
     await Promise.all(independent);
   });
 
+  it('never shares across phases, including when initial and second reads overlap', async () => {
+    const initial = [verify('sdk-headless', 1, 'initial-ownership'), verify('sdk-headless', 1, 'initial-ownership')];
+    const second = [verify('sdk-headless', 1, 'second-ownership'), verify('sdk-headless', 1, 'second-ownership')];
+    const acquisition = recovery.verifyWakeOwnership(() => true, origin('gps-acquisition', 'acquisition-ownership'), 1);
+    await flush();
+    expect(dispatch).toHaveBeenCalledTimes(9);
+    succeed();
+    expect((await Promise.all([...initial, ...second])).every(v => v.state === 'AUTHORIZED')).toBe(true);
+    expect(await acquisition).toBe('allowed');
+  });
+
+  it('a settled second stage dispatches fresh reads even with an initial stage still pending', async () => {
+    const initial = verify('sdk-headless', 1, 'initial-ownership'); await flush();
+    const second = verify('sdk-headless', 1, 'second-ownership'); await flush();
+    expect(dispatch).toHaveBeenCalledTimes(6);
+    succeed(3);
+    expect((await second).state).toBe('AUTHORIZED');
+    const next = verify('sdk-headless', 1, 'second-ownership'); await flush();
+    expect(dispatch).toHaveBeenCalledTimes(9);
+    succeed(6);
+    expect((await next).state).toBe('AUTHORIZED');
+    succeed();
+    expect((await initial).state).toBe('AUTHORIZED');
+  });
+
   it.each(['missing-intent', 'missing-authority', 'pending-mutation'])('does not share an unproven %s context', async kind => {
     if (kind === 'missing-intent') store.delete(recovery.TRACKING_INTENT_KEY);
     if (kind === 'missing-authority') {
@@ -305,7 +331,7 @@ describe('real initial ownership verification with runtime-local pending reads',
     const pending = [verify(), verify('foreground-position')]; await flush();
     expect(scope).toHaveBeenCalledTimes(3);
     expect(scope.mock.calls.every(([o]: any) =>
-      o.phase === 'initial-ownership' && o.origin === 'sdk-headless' && o.wake)).toBe(true);
+      o.phase === stage && o.origin === 'sdk-headless' && o.wake)).toBe(true);
     succeed(); await Promise.all(pending);
   });
 

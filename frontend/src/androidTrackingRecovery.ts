@@ -311,7 +311,7 @@ export async function authorizeDeviceContactTransport(
  */
 export async function verifyWakeOwnership(
   isCurrent: () => boolean, origin: RequestOrigin = operationOrigin('ownership-direct'),
-  initialLifecycleGeneration?: number,
+  lifecycleGeneration?: number,
 ): Promise<string> {
   let attached = false;
   const finish = (result: string) => {
@@ -320,11 +320,13 @@ export async function verifyWakeOwnership(
     return result;
   };
   deepStage(origin, 'ownership_entered');
-  // Only the initial recovery stage opts in. Later ownership/acquisition checks
-  // must dispatch new reads even if an initial flight happens to be pending.
-  const initial = initialLifecycleGeneration !== undefined && origin.phase === 'initial-ownership';
-  const session = initial ? ownershipSession() : null;
-  const admittedAuthority = initial ? readTrackingAuthority() : null;
+  // Recovery stages may share equivalent pending raw reads, never verdicts.
+  // Phase is part of the key: a second check can NEVER join an initial check.
+  // Acquisition, token updates and other independent checks remain unshared.
+  const shareable = lifecycleGeneration !== undefined
+    && (origin.phase === 'initial-ownership' || origin.phase === 'second-ownership');
+  const session = shareable ? ownershipSession() : null;
+  const admittedAuthority = shareable ? readTrackingAuthority() : null;
   const expectedEpoch = trackingIntentEpoch();
   deepStage(origin, 'policy_read_entered');
   const stamp = await trackingPolicyStamp();
@@ -354,8 +356,8 @@ export async function verifyWakeOwnership(
   const sharingKey = session && intent && admittedAuthority && !admittedAuthority.revoked
     && admittedAuthority.owner === `${intent.ownerUserId}:${intent.memberId}`
     && sameAuthority() && stamp === (deepStage(origin, 'eligibility_policy_entered'), await trackingPolicyStamp())
-    ? JSON.stringify([session.revision, token, base, stamp, admittedAuthority.owner,
-      expectedEpoch, initialLifecycleGeneration, admittedConsent])
+    ? JSON.stringify([origin.phase, session.revision, token, base, stamp, admittedAuthority.owner,
+      admittedAuthority.generation, expectedEpoch, lifecycleGeneration, admittedConsent])
     : null;
   deepStage(origin, 'sharing_eligibility_completed', { eligible: !!sharingKey });
   // Loading dispatches synchronously. Fence creation, never abort a pending
@@ -366,11 +368,11 @@ export async function verifyWakeOwnership(
     authenticatedGet(`${base}/api/members`, token, origin, isCurrent),
     authenticatedGet(`${base}/api/me/preferences`, token, origin, isCurrent),
   ]) as Promise<[unknown, unknown, unknown]>;
-  const obsoleteInitial = () => !!session && (!ownershipSessionCurrent(session)
+  const obsoleteSharedContext = () => !!session && (!ownershipSessionCurrent(session)
     || (!!sharingKey && !sameAuthority()));
   let user: { id?: string }, members: { id: string; user_id: string; location_consent_generation?: number }[], preferences: { location_sharing_enabled?: boolean };
   try {
-    if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteInitial()) return finish('obsolete_owner');
+    if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteSharedContext()) return finish('obsolete_owner');
     attached = true;
     deepStage(origin, sharingKey ? 'flight_await_entered' : 'unshared_load_entered');
     [user, members, preferences] = await (sharingKey
@@ -381,7 +383,7 @@ export async function verifyWakeOwnership(
     deepStage(origin, 'aggregate_rejected');
     if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch
       || (deepStage(origin, 'error_token_entered'), await getCurrentToken()) !== token
-      || obsoleteInitial()) return finish('obsolete_owner');
+      || obsoleteSharedContext()) return finish('obsolete_owner');
     deepStage(origin, 'error_token_completed');
     // Only /auth/me 401 confirms session invalidation. A member/preferences
     // 403 can be an endpoint policy failure, not evidence of sign-out.
@@ -394,7 +396,7 @@ export async function verifyWakeOwnership(
   const currentToken = await getCurrentToken();
   deepStage(origin, 'post_token_completed');
   if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || currentStamp !== stamp || currentToken !== token
-    || obsoleteInitial()) return finish('obsolete_owner');
+    || obsoleteSharedContext()) return finish('obsolete_owner');
   deepStage(origin, 'execution_authority_validated');
   if (!user?.id || !Array.isArray(members)
     || members.some(member => !member || typeof member.id !== 'string'
@@ -412,7 +414,7 @@ export async function verifyWakeOwnership(
   if (preferences?.location_sharing_enabled !== true) return finish('ownership_unavailable');
   // A native HTTP receipt has no original dispatch generation. Read the
   // accepted tuple only through this current-token/current-owner operation.
-  if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteInitial()) return finish('obsolete_owner');
+  if (!isCurrent() || trackingIntentEpoch() !== expectedEpoch || obsoleteSharedContext()) return finish('obsolete_owner');
   if (sharingKey && admittedAuthority) {
     const latestConsent = getVerifiedConsentGeneration(admittedAuthority.owner);
     if (latestConsent !== admittedConsent
