@@ -68,6 +68,51 @@ async def remove(s):
     return await s.http.post("/api/family-group/remove-member", json={"user_id": "invitee"})
 
 
+@pytest.mark.asyncio
+async def test_owner_removal_moves_only_verified_self_records(scenario):
+    s = scenario
+    assert (await accept(s, "email")).status_code == 200
+    await s.db.checkins.insert_many([
+        {"id": "self-checkin", "member_id": "self", "owner_id": "invitee", "family_group_id": "target"},
+        {"id": "unrelated-checkin", "member_id": "self", "owner_id": "invitee", "family_group_id": "unrelated"},
+    ])
+    original = await s.db.checkins.find_one({"id": "unrelated-checkin"})
+    result = await remove(s)
+    assert result.status_code == 200, result.text
+    new_group = (await s.db.users.find_one({"id": "invitee"}))["family_group_id"]
+    assert (await s.db.checkins.find_one({"id": "self-checkin"}))["family_group_id"] == new_group
+    assert await s.db.checkins.find_one({"id": "unrelated-checkin"}) == original
+
+
+@pytest.mark.asyncio
+async def test_owner_removal_requires_dependent_care_handoff(scenario):
+    s = scenario
+    assert (await accept(s, "email")).status_code == 200
+    await s.db.members.insert_one({
+        "id": "dependent", "owner_id": "invitee", "family_group_id": "target",
+    })
+    before = await snapshot(s.db)
+    assert (await remove(s)).status_code == 409
+    assert await snapshot(s.db) == before
+    # A completed explicit handoff leaves the dependent in the source.
+    await s.db.members.update_one({"id": "dependent"}, {"$set": {"owner_id": "owner"}})
+    assert (await remove(s)).status_code == 200
+    assert (await s.db.members.find_one({"id": "dependent"}))["family_group_id"] == "target"
+
+
+@pytest.mark.asyncio
+async def test_owner_removal_preserves_active_sos_without_partial_changes(scenario):
+    s = scenario
+    assert (await accept(s, "email")).status_code == 200
+    await s.db.alerts.insert_one({
+        "id": "active-incident", "family_group_id": "target", "owner_id": "owner",
+        "member_id": "self", "type": "sos", "resolved": False,
+    })
+    before = await snapshot(s.db)
+    assert (await remove(s)).status_code == 409
+    assert await snapshot(s.db) == before
+
+
 async def alternate_join(s):
     # Legitimate family-wide entry leaves the separate emailed invitation pending.
     await s.db.family_groups.update_one({"id": "target"}, {"$set": {"invite_code": "KINN-TARGET"}})

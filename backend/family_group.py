@@ -57,6 +57,8 @@ from pydantic import BaseModel, EmailStr
 from pymongo.errors import DuplicateKeyError
 
 import invitation_presentation
+import sos_history as sh
+import family_write_fence as fw
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +341,12 @@ async def ensure_self_member_row(
         uuid.NAMESPACE_URL,
         f"kinnship:self-member:{len(group_id)}:{group_id}:{uid}",
     ))
+    if not isinstance(db, fw.SessionDatabase):
+        async def create_self(tx):
+            fresh = await fw.actor_in_family(tx, uid, group_id)
+            return await ensure_self_member_row(tx, fresh, group_id, invite_doc, caller=caller)
+        return await fw.run(db, [group_id], create_self)
+    await fw.acquire(db, [group_id])
     try:
         await db.members.update_one(
             {"_id": creation_key}, {"$setOnInsert": doc}, upsert=True,
@@ -384,6 +392,17 @@ def _default_group_name(user: dict) -> str:
 
 async def create_group_for_user(db, user: dict) -> dict:
     """Create a brand-new family group with this user as owner."""
+    if not isinstance(db, fw.SessionDatabase):
+        old_gid = user.get("family_group_id")
+        locks = [old_gid] if old_gid and await get_group(db, old_gid) else []
+        async def create(tx):
+            fresh = await tx.users.find_one({"id": user["id"]})
+            if not fresh or fresh.get("family_group_id") != old_gid:
+                raise HTTPException(409, "Your family changed; reopen setup.")
+            return await create_group_for_user(tx, fresh)
+        group = await fw.run(db, locks, create)
+        user.update(family_group_id=group["id"], family_group_role="owner")
+        return group
     code = await _generate_unique_invite_code(db)
     group = {
         "id": str(uuid.uuid4()),
@@ -393,6 +412,7 @@ async def create_group_for_user(db, user: dict) -> dict:
         "created_at": datetime.now(timezone.utc),
     }
     await db.family_groups.insert_one(group)
+    db.families.add(group["id"])
     # `insert_one` mutates `group` to add a Mongo `_id` (ObjectId).  Strip
     # it before returning so callers that pass the dict straight into a
     # JSON response don't hit ObjectId-serialisation crashes.
@@ -485,6 +505,15 @@ async def ensure_family_group(db, user: dict) -> str:
         g = await db.family_groups.find_one({"id": gid}, {"_id": 0, "id": 1})
         if g:
             return gid
+    if not isinstance(db, fw.SessionDatabase):
+        async def recover(tx):
+            fresh = await tx.users.find_one({"id": user["id"]})
+            if not fresh or fresh.get("family_group_id") != gid:
+                raise HTTPException(409, "Your family changed; reopen setup.")
+            return await ensure_family_group(tx, fresh)
+        result = await fw.run(db, [], recover, timeout=1.0)
+        user.update(family_group_id=result, family_group_role="owner")
+        return result
     # Need a new solo group.
     group = await create_group_for_user(db, user)
     gid = group["id"]
@@ -492,26 +521,15 @@ async def ensure_family_group(db, user: dict) -> str:
     user["family_group_role"] = "owner"
     # Backfill family_group_id on this user's existing owned data.
     for coll in DATA_COLLECTIONS:
-        try:
-            await db[coll].update_many(
-                {"owner_id": user["id"], "family_group_id": {"$exists": False}},
-                {"$set": {"family_group_id": gid}},
-            )
-        except Exception as e:
-            logger.warning(f"ensure_family_group backfill {coll} failed: {e}")
+        query = {"owner_id": user["id"], "family_group_id": {"$exists": False}}
+        if coll == "alerts":
+            # Ownership alone does not prove the original family of an SOS.
+            query["type"] = {"$ne": "sos"}
+        await db[coll].update_many(
+            query,
+            {"$set": {"family_group_id": gid}},
+        )
     return gid
-
-
-async def transfer_data_to_group(db, owner_user_id: str, target_group_id: str) -> None:
-    """Re-tag this user's owned data into a new group (used when they join)."""
-    for coll in DATA_COLLECTIONS:
-        try:
-            await db[coll].update_many(
-                {"owner_id": owner_user_id},
-                {"$set": {"family_group_id": target_group_id}},
-            )
-        except Exception as e:
-            logger.warning(f"transfer_data_to_group {coll} failed: {e}")
 
 
 def public_group(group: dict) -> dict:
@@ -777,67 +795,10 @@ def build_router(
                 await accept_invite(db, accepted_invite["id"], current["id"])
             return {"ok": True, "already_member": True, "group": public_group(target)}
 
-        # Owner of multi-user group can't leave
-        if old_gid:
-            old_group = await get_group(db, old_gid)
-            if old_group and old_group.get("owner_user_id") == current["id"]:
-                co_users = await db.users.count_documents(
-                    {"family_group_id": old_gid, "id": {"$ne": current["id"]}}
-                )
-                if co_users > 0:
-                    raise HTTPException(
-                        400,
-                        "You're the owner of a family with other members. "
-                        "Remove them first or transfer ownership before joining a different family.",
-                    )
-
-        # Move data to new group, update user, delete old solo group
-        await transfer_data_to_group(db, current["id"], target["id"])
-        assignment = await db.users.update_one(
-            {"id": current["id"]},
-            {"$set": {
-                "family_group_id": target["id"],
-                "family_group_role": "member",
-            }},
-        )
-        if assignment.matched_count != 1:
-            raise RuntimeError("Family assignment did not match the authenticated user")
-        assigned = await db.users.find_one(
-            {"id": current["id"], "family_group_id": target["id"]},
-            {"_id": 0, "id": 1},
-        )
-        if not assigned:
-            raise RuntimeError("Family assignment was not persisted")
-        logger.info(
-            "[invite-accept] family_group_updated user=%s group=%s",
-            current.get("id", "")[:8],
-            target.get("id", "")[:8],
-        )
-        # Build #59 hotfix — guarantee a self-member row exists for
-        # the joiner in the target group.  Idempotent: if the joiner
-        # already had a members row that got re-tagged by
-        # transfer_data_to_group above, this is a no-op.  Otherwise
-        # it inserts a fresh row so the joiner is immediately visible
-        # on the caregiver's /members dashboard on the NEXT poll (no
-        # sign-out / restart required — the client just re-fetches
-        # /members and sees the new row).  See ensure_self_member_row
-        # docstring for the full failure-mode analysis.
-        await ensure_self_member_row(
-            db, current, target["id"], accepted_invite, caller="join"
-        )
-        logger.info(
-            "[invite-accept] membership_refreshed user=%s group=%s",
-            current.get("id", "")[:8],
-            target.get("id", "")[:8],
-        )
-        # Cleanup old solo group if it has no users left
-        if old_gid and old_gid != target["id"]:
-            remaining = await db.users.count_documents({"family_group_id": old_gid})
-            if remaining == 0:
-                await db.family_groups.delete_one({"id": old_gid})
-
-        current["family_group_id"] = target["id"]
-        current["family_group_role"] = "member"
+        # Retained family-wide clients use the same guard and fence, not the
+        # old independent bulk-retagging path. Delivery remains after commit.
+        from email_links import join_family_code
+        current, target = await join_family_code(db, current["id"], code)
 
         # Ghost-notification sprint — one event, one recipient, one notification.
         #
@@ -907,28 +868,29 @@ def build_router(
         gid = current.get("family_group_id")
         if not gid:
             raise HTTPException(400, "You are not in a family group")
-        group = await get_group(db, gid)
-        if not group:
-            # Out of sync; just lazy-create new solo group.
-            new_group = await create_group_for_user(db, current)
-            return {"ok": True, "new_group": public_group(new_group)}
-        if group.get("owner_user_id") == current["id"]:
-            co_users = await db.users.count_documents(
-                {"family_group_id": gid, "id": {"$ne": current["id"]}}
+        async def leave(tx):
+            fresh = await fw.actor_in_family(tx, current["id"], gid)
+            self_ids = await sh.verify_departure(tx, fresh["id"], gid, DATA_COLLECTIONS)
+            new_group = await create_group_for_user(tx, fresh)
+            await sh.move_verified_self_records(
+                tx, fresh["id"], gid, new_group["id"], self_ids, DATA_COLLECTIONS,
             )
-            if co_users > 0:
-                raise HTTPException(
-                    400,
-                    "You're the owner of a family with other members. "
-                    "Transfer ownership or remove other members first.",
-                )
-        # Detach the user's existing data and ship it into a fresh solo group.
-        new_group = await create_group_for_user(db, current)
-        await transfer_data_to_group(db, current["id"], new_group["id"])
-        # If old group has no more users, delete it
-        remaining = await db.users.count_documents({"family_group_id": gid})
-        if remaining == 0:
-            await db.family_groups.delete_one({"id": gid})
+            # Leave starts a new location-consent lifetime just like a join.
+            await tx.members.update_many(
+                {"user_id": fresh["id"], "family_group_id": new_group["id"]},
+                {"$set": {"location_sharing_enabled": False, "latitude": None, "longitude": None,
+                          "coordinate_captured_at": None, "location_name": "Location Sharing Off"},
+                 "$inc": {"location_consent_generation": 1}},
+            )
+            await tx.users.update_one({"id": fresh["id"]}, {"$set": {"location_sharing_enabled": False}})
+            if not await tx.users.count_documents({"family_group_id": gid}):
+                for collection in DATA_COLLECTIONS:
+                    if await tx[collection].find_one({"family_group_id": gid}, {"_id": 1}):
+                        break
+                else:
+                    await tx.family_groups.delete_one({"id": gid})
+            return new_group
+        new_group = await fw.run(db, [gid], leave, timeout=1.0)
         return {"ok": True, "new_group": public_group(new_group)}
 
     @router.post("/remove-member")
@@ -946,11 +908,14 @@ def build_router(
             if not owner:
                 raise HTTPException(401, "Please sign in again.")
             group = await require_group_owner(tx, owner)
+            await fw.acquire(tx, [group["id"]])
+            owner = await fw.actor_in_family(tx, owner["id"], group["id"], owner=True)
             target_user = await tx.users.find_one(
                 {"id": data.user_id, "family_group_id": group["id"]}, {"_id": 0},
             )
             if not target_user:
                 raise HTTPException(404, "User is not in your family group")
+            self_ids = await sh.verify_departure(tx, data.user_id, group["id"], DATA_COLLECTIONS)
             # Both acceptance and removal write this user's membership and the
             # invitation inside a transaction. A stale acceptance must retry
             # against the revoked token, never commit after a successful removal.
@@ -961,18 +926,19 @@ def build_router(
                     "invitee_email": re.compile(r"^" + re.escape(email) + r"$", re.IGNORECASE),
                 }, {"$set": {"status": "revoked"}})
             solo = await create_group_for_user(tx, target_user)
-            # Preserve the existing removal's data scope, but never swallow a
-            # partial write: membership, invitation revocation and moves settle
-            # together, or all roll back.
-            for collection in DATA_COLLECTIONS:
-                await tx[collection].update_many(
-                    {"owner_id": target_user["id"]},
-                    {"$set": {"family_group_id": solo["id"]}},
-                )
+            await sh.move_verified_self_records(
+                tx, data.user_id, group["id"], solo["id"], self_ids, DATA_COLLECTIONS,
+            )
+            await tx.members.update_many(
+                {"user_id": data.user_id, "family_group_id": solo["id"]},
+                {"$set": {"location_sharing_enabled": False, "latitude": None, "longitude": None,
+                          "coordinate_captured_at": None, "location_name": "Location Sharing Off"},
+                 "$inc": {"location_consent_generation": 1}},
+            )
+            await tx.users.update_one({"id": data.user_id}, {"$set": {"location_sharing_enabled": False}})
             return {"ok": True, "removed_user_id": data.user_id}
 
-        async with await db.client.start_session() as session:
-            return await session.with_transaction(transaction)
+        return await fw.transaction(db, transaction)
 
     # ----- Email invitations (per-recipient tokens) -----
     async def deliver_invitation(inv, group):

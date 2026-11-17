@@ -58,6 +58,8 @@ from expo_push import (
 )
 import billing
 import family_group as fg
+import sos_history as sh
+import family_write_fence as fw
 import invitation_presentation
 import sms
 import med_scheduler
@@ -821,9 +823,10 @@ async def require_family_owner(current: dict) -> dict:
     return group
 
 
-async def require_reminder_self_target(reminder: dict, current: dict) -> None:
+async def require_reminder_self_target(reminder: dict, current: dict, *, tx=None) -> None:
     """Ensure completion is performed by the user represented by its target."""
-    target = await db.members.find_one(
+    store = db if tx is None else tx
+    target = await store.members.find_one(
         {
             "id": reminder.get("member_id"),
             "family_group_id": current.get("family_group_id"),
@@ -1170,7 +1173,8 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
             doc = a.model_dump()
             doc["slot_key"] = slot_key
             try:
-                await db.alerts.insert_one(doc)
+                if not await fw.insert_background_record(db, "alerts", doc):
+                    continue
             except DuplicateKeyError:
                 # Another concurrent request already inserted + pushed for
                 # this slot.  Do NOT fan out a duplicate push.
@@ -1209,7 +1213,8 @@ async def detect_missed_checkins(family_group_id: str, user: dict):
         doc = a.model_dump()
         doc["slot_key"] = slot_key
         try:
-            await db.alerts.insert_one(doc)
+            if not await fw.insert_background_record(db, "alerts", doc):
+                continue
         except DuplicateKeyError:
             # Another concurrent request already inserted + pushed.
             continue
@@ -1872,123 +1877,22 @@ async def verify_otp(data: OtpVerify):
             "push_tokens": [],
             "created_at": datetime.now(timezone.utc),
         }
-        await db.users.insert_one(doc)
+        if target_group:
+            doc, target_group = await el.join_family_code(
+                db, user_id, fg.normalize_invite_code(invite_code),
+                new_user=doc, link_by_name=True,
+            )
+        else:
+            await db.users.insert_one(doc)
         if invite_code:
             logger.info(
                 "[invite-accept] user_authenticated path=signup_new user=%s",
                 user_id[:8],
             )
         if target_group:
-            assignment = await db.users.update_one(
-                {"id": user_id},
-                {"$set": {
-                    "family_group_id": target_group["id"],
-                    "family_group_role": "member",
-                }},
-            )
-            if assignment.matched_count != 1:
-                raise RuntimeError("Family assignment did not match the new user")
-            assigned = await db.users.find_one(
-                {"id": user_id, "family_group_id": target_group["id"]},
-                {"_id": 0, "id": 1},
-            )
-            if not assigned:
-                raise RuntimeError("Family assignment was not persisted")
-            logger.info(
-                "[invite-accept] family_group_updated path=signup_new user=%s group=%s",
-                user_id[:8],
-                target_group.get("id", "")[:8],
-            )
-            doc["family_group_id"] = target_group["id"]
-            doc["family_group_role"] = "member"
-            # === Member-record auto-linkage ===
-            # When a caregiver pre-created a member row (e.g. "Test Member, 78")
-            # and later invited that person by email, the freshly-signed-up
-            # user account is still NOT linked to the member row — the
-            # `members.user_id` field stays null, blocking self-targeted
-            # pushes (e.g. "you have a med to take in 5 min" landing on
-            # the SENIOR's phone, not the caregiver's).
-            #
-            # Heuristic: within the family_group, find an UNLINKED member
-            # (user_id is null/missing) whose `name` matches the joining
-            # user's full_name (case-insensitive, trimmed).  If exactly
-            # one matches, bind them.  Multiple matches → leave unlinked
-            # and log (manual intervention needed; safer than guessing).
-            try:
-                name_target = (doc.get("full_name") or "").strip().lower()
-                if name_target:
-                    matches = await db.members.find(
-                        {
-                            "family_group_id": target_group["id"],
-                            "$or": [
-                                {"user_id": None},
-                                {"user_id": {"$exists": False}},
-                            ],
-                        },
-                        {"_id": 0, "id": 1, "name": 1},
-                    ).to_list(50)
-                    candidates = [
-                        m for m in matches
-                        if (m.get("name") or "").strip().lower() == name_target
-                    ]
-                    if len(candidates) == 1:
-                        await db.members.update_one(
-                            {"id": candidates[0]["id"]},
-                            {"$set": {"user_id": user_id}},
-                        )
-                        logger.info(
-                            f"member-link: bound member={candidates[0]['id']} "
-                            f"({candidates[0].get('name')}) → user={user_id}"
-                        )
-                    elif len(candidates) > 1:
-                        logger.warning(
-                            f"member-link: AMBIGUOUS — {len(candidates)} unlinked "
-                            f"members named {doc.get('full_name')!r} in group "
-                            f"{target_group['id']}; left unlinked for manual review"
-                        )
-            except Exception as e:
-                logger.warning(f"member-link auto-bind skipped: {e}")
-            # Build #59 hotfix — ensure a self-member row EXISTS.
-            #
-            # The auto-bind above only helps when a caregiver had
-            # pre-created a placeholder members row via the OLD
-            # add-member flow (Build #58 and earlier).  Build #59
-            # rewired add-member.tsx to send an invitation ONLY,
-            # without pre-creating any row, so the auto-bind is
-            # almost always a no-op now.  This call is the safety
-            # net: idempotent (returns the auto-bound row if one
-            # exists, or inserts a fresh row if not).  Without it,
-            # the joiner would be invisible on both dashboards
-            # after signup — the exact user-reported symptom that
-            # motivated this hotfix.
-            await fg.ensure_self_member_row(
-                db, doc, target_group["id"], accepted_invite, caller="signup_invite"
-            )
-            logger.info(
-                "[invite-accept] membership_refreshed path=signup_new user=%s group=%s",
-                user_id[:8],
-                target_group.get("id", "")[:8],
-            )
-            # If they used a per-recipient INV- token, mark it accepted
-            # and notify the inviter via push.  Best-effort — never fail
-            # signup just because the bookkeeping push misfires.
-            if accepted_invite:
-                await fg.accept_invite(db, accepted_invite["id"], user_id)
-                inviter_id = accepted_invite.get("invited_by_user_id")
-                if inviter_id and inviter_id != user_id:
-                    try:
-                        await push_to_user(
-                            inviter_id,
-                            "✅ Family invite accepted",
-                            f"{doc['full_name']} just joined your Kinnship family.",
-                            {
-                                "type": "family_join",
-                                "user_id": user_id,
-                                "invite_id": accepted_invite["id"],
-                            },
-                        )
-                    except Exception as e:
-                        logger.warning(f"inviter push failed: {e}")
+            # INV recipients returned through accept_legacy_invitation above;
+            # family-wide OTP membership and linkage committed together.
+            logger.info("[invite-accept] transactional family-code signup completed")
         else:
             group = await fg.create_group_for_user(db, doc)
             doc["family_group_id"] = group["id"]
@@ -2050,114 +1954,9 @@ async def verify_otp(data: OtpVerify):
     # invite_code present → treat it as a join, identical to
     # POST /family-group/join, so the account ends up in the right group.
     if purpose == "signup" and user and rec.get("invite_code"):
-        try:
-            _ei_code = rec["invite_code"]
-            logger.info(
-                "[invite-accept] user_authenticated path=signup_existing user=%s",
-                user.get("id", "")[:8],
-            )
-            _ei_target, _ei_accepted = await fg.resolve_invite_code(db, _ei_code)
-            if _ei_accepted and _ei_accepted["invitee_email"].strip().lower() != email:
-                raise HTTPException(403, "This invitation is for a different email address.")
-            if not _ei_target:
-                logger.warning(
-                    "[invite-accept] invite_lookup_failed path=signup_existing user=%s",
-                    user.get("id", "")[:8],
-                )
-                raise HTTPException(status_code=404, detail="Invite code not found")
-            logger.info(
-                "[invite-accept] invite_located path=signup_existing invite=%s group=%s user=%s",
-                (
-                    _ei_accepted.get("id", "")[:8]
-                    if _ei_accepted
-                    else "family-code"
-                ),
-                _ei_target.get("id", "")[:8],
-                user.get("id", "")[:8],
-            )
-            if _ei_target["id"] != user.get("family_group_id"):
-                _old_gid = user.get("family_group_id")
-                _can_join = True
-                # Owner of a populated group cannot silently leave it.
-                if _old_gid:
-                    _old_grp = await db.family_groups.find_one(
-                        {"id": _old_gid}, {"_id": 0, "owner_user_id": 1}
-                    )
-                    if _old_grp and _old_grp.get("owner_user_id") == user["id"]:
-                        _co = await db.users.count_documents(
-                            {"family_group_id": _old_gid, "id": {"$ne": user["id"]}}
-                        )
-                        if _co > 0:
-                            _can_join = False
-                            logger.warning(
-                                f"verify-otp join-existing: skipped — user={user['id'][:8]} "
-                                f"is owner of populated group {_old_gid[:8]}"
-                            )
-                if _can_join:
-                    await fg.transfer_data_to_group(db, user["id"], _ei_target["id"])
-                    assignment = await db.users.update_one(
-                        {"id": user["id"]},
-                        {"$set": {
-                            "family_group_id": _ei_target["id"],
-                            "family_group_role": "member",
-                        }},
-                    )
-                    if assignment.matched_count != 1:
-                        raise RuntimeError(
-                            "Family assignment did not match the existing user"
-                        )
-                    assigned = await db.users.find_one(
-                        {
-                            "id": user["id"],
-                            "family_group_id": _ei_target["id"],
-                        },
-                        {"_id": 0, "id": 1},
-                    )
-                    if not assigned:
-                        raise RuntimeError("Family assignment was not persisted")
-                    logger.info(
-                        "[invite-accept] family_group_updated path=signup_existing "
-                        "user=%s group=%s",
-                        user.get("id", "")[:8],
-                        _ei_target.get("id", "")[:8],
-                    )
-                    user = dict(user)
-                    user["family_group_id"] = _ei_target["id"]
-                    user["family_group_role"] = "member"
-                    # Clean up the old solo group if it is now empty.
-                    if _old_gid and _old_gid != _ei_target["id"]:
-                        _remaining = await db.users.count_documents(
-                            {"family_group_id": _old_gid}
-                        )
-                        if _remaining == 0:
-                            await db.family_groups.delete_one({"id": _old_gid})
-                    await fg.ensure_self_member_row(
-                        db, user, _ei_target["id"], _ei_accepted, caller="login_invite"
-                    )
-                    logger.info(
-                        "[invite-accept] membership_refreshed path=signup_existing "
-                        "user=%s group=%s",
-                        user.get("id", "")[:8],
-                        _ei_target.get("id", "")[:8],
-                    )
-                    if _ei_accepted:
-                        await fg.accept_invite(db, _ei_accepted["id"], user["id"])
-                    logger.info(
-                        f"verify-otp: existing user {user['id'][:8]} joined "
-                        f"group {_ei_target['id'][:8]} via invite on login+signup path"
-                    )
-        except Exception as _join_err:
-            logger.error(
-                f"verify-otp join-existing: unexpected error for "
-                f"user={user.get('id','?')[:8]}: {_join_err}",
-                exc_info=True,
-            )
-            if isinstance(_join_err, HTTPException):
-                raise
-            raise HTTPException(
-                status_code=500,
-                detail="Could not complete invitation acceptance",
-            ) from _join_err
+        user, _ = await el.join_family_code(
+            db, user["id"], fg.normalize_invite_code(rec["invite_code"]),
+        )
 
     if not user:
         # purpose=login but the user doesn't exist (or signup race) —
@@ -2532,10 +2331,8 @@ async def delete_account(
 ):
     """Permanently delete the authenticated user and ALL of their data.
 
-    Steps:
-      1. Cancel active Stripe subscription (best-effort).
-      2. Delete all user-owned collections.
-      3. Delete the user document.
+    Delete eligible data and the account in one transaction, retaining SOS.
+    Stripe cleanup is best-effort and only runs after the database commits.
     """
     user_id = current["id"]
     payload = data or DeleteAccountRequest()
@@ -2545,7 +2342,8 @@ async def delete_account(
             detail='Confirmation required. Send {"confirm":"DELETE"} to proceed.',
         )
 
-    sub = (current.get("subscription") or {})
+    fresh, deleted_counts = await sh.delete_account_records(db, user_id, current.get("family_group_id"))
+    sub = (fresh.get("subscription") or {})
     sub_id = sub.get("stripe_subscription_id")
     customer_id = sub.get("stripe_customer_id")
     stripe_canceled = False
@@ -2564,25 +2362,6 @@ async def delete_account(
                 customer_deleted = True
         except Exception as e:
             logger.warning(f"Stripe customer delete failed for {user_id}: {e}")
-
-    # Delete all user-owned data.
-    deleted_counts = {}
-    for coll in [
-        "members",
-        "reminders",
-        "checkins",
-        "alerts",
-        "medication_logs",
-    ]:
-        try:
-            r = await db[coll].delete_many({"owner_id": user_id})
-            deleted_counts[coll] = r.deleted_count
-        except Exception as e:
-            logger.warning(f"Failed to delete from {coll} for {user_id}: {e}")
-            deleted_counts[coll] = 0
-
-    # Finally delete the user.
-    await db.users.delete_one({"id": user_id})
 
     logger.info(
         f"Account deleted: user={user_id} stripe_sub_canceled={stripe_canceled} "
@@ -2831,7 +2610,7 @@ async def create_member(data: FamilyMemberCreate, current=Depends(get_current_us
         daily_checkin_time="09:00" if role == "senior" else None,
         emergency_contact_phone=ec_phone,
     )
-    await db.members.insert_one(member.model_dump())
+    await fw.create_dependent(db, member.model_dump(), current["id"])
     return member
 
 
@@ -2963,28 +2742,8 @@ async def delete_member(member_id: str, current=Depends(get_current_user)):
     All scoped to the caller's family_group_id so a user can never
     accidentally (or deliberately) wipe another family's data.
     """
-    await require_family_owner(current)
     fgid = current["family_group_id"]
-    r = await db.members.delete_one({"id": member_id, "family_group_id": fgid})
-    if r.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Member not found")
-    # Cascade — best-effort per collection, log any individual failures
-    # but never abort the whole request (we already deleted the member).
-    cascade_counts: dict = {}
-    for coll, query in (
-        ("reminders",            {"family_group_id": fgid, "member_id": member_id}),
-        ("checkins",             {"family_group_id": fgid, "member_id": member_id}),
-        ("alerts",               {"family_group_id": fgid, "member_id": member_id}),
-        ("medication_logs",      {"family_group_id": fgid, "member_id": member_id}),
-        ("med_notifications",    {"family_group_id": fgid, "member_id": member_id}),
-        ("medication_occurrences", {"member_id": member_id}),
-    ):
-        try:
-            res = await db[coll].delete_many(query)
-            cascade_counts[coll] = res.deleted_count
-        except Exception as e:
-            logger.warning(f"cascade delete failed for {coll} member={member_id}: {e}")
-            cascade_counts[coll] = 0
+    cascade_counts = await sh.delete_dependent_records(db, current["id"], fgid, member_id)
     logger.info(
         f"Member deleted with cascade: member_id={member_id} family_group={fgid} "
         f"counts={cascade_counts}"
@@ -3129,7 +2888,8 @@ async def _check_low_battery_legacy(
             ),
         )
         try:
-            await db.alerts.insert_one(a.model_dump())
+            if not await fw.insert_background_record(db, "alerts", a.model_dump()):
+                return {}
         except DuplicateKeyError:
             logger.debug(
                 f"check_low_battery: critical insert deduped for member={member_id}"
@@ -3179,7 +2939,8 @@ async def _check_low_battery_legacy(
             ),
         )
         try:
-            await db.alerts.insert_one(a.model_dump())
+            if not await fw.insert_background_record(db, "alerts", a.model_dump()):
+                return {}
         except DuplicateKeyError:
             logger.debug(
                 f"check_low_battery: warning insert deduped for member={member_id}"
@@ -3398,7 +3159,8 @@ async def _create_battery_alert_if_missing(
             message=message,
         )
         try:
-            await db.alerts.insert_one(alert.model_dump())
+            if not await fw.insert_background_record(db, "alerts", alert.model_dump()):
+                return False
         except DuplicateKeyError:
             logger.debug(
                 f"battery incident insert deduped for member={member_id} tier={tier}"
@@ -4476,24 +4238,17 @@ async def update_checkin_settings(member_id: str, data: CheckinSettings, current
 @api_router.get("/alerts", response_model=List[Alert])
 async def list_alerts(current=Depends(get_current_user)):
     await detect_missed_checkins(current["family_group_id"], current)
-    docs = await db.alerts.find({"family_group_id": current["family_group_id"]}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    docs = await sh.read_family_alerts(db, current["id"], current["family_group_id"])
     return [Alert(**d) for d in docs]
 
 
 @api_router.post("/alerts/{alert_id}/ack")
 async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
-    alert = await db.alerts.find_one(
-        {"id": alert_id, "family_group_id": current["family_group_id"]},
-        {"_id": 0},
-    )
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-
     # Only the exact self-due medication row is an actionable occurrence, not
     # a caregiver-facing missed/escalation or legacy medication banner.
     # Complete the same canonical taken transition used by
     # /reminders/{id}/mark before hiding the row.
-    if alert.get("type") == "medication" and alert.get("self_due") is True:
+    async def complete(tx, alert):
         required = (
             "reminder_id",
             "member_id",
@@ -4506,7 +4261,7 @@ async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
                 status_code=409,
                 detail="This legacy medication alert has no exact occurrence identity; it was not acknowledged",
             )
-        rem = await db.reminders.find_one(
+        rem = await tx.reminders.find_one(
             {
                 "id": alert["reminder_id"],
                 "family_group_id": current["family_group_id"],
@@ -4518,7 +4273,13 @@ async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
         # The target user or the authoritative family owner may complete this
         # exact occurrence.  An ordinary family member may acknowledge a
         # caregiver alert, but cannot claim another member took medication.
-        await require_member_owner_or_self(alert["member_id"], current)
+        member = await tx.members.find_one({
+            "id": alert["member_id"], "family_group_id": current["family_group_id"],
+        })
+        if not member:
+            raise HTTPException(404, "Member not found")
+        if member.get("user_id") != current["id"]:
+            await fw.actor_in_family(tx, current["id"], current["family_group_id"], owner=True)
         await _mark_exact_medication_taken(
             rem,
             current,
@@ -4531,14 +4292,12 @@ async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
             ),
             datetime.now(timezone.utc),
             enforce_self_target=False,
+            tx=tx,
         )
 
-    r = await db.alerts.update_one(
-        {"id": alert_id, "family_group_id": current["family_group_id"]},
-        {"$set": {"acknowledged": True}},
+    alert = await sh.acknowledge_in_family(
+        db, current["id"], current["family_group_id"], alert_id, complete_medication=complete,
     )
-    if r.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Alert not found")
     return {"ok": True, **({"status": "taken"} if alert.get("type") == "medication" and alert.get("self_due") is True else {})}
 
 
@@ -4562,17 +4321,6 @@ async def acknowledge_alert(alert_id: str, current=Depends(get_current_user)):
 # =========================================================================
 @api_router.post("/alerts/{alert_id}/resolve")
 async def resolve_alert(alert_id: str, current=Depends(get_current_user)):
-    doc = await db.alerts.find_one(
-        {"id": alert_id, "family_group_id": current["family_group_id"]},
-        {"_id": 0},
-    )
-    if not doc:
-        raise HTTPException(status_code=404, detail="Alert not found")
-
-    # Idempotent short-circuit — already resolved.
-    if doc.get("resolved"):
-        return {"ok": True, "alert": Alert(**doc).model_dump(mode="json"), "already_resolved": True}
-
     resolver_name = current.get("full_name") or current.get("email") or "A family member"
     now = datetime.now(timezone.utc)
     updates = {
@@ -4582,11 +4330,17 @@ async def resolve_alert(alert_id: str, current=Depends(get_current_user)):
         "resolved_by_name": resolver_name,
         "acknowledged": True,
     }
-    await db.alerts.update_one(
-        {"id": alert_id, "family_group_id": current["family_group_id"]},
-        {"$set": updates},
+    doc, changed = await fw.change_sos_resolution(
+        db, current["family_group_id"], alert_id, current["id"], updates,
+        include_ordinary=True,
     )
-    doc.update(updates)
+    await fw.actor_in_family(db, current["id"], current["family_group_id"])
+    if not changed:
+        return {"ok": True, "alert": Alert(**doc).model_dump(mode="json"), "already_resolved": True}
+    if doc.get("type") != "sos":
+        # This fanout clears the active SOS banner; an ordinary alert must
+        # never send an emergency notification or disclose its details.
+        return {"ok": True, "alert": Alert(**doc).model_dump(mode="json")}
 
     # Cascade "alert_resolved" push to the entire family group so every
     # caregiver's device can clear the ACTIVE banner + refresh state.
@@ -4619,17 +4373,20 @@ async def resolve_alert(alert_id: str, current=Depends(get_current_user)):
     except Exception as e:
         logger.warning(f"alert_resolved push fanout failed for {alert_id}: {e}")
 
+    await fw.actor_in_family(db, current["id"], current["family_group_id"])
     return {"ok": True, "alert": Alert(**doc).model_dump(mode="json")}
 
 
 @api_router.delete("/alerts")
 async def clear_all_alerts(current=Depends(get_current_user)):
     """
-    Delete every alert in the caller's family group. Used by the
-    "Clear All" button in the Alerts tab. Scoped to family_group_id
-    so a user cannot wipe another family's alerts.
+    Clear ordinary family alerts without deleting SOS incidents or history.
     """
-    r = await db.alerts.delete_many({"family_group_id": current["family_group_id"]})
+    async def clear(tx):
+        await fw.actor_in_family(tx, current["id"], current["family_group_id"])
+        scope = await sh.family_alert_query(tx, current["family_group_id"])
+        return await tx.alerts.delete_many({**scope, "type": {"$ne": "sos"}})
+    r = await fw.run(db, [current["family_group_id"]], clear)
     return {"ok": True, "deleted": r.deleted_count}
 
 
@@ -4669,7 +4426,7 @@ async def create_reminder(data: ReminderCreate, current=Depends(get_current_user
         category=data.category, title=data.title, dosage=data.dosage,
         times=times, time=times[0].time if times else "",
     )
-    await db.reminders.insert_one(rem.model_dump())
+    await fw.insert_record(db, "reminders", rem.model_dump(), actor_id=current["id"], owner=True)
     return rem
 
 
@@ -4838,7 +4595,7 @@ async def _resolve_mark_occurrence(
     }
 
 
-async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> str:
+async def _claim_medication_acknowledgment(occurrence: dict, now: datetime, *, tx=None) -> str:
     """Claim an exact occurrence for acknowledgment.
 
     Mongo's conditional update is the occurrence-level mutex shared with the
@@ -4847,16 +4604,26 @@ async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> s
     occurrence. A completed scheduler escalation is history, not a permanent
     prohibition on the recipient subsequently taking the dose.
     """
-    collection = getattr(db, "medication_occurrences", None)
+    store = db if tx is None else tx
+    collection = getattr(store, "medication_occurrences", None)
     if collection is None:
         return "unavailable"
 
     oid = occurrence["occurrence_id"]
+    scope = {"occurrence_id": oid}
+    if tx is not None:
+        scope.update({
+            "reminder_id": occurrence["reminder_id"], "member_id": occurrence["member_id"],
+            "$and": [{"$or": [{"family_group_id": occurrence["family_group_id"]},
+                              {"family_group_id": {"$exists": False}}]}],
+        })
+        if await collection.find_one({"occurrence_id": oid}) and not await collection.find_one(scope):
+            return "blocked"
     # Do not allow a retry or another device to turn any durable missed
     # terminal state into a taken contradiction, even if it is a historical
     # row without the migration-safe terminal key or the occurrence state row
     # is unavailable.
-    missed_terminal = await db.medication_logs.find_one(
+    missed_terminal = await store.medication_logs.find_one(
         {
             "occurrence_id": oid,
             "status": "missed",
@@ -4865,18 +4632,20 @@ async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> s
     )
     if missed_terminal:
         return "blocked_missed"
-    try:
-        await collection.insert_one({
-            **occurrence,
-            "acknowledged": False,
-            "family_claimed": False,
-        })
-    except DuplicateKeyError:
-        pass
+    initial = {**occurrence, "acknowledged": False, "family_claimed": False}
+    if tx is not None:
+        await collection.update_one(
+            {"occurrence_id": oid}, {"$setOnInsert": initial}, upsert=True,
+        )
+    else:
+        try:
+            await collection.insert_one(initial)
+        except DuplicateKeyError:
+            pass
 
     result = await collection.update_one(
         {
-            "occurrence_id": oid,
+            **scope,
             "acknowledged": {"$ne": True},
             "$or": [
                 {"family_claimed": {"$ne": True}},
@@ -4891,12 +4660,13 @@ async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> s
                 },
             ],
         },
-        {"$set": {"acknowledged": True, "acknowledged_at": now}},
+        {"$set": {"acknowledged": True, "acknowledged_at": now,
+                  **({"family_group_id": occurrence["family_group_id"]} if tx is not None else {})}},
     )
     if getattr(result, "matched_count", 0):
         return "claimed"
 
-    state = await collection.find_one({"occurrence_id": oid}, {"_id": 0})
+    state = await collection.find_one(scope, {"_id": 0})
     if state and state.get("acknowledged"):
         return "duplicate"
     if state and state.get("family_claimed"):
@@ -4906,7 +4676,7 @@ async def _claim_medication_acknowledgment(occurrence: dict, now: datetime) -> s
     return "blocked"
 
 
-async def _persist_taken_medication_log(rem: dict, current: dict, occurrence: dict, now: datetime) -> None:
+async def _persist_taken_medication_log(rem: dict, current: dict, occurrence: dict, now: datetime, *, tx=None) -> None:
     """Insert one taken log, relying on the unique occurrence index for races."""
     doc = {
         "id": str(uuid.uuid4()),
@@ -4922,14 +4692,18 @@ async def _persist_taken_medication_log(rem: dict, current: dict, occurrence: di
         "occurrence_id": occurrence["occurrence_id"],
         "terminal_occurrence_key": occurrence["occurrence_id"],
     }
-    existing = await db.medication_logs.find_one(
+    store = db if tx is None else tx
+    existing = await store.medication_logs.find_one(
         {"occurrence_id": occurrence["occurrence_id"], "status": "taken"},
         {"_id": 0},
     )
     if existing:
         return
+    if tx is not None:
+        await tx.medication_logs.insert_one(doc)
+        return
     try:
-        await db.medication_logs.insert_one(doc)
+        await fw.insert_record(db, "medication_logs", doc, actor_id=current["id"])
     except DuplicateKeyError:
         # Another delivery won the unique occurrence insert.  This is a
         # successful idempotent retry, not an endpoint failure.
@@ -4943,6 +4717,7 @@ async def _mark_exact_medication_taken(
     now: datetime,
     *,
     enforce_self_target: bool = True,
+    tx=None,
 ) -> dict:
     """Apply the canonical taken transition for one medication occurrence.
 
@@ -4954,7 +4729,7 @@ async def _mark_exact_medication_taken(
     if rem.get("category", "medication") != "medication":
         raise HTTPException(status_code=400, detail="Reminder is not a medication")
     if enforce_self_target:
-        await require_reminder_self_target(rem, current)
+        await require_reminder_self_target(rem, current, tx=tx)
     occurrence = await _resolve_mark_occurrence(rem, body, current, now)
     if occurrence is None:
         raise HTTPException(
@@ -4967,7 +4742,8 @@ async def _mark_exact_medication_taken(
             detail="Medication acknowledgment safety indexes are not ready; retry shortly",
             headers={"Retry-After": "5"},
         )
-    ack_state = await _claim_medication_acknowledgment(occurrence, now)
+    occurrence["family_group_id"] = current["family_group_id"]
+    ack_state = await _claim_medication_acknowledgment(occurrence, now, tx=tx)
     if ack_state == "blocked_missed":
         raise HTTPException(
             status_code=409,
@@ -4982,8 +4758,9 @@ async def _mark_exact_medication_taken(
     # concurrent delete wins after the occurrence claim, the exact occurrence
     # still has its durable taken log and a retry cannot report a display-only
     # success.  The matched-count check makes the missing reminder explicit.
-    await _persist_taken_medication_log(rem, current, occurrence, now)
-    reminder_update = await db.reminders.update_one(
+    await _persist_taken_medication_log(rem, current, occurrence, now, tx=tx)
+    store = db if tx is None else tx
+    reminder_update = await store.reminders.update_one(
         {"id": rem["id"], "family_group_id": current["family_group_id"]},
         {
             "$set": {
@@ -5000,7 +4777,7 @@ async def _mark_exact_medication_taken(
 
 
 async def _persist_missed_medication_log(
-    rem: dict, current: dict, occurrence: dict, now: datetime
+    rem: dict, current: dict, occurrence: dict, now: datetime, *, tx
 ) -> None:
     """Persist exactly one missed log for an exact medication occurrence."""
     doc = {
@@ -5017,22 +4794,17 @@ async def _persist_missed_medication_log(
         "occurrence_id": occurrence["occurrence_id"],
         "terminal_occurrence_key": occurrence["occurrence_id"],
     }
-    existing = await db.medication_logs.find_one(
+    existing = await tx.medication_logs.find_one(
         {"occurrence_id": occurrence["occurrence_id"], "status": "missed"},
         {"_id": 0},
     )
     if existing:
         return
-    try:
-        await db.medication_logs.insert_one(doc)
-    except DuplicateKeyError:
-        # The partial unique occurrence index makes concurrent/retried
-        # requests converge on the first durable missed log.
-        return
+    await tx.medication_logs.insert_one(doc)
 
 
 async def _arbitrate_manual_missed_occurrence(
-    occurrence: dict, now: datetime
+    db, occurrence: dict, now: datetime
 ) -> tuple[str, Optional[str]]:
     """Arbitrate an exact manual miss before touching reminder/log state.
 
@@ -5046,6 +4818,16 @@ async def _arbitrate_manual_missed_occurrence(
     not completion evidence.  A replay gets the same token and repairs every
     missing durable artifact before returning.
     """
+    scope = {
+        "occurrence_id": occurrence["occurrence_id"],
+        "reminder_id": occurrence["reminder_id"],
+        "member_id": occurrence["member_id"],
+        "$or": [{"family_group_id": occurrence["family_group_id"]},
+                {"family_group_id": {"$exists": False}}],
+    }
+    existing = await db.medication_occurrences.find_one({"occurrence_id": occurrence["occurrence_id"]})
+    if existing and not await db.medication_occurrences.find_one(scope):
+        return "blocked", None
     if await med_scheduler._has_taken_log_after(
         db,
         occurrence["reminder_id"],
@@ -5064,12 +4846,13 @@ async def _arbitrate_manual_missed_occurrence(
         local_date=occurrence["local_date"],
         now_utc=now,
         family_purpose="manual_miss",
+        family_group_id=occurrence.get("family_group_id"),
     )
     if claim_token:
         return "claimed", claim_token
 
     state = await db.medication_occurrences.find_one(
-        {"occurrence_id": occurrence["occurrence_id"]}, {"_id": 0}
+        scope, {"_id": 0}
     )
     if not state:
         return "blocked", None
@@ -5086,6 +4869,9 @@ async def _arbitrate_manual_missed_occurrence(
             # This is a replay or concurrent request for the same resumable
             # owner.  It must continue repairing state, never report success
             # merely because an in-progress bit exists.
+            await db.medication_occurrences.update_one(
+                scope, {"$set": {"family_group_id": occurrence["family_group_id"]}},
+            )
             return "resume", state.get("family_claim_token")
         if state.get("family_state") != "sent":
             return "owned", None
@@ -5094,7 +4880,7 @@ async def _arbitrate_manual_missed_occurrence(
         # request may do so and it must never send a second family push.
         result = await db.medication_occurrences.update_one(
             {
-                "occurrence_id": occurrence["occurrence_id"],
+                **scope,
                 "family_claimed": True,
                 "family_state": "sent",
                 "acknowledged": {"$ne": True},
@@ -5109,7 +4895,7 @@ async def _arbitrate_manual_missed_occurrence(
         if getattr(result, "matched_count", 0):
             return "resume", state.get("family_claim_token")
         state = await db.medication_occurrences.find_one(
-            {"occurrence_id": occurrence["occurrence_id"]}, {"_id": 0}
+            scope, {"_id": 0}
         )
         if state and state.get("family_purpose") == "manual_miss":
             return "resume", state.get("family_claim_token")
@@ -5135,11 +4921,21 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
             or body.local_date
         )
     ):
-        occurrence = await _mark_exact_medication_taken(rem, current, body, now)
+        async def mark_taken(tx):
+            fresh = await fw.actor_in_family(tx, current["id"], current["family_group_id"])
+            fresh_reminder = await tx.reminders.find_one(
+                {"id": reminder_id, "family_group_id": current["family_group_id"]},
+            )
+            if not fresh_reminder:
+                raise HTTPException(404, "Reminder not found")
+            return await _mark_exact_medication_taken(fresh_reminder, fresh, body, now, tx=tx)
+        await fw.run(db, [current["family_group_id"]], mark_taken)
         return {"ok": True, "status": "taken"}
 
     await require_reminder_self_target(rem, current)
     occurrence = await _resolve_mark_occurrence(rem, body, current, now)
+    if occurrence:
+        occurrence["family_group_id"] = current["family_group_id"]
     today = (occurrence or {}).get("local_date") or local_today_str(current)
     if body.status == "taken" and occurrence is None and _reminder_slot_times(rem):
         raise HTTPException(
@@ -5163,24 +4959,37 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
         and occurrence
         and rem.get("category", "medication") == "medication"
     ):
-        manual_miss_state, manual_miss_claim_token = (
-            await _arbitrate_manual_missed_occurrence(occurrence, now)
+        async def mark_missed(tx):
+            gid = current["family_group_id"]
+            actor = await fw.actor_in_family(tx, current["id"], gid)
+            selector = {"id": reminder_id, "family_group_id": gid}
+            fresh = await tx.reminders.find_one(selector)
+            if not fresh:
+                raise HTTPException(404, "Reminder not found")
+            await require_reminder_self_target(fresh, actor, tx=tx)
+            exact = await _resolve_mark_occurrence(fresh, body, actor, now)
+            if (not exact or fresh.get("category", "medication") != "medication"
+                    or exact["occurrence_id"] != occurrence["occurrence_id"]):
+                raise HTTPException(409, "The reminder changed; reopen it.")
+            exact["family_group_id"] = gid
+            state, token = await _arbitrate_manual_missed_occurrence(tx, exact, now)
+            if state not in ("claimed", "resume"):
+                raise HTTPException(409, {
+                    "acknowledged": "Medication occurrence was already acknowledged; it was not marked missed",
+                    "owned": "Medication escalation is already being sent for this occurrence; retry",
+                }.get(state, "Medication occurrence could not be safely claimed; retry"))
+            result = await tx.reminders.update_one(selector, {"$set": {
+                "status": "missed", "taken": False, "last_marked_at": now,
+                "last_marked_date": exact["local_date"],
+            }})
+            if result.matched_count != 1:
+                raise HTTPException(409, "The reminder changed; reopen it.")
+            await _persist_missed_medication_log(fresh, actor, exact, now, tx=tx)
+            return fresh, state, token
+
+        rem, manual_miss_state, manual_miss_claim_token = await fw.run(
+            db, [current["family_group_id"]], mark_missed,
         )
-        if manual_miss_state == "acknowledged":
-            raise HTTPException(
-                status_code=409,
-                detail="Medication occurrence was already acknowledged; it was not marked missed",
-            )
-        if manual_miss_state == "owned":
-            raise HTTPException(
-                status_code=409,
-                detail="Medication escalation is already being sent for this occurrence; retry",
-            )
-        if manual_miss_state == "blocked":
-            raise HTTPException(
-                status_code=409,
-                detail="Medication occurrence could not be safely claimed; retry",
-            )
 
     # A T+15 scan and this endpoint use the same durable occurrence row.
     # Losing the claim means the request arrived while escalation was being
@@ -5199,28 +5008,23 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
                 detail="Medication escalation is already being sent for this occurrence",
             )
 
-    await db.reminders.update_one(
-        {"id": reminder_id, "family_group_id": current["family_group_id"]},
-        {"$set": {
-            "status": body.status,
-            "taken": body.status == "taken",
-            "last_marked_at": now,
-            "last_marked_date": today,
-        }}
-    )
+    if manual_miss_state is None:
+        await db.reminders.update_one(
+            {"id": reminder_id, "family_group_id": current["family_group_id"]},
+            {"$set": {
+                "status": body.status,
+                "taken": body.status == "taken",
+                "last_marked_at": now,
+                "last_marked_date": today,
+            }}
+        )
     # Log every mark for medication history.  Taken and exact missed
     # occurrence rows are unique; repeated Android delivery therefore remains
     # one logical mark.
     if body.status == "taken" and occurrence:
         await _persist_taken_medication_log(rem, current, occurrence, now)
-    elif (
-        body.status == "missed"
-        and occurrence
-        and rem.get("category", "medication") == "medication"
-    ):
-        await _persist_missed_medication_log(rem, current, occurrence, now)
-    else:
-        await db.medication_logs.insert_one({
+    elif manual_miss_state is None:
+        await fw.insert_record(db, "medication_logs", {
             "id": str(uuid.uuid4()),
             "family_group_id": current["family_group_id"],
             "reminder_id": reminder_id,
@@ -5234,7 +5038,7 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
                 "slot_time": occurrence["slot_time"],
                 "occurrence_id": occurrence["occurrence_id"],
             } if occurrence else {}),
-        })
+        }, actor_id=current["id"])
 
     if body.status == "missed":
         # An occurrence-qualified medication miss uses the same durable
@@ -5265,7 +5069,7 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
             # not reserve/push a second stage.
             claim_token = manual_miss_claim_token
             occurrence_state = await db.medication_occurrences.find_one(
-                {"occurrence_id": occurrence_id}, {"_id": 0}
+                {"occurrence_id": occurrence_id, "family_group_id": current["family_group_id"]}, {"_id": 0}
             )
             can_push = bool(
                 claim_token
@@ -5405,7 +5209,7 @@ async def mark_reminder(reminder_id: str, body: ReminderMark, current=Depends(ge
                 })
                 if occurrence:
                     alert_doc["occurrence_id"] = occurrence["occurrence_id"]
-            await db.alerts.insert_one(alert_doc)
+            await fw.insert_record(db, "alerts", alert_doc, actor_id=current["id"])
             await push_to_family_group(
                 current["family_group_id"],
                 f"💊 {rem['member_name']} missed {rem['title']}",
@@ -5438,37 +5242,30 @@ async def toggle_reminder(reminder_id: str, current=Depends(get_current_user)):
 
 @api_router.delete("/reminders/{reminder_id}")
 async def delete_reminder(reminder_id: str, current=Depends(get_current_user)):
-    await require_family_owner(current)
-    r = await db.reminders.delete_one({"id": reminder_id, "family_group_id": current["family_group_id"]})
-    if r.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Reminder not found")
-    # Cascade: remove all scheduler bookkeeping rows tied to this reminder.
-    # Without this, med_notifications for the deleted reminder linger forever
-    # and (a) waste storage, (b) confuse the per-slot dedupe logic if a
-    # reminder with the same id is somehow recreated, and (c) make the
-    # /medications/_stages/{reminder_id} endpoint return stale data.
-    # Scoped by family_group_id too as belt-and-suspenders tenant isolation.
-    n = await db.med_notifications.delete_many({
-        "reminder_id": reminder_id,
-        "family_group_id": current["family_group_id"],
-    })
-    occurrence_cleanup = 0
-    occurrence_collection = getattr(db, "medication_occurrences", None)
-    if occurrence_collection is not None:
-        occurrence_cleanup = (
-            await occurrence_collection.delete_many({
-                "reminder_id": reminder_id,
-            })
-        ).deleted_count
-    logger.info(
-        f"[reminder] deleted {reminder_id}; cleaned {n.deleted_count} "
-        f"med_notifications and {occurrence_cleanup} occurrence row(s)"
-    )
-    return {
-        "ok": True,
-        "med_notifications_deleted": n.deleted_count,
-        "medication_occurrences_deleted": occurrence_cleanup,
-    }
+    gid = current["family_group_id"]
+
+    async def delete(tx):
+        await fw.actor_in_family(tx, current["id"], gid, owner=True)
+        scope = {"id": reminder_id, "family_group_id": gid}
+        reminder = await tx.reminders.find_one(scope)
+        if not reminder:
+            raise HTTPException(404, "Reminder not found")
+        state = {"reminder_id": reminder_id, "member_id": reminder["member_id"]}
+        if await tx.medication_occurrences.find_one({
+            **state, "family_claimed": True, "family_state": "sending",
+        }, {"_id": 1}):
+            raise HTTPException(409, "A medication notification is being sent; retry shortly.")
+        n = await tx.med_notifications.delete_many({**state, "family_group_id": gid})
+        occurrences = await tx.medication_occurrences.delete_many({
+            **state, "$or": [{"family_group_id": gid}, {"family_group_id": {"$exists": False}}],
+        })
+        deleted = await tx.reminders.delete_one(scope)
+        if deleted.deleted_count != 1:
+            raise HTTPException(409, "Reminder changed.")
+        return {"ok": True, "med_notifications_deleted": n.deleted_count,
+                "medication_occurrences_deleted": occurrences.deleted_count}
+
+    return await fw.run(db, [gid], delete)
 
 
 # ========== Medication history / weekly compliance ==========
@@ -5582,7 +5379,7 @@ async def create_checkin(data: CheckInCreate, current=Depends(get_current_user))
         # atomically authorize a separate collection insert or a later push.
         confirmed_by=member["name"], source="self",
     )
-    await db.checkins.insert_one(ci.model_dump())
+    await fw.insert_record(db, "checkins", ci.model_dump(), actor_id=current["id"])
     update = {"last_seen": datetime.now(timezone.utc), "status": "healthy"}
     await db.members.update_one(
         {"id": member["id"], "family_group_id": current["family_group_id"],
@@ -5687,7 +5484,7 @@ async def send_checkin_request(member_id: str, current=Depends(get_current_user)
         member_name=target["name"],
         target_user_id=target_user_id,
     )
-    await db.checkin_requests.insert_one(req.model_dump())
+    await fw.insert_record(db, "checkin_requests", req.model_dump(), actor_id=current["id"], owner=True)
 
     if not target_user_id:
         return {"ok": True, "request_id": req.id, "skipped_push": "no_user_link"}
@@ -5864,10 +5661,10 @@ async def respond_to_checkin_request(
     )
     canonical_mongo_id = f"welfare-check:{request_id}"
     try:
-        await db.checkins.insert_one({
+        await fw.insert_record(db, "checkins", {
             **ci.model_dump(),
             "_id": canonical_mongo_id,
-        })
+        }, actor_id=current["id"])
     except Exception:
         # `_id` is MongoDB's durable uniqueness boundary. If a previous attempt
         # inserted the response and then crashed before finalizing the request,
@@ -6207,7 +6004,10 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         message=f"{member_name} triggered SOS at {local_time_str}.{coord_str} Emergency services notified.",
         latitude=data.latitude, longitude=data.longitude,
     )
-    await db.alerts.insert_one(alert.model_dump())
+    committed, current = await fw.persist_sos(
+        db, alert.model_dump(), current["id"], explicit_member_id=data.member_id,
+    )
+    alert.family_group_id = committed["family_group_id"]
 
     # Enhanced push: fan out to ALL users in the family group (every linked
     # family member receives the alert on their own devices).
@@ -7472,7 +7272,6 @@ class _ResetTestUserRequest(BaseModel):
     email: EmailStr
 
 
-@api_router.post("/internal/reset-test-user", include_in_schema=False)
 async def reset_test_user(data: _ResetTestUserRequest, request: Request):
     """Full wipe of a user account and every document that references it.
 
@@ -7822,14 +7621,7 @@ async def _migrate_family_groups():
         logger.info(f"Backfilling family_group_id for {len(legacy)} legacy users…")
         for user in legacy:
             try:
-                group = await fg.create_group_for_user(db, user)
-                gid = group["id"]
-                # Backfill data
-                for coll in fg.DATA_COLLECTIONS:
-                    await db[coll].update_many(
-                        {"owner_id": user["id"], "family_group_id": {"$exists": False}},
-                        {"$set": {"family_group_id": gid}},
-                    )
+                await fg.ensure_family_group(db, user)
             except Exception as e:
                 logger.warning(f"Migration failed for user {user.get('id')}: {e}")
         logger.info("Family group migration complete.")
@@ -8087,7 +7879,6 @@ async def _ensure_alert_dedup_index():
     # Tuning rationale:
     #   otp_codes:           10 min   — short-lived secrets
     #   checkins:            90 days  — long enough for trend UI
-    #   resolved alerts:     30 days  — audit trail + ack history
     #   med_notifications:   30 days  — escalation history
     ttl_indexes = [
         # OTP codes — expire from their own expires_at field
@@ -8099,9 +7890,8 @@ async def _ensure_alert_dedup_index():
         ("email_link_limits",  "expires_at", 0,             None),
         # Check-ins — 90 days after creation
         ("checkins",           "created_at", 90 * 86400,    None),
-        # Alerts — 30 days after RESOLUTION (resolved_at must
-        # exist, so partial-filter on that)
-        ("alerts",             "resolved_at", 30 * 86400,   {"resolved_at": {"$exists": True}}),
+        # Do not install an alerts TTL that can delete historical SOS. An
+        # existing database index requires a separately approved migration.
         # Medication notifications — 30 days after creation
         ("med_notifications",  "created_at", 30 * 86400,    None),
         # Build 53 — Location ingest diagnostic log + blank-push drops.
@@ -8208,120 +7998,9 @@ async def _migrate_dedupe_push_tokens():
         logger.warning(f"push_tokens dedupe migration skipped: {e}")
 
 
-# =========================================================================
-# Build 50 hotfix — Alerts backfill + ancient-cleanup migration.
-#
-# Problem observed in the field: pre-Build-50 SOS alerts stored in Mongo
-# have no `resolved` field.  The frontend auto-resume detector treats
-# every SOS with `resolved` != true as "unresolved", so any legacy
-# record (from days-old testing) was being resurfaced on cold-start,
-# trapping the user on an incident screen for an alert nobody was
-# handling.
-#
-# SAFETY MODEL — this migration must NEVER accidentally mark a truly
-# active unresolved SOS as resolved.  Two safeguards:
-#
-#   A. SENTINEL DOC — a marker in the `migrations` collection.  When
-#      present, the migration short-circuits on subsequent boots (true
-#      one-shot semantics).  Even if the marker is manually removed
-#      (e.g. for a re-run in a dev env), safeguard B still holds.
-#
-#   B. SAFETY WINDOW — the promotion step (acknowledged → resolved)
-#      ONLY affects SOS alerts older than 1 hour.  A genuine emergency
-#      response completes in minutes; anything acknowledged-but-not-
-#      resolved after 1 h is stale.  This bounds the worst-case damage
-#      even if the sentinel is deleted AND the migration is re-run
-#      moments after a caregiver ack'd a real SOS via a legacy bundle.
-#
-# Steps (each idempotent independently, so re-running is safe):
-#   1. DELETE alerts older than 30 days (opportunistic housekeeping —
-#      Kinnship maintains a clean DB; obsolete test data serves no
-#      caregiver purpose).
-#   2. BACKFILL `resolved: False` on any alert missing the field.
-#   3. MARK legacy `sos` alerts that are (acknowledged AND created ≥1h
-#      ago) as `resolved: True` with `resolved_at = created_at`.
-#      Missed-checkin / medication / routine alerts are NOT affected —
-#      they use `acknowledged` semantics only.
-# =========================================================================
-MIGRATION_ID_ALERTS_V50 = "alerts_backfill_v50"
-MIGRATION_PROMOTE_MIN_AGE = timedelta(hours=1)
-
-
-@app.on_event("startup")
-async def _migrate_alerts_backfill_v50():
-    try:
-        # Safeguard A — sentinel doc.  If this migration has already
-        # completed on this deployment, short-circuit.
-        marker = await db.migrations.find_one({"_id": MIGRATION_ID_ALERTS_V50})
-        if marker:
-            return
-
-        now = datetime.now(timezone.utc)
-
-        # 1. Housekeeping — delete alerts older than 30 days.
-        cutoff = now - timedelta(days=30)
-        del_res = await db.alerts.delete_many({"created_at": {"$lt": cutoff}})
-        if del_res.deleted_count:
-            logger.info(
-                f"alerts housekeeping: removed {del_res.deleted_count} alert(s) "
-                f"older than 30 days"
-            )
-
-        # 2. Backfill `resolved: False` on any record missing the field.
-        backfill_res = await db.alerts.update_many(
-            {"resolved": {"$exists": False}},
-            {"$set": {"resolved": False}},
-        )
-        if backfill_res.modified_count:
-            logger.info(
-                f"alerts backfill: set resolved=False on "
-                f"{backfill_res.modified_count} legacy alert(s)"
-            )
-
-        # 3. Mark legacy acknowledged SOS as resolved — WITH SAFETY WINDOW.
-        #    Only touches alerts older than 1 hour, so an active
-        #    caregiver response ack'd in the last few minutes is never
-        #    accidentally promoted to "resolved".
-        promote_cutoff = now - MIGRATION_PROMOTE_MIN_AGE
-        promote_res = await db.alerts.update_many(
-            {
-                "type": "sos",
-                "acknowledged": True,
-                "resolved": {"$in": [False, None]},
-                "created_at": {"$lt": promote_cutoff},
-            },
-            [
-                {
-                    "$set": {
-                        "resolved": True,
-                        "resolved_at": "$created_at",
-                        "resolved_by_name": "Legacy (pre-Build-50)",
-                    }
-                }
-            ],
-        )
-        if promote_res.modified_count:
-            logger.info(
-                f"alerts backfill: promoted {promote_res.modified_count} legacy "
-                f"acknowledged SOS to resolved (safety window: ≥1h old)"
-            )
-
-        # Record completion so subsequent boots short-circuit (safeguard A).
-        await db.migrations.update_one(
-            {"_id": MIGRATION_ID_ALERTS_V50},
-            {
-                "$set": {
-                    "_id": MIGRATION_ID_ALERTS_V50,
-                    "run_at": now,
-                    "deleted": del_res.deleted_count,
-                    "backfilled": backfill_res.modified_count,
-                    "promoted": promote_res.modified_count,
-                }
-            },
-            upsert=True,
-        )
-    except Exception as e:
-        logger.warning(f"alerts backfill migration skipped: {e}")
+# The old Build 50 alerts migration is intentionally not registered at startup.
+# A rolling startup must not delete SOS history or infer resolution from age
+# and acknowledgment. Preserve existing records and completion markers.
 
 
 # =========================================================================
@@ -8546,8 +8225,11 @@ async def _migrate_iso_string_timestamps_to_date():
     ]
     for coll_name, field in targets:
         try:
+            query = {field: {"$type": "string"}}
+            if coll_name == "alerts":
+                query["type"] = {"$ne": "sos"}
             cursor = db[coll_name].find(
-                {field: {"$type": "string"}},
+                query,
                 {"_id": 1, "id": 1, field: 1},
             )
             converted = 0
@@ -8566,7 +8248,7 @@ async def _migrate_iso_string_timestamps_to_date():
                         parsed = parsed.replace(tzinfo=timezone.utc)
                     parsed_utc = parsed.astimezone(timezone.utc)
                     await db[coll_name].update_one(
-                        {"_id": doc["_id"]},
+                        {**query, "_id": doc["_id"], field: raw},
                         {"$set": {field: parsed_utc}},
                     )
                     converted += 1
@@ -8584,7 +8266,6 @@ async def _migrate_iso_string_timestamps_to_date():
             logger.warning(f"iso→date migration skipped for {coll_name}.{field}: {e}")
 
 
-@app.on_event("startup")
 async def _purge_legacy_demo_data():
     """v1.1.7 one-time DB cleanup.
 
@@ -8596,7 +8277,7 @@ async def _purge_legacy_demo_data():
 
     The seed itself has now been removed (see seed_demo_data above) but
     accounts created before v1.1.7 still carry the demo records.  This
-    handler runs once per process start and PERMANENTLY DELETES every
+    historical helper is no longer registered at startup. It deletes
     legacy demo member plus all documents that referenced them across
     every collection (cascading delete).
 

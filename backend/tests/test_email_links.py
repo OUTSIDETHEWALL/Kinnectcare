@@ -44,6 +44,12 @@ def matches(doc, query):
                     return False
                 if operator == "$in" and actual not in value:
                     return False
+                if operator == "$nin" and actual in value:
+                    return False
+                if operator == "$eq" and actual != value:
+                    return False
+                if operator == "$type" and value == "bool" and type(actual) is not bool:
+                    return False
         elif actual != expected:
             return False
     return True
@@ -110,6 +116,9 @@ class Transaction:
 
     async def __aexit__(self, *args):
         self.db.lock.release()
+
+    async def commit_transaction(self):
+        pass  # Snapshot fake: real commit/retry behavior is covered in Mongo tests.
 
     async def with_transaction(self, callback):
         snapshot = {k: copy.deepcopy(v.rows) for k, v in self.db.collections.items()}
@@ -447,6 +456,7 @@ async def test_transferred_self_role_and_confirmation_are_idempotent_without_del
 async def test_invite_stays_pending_until_membership_exists_and_failed_join_can_retry(monkeypatch):
     db, _, inv, user, client = setup()
     db.users.rows.append(copy.deepcopy(user))
+    db.family_groups.rows.append({"id": "solo", "owner_user_id": user["id"]})
     original = fg.ensure_self_member_row
 
     async def observe_pending(*args, **kwargs):
@@ -593,12 +603,12 @@ async def test_non_owner_transfer_preserves_other_peoples_records_and_family():
     db.members.rows.extend([
         {"id": "self", "user_id": user["id"], "owner_id": user["id"], "family_group_id": "solo",
          "latitude": 12, "longitude": 13, "location_sharing_enabled": True},
-        {"id": "other", "user_id": "other-person", "owner_id": user["id"], "family_group_id": "solo",
+        {"id": "other", "user_id": "other-person", "owner_id": "another-owner", "family_group_id": "solo",
          "latitude": 22, "longitude": 23, "location_sharing_enabled": True},
     ])
     db.reminders.rows.extend([
         {"id": "self-med", "member_id": "self", "owner_id": user["id"], "family_group_id": "solo"},
-        {"id": "other-med", "member_id": "other", "owner_id": user["id"], "family_group_id": "solo"},
+        {"id": "other-med", "member_id": "other", "owner_id": "another-owner", "family_group_id": "solo"},
     ])
     async with client:
         result = await client.post("/api/auth/email-link/join", json={

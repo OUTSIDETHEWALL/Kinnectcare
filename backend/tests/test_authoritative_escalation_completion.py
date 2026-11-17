@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from test_medication_occurrence_reliability import DB, med_scheduler, server
+from test_medication_occurrence_reliability import isolate_family_persistence
 from medication_delivery import send_verified_escalation
 
 NOW = datetime(2026, 9, 12, 14, 15, tzinfo=timezone.utc)

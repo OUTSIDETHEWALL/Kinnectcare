@@ -20,12 +20,14 @@ tab shows a complete history of activity (per user requirement).
 from __future__ import annotations
 
 import asyncio
+import family_write_fence as fw
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pymongo.errors import DuplicateKeyError
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -197,11 +199,23 @@ async def _ensure_occurrence_state(
     member_id: str,
     slot_time: str,
     local_date: str,
+    family_group_id: Optional[str] = None,
 ) -> bool:
     """Create the small durable coordination row used by the race guard."""
     collection = getattr(db, "medication_occurrences", None)
     if collection is None:
         return False
+    if isinstance(db, fw.SessionDatabase):
+        await collection.update_one(
+            {"occurrence_id": occurrence_id},
+            {"$setOnInsert": {
+                "reminder_id": reminder_id, "member_id": member_id, "slot_time": slot_time,
+                "local_date": local_date, "family_group_id": family_group_id,
+                "acknowledged": False, "family_claimed": False,
+            }},
+            upsert=True,
+        )
+        return True
     try:
         await collection.insert_one(
             {
@@ -231,6 +245,7 @@ async def _claim_occurrence_for_family(
     local_date: str,
     now_utc: datetime,
     family_purpose: Optional[str] = None,
+    family_group_id: Optional[str] = None,
 ) -> Optional[str]:
     """Atomically claim an occurrence before starting family escalation.
 
@@ -239,6 +254,20 @@ async def _claim_occurrence_for_family(
     family-stage claim. A claim remains exclusive until durable provider
     completion evidence exists; attempted/unknown sends never permit Taken.
     """
+    if isinstance(db, AsyncIOMotorDatabase):
+        if not family_group_id:
+            return None
+
+        async def claim(tx):
+            if not await _current_reminder_target(tx, reminder_id, member_id, family_group_id):
+                return None
+            return await _claim_occurrence_for_family(
+                tx, occurrence_id=occurrence_id, reminder_id=reminder_id, member_id=member_id,
+                slot_time=slot_time, local_date=local_date, now_utc=now_utc,
+                family_purpose=family_purpose, family_group_id=family_group_id,
+            )
+
+        return await fw.run(db, [family_group_id], claim)
     if not await _ensure_occurrence_state(
         db,
         occurrence_id=occurrence_id,
@@ -246,10 +275,17 @@ async def _claim_occurrence_for_family(
         member_id=member_id,
         slot_time=slot_time,
         local_date=local_date,
+        family_group_id=family_group_id,
     ):
         return None
     collection = db.medication_occurrences
     claim_token = str(uuid4())
+    identity = {"occurrence_id": occurrence_id}
+    if family_group_id:
+        identity.update({
+            "reminder_id": reminder_id, "member_id": member_id,
+            "$or": [{"family_group_id": family_group_id}, {"family_group_id": {"$exists": False}}],
+        })
     initial_update = {
         "family_claimed": True,
         "family_claimed_at": now_utc,
@@ -261,9 +297,11 @@ async def _claim_occurrence_for_family(
     }
     if family_purpose:
         initial_update["family_purpose"] = family_purpose
+    if family_group_id:
+        initial_update["family_group_id"] = family_group_id
     result = await collection.update_one(
         {
-            "occurrence_id": occurrence_id,
+            **identity,
             "acknowledged": {"$ne": True},
             "family_claimed": {"$ne": True},
         },
@@ -282,7 +320,7 @@ async def _claim_occurrence_for_family(
     # Transfer ownership atomically.  family_claimed stays true throughout,
     # so the acknowledgment conditional can never win this handoff.
     stale_query = {
-        "occurrence_id": occurrence_id,
+        **identity,
         "acknowledged": {"$ne": True},
         "family_claimed": True,
         "family_state": "sending",
@@ -297,6 +335,8 @@ async def _claim_occurrence_for_family(
     }
     if family_purpose:
         takeover_update["family_purpose"] = family_purpose
+    if family_group_id:
+        takeover_update["family_group_id"] = family_group_id
     result = await collection.update_one(
         stale_query,
         {"$set": takeover_update},
@@ -316,6 +356,8 @@ async def _claim_occurrence_for_family(
         }
         if family_purpose:
             takeover_update["family_purpose"] = family_purpose
+        if family_group_id:
+            takeover_update["family_group_id"] = family_group_id
         result = await collection.update_one(
             stale_query,
             {"$set": takeover_update},
@@ -368,6 +410,17 @@ async def _finish_occurrence_family_claim(
     )
 
 
+async def _current_reminder_target(db, reminder_id, member_id, family_group_id):
+    return (
+        await db.reminders.find_one({
+            "id": reminder_id, "member_id": member_id, "family_group_id": family_group_id,
+        }, {"_id": 1})
+        and await db.members.find_one({
+            "id": member_id, "family_group_id": family_group_id,
+        }, {"_id": 1})
+    )
+
+
 async def _try_record_stage(
     db,
     *,
@@ -382,6 +435,17 @@ async def _try_record_stage(
     allow_resume_claim: bool = False,
 ) -> bool:
     """Reserve or reclaim a delivery stage without duplicating a push."""
+    if isinstance(db, AsyncIOMotorDatabase):
+        async def record(tx):
+            if not await _current_reminder_target(tx, reminder_id, member_id, family_group_id):
+                return False
+            return await _try_record_stage(
+                tx, reminder_id=reminder_id, family_group_id=family_group_id, member_id=member_id,
+                slot_time=slot_time, local_date=local_date, stage=stage, now_utc=now_utc,
+                claim_token=claim_token, allow_resume_claim=allow_resume_claim,
+            )
+
+        return await fw.run(db, [family_group_id], record)
     row = {
         "reminder_id": reminder_id,
         "family_group_id": family_group_id,
@@ -401,11 +465,20 @@ async def _try_record_stage(
             "family_claim_token": claim_token,
         })
     try:
-        await db.med_notifications.insert_one(row)
-        return True
+        if isinstance(db, fw.SessionDatabase):
+            identity = {key: row[key] for key in ("reminder_id", "slot_time", "local_date", "stage")}
+            result = await db.med_notifications.update_one(identity, {"$setOnInsert": row}, upsert=True)
+            if result.upserted_id is not None:
+                return True
+            if stage != STAGE_FAMILY:
+                return False
+        else:
+            await db.med_notifications.insert_one(row)
+            return True
     except DuplicateKeyError:
         if stage != STAGE_FAMILY:
             return False
+    if stage == STAGE_FAMILY:
         query = {
             "reminder_id": reminder_id,
             "member_id": member_id,
@@ -607,7 +680,7 @@ async def _log_alert(
             doc["local_date"] = local_date
         if self_due is not None:
             doc["self_due"] = self_due
-        await db.alerts.insert_one(doc)
+        await fw.insert_record(db, "alerts", doc, actor_id=owner_id or None)
     except Exception as e:
         if raise_on_error:
             raise
@@ -671,7 +744,7 @@ async def _ensure_medication_escalation_alert(
         "occurrence_id": occurrence_id,
     }
     try:
-        await db.alerts.insert_one(doc)
+        await fw.insert_record(db, "alerts", doc, actor_id=owner_id or None)
         return alert_id
     except DuplicateKeyError:
         existing = await db.alerts.find_one(query, {"_id": 0})
@@ -852,6 +925,7 @@ async def _recover_stale_family_deliveries(
             slot_time=slot_time,
             local_date=local_date,
             now_utc=now_utc,
+            family_group_id=family_group_id,
         )
         if not claim_token:
             continue
@@ -1120,6 +1194,7 @@ async def process_pending_notifications(
                     slot_time=slot_time,
                     local_date=local_date,
                     now_utc=now_utc,
+                    family_group_id=family_group_id,
                 )
                 if not claim_token:
                     counters["skipped_taken"] += 1

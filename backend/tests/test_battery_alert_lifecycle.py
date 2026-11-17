@@ -90,8 +90,10 @@ def _call(
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def mock_db():
+def mock_db(monkeypatch):
     """Replace the module-level `db` with a mock for each test."""
+    from family_fence_unit_seams import install
+    install(monkeypatch)
     m = MagicMock()
     m.alerts.insert_one       = AsyncMock()
     m.alerts.update_one       = AsyncMock()
