@@ -14,7 +14,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from test_email_links_mongo_integration import local_replica  # noqa: F401
 from test_location_consent_write_race import run, server
-from test_recovery_push_receipts import _FakeClient, _FakeResponse
+from test_recovery_push_receipts import TICKET_ONE, _FakeClient, _FakeResponse
 
 
 MEMBER = "synthetic-private-member"
@@ -22,6 +22,7 @@ VIEWER = "synthetic-private-viewer"
 TARGET = "synthetic-private-target"
 FAMILY = "synthetic-private-family"
 TOKEN = "ExponentPushToken[SYNTHETIC-PRIVATE-DEVICE]"
+REAL_SEND = server.send_expo_push_with_tickets
 PRIVATE = f"{MEMBER} {VIEWER} {TARGET} {FAMILY} {TOKEN} 33.1234567"
 PATH = f"/api/members/{MEMBER}/request-location-refresh"
 CURRENT = {"id": VIEWER, "family_group_id": FAMILY}
@@ -210,3 +211,35 @@ def test_refresh_transport_logs_do_not_echo_private_fields(monkeypatch, caplog, 
     assert "Expo location refresh" in caplog.text
     for value in PRIVATE.split():
         assert value not in caplog.text
+
+
+def test_refresh_evidence_admits_only_safe_relay_fields(isolated, monkeypatch):
+    import expo_push
+
+    async def scenario():
+        members = MagicMock()
+        members.with_options.return_value.aggregate.return_value = SimpleNamespace(
+            to_list=AsyncMock(return_value=[{
+                "id": MEMBER, "user_id": TARGET, "family_group_id": FAMILY,
+                "location_sharing_enabled": True, "families": [{"id": FAMILY}],
+                "callers": [CURRENT],
+                "targets": [{"id": TARGET, "family_group_id": FAMILY,
+                             "location_sharing_enabled": True, "push_tokens": [TOKEN] * 3}],
+            }]),
+        )
+        evidence = SimpleNamespace(update_one=AsyncMock())
+        monkeypatch.setattr(server, "db", SimpleNamespace(members=members, recovery_push_evidence=evidence))
+        monkeypatch.setattr(server, "send_expo_push_with_tickets", REAL_SEND)
+        response = _FakeResponse(200, {"data": [
+            {"status": "ok", "id": TICKET_ONE},
+            {"status": "ok", "id": PRIVATE},
+            {"status": PRIVATE, "id": PRIVATE, "details": {"error": PRIVATE}},
+        ]})
+        monkeypatch.setattr(expo_push.httpx, "AsyncClient", lambda **_: _FakeClient(response=response))
+        await server.request_location_refresh(MEMBER, CURRENT)
+        saved = evidence.update_one.await_args.args[1]["$set"]
+        assert saved["receipt_status"] == "pending"
+        assert [(t["status"], t["ticket_id"], t["error"]) for t in saved["tickets"]] == [
+            ("ok", TICKET_ONE, None), ("ok", None, None), ("unknown", None, "unknown"),
+        ]
+    run(scenario())
