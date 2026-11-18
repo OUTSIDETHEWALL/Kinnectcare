@@ -47,7 +47,6 @@ import Svg, { Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
-const SOS_FAB_SIZE = 114; // accessibility: ~30% larger than original 88dp for tremor / dexterity users
 // Issue 3 — ring enlarged so it stays visible even with a thumb on the button.
 // Button stays 114 dp; ring grows ~27 % so ~28 dp of ring extends beyond the thumb on each side.
 
@@ -79,9 +78,10 @@ function formatScheduledMedicationTime(value: string): string {
   return `${displayHour}:${String(minute).padStart(2, '0')} ${suffix}`;
 }
 
-const SOS_RING_SIZE = 170; // FAB (114) + 28 px visible ring gap each side — stays visible under a thumb
-const SOS_RING_RADIUS = 81; // (SOS_RING_SIZE / 2) - (strokeWidth / 2) = 85 - 4
-const SOS_CIRCUMFERENCE = 2 * Math.PI * SOS_RING_RADIUS; // ≈ 508.9
+const SOS_FAB_SIZE = 92;
+const SOS_RING_SIZE = 118; // Keep the 8 dp ring clear of the circle even at its 1.07x hold scale.
+const SOS_RING_RADIUS = SOS_RING_SIZE / 2 - 4;
+const SOS_CIRCUMFERENCE = 2 * Math.PI * SOS_RING_RADIUS;
 
 export default function Dashboard() {
   const router = useRouter();
@@ -96,8 +96,7 @@ export default function Dashboard() {
       loadRevision.current += 1;
     };
   }, [user?.id]);
-  // Safe area insets — used to keep the SOS FAB clear of the navigation bar
-  // on all device/navigation configurations (gesture, Samsung buttons, Pixel, etc.)
+  // Bottom inset is used by the modals; the in-flow tab bar handles it for SOS.
   const insets = useSafeAreaInsets();
   // Build 47 — Dashboard no longer owns a local copy of the members
   // array.  Every consumer reads from `memberStore` so coordinates,
@@ -762,9 +761,10 @@ export default function Dashboard() {
   const safetyFailed = summaryStatus === 'failed' || alertsStatus === 'failed';
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
+    <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <ScrollView
-        contentContainerStyle={{ paddingBottom: 160 }}
+        style={styles.familyScroll}
+        contentContainerStyle={styles.familyScrollContent}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.primary} />}
       >
         <View style={styles.header}>
@@ -1167,7 +1167,10 @@ export default function Dashboard() {
           Issue 2: hidden while an SOS is already active (the red emergency banner
           communicates the state; the FAB is redundant and adds visual clutter).
           Reappears automatically once the emergency resolves. */}
-      {!activeEmergency && <View style={[styles.sosFabContainer, { bottom: 12 + insets.bottom }]} pointerEvents="box-none">
+      {!activeEmergency && <View style={styles.sosFabContainer} testID="family-sos-dock" pointerEvents="box-none">
+        <Text style={styles.sosFabLabel}>
+          {sosHolding ? 'Release to cancel' : 'Press & hold'}
+        </Text>
         <View style={{ width: SOS_RING_SIZE, height: SOS_RING_SIZE, alignItems: 'center', justifyContent: 'center' }}>
           <Svg width={SOS_RING_SIZE} height={SOS_RING_SIZE} style={StyleSheet.absoluteFill}>
             {/* Track ring — faint background arc, only visible while holding */}
@@ -1195,18 +1198,18 @@ export default function Dashboard() {
           </Svg>
           <Pressable
             testID="sos-button"
+            accessibilityRole="button"
+            accessibilityLabel="SOS"
+            accessibilityHint="Press and hold for SOS"
             onPressIn={onSosHoldStart}
             onPressOut={onSosHoldEnd}
             android_disableSound
           >
             <Animated.View style={[styles.sosFab, { transform: [{ scale: sosScale }] }]}>
-              <Text style={styles.sosFabIcon}>🆘</Text>
+              <Text style={styles.sosFabIcon} maxFontSizeMultiplier={2}>SOS</Text>
             </Animated.View>
           </Pressable>
         </View>
-        <Text style={[styles.sosFabLabel, sosHolding && styles.sosFabLabelHolding]}>
-          {sosHolding ? 'Release to cancel' : 'Press & Hold for SOS'}
-        </Text>
       </View>}
     </SafeAreaView>
   );
@@ -1698,13 +1701,13 @@ const styles = StyleSheet.create({
   mapPlaceholderText: { color: Colors.textTertiary, fontSize: 13, fontWeight: '600' },
   empty: { alignItems: 'center', padding: 24, marginHorizontal: 24, marginTop: 8 },
   emptyText: { color: Colors.textTertiary, marginTop: 8, textAlign: 'center' },
+  familyScroll: { flex: 1, minHeight: 0 },
+  familyScrollContent: { paddingBottom: 16 },
+  // Reserve real space outside the scroll viewport. The non-absolute tab bar
+  // already includes the system navigation inset, so don't add it again here.
   sosFabContainer: {
-    // Standard Android FAB position: bottom-right, 24 dp from right edge.
-    // bottom is NOT set here — applied inline as (12 + insets.bottom) so the FAB
-    // clears the nav bar on gesture navigation, Samsung buttons, and Pixel nav alike.
-    // Sprint 1: moved 20 dp lower than the original 32 dp base offset.
-    position: 'absolute', right: 24,
-    alignItems: 'center', gap: 4,
+    flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center',
+    flexShrink: 0, paddingHorizontal: 12, paddingBottom: 4, gap: 8,
   },
   sosFab: {
     width: SOS_FAB_SIZE, height: SOS_FAB_SIZE, borderRadius: SOS_FAB_SIZE / 2,
@@ -1713,9 +1716,11 @@ const styles = StyleSheet.create({
     boxShadow: '0px 8px 20px rgba(220,38,38,0.45)' as any,
     ...Platform.select({ android: { elevation: 10 } }),
   },
-  sosFabIcon: { fontSize: 34, lineHeight: 40 },
-  sosFabLabel: { fontSize: 18, fontWeight: '800', color: Colors.sos },
-  sosFabLabelHolding: { color: Colors.sos, fontWeight: '800' },
+  sosFabIcon: { fontSize: 20, fontWeight: '900', color: '#FFFFFF' },
+  sosFabLabel: {
+    flexShrink: 1, textAlign: 'right', fontSize: 14, fontWeight: '700',
+    color: Colors.textPrimary,
+  },
   // 3-2-1 countdown overlay
   sosCountdownOverlay: {
     ...StyleSheet.absoluteFillObject,
