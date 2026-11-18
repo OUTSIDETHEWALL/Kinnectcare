@@ -9,6 +9,7 @@ import logging
 
 from fastapi import HTTPException
 from pymongo.errors import PyMongoError
+import family_sos_priority
 
 
 # A transfer performs sequential, security-sensitive reads and writes across
@@ -30,9 +31,10 @@ class SessionCollection:
 
 
 class SessionDatabase:
-    def __init__(self, db, session):
+    def __init__(self, db, session, *, priority=None):
         self.db, self.session = db, session
         self.families = set()
+        self.sos_priority = priority
 
     def __getitem__(self, name):
         return SessionCollection(self.db[name], self.session)
@@ -45,6 +47,9 @@ async def acquire(tx, family_ids):
     if not isinstance(tx, SessionDatabase):
         raise RuntimeError("A family fence requires the caller's transaction")
     requested = set(filter(None, family_ids)) - tx.families
+    if tx.sos_priority is not None:
+        tx.sos_priority.families.update(filter(None, family_ids))
+        await tx.sos_priority.check()
     if requested and tx.families and min(requested) < max(tx.families):
         raise HTTPException(409, "Family scope changed; retry the operation.")
     for gid in sorted(requested):
@@ -56,7 +61,7 @@ async def acquire(tx, family_ids):
         tx.families.add(gid)
 
 
-async def run(db, family_ids, action, *, timeout=2.0):
+async def run(db, family_ids, action, *, timeout=2.0, sos_priority=False):
     """Abort on cancellation; callbacks must contain only database work.
 
     Motor retries the entire callback on transient write conflicts and retries
@@ -65,17 +70,23 @@ async def run(db, family_ids, action, *, timeout=2.0):
     not be reported successful or deliver notifications.
     """
     if isinstance(db, SessionDatabase):
+        if sos_priority and db.sos_priority is None:
+            raise RuntimeError("A priority transfer requires its own monitored transaction")
         await acquire(db, family_ids)
         return await action(db)
 
+    priority = family_sos_priority.TransferPriority(db) if sos_priority else None
+
     async def callback(session):
-        tx = SessionDatabase(db, session)
+        tx = SessionDatabase(db, session, priority=priority)
         await acquire(tx, family_ids)
         return await action(tx)
 
     try:
         async with asyncio.timeout(timeout):
             async with await db.client.start_session() as session:
+                if priority is not None:
+                    return await priority.execute(lambda: _known_commit(session, callback))
                 return await _known_commit(session, callback)
     except TimeoutError as error:
         raise HTTPException(503, "Family operation timed out; check its status before retrying.") from error
@@ -184,6 +195,13 @@ async def persist_sos(db, document, actor_id, *, explicit_member_id=None):
         gid = candidate.get("family_group_id")
         if not gid:
             raise HTTPException(409, "Family setup is incomplete.")
+        if explicit_member_id and not await db.members.find_one(
+            {"id": explicit_member_id, "family_group_id": gid}, {"_id": 1},
+        ):
+            raise HTTPException(403, "That person is not in your current family.")
+        # Ask long transfer transactions to yield; SOS still takes the SAME
+        # family fence and revalidates identity/subject inside its 2s transaction.
+        await family_sos_priority.announce(db, gid)
 
         async def action(tx):
             actor = await actor_in_family(tx, actor_id, gid)
@@ -193,6 +211,8 @@ async def persist_sos(db, document, actor_id, *, explicit_member_id=None):
                 raise HTTPException(403, "That person is not in your current family.")
             row = {**copy.deepcopy(document), "family_group_id": gid,
                    "owner_id": actor_id, "member_id": explicit_member_id or actor_id}
+            if row.get("resolved") is not True:
+                row.pop("resolved_at", None)
             await tx.alerts.insert_one(row)
             return row, actor
 

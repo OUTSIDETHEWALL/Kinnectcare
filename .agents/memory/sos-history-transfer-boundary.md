@@ -3,6 +3,16 @@ name: SOS history transfer boundary
 description: Approved history-retention constraints and the concurrency boundary for family transitions
 ---
 
+## Final retention policy
+
+Resolved SOS is automatically eligible for deletion after 30 days. Permanent
+retention is not required; leave the existing production TTL unchanged.
+
+**Why:** The product owner finalized this policy and withdrew TTL removal.
+
+**How to apply:** Preservation across membership changes means within that
+retention period, not indefinitely. Active SOS must not inherit an expiry date.
+
 Qualifying resolved self-SOS history must stay unchanged in its existing family
 when its subject joins or is removed from a family. Both verified account-ID and
 self-member-ID subjects are legitimate. Historical ownership is not authority
@@ -49,6 +59,6 @@ does not disable a TTL index already installed in a database.
 **Why:** An existing Mongo index can delete history without any application
 writer running, even after the startup migration that installed it is retired.
 
-**How to apply:** Treat existing-index verification and retirement as an
-explicit, separately approved operational step; do not infer production index
-state from source changes or from a fresh test database.
+**How to apply:** Verify existing indexes instead of inferring production state
+from source or a fresh test database. The former TTL-retirement plan is
+superseded; do not execute it.

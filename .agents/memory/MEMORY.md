@@ -46,3 +46,4 @@
 - [Invitation removal authority](invitation-removal-authority.md) — owner removal must invalidate outstanding recipient invitations, including acceptance from retained clients.
 - [SOS history transfer boundary](sos-history-transfer-boundary.md) — retain verified self history without new family access; snapshot transactions do not fence new obligations.
 - [Motor commit retry boundary](motor-commit-retry-boundary.md) — verify unknown-commit retries with a real failpoint; the installed context can auto-commit outside its retry loop.
+- [SOS transfer priority](sos-transfer-priority.md) — long transfers must yield their family fences without bypassing fresh SOS authorization or extending its deadline.

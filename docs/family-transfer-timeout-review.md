@@ -1,5 +1,57 @@
 # Family transfer transaction deadline — approval required
 
+## Current correction: SOS-priority transfer preemption
+
+The timeout-only revision `79829be2` was NOT CLEAN: a transfer could retain
+the family-write fence beyond the two-second SOS deadline. This correction
+keeps SOS on its original, freshly authorized two-second transactional path.
+It does not bypass family fencing, increase that deadline, or move an emergency
+to a family based on a cached identity.
+
+Before trying its family fence, SOS announces a three-second priority window
+in `family_sos_priority`. This stores only a family ID and a Mongo-server-clock
+deadline; no coordinates, recipient details, or emergency payload. Windows
+expire logically, and the built-in `_id` index provides one row per family.
+No index, TTL, environment-variable, or configuration migration is required.
+Overlapping announcements extend priority; one completion cannot withdraw
+another incident's protection.
+
+The four long transfer entry points run a priority monitor outside their
+Mongo transaction. It checks priority before acquiring a family fence and
+while the transaction is running. An announcement cancels the transfer and
+waits for transaction cleanup before returning a generic retryable 409.
+The response does not disclose destination-family emergency activity.
+This is cross-worker database coordination, not an in-memory-only lock.
+
+SOS then acquires the same fence and rechecks both the account's current
+family and any explicitly selected member. If membership changed first,
+self-SOS retries with freshly read membership; an explicitly selected subject
+must still belong to that current family. No old-family coordinates are
+published into a new family based on the caller's stale scope.
+
+Tests keep transfers holding actual fences for more than three seconds before
+triggering the production SOS endpoint and production Alert model. They verify
+preemption, one durable active incident in the correct family, no expiration
+date, one visible push plus its existing data-only companion, no transfer
+notification, unchanged resolved SOS history, and rejection of a transfer retry
+that would abandon the new active incident. Other cases cover successful
+transfers, expiry, transient writes, uncertain commits, and membership races.
+
+### Boundaries
+
+- Database/network failure can still prevent persistence. Priority is not an
+  emergency-delivery guarantee when MongoDB or the event loop is unavailable.
+- Canceling an already-dispatched commit cannot prove that it rolled back.
+  Known committed completion wins over a simultaneous priority signal; an
+  uncertain outcome still requires authoritative status recovery.
+- Priority may conservatively interrupt a transfer for up to three seconds
+  after an SOS attempt, including a failed attempt. Do not automatically
+  replay a transfer without its original authorization checks.
+- The priority row contains no incident history and has no effect on the
+  existing 30-day resolved-SOS TTL. Active SOS remains a departure blocker.
+
+The following sections retain the evidence for the original timeout correction.
+
 ## Diagnosis
 
 **Severity: High.** The production family-transfer endpoints return 503 rather
