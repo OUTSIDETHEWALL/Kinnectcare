@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import { useIsFocused } from '@react-navigation/native';
 import { api, type Alert, type Member } from './api';
@@ -53,8 +53,16 @@ export function isFreshSosFix(fix: SharedFix, alert: FamilyAlert): boolean {
   return captured >= Date.parse(alert.created_at) && Date.now() - captured <= WAIT_MS;
 }
 
-type State = { fix: SharedFix | null; phone: string | null; waiting: boolean };
-const EMPTY: State = { fix: null, phone: null, waiting: false };
+type State = { fix: SharedFix | null; phone: string | null; waiting: boolean; allowAttached: boolean };
+const EMPTY: State = { fix: null, phone: null, waiting: false, allowAttached: false };
+
+type Consent = {
+  id: string;
+  user: string;
+  generation: number;
+  denied: boolean;
+  allowAttached: boolean;
+};
 
 // Scoped to this open, foreground incident. Do not populate/use the shared
 // member cache: it can hold coordinates from a previous sharing lifetime.
@@ -64,6 +72,12 @@ export function useSosDetailLocation(
 ) {
   const focused = useIsFocused();
   const [state, setState] = useState(EMPTY);
+  // The detail screen is keyed by account, family and alert ID. Do not
+  // reset this watermark on blur or background within that same screen.
+  const consent = useRef<Consent | null>(null);
+  const linkChanged = useRef(false);
+  const refreshRequested = useRef(false);
+  const initialAlertUsed = useRef(false);
 
   useEffect(() => {
     if (!focused || !incident || incident.resolved) {
@@ -72,11 +86,7 @@ export function useSosDetailLocation(
     }
     const alert = incident;
     let stopRun: (() => void) | undefined;
-    let refreshRequested = false;
-    let firstRun = true;
     let latestPoint: { id: string; generation: number; fix: SharedFix; watermark: number } | undefined;
-    let authority: { id: string; user: string | null; generation: number } | undefined;
-    let denied: { id: string; generation: number } | undefined;
 
     const begin = () => {
       stopRun?.();
@@ -93,10 +103,42 @@ export function useSosDetailLocation(
         clearTimeout(lease);
         clearTimeout(wait);
       };
-      setState({ ...EMPTY, waiting: !refreshRequested });
+      setState({ ...EMPTY, waiting: !refreshRequested.current });
       const wait = setTimeout(() => {
         if (current()) setState(s => ({ ...s, waiting: false }));
       }, WAIT_MS);
+
+      const clearLocation = (phone: string | null = null) => {
+        best = null;
+        clearTimeout(lease);
+        setState({ ...EMPTY, phone });
+      };
+
+      const requestFix = async (profile: FamilyProfile, grant: Consent) => {
+        // A POST response has no coordinates and can never restore a pin.
+        // Ignore results from old runs or a superseded consent generation.
+        const stillRelevant = () => current() && !linkChanged.current
+          && consent.current?.id === grant.id && consent.current.user === grant.user
+          && consent.current.generation === grant.generation && !consent.current.denied;
+        const deny = () => {
+          consent.current = { ...grant, denied: true, allowAttached: false };
+          clearLocation(profile.emergency_contact_phone ?? null);
+        };
+        try {
+          const { data } = await api.post(`/members/${encodeURIComponent(profile.id)}/request-location-refresh`, undefined, options);
+          if (!stillRelevant()) return;
+          if (data?.skipped === 'target_sharing_off' || data?.skipped === 'no_user_link') deny();
+          else if ((data?.skipped && data.skipped !== 'throttled') || data?.sent_to === 0) {
+            setState(s => ({ ...s, waiting: false }));
+          }
+        } catch (error: any) {
+          if (!stillRelevant()) return;
+          const status = error?.response?.status;
+          if ([401, 403, 404].includes(status)) deny();
+          else if (status === 503) clearLocation();
+          else setState(s => ({ ...s, waiting: false }));
+        }
+      };
 
       const read = async (initial: boolean) => {
         let checkingAlert = !initial;
@@ -122,20 +164,33 @@ export function useSosDetailLocation(
 
           const profile = profileFor(alert, result.data);
           const generation = profile?.location_consent_generation;
-          if (!profile || profile.location_sharing_enabled !== true
+          const user = profile?.user_id;
+          const prior = consent.current;
+          const phone = profile?.emergency_contact_phone ?? null;
+          if (prior && profile && (prior.id !== profile.id || prior.user !== user)) {
+            // A different link cannot become the subject of an open SOS.
+            linkChanged.current = true;
+          }
+          if (!profile || typeof user !== 'string' || !user || linkChanged.current
             || typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0
-            || (authority?.id === profile.id && generation < authority.generation)
-            || (denied?.id === profile.id && generation <= denied.generation)) {
-            if (authority?.id === profile?.id && profile?.location_sharing_enabled === false
-              && typeof generation === 'number') denied = { id: profile.id, generation };
-            best = null;
-            clearTimeout(lease);
-            setState({ ...EMPTY, phone: profile?.emergency_contact_phone ?? null });
+            || (prior && generation < prior.generation)) {
+            clearLocation(linkChanged.current ? null : phone);
+            return;
+          }
+
+          const denied = profile.location_sharing_enabled !== true
+            || (prior?.generation === generation && prior.denied);
+          const grant: Consent = {
+            id: profile.id, user, generation, denied,
+            // The attached SOS pin has no consent generation of its own.
+            // Do not revive it after a denial or a consent-lifetime change.
+            allowAttached: !denied && (!prior || (prior.allowAttached && prior.generation === generation)),
+          };
+          consent.current = grant;
+          if (denied) {
+            clearLocation(phone);
           } else {
-            const user = profile.user_id ?? null;
-            if (authority && (authority.id !== profile.id || authority.user !== user
-              || authority.generation !== generation)) best = null;
-            authority = { id: profile.id, user, generation };
+            if (prior && prior.generation !== generation) best = null;
             const candidate = fixFrom(profile);
             const timestamp = candidate?.capturedAt ? Date.parse(candidate.capturedAt) : null;
             if (!candidate) best = null;
@@ -149,42 +204,29 @@ export function useSosDetailLocation(
               // Restore only the identical fix after a fresh authorized read.
               best = candidate;
             }
-            const eligible = !!user && Date.now() < deadline;
+            const eligible = Date.now() < deadline;
+            const fix = best;
             setState(s => ({
-              fix: best, phone: profile.emergency_contact_phone ?? null,
-              waiting: !best && s.waiting && eligible,
+              fix, phone, allowAttached: grant.allowAttached,
+              waiting: !fix && s.waiting && eligible,
             }));
             // A previously authorized map is not kept indefinitely if an
             // authority check hangs. In-flight responses remain scope-bound.
             clearTimeout(lease);
             lease = setTimeout(() => {
-              if (current()) setState(s => ({ ...s, fix: null }));
+              if (current()) clearLocation(phone);
             }, ACTIVE_RECHECK_MS + REQUEST_MS * 2);
-            if (eligible && !refreshRequested) {
-              refreshRequested = true;
-              try {
-                const { data } = await api.post(`/members/${encodeURIComponent(profile.id)}/request-location-refresh`, undefined, options);
-                if (current() && ((data?.skipped && data.skipped !== 'throttled') || data?.sent_to === 0)) {
-                  if (data.skipped === 'target_sharing_off') {
-                    denied = { id: profile.id, generation };
-                    best = null;
-                  }
-                  setState(s => ({ ...s, fix: best, waiting: false }));
-                }
-              } catch (error: any) {
-                if (current()) {
-                  if ([401, 403, 404].includes(error?.response?.status)) best = null;
-                  setState(s => ({ ...s, fix: best, waiting: false }));
-                }
-              }
+            if (eligible && !refreshRequested.current) {
+              refreshRequested.current = true;
+              void requestFix(profile, grant);
             }
           }
         } catch (error: any) {
           if (current()) {
-            setState(EMPTY);
-            if (checkingAlert && [401, 403].includes(error?.response?.status)) {
+            clearLocation();
+            if ([401, 403].includes(error?.response?.status)) {
               stopRun?.();
-              onIncidentEnded(null);
+              if (checkingAlert) onIncidentEnded(null);
             }
           }
         } finally {
@@ -196,8 +238,8 @@ export function useSosDetailLocation(
           }
         }
       };
-      const justLoaded = firstRun;
-      firstRun = false;
+      const justLoaded = !initialAlertUsed.current;
+      initialAlertUsed.current = true;
       void read(justLoaded);
     };
 
