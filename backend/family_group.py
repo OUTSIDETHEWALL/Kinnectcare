@@ -890,7 +890,7 @@ def build_router(
                 else:
                     await tx.family_groups.delete_one({"id": gid})
             return new_group
-        new_group = await fw.run(db, [gid], leave, timeout=1.0)
+        new_group = await fw.run(db, [gid], leave, timeout=fw.FAMILY_TRANSFER_TIMEOUT_SECONDS)
         return {"ok": True, "new_group": public_group(new_group)}
 
     @router.post("/remove-member")

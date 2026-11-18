@@ -18,3 +18,16 @@ must remain deadline-bounded and tested against the installed version. An
 application timeout is not proof that an already-dispatched command did not
 commit; never claim durable cross-request notification idempotency from an
 internal retry test.
+
+Budget the entire guarded family transaction for accumulated round trips,
+not a single fast local database call. Keep the transfer budget separate from
+the shorter SOS persistence budget.
+
+**Why:** A one-second outer deadline failed otherwise valid multi-collection
+transfers on all real join routes under modest per-command latency. Fast local
+success and an isolated commit-retry test did not exercise that total cost.
+
+**How to apply:** Exercise the real routes and Motor against an owned replica
+with per-command latency and delayed/uncertain commit acknowledgment. Keep the
+deadline finite, below the client request timeout, and preserve cancellation,
+authorization, atomicity, and post-commit-only delivery.

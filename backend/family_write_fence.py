@@ -11,6 +11,13 @@ from fastapi import HTTPException
 from pymongo.errors import PyMongoError
 
 
+# A transfer performs sequential, security-sensitive reads and writes across
+# both families. Budget the *whole* transaction, including conflict/commit
+# retries, below the mobile client's 45s request timeout. Do not apply this
+# longer bound to SOS persistence or other short structural writes.
+FAMILY_TRANSFER_TIMEOUT_SECONDS = 10.0
+
+
 class SessionCollection:
     def __init__(self, collection, session):
         self.collection, self.session = collection, session

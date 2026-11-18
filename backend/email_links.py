@@ -197,7 +197,7 @@ async def join_family_code(db, user_id, code, *, new_user=None, link_by_name=Fal
                         raise HTTPException(409, "The invited member changed; try again.")
         await join_verified(tx, user, None, target, family_code=code)
         return user, target
-    return await fw.run(db, [], action, timeout=1.0)
+    return await fw.run(db, [], action, timeout=fw.FAMILY_TRANSFER_TIMEOUT_SECONDS)
 
 
 async def rate_limit(db, key: str, limit: int, window: int):
@@ -232,7 +232,7 @@ async def accept_legacy_invitation(db, token, *, user_id=None, new_user=None):
         return {"user": user, "group": target, "invitation": inv,
                 "already_member": already_member}
 
-    return await fw.transaction(db, transaction)
+    return await fw.transaction(db, transaction, timeout=fw.FAMILY_TRANSFER_TIMEOUT_SECONDS)
 
 
 def build_router(db, get_current_user, send_email, make_token, public_user):
@@ -396,7 +396,7 @@ def build_router(db, get_current_user, send_email, make_token, public_user):
                 raise HTTPException(409, "Your current family changed. Please review the invitation again.")
             await join_verified(tx, user, inv, target)
             return {"ok": True, "group": fg.public_group(target)}
-        return await fw.transaction(db, transaction)
+        return await fw.transaction(db, transaction, timeout=fw.FAMILY_TRANSFER_TIMEOUT_SECONDS)
 
     return router
 
