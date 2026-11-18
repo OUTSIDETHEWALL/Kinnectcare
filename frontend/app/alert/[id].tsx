@@ -90,6 +90,7 @@ function ScopedAlertDetail({ id, familyId, memberPhoneParam }: {
   const [loading, setLoading] = useState(true);
   const [resolving, setResolving] = useState(false);
   const [notFound, setNotFound] = useState(false);
+  const [leaving, setLeaving] = useState(false);
   useEffect(() => {
     if (!id || !familyId) {
       setNotFound(true);
@@ -146,7 +147,7 @@ function ScopedAlertDetail({ id, familyId, memberPhoneParam }: {
     setAlert(latest);
     if (!latest) setNotFound(true);
   }, [id]);
-  const location = useSosDetailLocation(notFound ? null : alert, onIncidentEnded);
+  const location = useSosDetailLocation(notFound || leaving ? null : alert, onIncidentEnded);
 
   // -----------------------------------------------------------------------
   //  Resolve action.  Optimistic UI: flip the local alert to resolved
@@ -231,12 +232,12 @@ function ScopedAlertDetail({ id, familyId, memberPhoneParam }: {
     );
   }
 
-  const snapshot = hasSosCoordinates(alert.latitude, alert.longitude);
+  const snapshot = location.allowAttached && hasSosCoordinates(alert.latitude, alert.longitude);
   // An older shared pin must not displace a location attached to the SOS.
   const fix = location.fix && (!snapshot || (location.fix.capturedAt
     && Date.parse(location.fix.capturedAt) > Date.parse(alert.created_at))) ? location.fix : null;
-  const lat = fix?.latitude ?? alert.latitude;
-  const lon = fix?.longitude ?? alert.longitude;
+  const lat = fix?.latitude ?? (snapshot ? alert.latitude : null);
+  const lon = fix?.longitude ?? (snapshot ? alert.longitude : null);
   const hasCoords = hasSosCoordinates(lat, lon);
   const address = fix?.address ?? null;
   const memberPhone = location.phone || alert.member_phone || memberPhoneParam || '';
@@ -252,7 +253,10 @@ function ScopedAlertDetail({ id, familyId, memberPhoneParam }: {
       <View style={styles.returnRow}>
         <TouchableOpacity
           testID="alert-back"
-          onPress={() => router.replace('/(tabs)/dashboard')}
+          onPress={() => {
+            setLeaving(true);
+            router.replace('/(tabs)/dashboard');
+          }}
           style={styles.returnBtn}
           activeOpacity={0.85}
           accessibilityRole="button"

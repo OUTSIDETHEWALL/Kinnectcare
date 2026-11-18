@@ -328,6 +328,146 @@ describe('SOS location — real detail screen with offline responses', () => {
     expect(text()).toContain('Location unavailable');
   });
 
+  it('records an initial denial, rejects stale and same-generation grants, and resumes on a newer grant', async () => {
+    members = [profile({ location_sharing_enabled: false, location_consent_generation: 4 })];
+    await mount();
+    expect(lat()).toBeUndefined();
+    for (const generation of [3, 4]) {
+      members = [profile({ location_consent_generation: generation })];
+      await advance(4000);
+      expect(lat()).toBeUndefined();
+      expect(mockApiPost).not.toHaveBeenCalled();
+      expect(text()).toContain('Location unavailable');
+    }
+    members = [profile({ location_consent_generation: 5 })];
+    await advance(4000);
+    expect(lat()).toBe(20);
+    expect(mockApiPost).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not show or navigate to an attached SOS pin after a sharing denial', async () => {
+    incident = { ...incident, latitude: 38, longitude: 42 };
+    members = [profile({ location_sharing_enabled: false, location_consent_generation: 4 })];
+    await mount();
+    expect(lat()).toBeUndefined();
+    expect(text()).not.toContain('Open in Maps');
+    expect(text()).toContain('Location unavailable');
+    expect(mockApiPost).not.toHaveBeenCalled();
+    members = [profile({ location_consent_generation: 5, latitude: null, longitude: null })];
+    await advance(4000);
+    expect(lat()).toBeUndefined(); // A later grant does not reauthorize the old attached pin.
+  });
+
+  it('never lowers the highest generation, even after an older denial', async () => {
+    members = [profile({ location_consent_generation: 5 })];
+    await mount();
+    for (const sharing of [false, true]) {
+      members = [profile({ location_consent_generation: 4, location_sharing_enabled: sharing })];
+      await advance(4000);
+      expect(lat()).toBeUndefined();
+    }
+    members = [profile({ location_consent_generation: 5 })];
+    await advance(4000);
+    expect(lat()).toBe(20);
+    expect(mockApiPost).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['blur', 'background'])('retains a denial watermark across %s', async mode => {
+    members = [profile({ location_sharing_enabled: false, location_consent_generation: 4 })];
+    await mount();
+    await act(async () => {
+      if (mode === 'background') mockAppStateChangeHandler?.('background');
+      else {
+        mockFocused = false;
+        tree.update(<AlertDetail />);
+      }
+    });
+    members = [profile()];
+    await act(async () => {
+      if (mode === 'background') mockAppStateChangeHandler?.('active');
+      else {
+        mockFocused = true;
+        tree.update(<AlertDetail />);
+      }
+    });
+    expect(lat()).toBeUndefined();
+    expect(mockApiPost).not.toHaveBeenCalled();
+  });
+
+  it('revalidates while the refresh POST is pending; its late result cannot restore a withdrawn fix', async () => {
+    const push = defer();
+    mockApiPost.mockReturnValueOnce(push.promise);
+    await mount();
+    expect(lat()).toBe(20);
+    members = [profile({ location_sharing_enabled: false, location_consent_generation: 4 })];
+    await advance(4000);
+    expect(lat()).toBeUndefined();
+    await act(async () => push.resolve({ data: { sent_to: 0 } }));
+    expect(lat()).toBeUndefined();
+    expect(text()).toContain('Location unavailable');
+  });
+
+  it('ignores a late POST denial from a superseded consent generation', async () => {
+    const push = defer();
+    mockApiPost.mockReturnValueOnce(push.promise);
+    await mount();
+    members = [profile({ location_consent_generation: 5, latitude: 26,
+      coordinate_captured_at: '2026-11-18T21:53:12Z' })];
+    await advance(4000);
+    expect(lat()).toBe(26);
+    await act(async () => push.resolve({ data: { skipped: 'target_sharing_off' } }));
+    expect(lat()).toBe(26);
+  });
+
+  it('honors a current server refresh denial and rejects the same generation from a later member read', async () => {
+    mockApiPost.mockResolvedValueOnce({ data: { skipped: 'target_sharing_off' } });
+    await mount();
+    expect(lat()).toBeUndefined();
+    await advance(4000);
+    expect(lat()).toBeUndefined();
+    expect(mockApiPost).toHaveBeenCalledTimes(1);
+  });
+
+  it('never accepts a different linked account for the same explicit SOS profile', async () => {
+    incident = { ...incident, member_id: 'linked-profile' };
+    await mount();
+    expect(lat()).toBe(20);
+    members = [profile({ user_id: 'different-account', location_consent_generation: 6 })];
+    await advance(4000);
+    expect(lat()).toBeUndefined();
+    members = [profile({ location_consent_generation: 7 })];
+    await advance(4000);
+    expect(lat()).toBeUndefined();
+  });
+
+  it('expires a displayed pin if a timed-out authority check never settles', async () => {
+    await mount();
+    expect(lat()).toBe(20);
+    mockApiGet.mockImplementation(async (path: string) => (
+      path === '/alerts' ? { data: [incident] } : defer().promise
+    ));
+    await advance(30_000);
+    expect(lat()).toBeUndefined();
+    expect(text()).toContain('Location unavailable');
+  });
+
+  it('aborts overlapping reads on Return and ignores callbacks completing after exit', async () => {
+    const pending = defer();
+    const signal = new AbortController();
+    const signals: AbortSignal[] = [];
+    mockApiGet.mockImplementation(async (path: string, options = { signal: signal.signal }) => {
+      if (path === '/alerts') return { data: [incident] };
+      signals.push(options.signal);
+      return pending.promise;
+    });
+    await mount();
+    await act(async () => find('alert-back')!.props.onPress());
+    expect(signals[0].aborted).toBe(true);
+    await act(async () => pending.resolve({ data: [profile()] }));
+    expect(lat()).toBeUndefined();
+    expect(mockApiPost).not.toHaveBeenCalled();
+  });
+
   it.each(['family change', 'account change', 'blur', 'background'])('aborts pending reads and rejects late coordinates on %s', async mode => {
     const pending = defer();
     const calls: AbortSignal[] = [];
