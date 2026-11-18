@@ -17,11 +17,7 @@
  *     • Member name (large) + relative timestamp
  *   [Live map card]
  *     • MemberMap centred on member's current lat/lon
- *     • Auto-refresh every 15 s via memberStore.requestRefresh(memberId)
- *     • Tracking status pill:
- *         🟢 Tracking Healthy       — last_seen ≤ 60 s ago
- *         🟡 Location updating…      — last_seen 60 s – 5 min ago
- *         🔴 Location unavailable    — no fix, or last_seen > 5 min
+ *     • An authorized, source-labeled location with bounded fresh-fix waiting
  *     • "Open in Maps" button below map
  *   [Action grid]
  *     • 📞 Call 911               — always visible (primary red)
@@ -38,7 +34,7 @@
  * we show a friendly empty state and bounce to `/(tabs)/alerts` after
  * 2 s so the user is never dead-ended.
  */
-import { useCallback, useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -48,26 +44,19 @@ import {
   ScrollView,
   Linking,
   Platform,
-  AppState,
   Alert as RNAlert,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Icon } from '../../src/Icon';
 import { Colors } from '../../src/theme';
-import { api, Alert, Member } from '../../src/api';
+import { api } from '../../src/api';
+import { useAuth } from '../../src/AuthContext';
 import MemberMap from '../../src/MemberMap';
-import { formatRelativeLocal } from '../../src/timeFormat';
-import * as memberStore from '../../src/store/memberStore';
+import { formatDateTimeLocal, formatRelativeLocal } from '../../src/timeFormat';
 import { logResumeDecision, markAlertDismissed } from '../../src/resumeDiagnostics';
 import { setActiveEmergency } from '../../src/activeEmergency';
-import { TrackingStatusPill } from '../../src/tracking/TrackingStatusPill';
-
-// -------------------------------------------------------------------------
-// (Tracking-status logic + component now lives in
-//  ../../src/tracking/TrackingStatusPill.tsx — the single source of
-//  truth every location-status surface in the app shares.)
-// -------------------------------------------------------------------------
+import { hasSosCoordinates, isFreshSosFix, useSosDetailLocation, type FamilyAlert } from '../../src/sosDetailLocation';
 
 function openMaps(lat: number, lon: number, label: string) {
   const q = `${lat},${lon}`;
@@ -83,75 +72,61 @@ function openMaps(lat: number, lon: number, label: string) {
 
 export default function AlertDetail() {
   const params = useLocalSearchParams<{ id?: string; member_phone?: string }>();
+  const { user } = useAuth();
+  // A scope change must never render the previous screen's location.
+  return <ScopedAlertDetail
+    key={JSON.stringify([user?.id, user?.family_group_id, params.id])}
+    id={params.id}
+    familyId={user?.id ? user.family_group_id : null}
+    memberPhoneParam={params.member_phone}
+  />;
+}
+
+function ScopedAlertDetail({ id, familyId, memberPhoneParam }: {
+  id?: string; familyId?: string | null; memberPhoneParam?: string;
+}) {
   const router = useRouter();
-  const [alert, setAlert] = useState<Alert | null>(null);
+  const [alert, setAlert] = useState<FamilyAlert | null>(null);
   const [loading, setLoading] = useState(true);
   const [resolving, setResolving] = useState(false);
   const [notFound, setNotFound] = useState(false);
-  // 20 s force-tick so the "5 min ago" label and traffic-light status
-  // stay accurate even when memberStore didn't broadcast an update.
-  const [, forceTick] = useState(0);
-
-  // Live subscription to the canonical member store so coords + last_seen
-  // repaint automatically as fresh uploads arrive.  Build 50 rule: we
-  // never own a local `member` state here — always read from the store.
-  const liveMember = memberStore.useMember(alert?.member_id) ?? null;
-
-  const load = useCallback(async () => {
-    if (!params.id) {
+  useEffect(() => {
+    if (!id || !familyId) {
       setNotFound(true);
       setLoading(false);
       return;
     }
-    try {
-      const res = await api.get('/alerts');
-      const list: Alert[] = res.data || [];
-      const found = list.find((a) => a.id === params.id) || null;
-      if (!found) {
-        // Alert no longer exists — mark it dismissed so the auto-resume
-        // detector never routes back here in this session, clear the
-        // shared active-emergency store (so the dashboard banner
-        // disappears too), and log the reason.
-        if (params.id) markAlertDismissed(params.id as string);
+    const controller = new AbortController();
+    const load = async () => {
+      try {
+        const { data } = await api.get<FamilyAlert[]>('/alerts', { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        const found = (data || []).find(a => a.id === id && a.type === 'sos' && a.family_group_id === familyId);
+        if (!found || found.resolved) {
+          markAlertDismissed(id);
+          setActiveEmergency(null);
+        }
+        if (found) setAlert(found);
+        else {
+          logResumeDecision({ reason: 'get-404', alertId: id, detail: 'GET /alerts did not include this id' });
+          setNotFound(true);
+        }
+      } catch (e: any) {
+        if (controller.signal.aborted) return;
+        markAlertDismissed(id);
         setActiveEmergency(null);
         logResumeDecision({
-          reason: 'get-404',
-          alertId: (params.id as string) || null,
-          detail: 'GET /alerts did not include this id',
+          reason: 'fetch-failed', alertId: id,
+          detail: e?.response?.status ? `HTTP ${e.response.status}` : (e?.message || 'unknown'),
         });
         setNotFound(true);
-      } else if (found.resolved === true) {
-        // Already resolved — surface briefly then bounce to dashboard.
-        if (params.id) markAlertDismissed(params.id as string);
-        setActiveEmergency(null);
-        setAlert(found);
-      } else {
-        setAlert(found);
-        // Prime the canonical store immediately.  If the caller hasn't
-        // fetched this member yet (e.g. deep-link cold-start), pull it
-        // once so the map has coords to render.
-        if (found.member_id) {
-          memberStore.fetchOne(found.member_id).catch(() => {});
-        }
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
       }
-    } catch (e: any) {
-      // Treat auth/network as not-found so we don't trap. The
-      // auto-resume detector will re-validate on the next
-      // AppState → active anyway.
-      if (params.id) markAlertDismissed(params.id as string);
-      setActiveEmergency(null);
-      logResumeDecision({
-        reason: 'fetch-failed',
-        alertId: (params.id as string) || null,
-        detail: e?.response?.status ? `HTTP ${e.response.status}` : (e?.message || 'unknown'),
-      });
-      setNotFound(true);
-    } finally {
-      setLoading(false);
-    }
-  }, [params.id]);
-
-  useEffect(() => { load(); }, [load]);
+    };
+    void load();
+    return () => controller.abort();
+  }, [id, familyId]);
 
   // If the alert vanished from the server (resolved-and-pruned or
   // cross-tenant), bounce out after a short grace so the user isn't
@@ -165,51 +140,13 @@ export default function AlertDetail() {
     return () => clearTimeout(t);
   }, [notFound, router]);
 
-  // -----------------------------------------------------------------------
-  //  Auto-refresh: every 15 s while the incident is unresolved AND the
-  //  app is foregrounded, ask the member's device (via silent push) for
-  //  a fresh GPS upload.  We do NOT re-fetch the alert doc itself — it's
-  //  immutable until someone taps Resolve.
-  //
-  //  Design guarantees:
-  //    • Stops the moment `alert.resolved === true` (server flip during
-  //      cascade OR after our own resolve tap).
-  //    • Stops when the app backgrounds (no reason to burn battery on
-  //      an incident the caregiver isn't looking at).
-  //    • Fires an immediate refresh on mount + on every foreground
-  //      transition so the map has fresh coords within seconds.
-  // -----------------------------------------------------------------------
-  const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  useEffect(() => {
-    const memberId = alert?.member_id;
-    const isResolved = !!alert?.resolved;
-    if (!memberId || isResolved) return;
-
-    const pulse = () => {
-      memberStore.requestRefresh(memberId).catch(() => {});
-    };
-    pulse();
-    refreshTimerRef.current = setInterval(pulse, 15_000);
-
-    const appSub = AppState.addEventListener('change', (next) => {
-      if (next === 'active') {
-        pulse();
-      }
-    });
-
-    return () => {
-      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
-      refreshTimerRef.current = null;
-      appSub.remove();
-    };
-  }, [alert?.member_id, alert?.resolved]);
-
-  // Force a re-render every 20 s so the relative timestamp + tracking-
-  // status pill drift correctly even without a memberStore broadcast.
-  useEffect(() => {
-    const t = setInterval(() => forceTick((n) => n + 1), 20_000);
-    return () => clearInterval(t);
-  }, []);
+  const onIncidentEnded = useCallback((latest: FamilyAlert | null) => {
+    if (id) markAlertDismissed(id);
+    setActiveEmergency(null);
+    setAlert(latest);
+    if (!latest) setNotFound(true);
+  }, [id]);
+  const location = useSosDetailLocation(notFound ? null : alert, onIncidentEnded);
 
   // -----------------------------------------------------------------------
   //  Resolve action.  Optimistic UI: flip the local alert to resolved
@@ -232,7 +169,7 @@ export default function AlertDetail() {
             try {
               const res = await api.post(`/alerts/${alert.id}/resolve`);
               const updated = res?.data?.alert ?? { ...alert, resolved: true };
-              setAlert(updated as Alert);
+              setAlert(updated as FamilyAlert);
               // Clear the shared active-emergency store so the dashboard
               // banner disappears everywhere at once.
               setActiveEmergency(null);
@@ -294,33 +231,15 @@ export default function AlertDetail() {
     );
   }
 
-  // Canonical coord + freshness resolution.  Both the map and the
-  // tracking-status pill derive from these SAME variables so they
-  // can never disagree ("map shows a marker, pill says unavailable"
-  // was Bug #2 in Build #51 QA).  Priority:
-  //   1. liveMember (memberStore) — freshest, updated every 15 s via
-  //      auto-refresh loop and by any silent-push location upload.
-  //   2. alert.latitude/longitude — snapshot captured at SOS trigger.
-  //      When used as fallback, the effective "last seen" is the
-  //      alert's own created_at (that's when the coord was valid).
-  const liveLat = typeof liveMember?.latitude === 'number' ? liveMember.latitude : null;
-  const liveLon = typeof liveMember?.longitude === 'number' ? liveMember.longitude : null;
-  const usingLiveCoords = liveLat !== null && liveLon !== null;
-  const lat = usingLiveCoords ? liveLat : alert.latitude;
-  const lon = usingLiveCoords ? liveLon : alert.longitude;
-  const hasCoords = typeof lat === 'number' && typeof lon === 'number';
-  // When we're using liveMember's coord, its `last_seen` drives freshness.
-  // When we're falling back to the alert doc's coord, that coord was
-  // captured at alert creation, so `alert.created_at` is the correct
-  // freshness stamp — NOT any live memberStore timestamp (which would
-  // otherwise make us claim "healthy" for the wrong data source).
-  const effectiveLastSeen: string | null | undefined = usingLiveCoords
-    ? liveMember?.coordinate_captured_at
-    : null; // Alert creation time is not a GPS capture timestamp.
-  const address = liveMember?.location_name || null;
-  const memberPhone = liveMember?.emergency_contact_phone
-    || (params.member_phone as string | undefined)
-    || '';
+  const snapshot = hasSosCoordinates(alert.latitude, alert.longitude);
+  // An older shared pin must not displace a location attached to the SOS.
+  const fix = location.fix && (!snapshot || (location.fix.capturedAt
+    && Date.parse(location.fix.capturedAt) > Date.parse(alert.created_at))) ? location.fix : null;
+  const lat = fix?.latitude ?? alert.latitude;
+  const lon = fix?.longitude ?? alert.longitude;
+  const hasCoords = hasSosCoordinates(lat, lon);
+  const address = fix?.address ?? null;
+  const memberPhone = location.phone || alert.member_phone || memberPhoneParam || '';
   const memberLabel = alert.member_name || 'Family member';
   const resolved = !!alert.resolved;
 
@@ -368,24 +287,20 @@ export default function AlertDetail() {
           <Text style={styles.addressLine}>📍 {address}</Text>
         ) : null}
 
-        {/* Tracking-status pill — shared component, guaranteed to
-            match every other screen's status computation. */}
-        <TrackingStatusPill
-          hasCoords={hasCoords}
-          lastSeenIso={effectiveLastSeen}
-          screen="alert"
-          style={styles.trackingPillWrap}
-          testID="tracking-status-pill"
-        />
-        {effectiveLastSeen ? (
-          <Text style={styles.trackingSecondary} testID="tracking-status-secondary">
-            Last updated {formatRelativeLocal(effectiveLastSeen)}
-          </Text>
-        ) : null}
-
-        {/* Live map — auto-refreshes coords every 15 s while unresolved. */}
         {hasCoords && (
           <View style={styles.mapCard} testID="sos-map-card">
+            <Text style={styles.noCoordsTitle} testID="sos-location-source">
+              {fix ? (isFreshSosFix(fix, alert) ? 'Fresh location' : 'Last known location')
+                : 'Location attached to SOS'}
+            </Text>
+            <Text style={styles.trackingSecondary} testID="sos-location-captured">
+              {fix?.capturedAt ? `Captured ${formatDateTimeLocal(fix.capturedAt)}` : 'Capture time unavailable'}
+            </Text>
+            {fix?.accuracy != null && (
+              <Text style={styles.trackingSecondary} testID="sos-location-accuracy">
+                {`Accuracy about ${Math.round(fix.accuracy)} m`}
+              </Text>
+            )}
             <MemberMap
               latitude={lat as number}
               longitude={lon as number}
@@ -408,10 +323,12 @@ export default function AlertDetail() {
         {!hasCoords && (
           <View style={styles.noCoordsCard} testID="sos-no-coords">
             <Icon name="location-outline" size={32} color={Colors.textTertiary} />
-            <Text style={styles.noCoordsTitle}>Waiting for location…</Text>
+            <Text style={styles.noCoordsTitle}>
+              {location.waiting ? 'Looking for a location…' : 'Location unavailable'}
+            </Text>
             <Text style={styles.noCoordsBody}>
-              We&apos;re asking {memberLabel}&apos;s phone for a fresh GPS fix.
-              This usually takes 10–30 seconds.
+              {location.waiting ? 'Checking for a shared location.'
+                : 'No shared location is available for this emergency right now.'}
             </Text>
           </View>
         )}
