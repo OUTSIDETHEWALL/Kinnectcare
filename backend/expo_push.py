@@ -205,6 +205,8 @@ async def _send_expo_push_result(
         result["transport_status"] = "no_valid_tokens"
         return result
     data = data or {}
+    # The relay may echo device tokens or payload fields in error responses.
+    private_refresh = data.get("type") == "request_location_refresh"
     cat_id = data.get("categoryIdentifier") or data.get("categoryId")
     channel_id = data.get("channelId") or "default"
     # Optional TTL (seconds) injected via data["_ttl"].  None = omit the
@@ -368,9 +370,10 @@ async def _send_expo_push_result(
             )
             result["http_status"] = r.status_code
             if r.status_code >= 400:
-                logger.warning(
-                    f"Expo push non-200: {r.status_code} body={r.text[:300]}"
-                )
+                if private_refresh:
+                    logger.warning("Expo location refresh failed: HTTP %s", r.status_code)
+                else:
+                    logger.warning(f"Expo push non-200: {r.status_code} body={r.text[:300]}")
                 result["transport_status"] = "http_error"
                 return result
             # Parse per-message response. Expo returns:
@@ -403,10 +406,15 @@ async def _send_expo_push_result(
                 if status == "error":
                     if err in DEAD_TOKEN_ERRORS:
                         result["dead_tokens"].append(token)
-                        logger.info(
-                            f"Expo push: pruning dead token (err={err}) "
-                            f"token={token[:25]}..."
-                        )
+                        if private_refresh:
+                            logger.info("Expo location refresh: device token rejected")
+                        else:
+                            logger.info(
+                                f"Expo push: pruning dead token (err={err}) "
+                                f"token={token[:25]}..."
+                            )
+                    elif private_refresh:
+                        logger.warning("Expo location refresh: relay rejected delivery")
                     else:
                         logger.warning(
                             f"Expo push transient error err={err} "
@@ -415,7 +423,10 @@ async def _send_expo_push_result(
     except Exception as e:
         result["transport_status"] = "exception"
         result["error_type"] = type(e).__name__
-        logger.warning(f"Expo push failed: {e}")
+        if private_refresh:
+            logger.warning("Expo location refresh: transport failed")
+        else:
+            logger.warning(f"Expo push failed: {e}")
     return result
 
 
