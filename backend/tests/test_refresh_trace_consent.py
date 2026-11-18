@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -19,6 +20,19 @@ class TraceHarness(PipelineHarness):
         self.viewer = {"id": "viewer", "family_group_id": "family"}
         self.users = {"user": self.user, "caregiver": self.family, "viewer": self.viewer}
         self.db.users.find_one = AsyncMock(side_effect=self.find_user)
+        # Trace tests exercise the route with an authorized snapshot; the
+        # join itself is exercised against Mongo in test_location_refresh_authorization.
+        self.db.members.with_options.return_value.aggregate.return_value = SimpleNamespace(
+            to_list=AsyncMock(side_effect=self.refresh_snapshot),
+        )
+
+    async def refresh_snapshot(self, limit):
+        return [{
+            **copy.deepcopy(self.member),
+            "families": [{"id": "family"}],
+            "callers": [copy.deepcopy(self.family)],
+            "targets": [copy.deepcopy(self.user)],
+        }]
 
     async def find_user(self, query, *args, **kwargs):
         await self.barrier("viewer")

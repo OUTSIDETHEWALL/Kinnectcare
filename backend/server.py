@@ -3,8 +3,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import ReturnDocument
+from pymongo import ReadPreference, ReturnDocument
 from pymongo.errors import DuplicateKeyError
+from pymongo.read_concern import ReadConcern
 import os
 import json
 import logging
@@ -6558,16 +6559,89 @@ async def _recovery_receipt_worker_loop() -> None:
             await asyncio.sleep(_RECOVERY_RECEIPT_POLL_S)
 
 
+async def _refresh_authority(member_id: str, caller_id: str, family_id: str):
+    """Read the link, both memberships, consent, and tokens in one snapshot."""
+    account_fields = {"_id": 0, "id": 1, "family_group_id": 1}
+    members = db.members.with_options(
+        read_concern=ReadConcern("snapshot"), read_preference=ReadPreference.PRIMARY,
+    )
+    rows = await members.aggregate([
+        {"$match": {"id": member_id}},
+        {"$limit": 2},
+        {"$project": {"_id": 0, "id": 1, "family_group_id": 1, "user_id": 1,
+                      "location_sharing_enabled": 1, "location_consent_generation": 1}},
+        {"$lookup": {
+            "from": "family_groups", "pipeline": [
+                {"$match": {"id": family_id}}, {"$limit": 2}, {"$project": {"_id": 0, "id": 1}},
+            ], "as": "families",
+        }},
+        {"$lookup": {
+            "from": "users", "pipeline": [
+                {"$match": {"id": caller_id}}, {"$limit": 2}, {"$project": account_fields},
+            ], "as": "callers",
+        }},
+        {"$lookup": {
+            "from": "users", "localField": "user_id", "foreignField": "id", "pipeline": [
+                {"$limit": 2},
+                {"$project": {**account_fields, "location_sharing_enabled": 1, "push_tokens": 1}},
+            ], "as": "targets",
+        }},
+    ], maxTimeMS=3000).to_list(2)
+    if len(rows) != 1:
+        raise HTTPException(404, "Member not found in your family group")
+    member = rows[0]
+    families = member["families"]
+    callers = member["callers"]
+    if (member.get("id") != member_id or member.get("family_group_id") != family_id
+            or len(families) != 1 or families[0].get("id") != family_id
+            or len(callers) != 1 or callers[0].get("id") != caller_id
+            or callers[0].get("family_group_id") != family_id):
+        raise HTTPException(404, "Member not found in your family group")
+
+    target_id = member.get("user_id")
+    if target_id is None or target_id == "":
+        return None, [], "no_user_link"
+    targets = member["targets"]
+    if (not isinstance(target_id, str) or len(targets) != 1
+            or targets[0].get("id") != target_id
+            or targets[0].get("family_group_id") != family_id):
+        raise HTTPException(404, "Member not found in your family group")
+    target = targets[0]
+    generation = member.get("location_consent_generation", 0)
+    if (member.get("location_sharing_enabled") is not True
+            or target.get("location_sharing_enabled") is not True
+            or not isinstance(generation, int) or isinstance(generation, bool) or generation < 0):
+        return None, [], "target_sharing_off"
+    tokens = target.get("push_tokens", [])
+    if not isinstance(tokens, list) or not all(isinstance(token, str) for token in tokens):
+        return target_id, [], None
+    return target_id, tokens, None
+
+
+async def _authenticate_location_refresh(
+    request: Request, creds: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    try:
+        return await get_current_user(request, creds)
+    except HTTPException:
+        raise
+    except Exception:
+        # Database errors may include identifying details. Don't let the
+        # server's unhandled-exception logger dump the exception for this route.
+        logger.warning("[refresh-pipeline] STAGE=authentication_unavailable")
+        raise HTTPException(503, "Could not verify location refresh permissions") from None
+
+
 @api_router.post("/members/{member_id}/request-location-refresh")
-async def request_location_refresh(member_id: str, current=Depends(get_current_user)):
+async def request_location_refresh(member_id: str, current=Depends(_authenticate_location_refresh)):
     """v1.3.0 — sends a silent data push to the target member's device
     asking it to upload a fresh GPS fix.  This bypasses Android Doze /
     Samsung One UI App-Standby throttling on the location task because
     push notifications wake the device regardless of background quota.
 
     Caller must share a family_group with the target.  Target must be
-    a linked user (has user_id and push_tokens).  Server-side throttle
-    of 30 s per member protects against the dashboard's auto-pull
+    a linked user with affirmative sharing on both records. Server-side throttle
+    of 5 minutes per member protects against the dashboard's auto-pull
     firing on every refetch tick.
 
     v1.3.3 — every invocation writes a refresh-trace row (in-memory)
@@ -6576,75 +6650,36 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
     """
     import uuid as _uuid
     request_id = _uuid.uuid4().hex[:12]
-    # Build #56 — Diagnostics polish.  `member_not_found` was showing up
-    # in the refresh-trace log for stale client caches (e.g. a device
-    # still holding an old family group's member id after leaving that
-    # group).  It's not evidence of a real problem — the endpoint is
-    # correctly rejecting the request — so we probe FIRST and skip the
-    # trace insertion entirely when the target member simply doesn't
-    # exist for this caller.  Real errors (throttled, no_tokens,
-    # push_error) still get logged so we can investigate them.
-    target = await db.members.find_one(
-        {"id": member_id, "family_group_id": current["family_group_id"]},
-        {"_id": 0, "id": 1, "user_id": 1, "name": 1},
-    )
-    if not target:
-        raise HTTPException(status_code=404, detail="Member not found in your family group")
+    caller_id, family_id = current.get("id"), current.get("family_group_id")
+    if not isinstance(caller_id, str) or not caller_id:
+        raise HTTPException(401, "Authenticated user required")
+    if not isinstance(family_id, str) or not family_id:
+        raise HTTPException(404, "Member not found in your family group")
 
-    trace = _trace_record_request(member_id, current["id"], request_id)
-    target_user_id = target.get("user_id")
-    logger.info(
-        f"[refresh-pipeline] STAGE=request_received "
-        f"request_id={request_id} member_id={member_id} "
-        f"caller={current['id']} target_user_id={target_user_id!r}"
-    )
-    if not target_user_id:
-        trace["push_skipped_reason"] = "no_user_link"
-        logger.info(
-            f"[refresh-pipeline] STAGE=push_skipped reason=no_user_link "
-            f"request_id={request_id}"
-        )
-        return {"ok": True, "skipped": "no_user_link", "request_id": request_id}
-
-    # Build #58 — CRITICAL PIPELINE FIX.
-    #
-    # Root cause of blank-K notifications correlating with Refresh
-    # Traces (Charles's device QA finding): the refresh push was being
-    # sent to every target regardless of whether that target had
-    # Location Sharing turned OFF.  The receiving device would:
-    #   1. Wake for the FCM message
-    #   2. Briefly draw the notification in the tray (OS default while
-    #      JS boots on cold-launched apps — Samsung/Xiaomi especially)
-    #   3. Fire the JS listener, which checks the on-device sharing
-    #      flag, and RETURNS EARLY — no GPS upload happens
-    #   4. Try to dismiss the tray entry — but the "blank K" is
-    #      already visible for ~1-3 s
-    # Net result: caregiver sees ghost K + zero benefit.
-    #
-    # Fix: short-circuit at the server BEFORE we send the push if the
-    # target has explicitly disabled sharing.  Nothing useful will
-    # happen if we do send it, and we're paying UX cost for no work.
+    # Last DB operation before starting the push. A committed change after
+    # the snapshot can still race transport; Mongo cannot atomically
+    # authorize or revoke an external Expo delivery.
     try:
-        tgt_user = await db.users.find_one(
-            {"id": target_user_id},
-            {"_id": 0, "location_sharing_enabled": 1},
-        )
-        tgt_sharing_off = (
-            tgt_user is not None and tgt_user.get("location_sharing_enabled") is False
-        )
+        async with asyncio.timeout(5):
+            target_user_id, tokens, skipped = await _refresh_authority(
+                member_id, caller_id, family_id,
+            )
+    except HTTPException:
+        raise
     except Exception:
-        tgt_sharing_off = False
-    if tgt_sharing_off:
-        trace["push_skipped_reason"] = "target_sharing_off"
-        logger.info(
-            f"[refresh-pipeline] STAGE=push_skipped reason=target_sharing_off "
-            f"request_id={request_id} target_user_id={target_user_id}"
+        logger.warning(
+            f"[refresh-pipeline] STAGE=authorization_unavailable request_id={request_id}"
         )
-        return {
-            "ok": True,
-            "skipped": "target_sharing_off",
-            "request_id": request_id,
-        }
+        raise HTTPException(503, "Could not verify location refresh permissions") from None
+
+    trace = _trace_record_request(member_id, caller_id, request_id)
+    logger.info(f"[refresh-pipeline] STAGE=request_received request_id={request_id}")
+    if skipped:
+        trace["push_skipped_reason"] = skipped
+        logger.info(
+            f"[refresh-pipeline] STAGE=push_skipped reason={skipped} request_id={request_id}"
+        )
+        return {"ok": True, "skipped": skipped, "request_id": request_id}
 
     import time as _t
     now = _t.time()
@@ -6683,14 +6718,11 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
             "request_id": request_id,
         }
     _REFRESH_PUSH_THROTTLE[member_id] = now
-
-    target_user = await db.users.find_one({"id": target_user_id}, {"push_tokens": 1})
-    tokens = (target_user or {}).get("push_tokens", []) or []
     if not tokens:
         trace["push_skipped_reason"] = "no_tokens"
         logger.info(
             f"[refresh-pipeline] STAGE=push_skipped reason=no_tokens "
-            f"request_id={request_id} target_user_id={target_user_id}"
+            f"request_id={request_id}"
         )
         return {"ok": True, "sent_to": 0, "request_id": request_id}
 
@@ -6791,9 +6823,9 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
             f"request_id={request_id} tokens={len(tokens)} "
             f"transport={send_result.get('transport_status')} tickets={len(ticket_ids)}"
         )
-    except Exception as e:
-        logger.warning(f"[refresh-pipeline] STAGE=push_error request_id={request_id} error={type(e).__name__}: {e}")
-        trace["push_skipped_reason"] = f"push_error:{type(e).__name__}"
+    except Exception:
+        logger.warning(f"[refresh-pipeline] STAGE=push_error request_id={request_id}")
+        trace["push_skipped_reason"] = "push_error"
     return {"ok": True, "sent_to": len(tokens), "request_id": request_id}
 
 
