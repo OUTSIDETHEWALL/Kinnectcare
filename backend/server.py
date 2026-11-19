@@ -60,6 +60,7 @@ from expo_push import (
 import billing
 import family_group as fg
 import sos_history as sh
+import account_deletion as account_cleanup
 import family_write_fence as fw
 import invitation_presentation
 import sms
@@ -960,7 +961,18 @@ async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
 
     dead_tokens: List[str] = []
     try:
-        dead_tokens = await send_expo_push(tokens, title, body, data) or []
+        import deletion_delivery as dd
+        outcome = await dd.run(
+            db, lambda: send_expo_push(tokens, title, body, data),
+            user_ids=[user_id], data=data,
+            operation_key=(
+                f"push:{user_id}:{data.get('type')}:{data.get('stage')}:" +
+                str(data.get("occurrence_id") or data.get("alert_id") or data.get("request_id"))
+            ) if data and (data.get("occurrence_id") or data.get("alert_id") or data.get("request_id")) else None,
+        )
+        if outcome is None:
+            return 0
+        dead_tokens = outcome or []
     except Exception as e:
         logger.warning(f"push_to_user failed for {user_id}: {e}")
     # Prune dead tokens out of the user's push_tokens array so subsequent
@@ -1351,7 +1363,7 @@ def _deliver_otp_email_sync(to_email: str, code: str, purpose: str) -> tuple[boo
     return False, "none"
 
 
-async def _deliver_otp_and_record(to_email: str, code: str, purpose: str) -> None:
+async def _deliver_otp_and_record(to_email: str, code: str, purpose: str, credential_id: str) -> None:
     """Background task: deliver the OTP via whichever transport is
     available, then record the delivery status back onto the otp_codes
     document so the client can poll for it.
@@ -1362,13 +1374,18 @@ async def _deliver_otp_and_record(to_email: str, code: str, purpose: str) -> Non
         delivery_attempted_at: datetime (UTC)
     """
     import asyncio
-    loop = asyncio.get_event_loop()
-    delivered, transport = await loop.run_in_executor(
-        None, _deliver_otp_email_sync, to_email, code, purpose
-    )
+    import deletion_delivery as dd
+    async def valid(tx):
+        return bool(await tx.otp_codes.find_one({"email": to_email, "credential_id": credential_id}))
+    async def deliver():
+        return await asyncio.to_thread(_deliver_otp_email_sync, to_email, code, purpose)
+    result = await dd.run(db, deliver, email=to_email, validate=valid, operation_key=f"otp:{credential_id}")
+    if result is None:
+        return
+    delivered, transport = result
     try:
         await db.otp_codes.update_one(
-            {"email": to_email},
+            {"email": to_email, "credential_id": credential_id},
             {"$set": {
                 "delivered": delivered,
                 "delivery_transport": transport,
@@ -1411,6 +1428,7 @@ async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, reque
     """
     email = data.email.lower().strip()
     purpose = (data.purpose or "").strip().lower()
+    observed_identity = await db.email_link_identities.find_one({"_id": el.digest(email)}) or {}
     client_host = request.client.host if request.client else "?"
     logger.info(
         f"[OTP] request-otp from ip={client_host} email={email} "
@@ -1491,6 +1509,7 @@ async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, reque
     now = datetime.now(timezone.utc)
     rec = {
         "email": email,
+        "credential_id": str(uuid.uuid4()),
         "purpose": purpose,
         "code_hash": code_hash,
         "expires_at": now + timedelta(minutes=OTP_TTL_MINUTES),
@@ -1505,7 +1524,22 @@ async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, reque
         if data.invite_code:
             rec["invite_code"] = data.invite_code.strip().upper()
 
-    await db.otp_codes.update_one({"email": email}, {"$set": rec}, upsert=True)
+    async def issue_otp(session):
+        tx = fw.SessionDatabase(db, session)
+        await tx.email_link_identities.update_one(
+            {"_id": el.digest(email)}, {"$inc": {"generation": 1}}, upsert=True,
+        )
+        fresh_user = await tx.users.find_one({"email": email})
+        if existing_user and (not fresh_user or fresh_user["id"] != existing_user["id"]):
+            raise HTTPException(410, "Your account changed. Request a fresh sign-in code.")
+        identity = await tx.email_link_identities.find_one({"_id": el.digest(email)})
+        if identity.get("deletion_generation", 0) != observed_identity.get("deletion_generation", 0):
+            raise HTTPException(410, "Your account changed. Request a fresh sign-in code.")
+        rec["issued_user_id"] = fresh_user["id"] if fresh_user else None
+        rec["deletion_generation"] = identity.get("deletion_generation", 0)
+        await tx.otp_codes.update_one({"email": email}, {"$set": rec}, upsert=True)
+
+    await fw.transaction(db, issue_otp)
     # Fire-and-forget delivery via background task.  The mongo record is
     # already written above, so the user CAN already verify their code
     # as soon as the email arrives — whether that's 200ms or 8 seconds
@@ -1514,7 +1548,7 @@ async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, reque
     # on the otp_codes row so the client can poll /auth/otp-status and
     # show a real error message if delivery fails, instead of the user
     # sitting forever staring at an empty inbox.
-    background_tasks.add_task(_deliver_otp_and_record, email, code, purpose)
+    background_tasks.add_task(_deliver_otp_and_record, email, code, purpose, rec["credential_id"])
     return {
         "ok": True,
         "message": (
@@ -1577,6 +1611,27 @@ async def otp_status(email: str):
 
 @api_router.post("/auth/verify-otp", response_model=TokenResponse)
 async def verify_otp(data: OtpVerify):
+    async def redeem(tx):
+        return await _verify_otp_transaction(data, tx)
+    result = await fw.run(db, [], redeem, timeout=fw.FAMILY_TRANSFER_TIMEOUT_SECONDS, sos_priority=True)
+    if isinstance(result, HTTPException):
+        raise result
+    if isinstance(result, tuple):
+        response, user, inv = result
+        if inv and inv.get("invited_by_user_id") != user["id"]:
+            try:
+                await push_to_user(
+                    inv["invited_by_user_id"], "✅ Family invite accepted",
+                    f"{user['full_name']} just joined your Kinnship family.",
+                    {"type": "family_join", "user_id": user["id"], "invite_id": inv["id"]},
+                )
+            except Exception:
+                logger.warning("inviter push failed")
+        return response
+    return result
+
+
+async def _verify_otp_transaction(data: OtpVerify, db):
     """Verify a 6-digit code. On success, return a fresh JWT — and if
     the code was issued for signup, create the user record + family
     group at the same time.
@@ -1586,8 +1641,16 @@ async def verify_otp(data: OtpVerify):
     if not (code.isdigit() and len(code) == OTP_LENGTH):
         raise HTTPException(status_code=400, detail="Invalid code")
 
+    await db.email_link_identities.update_one(
+        {"_id": el.digest(email)}, {"$inc": {"generation": 1}}, upsert=True,
+    )
     rec = await db.otp_codes.find_one({"email": email})
-    if not rec:
+    if not rec or any(key not in rec for key in ("issued_user_id", "deletion_generation", "credential_id")):
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+    identity = await db.email_link_identities.find_one({"_id": el.digest(email)})
+    user = await db.users.find_one({"email": email})
+    if (rec["deletion_generation"] != identity.get("deletion_generation", 0)
+            or rec["issued_user_id"] != (user["id"] if user else None)):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
 
     # Expiry
@@ -1596,13 +1659,13 @@ async def verify_otp(data: OtpVerify):
         exp = exp.replace(tzinfo=timezone.utc)
     if not exp or exp < datetime.now(timezone.utc):
         await db.otp_codes.delete_one({"_id": rec["_id"]})
-        raise HTTPException(status_code=400, detail="Invalid or expired code")
+        return HTTPException(status_code=400, detail="Invalid or expired code")
 
     # Attempt throttle
     attempts = int(rec.get("attempts", 0))
     if attempts >= OTP_MAX_ATTEMPTS:
         await db.otp_codes.delete_one({"_id": rec["_id"]})
-        raise HTTPException(
+        return HTTPException(
             status_code=429,
             detail="Too many attempts. Please request a new code.",
         )
@@ -1610,16 +1673,17 @@ async def verify_otp(data: OtpVerify):
     if not verify_password(code, rec.get("code_hash", "")):
         await db.otp_codes.update_one({"_id": rec["_id"]}, {"$inc": {"attempts": 1}})
         remaining = max(0, OTP_MAX_ATTEMPTS - attempts - 1)
-        raise HTTPException(
+        return HTTPException(
             status_code=400,
             detail=f"Invalid code. {remaining} attempt(s) remaining.",
         )
 
     # Code matches — consume it.
-    await db.otp_codes.delete_one({"_id": rec["_id"]})
+    consumed = await db.otp_codes.delete_one({"_id": rec["_id"], "credential_id": rec["credential_id"]})
+    if consumed.deleted_count != 1:
+        raise HTTPException(400, "Invalid or expired code")
 
     purpose = rec.get("purpose", "login")
-    user = await db.users.find_one({"email": email})
 
     if purpose == "signup" and fg.normalize_invite_code(rec.get("invite_code") or "").startswith("INV-"):
         # Retained Play clients can still redeem recipient invitations via OTP.
@@ -1644,18 +1708,11 @@ async def verify_otp(data: OtpVerify):
         user = result["user"]
         # Preserve the old new-signup invitation notification; existing-user OTP
         # joins did not send it. Retries cannot create a second new account.
-        inv = result["invitation"]
-        inviter_id = inv.get("invited_by_user_id")
-        if new_user and inviter_id and inviter_id != user["id"]:
-            try:
-                await push_to_user(
-                    inviter_id, "✅ Family invite accepted",
-                    f"{user['full_name']} just joined your Kinnship family.",
-                    {"type": "family_join", "user_id": user["id"], "invite_id": inv["id"]},
-                )
-            except Exception:
-                logger.warning("inviter push failed")
-        return TokenResponse(access_token=create_access_token(user["id"]), user=_user_response(user))
+        # Notification is emitted only after this transaction commits.
+        return (
+            TokenResponse(access_token=create_access_token(user["id"]), user=_user_response(user)),
+            user, result["invitation"] if new_user else None,
+        )
 
     # === SIGNUP path: create the user + family group on the fly. ===
     if purpose == "signup" and not user:
@@ -2154,9 +2211,9 @@ class DeleteAccountRequest(BaseModel):
 @api_router.delete("/auth/account")
 async def delete_account(
     data: DeleteAccountRequest = None,
-    current=Depends(get_current_user),
+    current=Depends(get_authenticated_user),
 ):
-    """Permanently delete the authenticated user and ALL of their data.
+    """Delete verified personal data, revoke access, and retain protected SOS.
 
     Delete eligible data and the account in one transaction, retaining SOS.
     Stripe cleanup is best-effort and only runs after the database commits.
@@ -3701,7 +3758,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     #   • did the GPS capture timestamp guard accept or reject the write?
     #   • what were the incoming vs. stored GPS capture times?
     try:
-        await db.location_ingest_log.insert_one({
+        await account_cleanup.persist_subject_evidence(db, "location_ingest_log", {
             "at":                   server_now,
             "member_id":            member_id,
             "family_group_id":      current["family_group_id"],
@@ -3729,7 +3786,8 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             # Geocoding is now lazy (resolved in GET /members, not here).
             # location_name is intentionally cleared on each upload so the
             # read path always resolves from fresh coordinates.
-        })
+        }, member_id=member_id, family_id=current["family_group_id"],
+            subject_user_id=target.get("user_id"))
     except Exception:
         pass
 
@@ -3743,7 +3801,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # collection bounded without a manual cleanup job.
     if write_accepted:
         try:
-            await db.location_history.insert_one({
+            await account_cleanup.persist_subject_evidence(db, "location_history", {
                 "accepted_at":      server_now,
                 "captured_at":      incoming_captured_at,
                 "member_id":        member_id,
@@ -3767,7 +3825,8 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 "battery_level":    data.battery_level,
                 "is_charging":      data.is_charging,
                 "raw_battery":      data.battery,
-            })
+            }, member_id=member_id, family_id=current["family_group_id"],
+                subject_user_id=target.get("user_id"))
         except Exception:
             pass
 
@@ -5331,7 +5390,8 @@ async def send_checkin_request(member_id: str, current=Depends(get_current_user)
         sharing_on = (tgt_user or {}).get("location_sharing_enabled", True)
         if tokens and sharing_on:
             import time as _t
-            await send_expo_push(
+            import deletion_delivery as dd
+            await dd.run(db, lambda: send_expo_push(
                 tokens=tokens, title="", body="",
                 data={
                     "type": "request_location_refresh",
@@ -5341,7 +5401,7 @@ async def send_checkin_request(member_id: str, current=Depends(get_current_user)
                     "_sentAt": _t.time(),
                     "_source_tag": "are_you_ok_gps_refresh",
                 },
-            )
+            ), user_ids=[current["id"], target_user_id], data={"member_id": member_id})
     except Exception as e:
         logger.warning(f"checkin_request silent-refresh push failed (non-fatal): {e}")
 
@@ -6592,7 +6652,8 @@ async def request_location_refresh(member_id: str, current=Depends(_authenticate
             f"request_id={request_id} tokens={len(tokens)} priority=high channel=silent_v2"
         )
         send_started_at = datetime.now(timezone.utc)
-        send_result = await send_expo_push_with_tickets(
+        import deletion_delivery as dd
+        send_result = await dd.run(db, lambda: send_expo_push_with_tickets(
             tokens=tokens,
             title="",
             body="",
@@ -6621,7 +6682,10 @@ async def request_location_refresh(member_id: str, current=Depends(_authenticate
             # title, body, and top-level channelId, so there is no notification
             # payload for Android to render even when priority is high.
             priority="high",
-        )
+        ), user_ids=[caller_id, target_user_id], data={"member_id": member_id}, operation_key=f"refresh:{request_id}")
+        if send_result is None:
+            trace["push_skipped_reason"] = "account_changed_or_delivery_active"
+            return {"ok": True, "sent_to": 0, "request_id": request_id, "skipped": trace["push_skipped_reason"]}
         tickets = [
             {
                 **_relay_diagnostic_fields(ticket),
@@ -6665,12 +6729,14 @@ async def request_location_refresh(member_id: str, current=Depends(_authenticate
         persist_error: Optional[Exception] = None
         for persist_attempt in range(1, 4):
             try:
-                await db.recovery_push_evidence.update_one(
-                    {"request_id": request_id},
-                    {"$set": evidence},
-                    upsert=True,
+                persisted = await account_cleanup.persist_subject_evidence(
+                    db, "recovery_push_evidence", evidence,
+                    member_id=member_id, family_id=current["family_group_id"],
+                    subject_user_id=target_user_id,
+                    upsert_selector={"request_id": request_id},
                 )
-                persisted = True
+                if not persisted:
+                    raise HTTPException(409, "The target account changed before evidence was recorded.")
                 break
             except Exception as error:
                 persist_error = error

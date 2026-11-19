@@ -210,7 +210,8 @@ async def persist_sos(db, document, actor_id, *, explicit_member_id=None):
             ):
                 raise HTTPException(403, "That person is not in your current family.")
             row = {**copy.deepcopy(document), "family_group_id": gid,
-                   "owner_id": actor_id, "member_id": explicit_member_id or actor_id}
+                   "owner_id": actor_id, "member_id": explicit_member_id or actor_id,
+                   "sos_subject_kind": "member" if explicit_member_id else "user"}
             if row.get("resolved") is not True:
                 row.pop("resolved_at", None)
             await tx.alerts.insert_one(row)

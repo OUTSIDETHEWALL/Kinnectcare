@@ -59,6 +59,24 @@ class Harness:
         }
         self.user = {"id": "user", "location_sharing_enabled": True}
         self.db = MagicMock()
+        # Storage-interface adapter only. Consent predicates below still execute
+        # unchanged. Real transaction isolation, retries and deletion ordering
+        # are exercised against Mongo in test_account_deletion_races.
+        class UnitSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def with_transaction(self, callback, **options):
+                return await callback(self)
+
+            async def commit_transaction(self):
+                pass
+
+        self.db.client.start_session = AsyncMock(side_effect=UnitSession)
+        self.db.__getitem__.side_effect = lambda name: getattr(self.db, name)
         self.db.users.find_one = AsyncMock(side_effect=lambda *a, **k: copy.deepcopy(self.user))
         self.db.users.update_one = AsyncMock(side_effect=self.update_user)
         self.db.members.find_one = AsyncMock(side_effect=lambda query, *a, **k:
@@ -83,7 +101,7 @@ class Harness:
         for key in mutation.get("$currentDate", {}):
             self.member[key] = datetime.now(timezone.utc)
 
-    async def update_member(self, query, mutation):
+    async def update_member(self, query, mutation, **options):
         if "latitude" in mutation.get("$set", {}):
             self.publication_filters.append(copy.deepcopy(query))
             if self.pause_next:

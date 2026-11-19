@@ -227,60 +227,9 @@ async def acknowledge_in_family(db, actor_id, family_id, alert_id, *, complete_m
 
 
 async def delete_account_records(db, actor_id, family_id):
-    """Delete only when the old deletion scope can be coordinated safely."""
-    if not family_id:
-        raise HTTPException(409, "Complete family setup before deleting your account.")
-
-    async def delete(tx):
-        actor = await fw.actor_in_family(tx, actor_id, family_id)
-        # Do not abandon an active incident or a family that needs its owner.
-        await verify_departure(tx, actor_id, family_id, (
-            "members", "reminders", "alerts", "checkins", "medication_logs",
-        ))
-        self_ids, subjects = await verified_subjects(tx, actor_id, family_id)
-        if await tx.members.find_one({
-            "family_group_id": family_id, "owner_id": actor_id, "user_id": {"$ne": actor_id},
-        }, {"_id": 1}):
-            raise HTTPException(409, "Resolve dependent care before deleting your account.")
-        if await tx.alerts.find_one({
-            "family_group_id": family_id, "member_id": {"$in": subjects}, "type": "sos",
-            "$nor": [{"resolved": {"$eq": True, "$type": "bool"}}],
-        }, {"_id": 1}):
-            raise HTTPException(409, "Resolve your active SOS before deleting your account.")
-        # Existing scheduler/check-in state is not uniformly family-scoped.
-        # Reject rather than leaving references or deleting ambiguous records.
-        for collection in ("reminders", "checkins", "medication_logs", "alerts"):
-            foreign = {"member_id": {"$in": self_ids}, "owner_id": {"$ne": actor_id}}
-            if collection == "alerts":
-                foreign["type"] = {"$ne": "sos"}
-            if await tx[collection].find_one(foreign, {"_id": 1}):
-                raise HTTPException(409, "Resolve linked care records before deleting your account.")
-        for collection in ("med_notifications", "medication_occurrences", "checkin_requests"):
-            references = {"member_id": {"$in": self_ids}}
-            if collection == "checkin_requests":
-                references = {"$or": [references, {"requester_id": actor_id}, {"target_user_id": actor_id}]}
-            if await tx[collection].find_one(references, {"_id": 1}):
-                raise HTTPException(409, "Resolve linked care records before deleting your account.")
-        counts = {}
-        for collection in ("members", "reminders", "checkins", "alerts", "medication_logs"):
-            owned = {"owner_id": actor_id}
-            if collection == "members":
-                owned = {"$or": [owned, {"user_id": actor_id}]}
-            if collection == "alerts":
-                owned["type"] = {"$ne": "sos"}
-            if await tx[collection].find_one({**owned, "family_group_id": {"$ne": family_id}}, {"_id": 1}):
-                raise HTTPException(409, "Account records span more than one family and cannot be deleted safely.")
-            if collection != "members" and await tx[collection].find_one({
-                **owned, "family_group_id": family_id, "member_id": {"$nin": subjects},
-            }, {"_id": 1}):
-                raise HTTPException(409, "Resolve other members' care records before deleting your account.")
-            counts[collection] = (await tx[collection].delete_many({
-                **owned, "family_group_id": family_id,
-            })).deleted_count
-        await tx.users.delete_one({"id": actor_id, "family_group_id": family_id})
-        return actor, counts
-
-    return await fw.run(db, [family_id], delete)
+    """Keep the existing public helper while isolating deletion-only policy."""
+    from account_deletion import delete_account_records as delete
+    return await delete(db, actor_id, family_id)
 
 
 async def delete_dependent_records(db, actor_id, family_id, member_id):
