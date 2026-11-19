@@ -11,22 +11,26 @@ Critical/High defect identified. Final security/data-integrity and evidence
 review is **PASS**, with **zero unresolved Critical/High findings** in this scope.
 PR #200 remains draft, stacked on unmerged PR #199.
 
-The sections below through “Initial verification” record the initial draft's
+The sections below through “Initial database, privacy and delivery boundaries” record the initial draft's
 evidence and limitations, not the final corrected behavior. The approved
 corrections and their operational implications follow that historical record.
-Phase 3C retention and the consolidated final report have not started; results
-and remaining risks must be reported to the owner before proceeding.
+The subsequent Phase 3C source assessment passed independent review in the
+existing retention draft #190. Its production-database target verification and
+physical acceptance remain OPEN; consult the consolidated Phase 3 report in
+that draft before approving any merge or release.
 
 Baseline GitHub main: `56b0d7634e5cf3131c3f972fe0971f5f8d11cf67`.
 Dedicated branch: `fix/account-deletion-care-records`, stacked on rotation draft
 #199's branch at `496cc5d4cd7d0bab17d841ad04427c1327661b54`. The parent PR is
 still unmerged; platform task completion is not GitHub merge evidence.
 
-Incomplete [draft PR #200](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/200),
+Historical initial [draft PR #200](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/200),
 initial WIP implementation/evidence commit
 `981913cfaa84faf501f994a1e593a7107b88d230`. Its explicit base is
-`fix/family-code-rotation-security`, not `main`. The PR records all three open
-High findings and must remain draft/unmerged pending approval and closure.
+`fix/family-code-rotation-security`, not `main`. The initial PR recorded three
+then-open High findings. All were subsequently closed, together with the later
+SOS regression, as recorded in the final review sections. It remains
+draft/unmerged pending the owner's approval.
 
 ## Original failure and partial correction
 
@@ -368,3 +372,12 @@ The reviewer inspected the assertions but did not independently rerun them.
 This is **536 prior targeted checks plus 2 new copy checks**, not a claim that
 the 536 backend/offline checks were rerun for a text-only change. Rendered
 signed-in UI and physical Android acceptance remain separate gates.
+
+### Current merge/release boundary
+
+Read-only Railway inspection confirms the live backend-root service is connected
+to GitHub `main`, with source check-suite waiting disabled. A main-branch merge
+may therefore trigger a deployment. Before approving any merge, establish a
+separately approved deployment hold or coordinated rollout; no Railway setting
+was changed here. Unknown-send recovery and old-worker draining remain mandatory
+operational decisions, not capabilities added by documentation.
