@@ -20,3 +20,19 @@ MongoDB cannot recall an external send. A parent snapshot read alone does not
 serialize a late private-evidence insert with parent deletion: require a real
 conflicting mutation in the same transaction. Keep ordinary telemetry outside
 the global family structural fence and preserve GPS/consent publication rules.
+
+Unknown interrupted provider calls must remain fail-closed until there is
+evidence that the original worker can no longer submit. Neither elapsed time,
+an expired scheduler lease nor a disconnected request proves that. Completion
+of a provider call permits cleanup, not a claim that its notification cannot
+arrive later. Preserve the hashed mailbox lifetime fence across deletion so a
+captured operation cannot mistake a replacement account for its original one.
+
+**Why:** The owner approved only minimum deletion-sensitive coordination,
+including interrupted attempts; a general notification rewrite and automatic
+uncertain-send replay are not authorized.
+
+**How to apply:** Keep providers outside database transactions, preserve SOS's
+distinct user-subject and member-subject forms, and document fail-closed
+interruption recovery as an operational limitation rather than silently
+releasing a blocker.

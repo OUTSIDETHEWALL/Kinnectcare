@@ -1,5 +1,6 @@
 """Provider evidence for medication escalation only; no change to other pushes."""
 import logging
+import deletion_delivery as dd
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,11 @@ async def send_verified_escalation(
         )
         if not user or not user.get("push_tokens") or in_quiet_hours(user):
             continue
-        result = await send_with_tickets(user["push_tokens"], title, body, data)
+        result = await dd.run(
+            db, lambda: send_with_tickets(user["push_tokens"], title, body, data),
+            user_ids=[uid], data=data, suppressed={"transport_status": "no_valid_tokens"},
+            operation_key=f"medication:{uid}:{data.get('occurrence_id')}:{data.get('stage')}" if data.get("occurrence_id") else None,
+        )
         dead = result.get("dead_tokens") or []
         if dead:
             try:

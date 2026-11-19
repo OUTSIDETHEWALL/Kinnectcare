@@ -38,8 +38,11 @@ async def test_care_heavy_account_deletes_complete_owned_scope_without_other_per
     for name in ("med_notifications", "medication_occurrences", "checkin_requests",
                  "checkin_deliveries", "location_history", "location_ingest_log",
                  "recovery_push_evidence", "family_members", "otp_codes", "email_links",
-                 "email_link_identities"):
+                 "deletion_deliveries"):
         assert await s.db[name].count_documents({}) == 0, name
+    identity = await s.db.email_link_identities.find_one({})
+    assert identity == {"_id": cleanup.hashlib.sha256(b"invitee@example.com").hexdigest(),
+                        "generation": 2, "deletion_generation": 1}
     assert not await s.db.users.find_one({"id": "invitee"})
     assert not await s.db.members.find_one({"user_id": "invitee"})
     assert not await s.db.family_groups.find_one({"id": "solo"})

@@ -263,7 +263,13 @@ async def deliver_one(db, row, *, now, send, quiet):
     }
     try:
         async with asyncio.timeout(SEND_TIMEOUT_SECONDS):
-            result = await send([token], title, body, data)
+            import deletion_delivery as dd
+            result = await dd.run(
+                db, lambda: send([token], title, body, data),
+                user_ids=[row["user_id"]], data=data,
+                suppressed={"transport_status": "no_valid_tokens"},
+                operation_key=f"checkin:{row['_id']}",
+            )
     except Exception as error:
         logger.warning("Missed check-in send uncertain: %s", type(error).__name__)
         result = {}

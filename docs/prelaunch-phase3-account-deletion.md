@@ -1,16 +1,20 @@
-# Phase 3B — account deletion investigation and incomplete draft
+# Phase 3B — safe account deletion
 
-## Status: blocked, not a completed correction
+## Status: independent code re-review PASS; final regression evidence pending
 
-**Independent review: FAIL; three unresolved High findings. Do not merge or
-deploy.** The owner authorized minimal account-deletion corrections but requires
-approval before architectural changes. A shared outbound-work reservation and
-settlement boundary would affect notification/email paths. That portion is
-paused for approval; no such new subsystem has been implemented.
+**Do not merge or deploy.** The owner explicitly approved correction of the
+three High findings and minimum deletion-sensitive delivery coordination,
+including interruption, retries and recovery. Implementation and focused tests
+have been added. Independent code re-review explicitly closed the original
+three High findings and the additional SOS regression, with no further concrete
+Critical/High defect identified. Final regression evidence review is pending.
+PR #200 remains draft, stacked on unmerged PR #199.
 
-The retained OTP and invitation findings also remain open. No follow-up review
-or complete account-deletion certification is claimed. Phase 3C retention and
-the consolidated final report have not started.
+The sections below through “Initial verification” record the initial draft's
+evidence and limitations, not the final corrected behavior. The approved
+corrections and their operational implications follow that historical record.
+Phase 3C retention and the consolidated final report have not started; results
+and remaining risks must be reported to the owner before proceeding.
 
 Baseline GitHub main: `56b0d7634e5cf3131c3f972fe0971f5f8d11cf67`.
 Dedicated branch: `fix/account-deletion-care-records`, stacked on rotation draft
@@ -44,7 +48,7 @@ implementation change was made.
 These improvements are **not sufficient** to close the task because the
 late-writer and external-send boundaries below remain incomplete.
 
-## Relationship and writer inventory
+## Initial relationship and writer inventory
 
 | Records / authority | Current draft behavior and remaining limitation |
 | --- | --- |
@@ -70,7 +74,7 @@ limitations, not a completed legal/account-deletion compliance claim.
 Automatic removal of a non-personal archived family envelope after its final SOS
 expires is not implemented here.
 
-## Independent review findings
+## Initial independent review findings
 
 Review was independent static inspection of the implementation and tests, not an
 independent rerun of the implementer's pass counts.
@@ -96,7 +100,7 @@ capture/publication, conservative SOS treatment, fresh JWT rejection and
 unchanged billing implementation sound/minimal. It did **not** approve the
 overall correction. All three findings remain open; no closure verdict exists.
 
-## Verification so far
+## Initial verification
 
 All integration data is synthetic in an owned loopback MongoDB replica set.
 Non-loopback sockets are blocked; mail, push and billing callbacks are stubbed.
@@ -130,7 +134,7 @@ Coverage does not include the three newly identified exact interleavings,
 physical Android delivery, signed-in visual acceptance or legal compliance.
 The current tests therefore cannot justify merging the incomplete draft.
 
-## Database, privacy and delivery boundaries
+## Initial database, privacy and delivery boundaries
 
 No new collection, startup/production index, migration, backfill, historical
 deletion, infrastructure setting or native dependency is introduced by the
@@ -155,3 +159,141 @@ production, built/uploaded for Android or released via OTA. Any eventual backend
 and confirmation-copy delivery requires separate owner approval after all
 Critical/High findings close. The required consolidated Phase 3 report remains
 downstream, not replaced by this interim document.
+
+## Approved correction: OTP identity and single consumption
+
+Fresh OTP issuance stores a random credential identity, its original random
+account ID (or explicit absence), and the mailbox deletion generation.
+Verification locks that mailbox and validates identity, expiry, attempts and
+the exact credential. Consumption checks `deleted_count == 1`; account creation,
+invitation acceptance/family-code transfer and self-member repair share the
+same transaction. Wrong-attempt counters and expiry cleanup commit before the
+HTTP error is raised. Invitation acceptance pushes occur only after commit.
+
+Deletion increments and retains a **hashed** mailbox lifetime fence rather than
+removing it. This prevents a captured absent/present account operation from
+mistaking a replacement identity for its original one. It contains the hash and
+coordination counters, not email, name, tokens or care history. Authentication
+links and invitation creation also compare the observed deletion generation.
+Old OTP rows missing identity binding fail closed and require a fresh code;
+there is no backfill that legitimizes an unbound credential.
+
+## Approved correction: invitation writers
+
+Create and resend now recheck the live account, family and authoritative owner
+inside the existing family transaction/fence. Creation also locks the recipient
+mailbox lifetime, rechecks membership/duplicate/cap rules and then inserts.
+No cached owner check authorizes a late insert. Delivery separately validates
+the exact still-pending invitation and live owner/family under a reservation.
+Recipient deletion shares the mailbox barrier and removes outstanding
+recipient invitations. Unrelated legitimate families/invitations are preserved.
+
+## Approved correction: provider reservation and completion
+
+`deletion_delivery` is a deletion barrier, **not a replacement scheduler or
+general notification queue**. Immediately before a push/email provider call:
+
+1. A short transaction makes real writes to the exact live recipient/subject
+   account rows and/or hashed mailbox fence.
+2. It validates source credentials/invitations where applicable and inserts a
+   durable active attempt. Stable event keys suppress replay while that event's
+   original attempt remains active.
+3. The provider runs outside the transaction. A strongly retained, shielded task
+   survives caller cancellation, including while synchronous email transport
+   continues in a thread.
+4. Only a real return from the provider call permits exact completion
+   persistence. Deletion refuses active attempts using the same conflicting
+   user/mailbox writes; completed attempt metadata for that identity is cleaned
+   with account deletion.
+
+Covered actual transports: generic user pushes (including DUE medication,
+family fanout and welfare responses), verified medication escalation,
+check-in outbox transport, explicit recovery refresh, welfare silent refresh,
+email links, OTP background email, invitation create/resend email. No changes
+to Expo/FCM payload generation, battery/GPS capture, native tracking, consent
+publication, SOS emergency policy, quiet hours or medication/check-in timing.
+
+Review found an additional **High** WIP regression: treating every `member_id`
+as a profile ID suppressed default/self SOS, whose subject is a user ID.
+The corrected reservation uses the exact persisted incident and explicit
+user/member subject kind. Legacy self incidents use their original owner/user
+identity without guessing from a missing profile; namespace collisions fail
+closed. Real-route tests verify actual visible provider invocation for default
+and explicit-member SOS and both resolution forms. Suppressed pushes report
+zero rather than a cached device count.
+
+### Interruption, retries and recovery limitations
+
+There is intentionally **no timeout, TTL or expired-lease auto-unlock of active
+attempts**. An expired lease cannot prove a paused worker or email thread has
+stopped. Caller cancellation leaves the original task responsible for eventual
+completion; failed completion persistence can be retried for that exact known
+completed attempt without sending again. A real killed-process test confirms
+the durable blocker survives and a new worker cannot replay the same event.
+
+A crash, provider exception or database failure can leave deletion blocked for
+manual delivery review. Do not clear a blocker merely because it is old.
+Recovery of a genuinely unknown call requires verified termination/quiescence
+of its original worker and reviewed provider evidence. No public bypass,
+automatic reconciliation job or production recovery mutation is introduced or
+executed by this work. This availability tradeoff must be accepted before
+release. Provider acceptance/display and app-call completion remain distinct:
+previously authorized work can arrive after deletion even when its call ended.
+
+## Migration/index and eventual rollout implications
+
+- Adds `deletion_deliveries` with MongoDB's intrinsic unique `_id`, opaque attempt
+  IDs, random account IDs, hashed mailbox/event identities, state and timestamps.
+  No raw address, push token, message body, OTP or coordinates are stored there.
+- Adds internal account delivery counters, mailbox deletion generations and a
+  persisted SOS subject-kind discriminator; supports conservatively classified
+  legacy SOS records. No historical rewrite or destructive migration.
+- No new startup index, backfill or migration is automatically run. Functional
+  local tests use only the intrinsic attempt `_id` index. Before significant
+  production volume, separately approve additive non-unique indexes on
+  `(state, user_ids)`, `(state, email_hash)` and `(state, operation_key)`; otherwise
+  completed-history growth causes scans and can affect deletion/send latency.
+  Active attempts must never be TTL-expired. No retention policy for unrelated
+  records is changed.
+- Mixed old/new workers are not safe deletion certification: old workers can
+  hold tokens or credentials without reservations. Eventual rollout must drain
+  all old application/scheduler workers and in-progress provider calls before
+  treating the new deletion guarantee as active. That is a future approved
+  deployment procedure, not an action taken here.
+- No billing implementation, native dependency, OTA, AAB, Play configuration,
+  provider configuration or production database/index change was performed.
+  Physical Android behavior and signed-in visual acceptance remain unverified.
+
+## Verification incident
+
+One historical SOS HTTP suite was mistakenly included in an otherwise offline
+batch. Its first test attempted one POST to the configured remote `/api/sos`
+using its embedded legacy credential. The response was **401 Invalid or expired
+token**; execution stopped at that first failure, before its SOS handler and
+before its database cleanup fixture. It is not passing verification, and no
+live SOS/provider send was authorized. No production query was made to claim
+independent side-effect verification.
+
+The incident was disclosed immediately. Subsequent batches explicitly load
+`backend/tests/loopback_guard_plugin.py` before collection, in addition to
+synthetic provider/billing stubs and owned disposable databases. That guard
+prohibits non-loopback TCP during imports as well as test execution.
+
+## Independent approved-scope review
+
+1. Initial independent review: **FAIL**, three High findings (OTP, invitations,
+   unreserved external sends).
+2. First approved-scope WIP review: **FAIL**, one additional High self-SOS
+   user/member-namespace regression in the new reservation.
+3. Follow-up independent code review: **PASS**, all four High findings explicitly
+   **CLOSED**, no additional concrete Critical/High defect found. The reviewer
+   inspected implementation and regression tests independently. Their attempt
+   to run the focused Mongo suites was blocked by review-shell filesystem
+   permissions before fixtures could start; no independent runtime pass count
+   is claimed.
+4. Final evidence review: pending the guarded regression results.
+
+The reviewer explicitly confirmed that unknown interrupted sends remaining
+blocked meets the approved fail-closed scope, not an unattended-recovery
+guarantee. No review verdict is permission to merge, deploy, change production
+indexes, publish OTA or build/upload Android.

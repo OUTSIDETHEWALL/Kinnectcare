@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 import family_write_fence as fw
 import sos_history as sh
+import deletion_delivery as dd
 
 CARE = ("members", "reminders", "checkins", "alerts", "medication_logs")
 
@@ -195,8 +196,9 @@ async def delete_account_records(db, actor_id, expected_family_id):
             # including accounts whose family setup is missing.
             await tx.email_link_identities.update_one(
                 {"_id": hashlib.sha256(email.encode()).hexdigest()},
-                {"$inc": {"generation": 1}}, upsert=True,
+                {"$inc": {"generation": 1, "deletion_generation": 1}}, upsert=True,
             )
+        delivery_scope = await dd.assert_idle(tx, actor_id, email)
         current_group = await tx.family_groups.find_one({"id": gid}) if gid else None
         if bool(group) != bool(current_group):
             raise HTTPException(409, "Family setup changed; reopen account deletion.")
@@ -224,9 +226,12 @@ async def delete_account_records(db, actor_id, expected_family_id):
         counts["email_links"] = (await tx.email_links.delete_many(credentials)).deleted_count
         if email:
             counts["otp_codes"] = (await tx.otp_codes.delete_many({"email": email})).deleted_count
-            counts["email_link_identities"] = (await tx.email_link_identities.delete_one({
-                "_id": hashlib.sha256(email.encode()).hexdigest(),
-            })).deleted_count
+            # Keep only the hashed identity fence. Removing it permits an ABA
+            # lifetime reset for operations captured before deletion.
+            counts["email_link_identities"] = 0
+        counts["deletion_deliveries"] = (await tx.deletion_deliveries.delete_many({
+            **delivery_scope, "state": "completed",
+        })).deleted_count
         removed = await tx.users.delete_one({"id": actor_id, "family_group_id": gid} if gid else {
             "id": actor_id, "family_group_id": {"$in": [None, ""]},
         })

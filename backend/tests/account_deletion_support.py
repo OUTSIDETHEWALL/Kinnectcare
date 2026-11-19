@@ -2,6 +2,7 @@
 import ast
 import copy
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,7 +42,7 @@ def bearer(uid="invitee"):
 
 
 @asynccontextmanager
-async def account_client(s, *, token=None, billing_failure=False):
+async def account_client(s, *, token=None, billing_failure=False, send_email=None):
     calls = []
 
     def bill(kind):
@@ -63,11 +64,12 @@ async def account_client(s, *, token=None, billing_failure=False):
                                   Customer=SimpleNamespace(delete=bill("customer"))),
         "logger": logging.getLogger("synthetic-account-tests"),
         "datetime": datetime, "timezone": timezone, "timedelta": timedelta,
+        "uuid": uuid,
     }
     execute(scope, "get_authenticated_user", "get_current_user", "DeleteAccountRequest", "delete_account")
     app = FastAPI()
     app.include_router(scope["api_router"])
-    app.include_router(fg.build_router(s.db, scope["get_current_user"]), prefix="/api")
+    app.include_router(fg.build_router(s.db, scope["get_current_user"], send_email=send_email), prefix="/api")
     app.include_router(links.build_router(
         s.db, scope["get_current_user"], lambda *a, **k: None,
         lambda uid: bearer(uid), lambda u: {k: v for k, v in u.items() if k != "_id"},

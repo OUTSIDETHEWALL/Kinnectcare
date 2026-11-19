@@ -317,10 +317,12 @@ def otp_app(db):
     transitions, linkage, transaction retries and HTTP errors are real.
     """
     path = Path(__file__).resolve().parents[1] / "server.py"
-    node = next(n for n in ast.parse(path.read_text()).body
-                if isinstance(n, ast.AsyncFunctionDef) and n.name == "verify_otp")
-    node.decorator_list = []
-    scope = {"db": db, "fg": fg, "el": links, "OtpVerify": SyntheticOtp,
+    nodes = [n for n in ast.parse(path.read_text()).body
+             if isinstance(n, ast.AsyncFunctionDef) and n.name in ("verify_otp", "_verify_otp_transaction")]
+    assert len(nodes) == 2
+    for node in nodes:
+        node.decorator_list = []
+    scope = {"db": db, "fg": fg, "el": links, "fw": fw, "OtpVerify": SyntheticOtp,
              "OTP_LENGTH": 6, "OTP_MAX_ATTEMPTS": 5, "HTTPException": HTTPException,
              "verify_password": lambda value, proof: value == "123456" and proof == "synthetic-proof",
              "datetime": datetime, "timezone": timezone, "uuid": uuid,
@@ -329,7 +331,7 @@ def otp_app(db):
              "TokenResponse": lambda **kwargs: kwargs,
              "create_access_token": lambda uid: "synthetic-session",
              "_user_response": lambda user: {key: user[key] for key in ("id", "family_group_id")}}
-    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), scope)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), scope)
     app = FastAPI()
     app.post("/api/auth/verify-otp")(scope["verify_otp"])
     return app
@@ -340,6 +342,8 @@ async def otp_request(s, new_account):
     email = "new-synthetic@example.com" if new_account else "invitee@example.com"
     await s.db.otp_codes.insert_one({
         "email": email, "code_hash": "synthetic-proof", "purpose": "signup",
+        "credential_id": uuid.uuid4().hex, "issued_user_id": None if new_account else "invitee",
+        "deletion_generation": 0,
         "invite_code": "KINN-SAFE", "full_name": "New Synthetic", "timezone": "UTC",
         "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
     })

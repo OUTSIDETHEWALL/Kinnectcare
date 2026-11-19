@@ -971,9 +971,27 @@ def build_router(
                 expires_at=inv["expires_at"],
                 relationship=inv.get("relationship"),
             )
-            return bool(await send_email(
-                inv["invitee_email"], subject, text_body, html=html_body,
-                from_override=os.environ.get("RESEND_INVITE_FROM") or os.environ.get("RESEND_FROM"),
+            import deletion_delivery as dd
+            async def valid(tx):
+                await fw.acquire(tx, [inv["family_group_id"]])
+                fresh = await tx.family_invites.find_one({
+                    "id": inv["id"], "token": inv["token"], "status": "pending",
+                    "expires_at": {"$gt": datetime.now(timezone.utc)},
+                })
+                owner = await tx.users.find_one({
+                    "id": inv["invited_by_user_id"], "family_group_id": inv["family_group_id"],
+                })
+                family = await tx.family_groups.find_one({
+                    "id": inv["family_group_id"], "owner_user_id": inv["invited_by_user_id"],
+                })
+                return bool(fresh and owner and family)
+            return bool(await dd.run(
+                db, lambda: send_email(
+                    inv["invitee_email"], subject, text_body, html=html_body,
+                    from_override=os.environ.get("RESEND_INVITE_FROM") or os.environ.get("RESEND_FROM"),
+                ),
+                user_ids=[inv["invited_by_user_id"]], email=inv["invitee_email"], validate=valid,
+                suppressed=False, operation_key=f"invitation:{inv['id']}:{inv.get('last_email_attempt_at')}",
             ))
         except Exception:
             logger.warning("family invitation email delivery failed")
@@ -1001,6 +1019,8 @@ def build_router(
             raise HTTPException(400, "Name must be 1-80 characters")
         if not email or "@" not in email:
             raise HTTPException(400, "Valid email required")
+        import deletion_delivery as dd
+        identity = await db.email_link_identities.find_one({"_id": dd.email_key(email)}) or {}
 
         # Soft cap: refuse if there are already 50 pending invites for
         # this group (abuse-prevention; tweak later if needed).
@@ -1078,7 +1098,28 @@ def build_router(
             "accepted_at": None,
             "last_email_attempt_at": now,
         }
-        await db.family_invites.insert_one(invite_doc)
+        async def persist(tx):
+            # Both the owner lifetime and recipient deletion lifetime are
+            # checked after acquiring the same write barriers as deletion.
+            fresh_owner = await fw.actor_in_family(tx, current["id"], gid)
+            await require_group_owner(tx, fresh_owner)
+            await tx.email_link_identities.update_one(
+                {"_id": dd.email_key(email)}, {"$inc": {"generation": 1}}, upsert=True,
+            )
+            fresh_identity = await tx.email_link_identities.find_one({"_id": dd.email_key(email)})
+            if fresh_identity.get("deletion_generation", 0) != identity.get("deletion_generation", 0):
+                raise HTTPException(410, "The recipient account changed; send a new invitation.")
+            if await tx.users.find_one({"family_group_id": gid, "email": email}):
+                raise HTTPException(409, detail={"code": "already_member", "message": f"{name} is already part of your family."})
+            if await tx.family_invites.find_one({
+                "family_group_id": gid, "invitee_email": email,
+                "status": "pending", "expires_at": {"$gt": datetime.now(timezone.utc)},
+            }):
+                raise HTTPException(409, detail={"code": "pending_invite_exists", "message": f"{name} already has a pending invitation."})
+            if await tx.family_invites.count_documents({"family_group_id": gid, "status": "pending"}) >= 50:
+                raise HTTPException(429, "Too many pending invites. Revoke old ones first.")
+            await tx.family_invites.insert_one(dict(invite_doc))
+        await fw.run(db, [gid], persist)
 
         # Delivery failure is explicit and retryable, never a manual-entry flow.
         delivered = await deliver_invitation(invite_doc, group)
@@ -1102,13 +1143,17 @@ def build_router(
         if not inv:
             raise HTTPException(410, "This invitation is no longer active. Send a new invitation.")
         # Claim one mail attempt, not membership. Concurrent taps cannot spam.
-        claimed = await db.family_invites.update_one({
-            **query,
-            "$or": [
-                {"last_email_attempt_at": {"$exists": False}},
-                {"last_email_attempt_at": {"$lt": now - timedelta(seconds=60)}},
-            ],
-        }, {"$set": {"last_email_attempt_at": now}})
+        async def claim(tx):
+            fresh_owner = await fw.actor_in_family(tx, current["id"], group["id"])
+            await require_group_owner(tx, fresh_owner)
+            return await tx.family_invites.update_one({
+                **query,
+                "$or": [
+                    {"last_email_attempt_at": {"$exists": False}},
+                    {"last_email_attempt_at": {"$lt": now - timedelta(seconds=60)}},
+                ],
+            }, {"$set": {"last_email_attempt_at": now}})
+        claimed = await fw.run(db, [group["id"]], claim)
         if claimed.modified_count != 1:
             raise HTTPException(429, "Please wait one minute before resending this invitation.")
         delivered = await deliver_invitation(inv, group)
