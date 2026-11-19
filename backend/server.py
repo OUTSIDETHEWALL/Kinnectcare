@@ -4511,16 +4511,19 @@ async def _legacy_mark_occurrence(
             minute=parsed % 60,
             second=0,
             microsecond=0,
+            fold=0,
         )
         slot_local = (
             today_slot
-            if today_slot <= now_local
+            if today_slot.astimezone(timezone.utc) <= now_utc
             else today_slot - timedelta(days=1)
         )
         candidates.append((slot_local, slot_time, slot_local.date().isoformat()))
     if not candidates:
         return None
-    slot_local, slot_time, local_date = max(candidates, key=lambda item: item[0])
+    slot_local, slot_time, local_date = max(
+        candidates, key=lambda item: item[0].astimezone(timezone.utc)
+    )
     return {
         "occurrence_id": med_scheduler.build_occurrence_id(
             rem["id"], rem["member_id"], slot_time, local_date

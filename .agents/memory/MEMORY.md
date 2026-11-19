@@ -29,6 +29,7 @@
 - [Missed medication occurrence source](missed-medication-occurrence-source.md) — dashboard missed counts and details come from durable active missed-alert occurrences, never reminder status.
 - [Stripe entitlement webhook reconciliation](stripe-entitlement-webhook-reconciliation.md) — reconcile current subscription state, use supported object conversion, and fail non-2xx when persistence does not match a user.
 - [Medication acknowledgment occurrence safety](medication-acknowledgment-occurrence-safety.md) — acknowledgments and T+15 escalation coordinate on one exact occurrence with durable retry and terminal delivery states.
+- [Medication DST occurrence identity](medication-dst-occurrence.md) — first-fold scheduler and legacy acknowledgment must compare actual UTC instants during the repeated hour.
 - [BackgroundFetch execution generations](background-fetch-execution-generations.md) — task IDs are reused; timeout and completion guards must be scoped to one invocation.
 - [Caregiver battery and device status](caregiver-battery-device-status.md) — one battery incident escalates in place; dashboard device states reuse movement-aware tolerance.
 - [Android recovery push invariant](android-recovery-push-invariant.md) — stale-device recovery must be high-priority and strictly data-only so Doze cannot defer it and Android cannot render it.
