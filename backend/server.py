@@ -64,6 +64,7 @@ import family_write_fence as fw
 import invitation_presentation
 import sms
 import med_scheduler
+import checkin_scheduler
 import geocoding
 
 # Module-level set of fire-and-forget background tasks (SOS fanout, etc.).
@@ -1040,192 +1041,8 @@ async def reset_daily_reminder_statuses(family_group_id: str, user: dict):
 
 
 async def detect_missed_checkins(family_group_id: str, user: dict):
-    """Detect members who have missed their expected check-in.
-
-    Two modes are supported per member:
-      - Fixed-time mode (`daily_checkin_time` = "HH:MM" in the owner's tz).
-        Expectation: at least one check-in today after that time.
-      - Interval mode (`checkin_interval_hours` = N, `checkin_interval_started_at`
-        anchor). Expectation: at least one check-in within the last N hours.
-
-    Modes are mutually exclusive. We grace-period each window by 15 minutes
-    before flagging it as missed.
-    """
-    tz = user_tz(user)
-    now_local = datetime.now(tz)
-    now_utc = datetime.now(timezone.utc)
-    now_minutes = now_local.hour * 60 + now_local.minute
-    day_start_local = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz)
-    day_start_utc = day_start_local.astimezone(timezone.utc)
-
-    GRACE_MIN = 15  # minutes of leeway before raising a missed alert
-
-    # NEW-MEMBER GRACE WINDOW (v6.11.6):
-    #
-    # When a caregiver adds a brand-new family member, the moment they
-    # save a `daily_checkin_time` or `checkin_interval_hours` we should
-    # NOT immediately fire missed-checkin alerts — there's been no time
-    # for the senior to check in yet, and the alert is obviously a
-    # false positive that erodes trust in the system. Industry-standard
-    # practice (Apple Health, Google Fit, every "habit" app) is to
-    # silently start tracking the next full cycle and only escalate if
-    # they miss that one.
-    #
-    # We give every newly-added member a 24-hour grace window after
-    # creation during which missed-checkin alerts are suppressed.
-    # That covers every fixed-time schedule (next-day-at-09:00 etc.)
-    # AND every interval schedule up to 24h. Intervals shorter than
-    # 24h still get their full first cycle of leeway.
-    NEW_MEMBER_GRACE_HOURS = 24
-    new_member_grace = timedelta(hours=NEW_MEMBER_GRACE_HOURS)
-
-    members = await db.members.find(
-        {
-            "family_group_id": family_group_id,
-            "$or": [
-                {"daily_checkin_time": {"$ne": None}},
-                {"checkin_interval_hours": {"$ne": None}},
-            ],
-        },
-        {"_id": 0},
-    ).to_list(500)
-
-    for m in members:
-        # Honor the new-member grace window FIRST, before any mode-specific
-        # logic. A member created less than 24h ago is "fresh" — we don't
-        # know their normal rhythm yet, and any "missed" alert here is
-        # noise.
-        m_created = m.get("created_at")
-        if m_created:
-            if isinstance(m_created, str):
-                try:
-                    m_created = datetime.fromisoformat(m_created.replace("Z", "+00:00"))
-                except Exception:
-                    m_created = None
-            if m_created and m_created.tzinfo is None:
-                m_created = m_created.replace(tzinfo=timezone.utc)
-            if m_created and (now_utc - m_created) < new_member_grace:
-                continue
-
-        interval = m.get("checkin_interval_hours")
-        fixed = m.get("daily_checkin_time")
-
-        # -------- Interval mode --------
-        if interval and interval in ALLOWED_CHECKIN_INTERVALS:
-            anchor = m.get("checkin_interval_started_at")
-            if not anchor:
-                continue
-            if isinstance(anchor, str):
-                try:
-                    anchor = datetime.fromisoformat(anchor.replace("Z", "+00:00"))
-                except Exception:
-                    continue
-            if anchor.tzinfo is None:
-                anchor = anchor.replace(tzinfo=timezone.utc)
-            window = timedelta(hours=interval)
-            grace = timedelta(minutes=GRACE_MIN)
-            # Number of complete windows since anchor.
-            elapsed = now_utc - anchor
-            if elapsed < window + grace:
-                # Still inside (or just past) the first window — not yet due.
-                continue
-            # Latest window cut-off that we EXPECT the senior to have checked in by.
-            # If now is t, the last expected check-in was at (now - elapsed % window)
-            # but to avoid false-positives right at the boundary we subtract the grace.
-            slots_passed = int(elapsed.total_seconds() // window.total_seconds())
-            last_due_utc = anchor + window * slots_passed
-            if now_utc < last_due_utc + grace:
-                # Inside grace period for the most-recent slot — still OK.
-                continue
-            # Did the senior check in at any point AFTER the previous slot?
-            previous_slot_utc = anchor + window * max(0, slots_passed - 1)
-            has_ci = await db.checkins.find_one(
-                {
-                    "family_group_id": family_group_id,
-                    "member_id": m["id"],
-                    "created_at": {"$gte": previous_slot_utc},
-                }
-            )
-            if has_ci:
-                continue
-            # RACE-SAFE INSERT: relies on the unique partial index
-            # `uniq_alert_slot` on (family_group_id, member_id, type, slot_key)
-            # ensured at startup.  Multiple concurrent callers all see no
-            # alert at find_one time, race to insert, and exactly ONE wins
-            # — the rest get DuplicateKeyError and are skipped.  Without
-            # this guard, every poll of /api/alerts or /api/summary from
-            # every device in the family group fired its own duplicate
-            # push (see duplicate missed-check-in reports).
-            label = f"every {interval} hours"
-            slot_key = f"interval_{last_due_utc.replace(microsecond=0).isoformat()}"
-            a = Alert(
-                owner_id=user["id"],
-                family_group_id=family_group_id,
-                member_id=m["id"],
-                member_name=m["name"],
-                type="missed_checkin",
-                severity="critical",
-                title=f"{m['name']} missed scheduled check-in",
-                message=(
-                    f"Expected {label}. The most recent {interval}-hour window has "
-                    f"passed without a check-in."
-                ),
-            )
-            doc = a.model_dump()
-            doc["slot_key"] = slot_key
-            try:
-                if not await fw.insert_background_record(db, "alerts", doc):
-                    continue
-            except DuplicateKeyError:
-                # Another concurrent request already inserted + pushed for
-                # this slot.  Do NOT fan out a duplicate push.
-                continue
-            await db.members.update_one({"id": m["id"]}, {"$set": {"status": "warning"}})
-            await push_to_family_group(
-                family_group_id,
-                f"⚠️ {m['name']} missed check-in",
-                f"Expected {label}. Tap to call or check on them.",
-                {"type": "missed_checkin", "member_id": m["id"], "alert_id": a.id},
-            )
-            continue
-
-        # -------- Fixed-time mode --------
-        if not fixed:
-            continue
-        expected = parse_hhmm(fixed)
-        if expected is None or now_minutes < expected + GRACE_MIN:
-            continue
-        has_ci = await db.checkins.find_one(
-            {"family_group_id": family_group_id, "member_id": m["id"], "created_at": {"$gte": day_start_utc}}
-        )
-        if has_ci:
-            continue
-        # RACE-SAFE INSERT — see explanation in interval branch above.
-        # slot_key combines the local date and the expected HH:MM so the
-        # same alert never fires twice in the same day for the same slot.
-        slot_key = f"fixed_{now_local.date().isoformat()}_{fixed}"
-        a = Alert(
-            owner_id=user["id"], family_group_id=family_group_id,
-            member_id=m["id"], member_name=m["name"],
-            type="missed_checkin", severity="critical",
-            title=f"{m['name']} missed daily check-in",
-            message=f"Expected by {fixed} ({user.get('timezone') or 'UTC'}) today. They haven't checked in yet.",
-        )
-        doc = a.model_dump()
-        doc["slot_key"] = slot_key
-        try:
-            if not await fw.insert_background_record(db, "alerts", doc):
-                continue
-        except DuplicateKeyError:
-            # Another concurrent request already inserted + pushed.
-            continue
-        await db.members.update_one({"id": m["id"]}, {"$set": {"status": "warning"}})
-        await push_to_family_group(
-            family_group_id,
-            f"⚠️ {m['name']} missed check-in",
-            f"Expected by {fixed}. Tap to call or check on them.",
-            {"type": "missed_checkin", "member_id": m["id"], "alert_id": a.id},
-        )
+    """Compatibility discovery; the backend worker owns reliable delivery."""
+    await checkin_scheduler.process_family(db, family_group_id)
 
 
 async def push_to_family_group(family_group_id: str, title: str, body: str, data: dict, exclude_user_id: Optional[str] = None) -> int | dict:
@@ -2662,10 +2479,15 @@ async def update_member(member_id: str, data: FamilyMemberUpdate, current=Depend
         )
         return FamilyMember(**_member_location_view(doc, current, doc))
     payload["last_seen"] = datetime.now(timezone.utc)
-    r = await db.members.update_one(
-        {"id": member_id, "family_group_id": current["family_group_id"]},
-        {"$set": payload},
-    )
+    if {"daily_checkin_time", "checkin_interval_hours", "checkin_interval_started_at"} & payload.keys():
+        r = await checkin_scheduler.update_settings(
+            db, member_id, current, payload, datetime.now(timezone.utc),
+        )
+    else:
+        r = await db.members.update_one(
+            {"id": member_id, "family_group_id": current["family_group_id"]},
+            {"$set": payload},
+        )
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
     doc = await db.members.find_one(
@@ -4222,9 +4044,8 @@ async def update_checkin_settings(member_id: str, data: CheckinSettings, current
         ),
     }
 
-    r = await db.members.update_one(
-        {"id": member_id, "family_group_id": current["family_group_id"]},
-        {"$set": update},
+    r = await checkin_scheduler.update_settings(
+        db, member_id, current, update, datetime.now(timezone.utc),
     )
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
@@ -7291,6 +7112,7 @@ async def health():
 # Single shared scheduler instance; started on app.startup, stopped on shutdown.
 _med_scheduler: Optional[med_scheduler.MedicationScheduler] = None
 _med_scheduler_ready = False
+_checkin_scheduler: Optional[checkin_scheduler.CheckinScheduler] = None
 
 
 @api_router.post("/medications/_tick")
@@ -7698,7 +7520,10 @@ async def _migrate_family_groups():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    global _med_scheduler, _med_scheduler_ready, _RECOVERY_RECEIPT_WORKER
+    global _med_scheduler, _med_scheduler_ready, _RECOVERY_RECEIPT_WORKER, _checkin_scheduler
+    if _checkin_scheduler:
+        await _checkin_scheduler.stop()
+        _checkin_scheduler = None
     if _RECOVERY_RECEIPT_WORKER and not _RECOVERY_RECEIPT_WORKER.done():
         _RECOVERY_RECEIPT_WORKER.cancel()
         try:
@@ -7713,6 +7538,17 @@ async def shutdown_db_client():
         except Exception:
             pass
     client.close()
+
+
+@app.on_event("startup")
+async def _start_checkin_scheduler():
+    """Fail startup if durable missed-check-in coordination cannot be ensured."""
+    global _checkin_scheduler
+    await checkin_scheduler.ensure_indexes(db)
+    _checkin_scheduler = checkin_scheduler.CheckinScheduler(
+        db, send=send_expo_push_with_tickets, quiet=_is_in_quiet_hours,
+    )
+    _checkin_scheduler.start()
 
 
 @app.on_event("startup")
