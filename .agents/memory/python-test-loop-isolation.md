@@ -28,3 +28,9 @@ verification when the service is unavailable.
 **How to apply:** Keep mocked endpoint/helper checks separate from explicitly
 authorized live integration acceptance. Report unavailable integration checks
 as unverified, not as passing and not as a product regression.
+
+Apply a non-loopback socket prohibition before collection when assembling a
+new test batch, not merely inside selected test fixtures. Inspect each added
+suite's setup first: historical SOS HTTP suites can submit real requests using
+embedded credentials even when their names look like offline regressions.
+An unauthorized response is an incident to disclose, not valid test evidence.

@@ -3,15 +3,27 @@ name: SOS history transfer boundary
 description: Approved history-retention constraints and the concurrency boundary for family transitions
 ---
 
-## Final retention policy
+## Current product retention decision
 
-Resolved SOS is automatically eligible for deletion after 30 days. Permanent
-retention is not required; leave the existing production TTL unchanged.
+Resolved SOS history automatically becomes eligible for expiration 30 days
+after resolution; deletion is asynchronous, not an exact-time promise.
+Permanent SOS retention is not required. Keep the existing production TTL
+unchanged unless the user separately authorizes a change.
 
-**Why:** The product owner finalized this policy and withdrew TTL removal.
+**Why:** The user explicitly chose 30-day retention instead of permanent history.
 
-**How to apply:** Preservation across membership changes means within that
-retention period, not indefinitely. Active SOS must not inherit an expiry date.
+**How to apply:** Transfer-time preservation below means preserving records
+within their retention period, not indefinite retention. The earlier TTL-removal
+proposal is superseded. Active/reopened incidents must not expire. Resolution
+starts the period, acknowledgment does not, and retries must not extend it.
+Historical resolutions without a trustworthy date need reviewed evidence,
+not an invented timestamp or an unapproved backfill.
+
+**Why:** An unknown historical event time cannot safely establish the original
+30-day deadline. Local TTL success cannot establish legacy production state.
+
+**How to apply:** Report undated-history and serving-database verification
+separately from source correctness; obtain approval before historical repair.
 
 Qualifying resolved self-SOS history must stay unchanged in its existing family
 when its subject joins or is removed from a family. Both verified account-ID and
@@ -59,6 +71,21 @@ does not disable a TTL index already installed in a database.
 **Why:** An existing Mongo index can delete history without any application
 writer running, even after the startup migration that installed it is retired.
 
-**How to apply:** Verify existing indexes instead of inferring production state
-from source or a fresh test database. The former TTL-retirement plan is
-superseded; do not execute it.
+**How to apply:** Verify existing index metadata rather than inferring it from
+source or a fresh test database. Under the current product decision, do not
+retire the existing index merely because it expires resolved SOS.
+
+Railway's read-only project connector can identify the live service by its
+domain and source branch, but its OAuth variable listing returns names only.
+A TTL result from the workspace read-only Mongo connection is not production
+evidence until its cluster and database match the serving service.
+
+**Why:** Historical connection/database provenance was ambiguous, and a secret
+labelled read-only proved write-capable. Neither its label nor default database
+establishes serving identity or least privilege.
+
+**How to apply:** Get a trusted, non-secret cluster identifier and database name
+for the serving service and compare them before labeling index results live.
+Keep owner-confirmed mapping distinct from independently retrieved configuration.
+Check privileges without exposing credentials; restrict verification commands
+to metadata and read-only pipelines, and prefer a genuinely read-only login.

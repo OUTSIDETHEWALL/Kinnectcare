@@ -213,33 +213,44 @@ def test_refresh_transport_logs_do_not_echo_private_fields(monkeypatch, caplog, 
         assert value not in caplog.text
 
 
-def test_refresh_evidence_admits_only_safe_relay_fields(isolated, monkeypatch):
+@pytest.mark.skipif(
+    os.environ.get("KINNSHIP_RUN_LOCAL_MONGO_TESTS") != "1",
+    reason="Full reservation/evidence path requires disposable loopback MongoDB",
+)
+def test_refresh_evidence_admits_only_safe_relay_fields(local_replica, isolated, monkeypatch):
     import expo_push
 
     async def scenario():
-        members = MagicMock()
-        members.with_options.return_value.aggregate.return_value = SimpleNamespace(
-            to_list=AsyncMock(return_value=[{
+        assert local_replica.startswith("mongodb://127.0.0.1:")
+        client = AsyncIOMotorClient(local_replica, serverSelectionTimeoutMS=5000)
+        db = client["refresh_safe_relay_tests"]
+        try:
+            await db.family_groups.insert_one({"id": FAMILY})
+            await db.users.insert_many([CURRENT.copy(), {
+                "id": TARGET, "family_group_id": FAMILY,
+                "location_sharing_enabled": True, "push_tokens": [TOKEN] * 3,
+            }])
+            await db.members.insert_one({
                 "id": MEMBER, "user_id": TARGET, "family_group_id": FAMILY,
-                "location_sharing_enabled": True, "families": [{"id": FAMILY}],
-                "callers": [CURRENT],
-                "targets": [{"id": TARGET, "family_group_id": FAMILY,
-                             "location_sharing_enabled": True, "push_tokens": [TOKEN] * 3}],
-            }]),
-        )
-        evidence = SimpleNamespace(update_one=AsyncMock())
-        monkeypatch.setattr(server, "db", SimpleNamespace(members=members, recovery_push_evidence=evidence))
-        monkeypatch.setattr(server, "send_expo_push_with_tickets", REAL_SEND)
-        response = _FakeResponse(200, {"data": [
-            {"status": "ok", "id": TICKET_ONE},
-            {"status": "ok", "id": PRIVATE},
-            {"status": PRIVATE, "id": PRIVATE, "details": {"error": PRIVATE}},
-        ]})
-        monkeypatch.setattr(expo_push.httpx, "AsyncClient", lambda **_: _FakeClient(response=response))
-        await server.request_location_refresh(MEMBER, CURRENT)
-        saved = evidence.update_one.await_args.args[1]["$set"]
-        assert saved["receipt_status"] == "pending"
-        assert [(t["status"], t["ticket_id"], t["error"]) for t in saved["tickets"]] == [
-            ("ok", TICKET_ONE, None), ("ok", None, None), ("unknown", None, "unknown"),
-        ]
+                "location_sharing_enabled": True,
+            })
+            # Exercise actual reservation and private-evidence transactions,
+            # not a nontransactional collection mock that bypasses the barrier.
+            monkeypatch.setattr(server, "db", db)
+            monkeypatch.setattr(server, "send_expo_push_with_tickets", REAL_SEND)
+            response = _FakeResponse(200, {"data": [
+                {"status": "ok", "id": TICKET_ONE},
+                {"status": "ok", "id": PRIVATE},
+                {"status": PRIVATE, "id": PRIVATE, "details": {"error": PRIVATE}},
+            ]})
+            monkeypatch.setattr(expo_push.httpx, "AsyncClient", lambda **_: _FakeClient(response=response))
+            await server.request_location_refresh(MEMBER, CURRENT)
+            saved = await db.recovery_push_evidence.find_one({"member_id": MEMBER})
+            assert saved["receipt_status"] == "pending"
+            assert [(t["status"], t["ticket_id"], t["error"]) for t in saved["tickets"]] == [
+                ("ok", TICKET_ONE, None), ("ok", None, None), ("unknown", None, "unknown"),
+            ]
+        finally:
+            await client.drop_database(db.name)
+            client.close()
     run(scenario())

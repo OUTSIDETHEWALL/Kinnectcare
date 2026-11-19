@@ -9,6 +9,19 @@ Kinnship is a mobile app, not a Replit Web Publish deployment. After every appro
 
 **How to apply:** After a merge, inspect the merged diff before taking any release action. Interpret “publish,” “deploy,” “ship,” “release,” and “go live” as the established Kinnship workflow, never Replit Web Publish. Use Replit Web Publish only when the user explicitly says: “Publish the website to Replit.” For a backend-only release, deploy Railway and verify health. For a mobile-only release, publish the OTA. For both, complete and verify Railway before publishing the OTA. For tests, documentation, diagnostics planning, or project memory only, do nothing operationally. For an OTA, use the repository's established publish script, verify the production API URL and runtime version, clear Metro cache as required, and report the OTA group ID, platform update IDs, runtime version, and commit SHA.
 
+## Railway documentation lookup limitation
+
+If the Railway documentation connector reports that a page from its own search
+results does not exist, verify the official public page directly before drawing
+a conclusion about the feature.
+
+**Why:** Both fragment and fragment-free connector fetches incorrectly reported
+the autodeploy-control page missing while the public page documented Disable and
+Enable controls.
+
+**How to apply:** Use the public official page for procedure details; do not
+substitute a source reconnect or commit pin for disabling automatic deployment.
+
 ## Manual Google Play uploads
 
 The owner downloads the verified AAB and manually uploads it to Google Play

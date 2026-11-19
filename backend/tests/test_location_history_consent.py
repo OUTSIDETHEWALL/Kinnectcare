@@ -33,10 +33,10 @@ class HistoryHarness(Harness):
             self.entered.set()
             await self.release.wait()
 
-    async def ingest(self, doc):
+    async def ingest(self, doc, **options):
         await self.barrier("before_payload")
 
-    async def insert_history(self, doc):
+    async def insert_history(self, doc, **options):
         await self.barrier("insert")
         self.records.append(copy.deepcopy(doc))
 

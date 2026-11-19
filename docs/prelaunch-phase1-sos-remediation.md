@@ -1,5 +1,39 @@
 # Pre-launch remediation tracker — Phases 1–3
 
+## Launch completion mode — effective 2026-11-19
+
+The owner's target is **Monday, 2026-11-23**, for Google Play submission
+readiness, not a promise to bypass critical safety or payment requirements.
+The owner will perform GitHub merges manually.
+
+Priority order:
+1. Finish safe integration preparation for already-reviewed #199 → #200 → #190.
+2. Establish only the minimum reversible Railway deployment hold before merges.
+3. Complete credential-safety preparation in existing Task #278; do not duplicate it.
+4. Present the minimum Google Play Billing design for owner approval, then
+   implement only the approved design. Billing is a launch blocker.
+5. After explicit authorization, deliver the final Android build with approved
+   fixes and complete two-phone acceptance.
+6. Prepare Google Play production submission; the established manual upload
+   workflow and separate build/upload approvals remain in force.
+
+Existing Task #280 supplies integration/readiness preparation; it is not a new
+review campaign or permission to execute deployment controls. Do not create
+additional tasks unless a concrete launch blocker requires one. Reuse passed
+reviews and tests unless changed source or specific new evidence invalidates
+them. No unrelated refactoring, redesign, features or reopened accepted decisions.
+Preserve working SOS/dialer, GPS/privacy, medication, check-in, onboarding and
+family behavior.
+
+**Current approval boundary:** the minimum Railway autodeploy-hold procedure in
+`docs/prelaunch-phase3-report.md`. No settings have been changed. Credential
+execution remains separately gated; billing design approval is required before
+implementation. No merge, production change, credential rotation, deployment,
+OTA or AAB build/upload is authorized by this reset.
+
+Updates must answer only: what finished; the single next action; the specific
+approval required; and genuine launch blockers.
+
 Baseline: `1f83570b3145a5bec441d46f9dc0b21e0fbdbca0`.
 
 Phase 1 implementation scope was SOS safety only. The owner subsequently merged
@@ -7,8 +41,15 @@ PRs #196, #197 and #198, accepted Phases 1 and 2, and authorized Phase 3's
 family-code, account-deletion and SOS-retention corrections with separate draft
 PRs and independent reviews. Agent merges, deployments, OTA, AAB, live
 pushes, production data/index/configuration changes and billing changes remain
-unauthorized. Phase 3 has started with family-code rotation; deletion and
-retention remain separate queued work.
+unauthorized. Rotation is implemented in a reviewed unmerged draft. Account
+deletion's three High findings and a subsequent SOS compatibility regression
+are corrected and independently closed. The owner approved minimum delivery
+coordination; final independent security/data-integrity/evidence review is PASS,
+with 536 distinct targeted checks passed and no unresolved Critical/High finding.
+Existing retention draft #190 is now updated and independently reviewed; the
+consolidated Phase 3 report is complete. The owner-confirmed serving database's
+30-day index and anonymous SOS state were verified without mutation. Credential
+safety, controlled delivery and two-phone acceptance remain unresolved.
 
 ## Current phase status
 
@@ -16,10 +57,10 @@ retention remain separate queued work.
 | --- | --- | --- |
 | 1 — SOS safety | [PR #196](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/196) owner-merged at `0396e5b9b168699ca0e1baa7952b7afa08548a12` | Deployment/physical acceptance pending certification; do not infer acceptance from a merge. A newer Railway deployment was observed read-only, but Phase 1 runtime behavior was not certified here. |
 | 2 — Medication/check-in reliability | [Medication #197](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/197) and [check-in #198](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/198) owner-merged; both passed independent adversarial re-review with no unresolved Critical/High findings in their affected implementations | Separately approved rollout/physical acceptance; stage/refill decisions remain unapproved |
-| 3 — Family/deletion/SOS retention | Authorized; [rotation draft #199](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/199) implemented and independently reviewed PASS; existing retention draft #190 left untouched | Separate deletion and retention/report tasks remain; owner review/merge and separately approved delivery/acceptance; no merge/release authorization |
-| 4 — Google Play Billing | Pending | Architecture approval before implementation/configuration |
-| 5 — Security and automated checks | Pending | Triage confirmed risks and repair test causes; baseline failures are not green |
-| 6 — Final Android AAB/Play verification | Pending | Approved reviewed corrections, separate build/upload/physical acceptance authorization |
+| 3 — Family/deletion/SOS retention | Drafts #199, #200 and updated #190 passed scoped independent review; consolidated report complete. Current assessment: 356 passes plus 2 known raw-write failures. Owner-confirmed serving database: 30-day TTL present, 4 resolved SOS, 0 checked anomalies | Credential safety, explicit merge/deployment hold, unknown-send operator handling, old-worker drain/performance-index evaluation and physical acceptance remain open. No merge/release authorization |
+| 4 — Google Play Billing | Confirmed launch blocker; minimum design not yet approved | Owner approval of the minimum design before implementation/configuration |
+| 5 — Security and automated checks | Reuse completed reviews and tests; verify actual candidate changes only | Confirmed launch-blocking risks only; baseline failures remain disclosed, not declared green |
+| 6 — Final Android AAB/Play verification | Follows approved fixes and billing | Separate build/upload authorization, exact-build two-phone acceptance and submission readiness |
 
 Phase 2 reports:
 - `docs/prelaunch-phase2-report.md`
@@ -30,6 +71,11 @@ Phase 2 reports:
 
 Phase 3 evidence:
 - `docs/prelaunch-phase3-family-code-rotation.md`
+- `docs/prelaunch-phase3-account-deletion.md` — deletion implementation, review,
+  test evidence, recovery/rollout limitations and rejected-request incident;
+  not the final consolidated Phase 3 report.
+- `docs/prelaunch-phase3-report.md` — consolidated source assessment, serving
+  database snapshot, credential safety, merge order and two-phone acceptance.
 
 ## Phase 1 corrections
 
@@ -59,8 +105,8 @@ generation, incident location fallback, or retention/index implementation change
 | Missed check-ins require polling | Critical safety reliability: detection runs from read requests; no durable fanout recovery | Independent startup worker, family-fenced per-device outbox and versioned schedule lifetime | Owner-merged #198; re-review PASS; 40 real Mongo tests passed; relevant baseline fixtures 34 passed/32 failed unchanged | Startup indexes and approved delivery/physical acceptance | Backend deployment; additive outbox/revision data and indexes, no destructive migration |
 | Three-stage/refill scope mismatch | High product-scope gap: only two automatic medication stages; refill workflow absent | Separate source-based reports complete; recommend minimal designs without choosing timing/thresholds/recipients | Documentation in merged #198; no new product behavior implemented | Owner decisions/implementation approval required | Backend/client scope depends on design; native delivery requirements not assumed |
 | Family-code rotation unreachable | High, reproduced: client URL returned 404; dormant write lacked family fence; review additionally found Medium auth provisioning before rotation | Register endpoint; current-owner check and replacement share admission's fence; read-only rotation auth prevents implicit family creation; preserve memberships/INV tokens | Draft #199; independent closure PASS, no C/H/M remaining; 29 new + 113 existing Mongo passed, 126 offline passed, 21 skipped; 3 baseline permission-fixture failures unchanged; see Phase 3A report | Owner review/merge, approved backend delivery and acceptance | Backend deployment only; no migration/index changes |
-| Ordinary care history blocks deletion | High: ambiguous ownership and terminal records rejected | Classify proven self records, preserve others and safety restrictions | Not started | Privacy/data-deletion adversarial review required | Backend deployment; migration only if justified and approved |
-| Resolved-SOS expiration / policy mismatch | High: expiration/index behavior needs reconciliation | Approved rule: resolved SOS expires after 30 days; never expire active/unresolved; clear expiry on reopen | Existing draft PR #190 identified, not duplicated or modified; not validated here | Phase 3 actual index/reopen/policy verification; production migration separately approved | Backend/client and possibly approved index migration |
+| Ordinary care history blocks deletion | High: ordinary self-care history rejected; retained OTP/invite/send races identified during review | Classify verified self records, revoke original identity, fence invitations and reserve sensitive sends; qualify retained SOS/security data | Draft #200; independent PASS, four High findings closed; 536 historical targeted passes plus 2 disclosure checks; current combined assessment in Phase 3 report | Owner approval; unknown sends may block indefinitely; drain old workers, hold automatic deployment and perform physical acceptance | Backend/client delivery; additive collection/counters and separately approved performance indexes; no destructive backfill |
+| Resolved-SOS expiration / policy mismatch | Critical potential data-integrity risk: retained expiry could delete reopened SOS; no verified production loss | Existing #190 updated without replacement/history rewrite; atomically clear reopened expiry, preserve resolution clock and reconcile disclosures | Independent source review PASS, no unresolved C/H; 13 retention cases passed; owner-confirmed serving index/state verified read-only; stacked #199 → #200 → #190 | Production TTL deletion itself not observed; credential safety, owner merge/release approval and physical acceptance remain open | No startup alerts-index change/backfill; no repair indicated by snapshot; any future production index/data repair separately approved |
 | Android subscription blocker | Critical release gate: Stripe-only native upgrade flow | Architecture proposal for Play purchases + unified backend entitlements, preserving legitimate Stripe use | Not started | Architecture approval before billing implementation; independent review | Backend + native dependency + AAB + Console configuration |
 | Security findings/logging | High pending reachability triage | Separate real deployed risks from duplicates/conditional/dev findings; redact sensitive logs | Not started | Phase 5 investigation and focused review | Depends on confirmed findings; no broad upgrade assumed |
 | Automated verification failures | High quality gate: mixed defects, stale mocks and environment gaps | Repair causes, not assertions; isolated databases/network controls | Baseline frontend: 4 failed suites/8 failures; backend incomplete plus check-in mock failures | Phase 5; focused Phase 1 tests do not declare the entire repository green | Mostly development-only; deployment if a production defect is corrected |
@@ -68,9 +114,11 @@ generation, incident location fallback, or retention/index implementation change
 
 ## Review and release boundaries
 
-The 30-day resolved-SOS rule is approved, but this PR does not certify the current
-production indexes enforce it. Existing draft PR #190 must be inspected in Phase 3.
-No blanket alerts TTL or production migration is introduced here.
+The 30-day resolved-SOS rule is approved. The subsequent Phase 3 source review
+updated existing draft #190 and verified the owner-confirmed serving database's
+index and anonymous SOS state without writes. This does not certify actual live
+TTL deletion or Android acceptance. See `docs/prelaunch-phase3-report.md` for
+evidence, merge order and open gates. No blanket TTL or migration is introduced.
 
 Notification explainability is unchanged: user SOS activation causes the existing
 family-scoped fanout; current visible/silent payloads, timing and deduplication are

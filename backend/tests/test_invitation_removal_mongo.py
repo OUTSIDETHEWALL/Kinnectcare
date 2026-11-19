@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 from fastapi import HTTPException
+import family_write_fence as fw
 
 from test_email_links_mongo_integration import (
     fg, links, local_replica, scenario, snapshot, pytestmark,
@@ -24,10 +25,13 @@ from test_email_links_mongo_integration import (
 def retained_otp(db):
     path = Path(__file__).resolve().parents[1] / "server.py"
     source = ast.parse(path.read_text())
-    endpoint = next(n for n in source.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "verify_otp")
-    endpoint.decorator_list = []
+    endpoints = [n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+                 and n.name in ("verify_otp", "_verify_otp_transaction")]
+    assert len(endpoints) == 2
+    for endpoint in endpoints:
+        endpoint.decorator_list = []
     namespace = {
-        "db": db, "fg": fg, "el": links, "OtpVerify": SimpleNamespace,
+        "db": db, "fg": fg, "el": links, "fw": fw, "OtpVerify": SimpleNamespace,
         "datetime": datetime, "timedelta": timedelta, "timezone": timezone,
         "uuid": uuid, "ZoneInfo": ZoneInfo, "ZoneInfoNotFoundError": ZoneInfoNotFoundError,
         "HTTPException": HTTPException, "logger": logging.getLogger(__name__),
@@ -40,7 +44,7 @@ def retained_otp(db):
     async def push(*args):
         pass
     namespace["push_to_user"] = push
-    exec(compile(ast.Module(body=[endpoint], type_ignores=[]), str(path), "exec"), namespace)
+    exec(compile(ast.Module(body=endpoints, type_ignores=[]), str(path), "exec"), namespace)
     return namespace["verify_otp"]
 
 
@@ -53,10 +57,14 @@ async def accept(s, mode):
     if mode == "legacy":
         return await s.http.post("/api/family-group/join", headers={"x-test-actor": "invitee"},
                                  json={"invite_code": s.invite["token"]})
-    await s.db.otp_codes.insert_one({
+    current_user = await s.db.users.find_one({"email": "invitee@example.com"})
+    identity = await s.db.email_link_identities.find_one({"_id": links.digest("invitee@example.com")}) or {}
+    await s.db.otp_codes.update_one({"email": "invitee@example.com"}, {"$set": {
         "email": "invitee@example.com", "code_hash": "123456", "purpose": "signup",
+        "credential_id": uuid.uuid4().hex, "issued_user_id": current_user["id"] if current_user else None,
+        "deletion_generation": identity.get("deletion_generation", 0),
         "invite_code": s.invite["token"], "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
-    })
+    }}, upsert=True)
     try:
         body = await retained_otp(s.db)(SimpleNamespace(email="invitee@example.com", code="123456"))
         return SimpleNamespace(status_code=200, json=lambda: body)

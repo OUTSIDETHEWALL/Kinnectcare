@@ -50,3 +50,4 @@
 - [SOS transfer priority](sos-transfer-priority.md) — long transfers must yield their family fences without bypassing fresh SOS authorization or extending its deadline.
 - [SOS retention policy](sos-retention-policy.md) — resolved SOS expires after 30 days; active/unresolved incidents must never expire automatically.
 - [Check-in schedule lifetime](checkin-schedule-lifetime.md) — activation/revision and family fencing must apply across all settings writers and delivery reservations.
+- [Account deletion boundary](account-deletion-boundary.md) — atomic cleanup does not cancel retained credentials, unfenced invitations or tokens captured before an await.
