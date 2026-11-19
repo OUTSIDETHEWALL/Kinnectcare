@@ -1,4 +1,15 @@
-# Resolved self-SOS transfer correction — draft, NOT CLEAN
+# Resolved self-SOS transfer correction — historical review
+
+## Current assessment
+
+The subsequent owner-approved application-writer coordination and updated
+retention draft passed independent source review. Current evidence, limitations,
+stacking and release holds are in `docs/prelaunch-phase3-report.md`. The two raw
+Mongo concurrency failures below remain visible within the explicitly accepted
+nonparticipating-writer boundary; they were not suppressed or declared passing.
+Serving-production retention and physical acceptance remain unverified.
+The earlier **NOT CLEAN** verdicts below are historical, not the latest scoped
+review verdict or permission to merge/release.
 
 ## Current retention policy — supersedes the historical review below
 
