@@ -6,6 +6,7 @@ scripts do not participate automatically. No incident fields serve as locks.
 import asyncio
 import copy
 import logging
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from pymongo.errors import PyMongoError
@@ -213,6 +214,7 @@ async def persist_sos(db, document, actor_id, *, explicit_member_id=None):
                    "owner_id": actor_id, "member_id": explicit_member_id or actor_id,
                    "sos_subject_kind": "member" if explicit_member_id else "user"}
             if row.get("resolved") is not True:
+                # New active incidents must not inherit a previous TTL date.
                 row.pop("resolved_at", None)
             await tx.alerts.insert_one(row)
             return row, actor
@@ -232,6 +234,13 @@ async def change_sos_resolution(db, family_id, alert_id, actor_id, updates, *, i
         raise ValueError("Not a resolution-only mutation")
     if type(updates.get("resolved")) is not bool:
         raise ValueError("An explicit boolean resolution is required")
+    changes = copy.deepcopy(updates)
+    if changes["resolved"]:
+        if not isinstance(changes.get("resolved_at"), datetime):
+            changes["resolved_at"] = datetime.now(timezone.utc)
+    else:
+        # Ignore any caller-supplied old date when reopening.
+        changes.pop("resolved_at", None)
 
     async def action(tx):
         await actor_in_family(tx, actor_id, family_id)
@@ -251,14 +260,24 @@ async def change_sos_resolution(db, family_id, alert_id, actor_id, updates, *, i
             # caregiver authority over a retired incident.
             if actor_id != alert["owner_id"]:
                 raise HTTPException(403, "Only the current incident owner can reopen it.")
-        if alert.get("resolved") is updates["resolved"]:
+        clear_expiration = changes["resolved"] is False
+        if (alert.get("resolved") is changes["resolved"]
+                and not (clear_expiration and "resolved_at" in alert)):
             return alert, False
+        mutation = {"$set": changes}
+        if clear_expiration:
+            # The same atomic write that reactivates SOS removes TTL eligibility,
+            # including an idempotent reopen of a legacy active row with a date.
+            mutation["$unset"] = {"resolved_at": ""}
         result = await tx.alerts.update_one(
             {**selector, "type": alert.get("type")},
-            {"$set": copy.deepcopy(updates)},
+            mutation,
         )
         if result.matched_count != 1:
             raise HTTPException(409, "Alert changed.")
-        return {**alert, **updates}, True
+        committed = {**alert, **changes}
+        if clear_expiration:
+            committed.pop("resolved_at", None)
+        return committed, True
 
     return await run(db, [family_id], action)

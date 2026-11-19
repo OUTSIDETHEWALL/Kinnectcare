@@ -1,4 +1,30 @@
-# Resolved self-SOS transfer correction — draft, NOT CLEAN
+# Resolved self-SOS transfer correction — historical review
+
+## Current assessment
+
+The subsequent owner-approved application-writer coordination and updated
+retention draft passed independent source review. Current evidence, limitations,
+stacking and release holds are in `docs/prelaunch-phase3-report.md`. The two raw
+Mongo concurrency failures below remain visible within the explicitly accepted
+nonparticipating-writer boundary; they were not suppressed or declared passing.
+The owner-confirmed serving database's index/state snapshot is now verified
+read-only; actual live TTL deletion and physical acceptance remain unverified.
+The earlier **NOT CLEAN** verdicts below are historical, not the latest scoped
+review verdict or permission to merge/release.
+
+## Current retention policy — supersedes the historical review below
+
+Resolved SOS records are automatically eligible for deletion 30 days after
+`resolved_at`, even while the account remains active. Expiration is asynchronous.
+Permanent retention is not required. Keep the existing production alerts TTL
+unchanged; the proposal to remove it is superseded and must not be executed.
+
+Transfer-time preservation means retaining the incident unchanged within its
+retention period, not retaining it indefinitely. New active SOS has no expiry
+date; reopening must atomically remove the previous `resolved_at`. Resolving
+again starts a new 30-day period. An idempotent resolve preserves its timestamp.
+
+The sections below document earlier review stages, not the current merge status.
 
 ## Corrective revision after the independent review of `35e0c02a`
 
@@ -31,9 +57,9 @@ application-level blockers outside the requested correction: owner-initiated
 removal still uses an unscoped ownership selector that can move records from
 another family, and ordinary (non-SOS) alert resolution can use stale
 membership. The reviewer also flagged that a non-owner departure can leave
-dependent obligations behind. The old `alerts` TTL index is no longer
-created, but an already-installed index can still remove SOS; it requires
-separate approval to inspect and retire in production. These risks are
+dependent obligations behind. The existing `alerts` TTL expires dated records;
+under the final product decision this is intended for resolved SOS after 30
+days, and the existing index must remain unchanged. These historical risks are
 distinct from the two accepted raw-Mongo limitations. Stop for approval.
 
 ## Current family-write-fence revision
