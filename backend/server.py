@@ -60,6 +60,7 @@ from expo_push import (
 import billing
 import family_group as fg
 import sos_history as sh
+import account_deletion as account_cleanup
 import family_write_fence as fw
 import invitation_presentation
 import sms
@@ -1505,7 +1506,17 @@ async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, reque
         if data.invite_code:
             rec["invite_code"] = data.invite_code.strip().upper()
 
-    await db.otp_codes.update_one({"email": email}, {"$set": rec}, upsert=True)
+    async def issue_otp(session):
+        tx = fw.SessionDatabase(db, session)
+        await tx.email_link_identities.update_one(
+            {"_id": el.digest(email)}, {"$inc": {"generation": 1}}, upsert=True,
+        )
+        fresh_user = await tx.users.find_one({"email": email})
+        if existing_user and (not fresh_user or fresh_user["id"] != existing_user["id"]):
+            raise HTTPException(410, "Your account changed. Request a fresh sign-in code.")
+        await tx.otp_codes.update_one({"email": email}, {"$set": rec}, upsert=True)
+
+    await fw.transaction(db, issue_otp)
     # Fire-and-forget delivery via background task.  The mongo record is
     # already written above, so the user CAN already verify their code
     # as soon as the email arrives — whether that's 200ms or 8 seconds
@@ -2154,9 +2165,9 @@ class DeleteAccountRequest(BaseModel):
 @api_router.delete("/auth/account")
 async def delete_account(
     data: DeleteAccountRequest = None,
-    current=Depends(get_current_user),
+    current=Depends(get_authenticated_user),
 ):
-    """Permanently delete the authenticated user and ALL of their data.
+    """Delete verified personal data, revoke access, and retain protected SOS.
 
     Delete eligible data and the account in one transaction, retaining SOS.
     Stripe cleanup is best-effort and only runs after the database commits.
@@ -3701,7 +3712,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     #   • did the GPS capture timestamp guard accept or reject the write?
     #   • what were the incoming vs. stored GPS capture times?
     try:
-        await db.location_ingest_log.insert_one({
+        await account_cleanup.persist_subject_evidence(db, "location_ingest_log", {
             "at":                   server_now,
             "member_id":            member_id,
             "family_group_id":      current["family_group_id"],
@@ -3729,7 +3740,8 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             # Geocoding is now lazy (resolved in GET /members, not here).
             # location_name is intentionally cleared on each upload so the
             # read path always resolves from fresh coordinates.
-        })
+        }, member_id=member_id, family_id=current["family_group_id"],
+            subject_user_id=target.get("user_id"))
     except Exception:
         pass
 
@@ -3743,7 +3755,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # collection bounded without a manual cleanup job.
     if write_accepted:
         try:
-            await db.location_history.insert_one({
+            await account_cleanup.persist_subject_evidence(db, "location_history", {
                 "accepted_at":      server_now,
                 "captured_at":      incoming_captured_at,
                 "member_id":        member_id,
@@ -3767,7 +3779,8 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 "battery_level":    data.battery_level,
                 "is_charging":      data.is_charging,
                 "raw_battery":      data.battery,
-            })
+            }, member_id=member_id, family_id=current["family_group_id"],
+                subject_user_id=target.get("user_id"))
         except Exception:
             pass
 
@@ -6665,12 +6678,14 @@ async def request_location_refresh(member_id: str, current=Depends(_authenticate
         persist_error: Optional[Exception] = None
         for persist_attempt in range(1, 4):
             try:
-                await db.recovery_push_evidence.update_one(
-                    {"request_id": request_id},
-                    {"$set": evidence},
-                    upsert=True,
+                persisted = await account_cleanup.persist_subject_evidence(
+                    db, "recovery_push_evidence", evidence,
+                    member_id=member_id, family_id=current["family_group_id"],
+                    subject_user_id=target_user_id,
+                    upsert_selector={"request_id": request_id},
                 )
-                persisted = True
+                if not persisted:
+                    raise HTTPException(409, "The target account changed before evidence was recorded.")
                 break
             except Exception as error:
                 persist_error = error

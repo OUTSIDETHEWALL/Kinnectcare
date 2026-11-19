@@ -7,8 +7,10 @@ PRs #196, #197 and #198, accepted Phases 1 and 2, and authorized Phase 3's
 family-code, account-deletion and SOS-retention corrections with separate draft
 PRs and independent reviews. Agent merges, deployments, OTA, AAB, live
 pushes, production data/index/configuration changes and billing changes remain
-unauthorized. Phase 3 has started with family-code rotation; deletion and
-retention remain separate queued work.
+unauthorized. Rotation is implemented in a reviewed unmerged draft. Account
+deletion is incomplete: independent review found three High issues; shared
+outbound-delivery coordination is paused for architectural approval. Retention
+and the consolidated report remain separate downstream work.
 
 ## Current phase status
 
@@ -16,7 +18,7 @@ retention remain separate queued work.
 | --- | --- | --- |
 | 1 — SOS safety | [PR #196](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/196) owner-merged at `0396e5b9b168699ca0e1baa7952b7afa08548a12` | Deployment/physical acceptance pending certification; do not infer acceptance from a merge. A newer Railway deployment was observed read-only, but Phase 1 runtime behavior was not certified here. |
 | 2 — Medication/check-in reliability | [Medication #197](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/197) and [check-in #198](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/198) owner-merged; both passed independent adversarial re-review with no unresolved Critical/High findings in their affected implementations | Separately approved rollout/physical acceptance; stage/refill decisions remain unapproved |
-| 3 — Family/deletion/SOS retention | Authorized; [rotation draft #199](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/199) implemented and independently reviewed PASS; existing retention draft #190 left untouched | Separate deletion and retention/report tasks remain; owner review/merge and separately approved delivery/acceptance; no merge/release authorization |
+| 3 — Family/deletion/SOS retention | [Rotation draft #199](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/199) implemented, independent PASS. Account-deletion draft is incomplete: independent FAIL, three open High findings; 48 new/165 combined real-Mongo tests passed. Existing retention draft #190 untouched | Approval for cross-cutting delivery reservations; close OTP-redemption, invitation-writer and late-send findings; independent closure review, then retention/consolidated report. No merge/release authorization |
 | 4 — Google Play Billing | Pending | Architecture approval before implementation/configuration |
 | 5 — Security and automated checks | Pending | Triage confirmed risks and repair test causes; baseline failures are not green |
 | 6 — Final Android AAB/Play verification | Pending | Approved reviewed corrections, separate build/upload/physical acceptance authorization |
@@ -30,6 +32,8 @@ Phase 2 reports:
 
 Phase 3 evidence:
 - `docs/prelaunch-phase3-family-code-rotation.md`
+- `docs/prelaunch-phase3-account-deletion.md` — interim findings and incomplete
+  draft, not a completed correction or final Phase 3 report.
 
 ## Phase 1 corrections
 

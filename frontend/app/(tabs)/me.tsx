@@ -1505,11 +1505,12 @@ export default function MeScreen() {
             <Text style={styles.modalEmoji}>⚠️</Text>
             <Text style={styles.modalTitle}>Delete your account?</Text>
             <Text style={styles.modalBody}>
-              This will permanently delete your Kinnship account and all related data:
-              {'\n'}• family member profiles
-              {'\n'}• medications, routines, and check-ins
-              {'\n'}• alerts and SOS history
-              {'\n'}• any active subscription (will be canceled)
+              This permanently deletes your account and verified personal data:
+              {'\n'}• your linked profile, medications, routines, and check-ins
+              {'\n'}• your registered devices, pending notifications, and sign-in links
+              {'\n\n'}Other family members&apos; information is not deleted. Resolve active SOS incidents and hand off dependent care or family ownership first.
+              {'\n\n'}Resolved SOS history is retained under the 30-day policy. Notifications already in progress may still arrive.
+              {'\n\n'}Cancellation of an existing subscription is attempted after deletion; it is not guaranteed if the billing service fails.
               {'\n\n'}
               This action cannot be undone.
             </Text>
