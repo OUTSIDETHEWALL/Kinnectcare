@@ -2218,6 +2218,13 @@ async def delete_account(
     Delete eligible data and the account in one transaction, retaining SOS.
     Stripe cleanup is best-effort and only runs after the database commits.
     """
+    # Operator-only release gate: enable only after the worker handoff is verified.
+    if os.environ.get("ACCOUNT_DELETION_HANDOFF_VERIFIED") != "true":
+        raise HTTPException(
+            status_code=503,
+            detail="Account deletion is temporarily unavailable while a safety update is verified. No data was deleted.",
+        )
+
     user_id = current["id"]
     payload = data or DeleteAccountRequest()
     if (payload.confirm or "").strip().upper() != "DELETE":
