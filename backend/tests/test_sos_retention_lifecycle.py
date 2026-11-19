@@ -1,6 +1,6 @@
 """SOS TTL eligibility on an owned loopback replica, never production.
 
-Uses the production Mongo selector (resolved_at exists/date), without waiting
+Uses the observed date-based selector (resolved_at exists/date), without waiting
 for the TTL monitor or changing any production indexes or records.
 """
 from datetime import datetime, timedelta, timezone

@@ -5,18 +5,25 @@ description: Approved history-retention constraints and the concurrency boundary
 
 ## Current product retention decision
 
-Resolved SOS history is retained for 30 days and then automatically expires.
-Permanent SOS retention is not required. Keep the existing production MongoDB
-TTL index unchanged unless the user separately authorizes a change.
+Resolved SOS history automatically becomes eligible for expiration 30 days
+after resolution; deletion is asynchronous, not an exact-time promise.
+Permanent SOS retention is not required. Keep the existing production TTL
+unchanged unless the user separately authorizes a change.
 
 **Why:** The user explicitly chose 30-day retention instead of permanent history.
 
 **How to apply:** Transfer-time preservation below means preserving records
-within their retention period, not indefinite retention. The earlier proposal
-to remove the alerts TTL is superseded. Active and reopened SOS must have no
-date-valued resolved_at: the existing filter checks only that resolved_at exists,
-not resolved status. Resolving again starts a new 30-day period; retries of an
-already-resolved incident must not extend its retention timestamp.
+within their retention period, not indefinite retention. The earlier TTL-removal
+proposal is superseded. Active/reopened incidents must not expire. Resolution
+starts the period, acknowledgment does not, and retries must not extend it.
+Historical resolutions without a trustworthy date need reviewed evidence,
+not an invented timestamp or an unapproved backfill.
+
+**Why:** An unknown historical event time cannot safely establish the original
+30-day deadline. Local TTL success cannot establish legacy production state.
+
+**How to apply:** Report undated-history and serving-database verification
+separately from source correctness; obtain approval before historical repair.
 
 Qualifying resolved self-SOS history must stay unchanged in its existing family
 when its subject joins or is removed from a family. Both verified account-ID and

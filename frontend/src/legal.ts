@@ -69,9 +69,13 @@ export const PRIVACY_POLICY: LegalSection[] = [
       `even while your account is active. Automatic deletion may occur after that point rather than ` +
       `at an exact time. Active, unresolved SOS records are not subject to this 30-day expiration. ` +
       `Other data is kept for as long as your account is active, subject to applicable retention periods. ` +
-      `You can delete a family member, a ` +
-      `reminder, or your entire account at any time, after which the associated data is removed from ` +
-      `our production database within 30 days. We use industry-standard safeguards including ` +
+      `Account deletion removes verified personal account data, not other family members' information. ` +
+      `It does not immediately erase resolved SOS history, which remains in its original family scope ` +
+      `within the 30-day period after resolution, with existing access restrictions. ` +
+      `Active SOS, dependent care, family ownership, ambiguous records, or unresolved notification or email ` +
+      `attempts can block account deletion pending resolution or review. Minimal hashed security records ` +
+      `are retained to prevent reuse of old credentials. Notifications already authorized may still arrive. ` +
+      `We use industry-standard safeguards including ` +
       `encryption in transit (TLS), hashed passwords, and access controls. No system is perfectly ` +
       `secure, and we cannot guarantee absolute security of information transmitted to us.`,
   },
