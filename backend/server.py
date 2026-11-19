@@ -748,10 +748,11 @@ def create_access_token(user_id: str) -> str:
     return jwt.encode({"sub": user_id, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
 
 
-async def get_current_user(
+async def get_authenticated_user(
     request: Request,
     creds: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
+    """Authenticate only; administrative operations need not provision a family."""
     try:
         payload = jwt.decode(creds.credentials, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("sub")
@@ -762,6 +763,14 @@ async def get_current_user(
     user = await db.users.find_one({"id": user_id}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
+async def get_current_user(
+    request: Request,
+    creds: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    user = await get_authenticated_user(request, creds)
     # Ensure user has a family_group_id (lazy-creates for legacy users)
     await fg.ensure_family_group(db, user)
     # Presence middleware deliberately reads this only after the dependency
@@ -7401,7 +7410,10 @@ async def reset_test_user(data: _ResetTestUserRequest, request: Request):
 import email_links as el
 api_router.include_router(el.build_router(db, get_current_user, send_email_via_resend_async, create_access_token, _user_response))
 el.install_public_routes(app)
-api_router.include_router(fg.build_router(db, get_current_user, push_to_user=push_to_user, send_email=send_email_via_resend_async))
+api_router.include_router(fg.build_router(
+    db, get_current_user, push_to_user=push_to_user,
+    send_email=send_email_via_resend_async, get_rotation_user=get_authenticated_user,
+))
 
 
 app.include_router(api_router)

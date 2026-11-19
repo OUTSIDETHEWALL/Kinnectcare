@@ -594,6 +594,7 @@ def build_router(
     get_current_user,
     push_to_user=None,
     send_email: Optional[Callable[[str, str, str], Awaitable[bool]]] = None,
+    get_rotation_user=None,
 ):
     """Build the family-group APIRouter wired against the provided db and auth dep.
 
@@ -695,17 +696,34 @@ def build_router(
             "invitee_email": invite.get("invitee_email") if invite else None,
             "code_type": "per-invite" if invite else "family-wide",
         }
-    async def regenerate_invite_code(current=Depends(get_current_user)):
-        gid = await ensure_family_group(db, current)
-        group = await get_group(db, gid)
-        if not group:
-            raise HTTPException(404, "Family group not found")
-        if group.get("owner_user_id") != current["id"]:
-            raise HTTPException(403, "Only the group owner can regenerate the invite code")
-        new_code = await _generate_unique_invite_code(db)
-        await db.family_groups.update_one({"id": gid}, {"$set": {"invite_code": new_code}})
-        group["invite_code"] = new_code
-        return {"ok": True, "invite_code": new_code, "group": public_group(group)}
+
+    @router.post("/regenerate-code")
+    async def regenerate_invite_code(current=Depends(get_rotation_user or get_current_user)):
+        # Rotation must not create a family or trust a cached role/scope.
+        actor = await db.users.find_one({"id": current["id"]}, {"family_group_id": 1})
+        if not actor:
+            raise HTTPException(401, "Please sign in again.")
+        gid = actor.get("family_group_id")
+        if not gid:
+            raise HTTPException(409, "Complete family setup before rotating its code.")
+
+        async def rotate(tx):
+            # Share admission's fence so an old code cannot win against a
+            # completed rotation, and recheck authority after waiting/retry.
+            await fw.actor_in_family(tx, current["id"], gid, owner=True)
+            group = await get_group(tx, gid)
+            new_code = await _generate_unique_invite_code(tx)
+            result = await tx.family_groups.update_one(
+                {"id": gid, "owner_user_id": current["id"]},
+                {"$set": {"invite_code": new_code}},
+            )
+            if result.matched_count != 1:
+                raise HTTPException(409, "Your family changed; reopen this action.")
+            group["invite_code"] = new_code
+            # Per-recipient INV tokens are independent of the wall code.
+            return {"ok": True, "invite_code": new_code, "group": public_group(group)}
+
+        return await fw.run(db, [gid], rotate)
 
     @router.post("/join")
     async def join_family_group(

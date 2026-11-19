@@ -1,20 +1,22 @@
-# Pre-launch remediation tracker — Phases 1 and 2
+# Pre-launch remediation tracker — Phases 1–3
 
 Baseline: `1f83570b3145a5bec441d46f9dc0b21e0fbdbca0`.
 
 Phase 1 implementation scope was SOS safety only. The owner subsequently merged
-PR #196 and authorized Phase 2's two reliability corrections plus investigation
-of medication-stage/refill gaps. Agent merges, deployments, OTA, AAB, live
+PRs #196, #197 and #198, accepted Phases 1 and 2, and authorized Phase 3's
+family-code, account-deletion and SOS-retention corrections with separate draft
+PRs and independent reviews. Agent merges, deployments, OTA, AAB, live
 pushes, production data/index/configuration changes and billing changes remain
-unauthorized. Phase 3 has not started.
+unauthorized. Phase 3 has started with family-code rotation; deletion and
+retention remain separate queued work.
 
 ## Current phase status
 
 | Phase | Status / evidence | Remaining gate |
 | --- | --- | --- |
 | 1 — SOS safety | [PR #196](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/196) owner-merged at `0396e5b9b168699ca0e1baa7952b7afa08548a12` | Deployment/physical acceptance pending certification; do not infer acceptance from a merge. A newer Railway deployment was observed read-only, but Phase 1 runtime behavior was not certified here. |
-| 2 — Medication/check-in reliability | [Medication draft #197](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/197) and [check-in draft #198](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/198); both passed independent adversarial re-review with no unresolved Critical/High findings in their affected implementations | Owner review/merge and separately approved rollout/physical acceptance; stage/refill decisions remain unapproved |
-| 3 — Family/deletion/SOS retention | Pending; existing draft #190 left untouched | Separate authorization and validation of authority, deletion and actual retention/index behavior |
+| 2 — Medication/check-in reliability | [Medication #197](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/197) and [check-in #198](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/198) owner-merged; both passed independent adversarial re-review with no unresolved Critical/High findings in their affected implementations | Separately approved rollout/physical acceptance; stage/refill decisions remain unapproved |
+| 3 — Family/deletion/SOS retention | Authorized; [rotation draft #199](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/199) implemented and independently reviewed PASS; existing retention draft #190 left untouched | Separate deletion and retention/report tasks remain; owner review/merge and separately approved delivery/acceptance; no merge/release authorization |
 | 4 — Google Play Billing | Pending | Architecture approval before implementation/configuration |
 | 5 — Security and automated checks | Pending | Triage confirmed risks and repair test causes; baseline failures are not green |
 | 6 — Final Android AAB/Play verification | Pending | Approved reviewed corrections, separate build/upload/physical acceptance authorization |
@@ -25,6 +27,9 @@ Phase 2 reports:
 - `docs/prelaunch-phase2-checkin-reliability.md`
 - `docs/prelaunch-phase2-medication-stages-review.md`
 - `docs/prelaunch-phase2-refill-review.md`
+
+Phase 3 evidence:
+- `docs/prelaunch-phase3-family-code-rotation.md`
 
 ## Phase 1 corrections
 
@@ -50,10 +55,10 @@ generation, incident location fallback, or retention/index implementation change
 
 | Audit finding | Severity / root cause | Proposed correction / decision | PR / tests / review | Remaining blocker | Eventual delivery |
 | --- | --- | --- | --- | --- | --- |
-| Midnight medication escalation | Critical safety reliability: only today's slots evaluated; related High DST acknowledgment mismatch | Bounded prior-day family window and UTC/first-fold identity consistency; preserve existing arbitration/deduplication | Draft #197; re-review PASS; implementer 86 passed/1 baseline failure plus 2 real Mongo tests; reviewer 100 passed/1 baseline failure | Owner review/merge, approved delivery and physical acceptance | Backend deployment only for this correction |
-| Missed check-ins require polling | Critical safety reliability: detection runs from read requests; no durable fanout recovery | Independent startup worker, family-fenced per-device outbox and versioned schedule lifetime | Draft #198; re-review PASS; 40 real Mongo tests passed; relevant baseline fixtures 34 passed/32 failed unchanged | Owner review/merge, startup indexes and approved delivery/physical acceptance | Backend deployment; additive outbox/revision data and indexes, no destructive migration |
-| Three-stage/refill scope mismatch | High product-scope gap: only two automatic medication stages; refill workflow absent | Separate source-based reports complete; recommend minimal designs without choosing timing/thresholds/recipients | Documentation in draft #198; no new product behavior implemented | Owner decisions/implementation approval required | Backend/client scope depends on design; native delivery requirements not assumed |
-| Family-code rotation unreachable | High: missing endpoint registration | Owner-authorized transactional rotation; prove old code invalidation | Not started | Phase 3 investigation | Backend deployment |
+| Midnight medication escalation | Critical safety reliability: only today's slots evaluated; related High DST acknowledgment mismatch | Bounded prior-day family window and UTC/first-fold identity consistency; preserve existing arbitration/deduplication | Owner-merged #197; re-review PASS; implementer 86 passed/1 baseline failure plus 2 real Mongo tests; reviewer 100 passed/1 baseline failure | Approved delivery and physical acceptance | Backend deployment only for this correction |
+| Missed check-ins require polling | Critical safety reliability: detection runs from read requests; no durable fanout recovery | Independent startup worker, family-fenced per-device outbox and versioned schedule lifetime | Owner-merged #198; re-review PASS; 40 real Mongo tests passed; relevant baseline fixtures 34 passed/32 failed unchanged | Startup indexes and approved delivery/physical acceptance | Backend deployment; additive outbox/revision data and indexes, no destructive migration |
+| Three-stage/refill scope mismatch | High product-scope gap: only two automatic medication stages; refill workflow absent | Separate source-based reports complete; recommend minimal designs without choosing timing/thresholds/recipients | Documentation in merged #198; no new product behavior implemented | Owner decisions/implementation approval required | Backend/client scope depends on design; native delivery requirements not assumed |
+| Family-code rotation unreachable | High, reproduced: client URL returned 404; dormant write lacked family fence; review additionally found Medium auth provisioning before rotation | Register endpoint; current-owner check and replacement share admission's fence; read-only rotation auth prevents implicit family creation; preserve memberships/INV tokens | Draft #199; independent closure PASS, no C/H/M remaining; 29 new + 113 existing Mongo passed, 126 offline passed, 21 skipped; 3 baseline permission-fixture failures unchanged; see Phase 3A report | Owner review/merge, approved backend delivery and acceptance | Backend deployment only; no migration/index changes |
 | Ordinary care history blocks deletion | High: ambiguous ownership and terminal records rejected | Classify proven self records, preserve others and safety restrictions | Not started | Privacy/data-deletion adversarial review required | Backend deployment; migration only if justified and approved |
 | Resolved-SOS expiration / policy mismatch | High: expiration/index behavior needs reconciliation | Approved rule: resolved SOS expires after 30 days; never expire active/unresolved; clear expiry on reopen | Existing draft PR #190 identified, not duplicated or modified; not validated here | Phase 3 actual index/reopen/policy verification; production migration separately approved | Backend/client and possibly approved index migration |
 | Android subscription blocker | Critical release gate: Stripe-only native upgrade flow | Architecture proposal for Play purchases + unified backend entitlements, preserving legitimate Stripe use | Not started | Architecture approval before billing implementation; independent review | Backend + native dependency + AAB + Console configuration |
