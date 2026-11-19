@@ -352,3 +352,19 @@ Baseline full-repository failures, including the previously reported TypeScript
 error and five legacy offline transaction/mock groups, remain outside this
 correction. No new full-repository or physical-device certification is claimed.
 No source or assertions were changed to hide those baseline failures.
+
+## Consolidated Phase 3 assessment follow-up
+
+The subsequent readiness review found that the account-page danger hint still
+promised removal of “all associated data,” despite the modal's qualifications.
+The hint now qualifies retained resolved SOS and minimal security records. The
+modal additionally explains that unknown notification/email attempts can delay
+deletion pending review, and that hashed security records prevent old credential
+reuse. These are copy-only corrections, not changed cleanup or recovery policy.
+
+Two new frontend disclosure checks passed. Independent follow-up review is
+**PASS**, no new Critical/High; all four prior High closures remain valid.
+The reviewer inspected the assertions but did not independently rerun them.
+This is **536 prior targeted checks plus 2 new copy checks**, not a claim that
+the 536 backend/offline checks were rerun for a text-only change. Rendered
+signed-in UI and physical Android acceptance remain separate gates.
