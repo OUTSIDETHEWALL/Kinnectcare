@@ -15,6 +15,85 @@ Final PR-head hashes are recorded in the live PR descriptions and delivery
 message after committing this report; code identities below identify the
 reviewed implementation, not a self-referential documentation commit.
 
+## Launch completion mode — next approval boundary
+
+The owner's 2026-11-19 reset governs existing integration preparation. Target:
+Monday, 2026-11-23, without bypassing critical safety or payment requirements.
+The owner performs GitHub merges manually. No additional planning task, repeated
+source review or unrelated infrastructure work is required.
+
+Read-only metadata refresh found the three PR heads unchanged from delivery:
+#199 `496cc5d4cd7d0bab17d841ad04427c1327661b54`,
+#200 `167a09a95c44f6857ddd7294ccac055c39a63752`,
+#190 `432b7d34ca5cf17a8284b606f81087b07b67bf4a` before this documentation-only
+update. Main remains `56b0d7634e5cf3131c3f972fe0971f5f8d11cf67`.
+Existing source reviews/tests are retained, not repeated. All PRs are drafts and
+conflict-free against their current bases; this is not merge authorization.
+Main's existing protection requires **one approving GitHub review**, with stale
+approvals dismissed. Independent source-review reports do not themselves fulfill
+that GitHub requirement. Mark ready and satisfy protection without bypassing it.
+No required linear-history rule was returned; use ancestry-preserving merges.
+
+### Minimum reversible Railway hold — proposed, not executed
+
+Official instructions:
+https://docs.railway.com/deployments/github-autodeploys
+
+Current read-only inventory shows three `Kinnectcare` services following this
+repository's `main`, all with check-suite waiting disabled:
+
+| Project / production service | Observed state |
+| --- | --- |
+| `zonal-freedom` / `Kinnectcare` | Serving public backend, root `backend`, latest deployment successful, no staged service changes |
+| `melodious-bravery` / `Kinnectcare` | Latest deployment failed; deletion already staged, not applied here |
+| `gracious-enjoyment` / `Kinnectcare` | Latest deployment failed; no staged service changes |
+
+Failed/no-public-domain services are not proof they cannot build or run on the
+next push. Hold their GitHub triggers too, rather than deleting, repairing or
+investigating them. This is trigger control, not infrastructure cleanup.
+
+1. Obtain explicit approval for the temporary autodeploy hold only. In Railway,
+   select each project above, environment **production**, service **Kinnectcare**.
+   Record current trigger state and the serving deployment ID before changing
+   anything. The observed serving deployment is
+   `56f3023a-117a-4320-a632-19cee450ed3b`.
+2. In each service's **Settings**, use **Disable** for GitHub automatic
+   deployments where currently enabled; leave already-disabled triggers alone.
+   The read-only connector shows source linkage, not the dashboard switch state.
+   Leave repository, branch, root, variables, replicas and running
+   deployment unchanged. Do not use disconnect/reconnect or commit pinning:
+   reconnecting can deploy. Do not apply staged changes, particularly the staged
+   deletion. If the dashboard would bundle pending changes or trigger a deploy,
+   stop instead.
+3. Confirm the dashboard shows automatic deployment disabled for all three.
+   Inspect for pending/running GitHub-triggered deployments and confirm the
+   currently serving deployment is unchanged. A trigger hold does not cancel an
+   already-started deployment; if one exists, stop for separate approval rather
+   than assuming it is harmless or canceling it automatically.
+4. Only after that evidence, the required GitHub approval and the owner's merge
+   decision, the owner manually merges #199 → #200 → #190, performing the existing
+   retarget/parent-diff checks. No agent merge or protection bypass.
+5. Keep the hold until a separately approved rollout can deliver the exact final
+   main commit, with credential continuity and old-worker/provider handling
+   addressed. **Deploy Latest Commit** is itself a deployment and needs approval.
+6. Restoration is a separate approved action: restore only the previously
+   enabled triggers using **Enable**, after verifying the intended release
+   commit and pending deployment state. Treat enabling as potentially
+   deployment-triggering; it is not an automatic rollback. Do not redeploy old
+   deletion workers against new reservations without checking compatibility.
+
+The exposed connector does not offer the dashboard's autodeploy switch; the
+approved hold should be applied in the Railway dashboard, not approximated with
+a potentially deploying source change. No switch or other setting was changed.
+
+Credential work stays solely in Task #278. Its completion and exposure-check
+limitations must be incorporated before claiming the wider readiness work
+complete. After safe integration and credential preparation, present the minimum
+Play Billing design for approval; do not implement billing yet. Final approved
+fixes and billing should be combined into the authorized Android candidate where
+possible, avoiding unnecessary intermediate builds/OTAs. Exact-build two-phone
+acceptance and Play submission checks remain necessary.
+
 ## PR-by-PR assessment
 
 ### #199 — secure family-code rotation and invitation preservation
@@ -281,11 +360,14 @@ Never delete a real family or place a non-emergency emergency call.
 ## Recommended next action and stop
 
 The approved serving-target identification and read-only index/state verification
-are complete. Next, approve a controlled credential-safety and deployment-hold
-plan before any merge. Planning is not authorization to rotate credentials,
-change configuration, repair data, alter indexes, merge or deploy.
+are complete. Next, approve the minimum temporary Railway autodeploy hold
+documented above, applied through the dashboard without deployment or staged
+changes. Credential preparation stays in existing Task #278; do not duplicate it
+or create another planning task. The owner performs subsequent GitHub merges
+manually after hold verification and required GitHub approval.
 
-Then review the remaining operational and two-phone evidence before deciding
-whether to close Phase 3. Existing broader prelaunch holds remain; no Railway
+Then obtain approval for the minimum Play Billing design before implementation,
+followed by an explicitly authorized final candidate and two-phone acceptance.
+Do not repeat completed reviews without concrete new evidence. No Railway
 deployment, production mutation/configuration change, OTA, AAB build/upload,
 Google Play Billing implementation or Phase 4 work was performed.

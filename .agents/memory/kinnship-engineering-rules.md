@@ -210,6 +210,31 @@ controlled experiments without weakening semantic assertions or changing
 production code. Preserve the original failed-run counts in the report even
 when a later control or readiness variant passes.
 
+## Launch completion scope
+
+Operate in LAUNCH COMPLETION MODE: finish existing launch blockers and Google
+Play readiness, not new features or unrelated infrastructure/refactoring.
+Do not create additional tasks unless an actual launch-blocking issue requires
+one. Do not repeat passed reviews/investigations or reopen accepted decisions
+without a specific reason and concrete evidence. Do not broaden narrow fixes
+into subsystem rewrites unless essential for safety.
+
+The owner performs GitHub merges manually. Production changes, credential
+rotation, deployment, OTA and AAB build/upload require explicit authorization.
+Google Play Billing is a launch blocker: present the minimum required design
+for approval before implementing it. Preserve working SOS, GPS, medication,
+check-in, onboarding and family functionality.
+
+Give short plain-English updates answering: what finished; the single next
+action; what specifically needs approval; and genuine launch blockers.
+
+**Why:** The owner explicitly reset priorities to stop scope expansion and
+finish a safe working Google Play release.
+
+**How to apply:** Use existing launch work and tracker; continue only authorized
+preparation and stop at the next required approval. A target date never permits
+bypassing critical safety or payment requirements.
+
 ## Platform scope of native authority
 
 Android-only native authority must not become a prerequisite for legitimate

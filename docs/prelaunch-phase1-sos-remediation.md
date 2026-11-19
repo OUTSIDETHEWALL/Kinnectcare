@@ -1,5 +1,39 @@
 # Pre-launch remediation tracker — Phases 1–3
 
+## Launch completion mode — effective 2026-11-19
+
+The owner's target is **Monday, 2026-11-23**, for Google Play submission
+readiness, not a promise to bypass critical safety or payment requirements.
+The owner will perform GitHub merges manually.
+
+Priority order:
+1. Finish safe integration preparation for already-reviewed #199 → #200 → #190.
+2. Establish only the minimum reversible Railway deployment hold before merges.
+3. Complete credential-safety preparation in existing Task #278; do not duplicate it.
+4. Present the minimum Google Play Billing design for owner approval, then
+   implement only the approved design. Billing is a launch blocker.
+5. After explicit authorization, deliver the final Android build with approved
+   fixes and complete two-phone acceptance.
+6. Prepare Google Play production submission; the established manual upload
+   workflow and separate build/upload approvals remain in force.
+
+Existing Task #280 supplies integration/readiness preparation; it is not a new
+review campaign or permission to execute deployment controls. Do not create
+additional tasks unless a concrete launch blocker requires one. Reuse passed
+reviews and tests unless changed source or specific new evidence invalidates
+them. No unrelated refactoring, redesign, features or reopened accepted decisions.
+Preserve working SOS/dialer, GPS/privacy, medication, check-in, onboarding and
+family behavior.
+
+**Current approval boundary:** the minimum Railway autodeploy-hold procedure in
+`docs/prelaunch-phase3-report.md`. No settings have been changed. Credential
+execution remains separately gated; billing design approval is required before
+implementation. No merge, production change, credential rotation, deployment,
+OTA or AAB build/upload is authorized by this reset.
+
+Updates must answer only: what finished; the single next action; the specific
+approval required; and genuine launch blockers.
+
 Baseline: `1f83570b3145a5bec441d46f9dc0b21e0fbdbca0`.
 
 Phase 1 implementation scope was SOS safety only. The owner subsequently merged
@@ -24,9 +58,9 @@ safety, controlled delivery and two-phone acceptance remain unresolved.
 | 1 — SOS safety | [PR #196](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/196) owner-merged at `0396e5b9b168699ca0e1baa7952b7afa08548a12` | Deployment/physical acceptance pending certification; do not infer acceptance from a merge. A newer Railway deployment was observed read-only, but Phase 1 runtime behavior was not certified here. |
 | 2 — Medication/check-in reliability | [Medication #197](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/197) and [check-in #198](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/198) owner-merged; both passed independent adversarial re-review with no unresolved Critical/High findings in their affected implementations | Separately approved rollout/physical acceptance; stage/refill decisions remain unapproved |
 | 3 — Family/deletion/SOS retention | Drafts #199, #200 and updated #190 passed scoped independent review; consolidated report complete. Current assessment: 356 passes plus 2 known raw-write failures. Owner-confirmed serving database: 30-day TTL present, 4 resolved SOS, 0 checked anomalies | Credential safety, explicit merge/deployment hold, unknown-send operator handling, old-worker drain/performance-index evaluation and physical acceptance remain open. No merge/release authorization |
-| 4 — Google Play Billing | Pending | Architecture approval before implementation/configuration |
-| 5 — Security and automated checks | Pending | Triage confirmed risks and repair test causes; baseline failures are not green |
-| 6 — Final Android AAB/Play verification | Pending | Approved reviewed corrections, separate build/upload/physical acceptance authorization |
+| 4 — Google Play Billing | Confirmed launch blocker; minimum design not yet approved | Owner approval of the minimum design before implementation/configuration |
+| 5 — Security and automated checks | Reuse completed reviews and tests; verify actual candidate changes only | Confirmed launch-blocking risks only; baseline failures remain disclosed, not declared green |
+| 6 — Final Android AAB/Play verification | Follows approved fixes and billing | Separate build/upload authorization, exact-build two-phone acceptance and submission readiness |
 
 Phase 2 reports:
 - `docs/prelaunch-phase2-report.md`
