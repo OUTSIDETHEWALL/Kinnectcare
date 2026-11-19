@@ -15,9 +15,10 @@ The sections below through â€œInitial database, privacy and delivery boundariesâ
 evidence and limitations, not the final corrected behavior. The approved
 corrections and their operational implications follow that historical record.
 The subsequent Phase 3C source assessment passed independent review in the
-existing retention draft #190. Its production-database target verification and
-physical acceptance remain OPEN; consult the consolidated Phase 3 report in
-that draft before approving any merge or release.
+existing retention draft #190. Subsequent owner-confirmed serving-target/index
+and anonymous-state verification is recorded in that draft's consolidated
+report. Credential safety, operational and physical acceptance remain OPEN;
+consult that report before approving any merge or release.
 
 Baseline GitHub main: `56b0d7634e5cf3131c3f972fe0971f5f8d11cf67`.
 Dedicated branch: `fix/account-deletion-care-records`, stacked on rotation draft

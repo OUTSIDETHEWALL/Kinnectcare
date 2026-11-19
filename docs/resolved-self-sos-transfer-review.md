@@ -7,7 +7,8 @@ retention draft passed independent source review. Current evidence, limitations,
 stacking and release holds are in `docs/prelaunch-phase3-report.md`. The two raw
 Mongo concurrency failures below remain visible within the explicitly accepted
 nonparticipating-writer boundary; they were not suppressed or declared passing.
-Serving-production retention and physical acceptance remain unverified.
+The owner-confirmed serving database's index/state snapshot is now verified
+read-only; actual live TTL deletion and physical acceptance remain unverified.
 The earlier **NOT CLEAN** verdicts below are historical, not the latest scoped
 review verdict or permission to merge/release.
 

@@ -3,9 +3,10 @@
 ## Decision
 
 **The scoped source corrections have passed independent review. Phase 3 is NOT
-ready to close as a released/accepted phase.** Serving-database retention
-verification, a safe deployment boundary, operational acceptance and the two
-Android phones remain open. No PR was merged and no release action was taken.
+ready to close as a released/accepted phase.** The owner-confirmed serving
+database's index and anonymous SOS state were verified read-only. Credential
+safety, a safe deployment boundary, operational acceptance and the two Android
+phones remain open. No PR was merged and no release action was taken.
 
 All three PRs are draft/open/unmerged. Independent agent review is not a GitHub
 approval or CI result: the inspected PRs had no formal GitHub reviews and no
@@ -129,7 +130,8 @@ permission, AAB or configuration change is inherently introduced by this fix.
   Reviewer inspected ancestry/source/tests/whitespace; no independent runtime
   rerun or production-retention certification is claimed.
 - **Engineering-ready for owner merge approval after #200**, with production
-  retention certification explicitly held open. Startup neither creates nor
+  index/state verification completed but operational acceptance still open.
+  Startup neither creates nor
   alters the alerts TTL; do not run the superseded TTL-removal proposal.
 
 ## Current assessment verification
@@ -164,9 +166,9 @@ account deletion does not rehome retained history or reset its expiry.
 
 Missing/invalid-date legacy resolved records **do not expire** under a date TTL.
 No safe original date can be invented. Untouched legacy active records carrying
-a date are also an operational concern. These require serving-database inspection
-and, if present, a separately approved evidence-based correction—not an automatic
-cleanup/backfill hidden in startup.
+a date are also a potential operational concern. The approved serving-database
+snapshot below found neither anomaly. Any future evidence-based correction needs
+separate approval—not an automatic cleanup/backfill hidden in startup.
 
 The earlier #200 verification incident remains disclosed: a historical HTTP test
 attempted one configured remote SOS POST and received 401 before its handler/
@@ -175,19 +177,49 @@ All subsequent assessment pytest batches use the collection-time loopback guard.
 
 ## Production retention and deployment gates
 
-Read-only workspace Mongo metadata observed an alerts TTL of **2,592,000 seconds**
-on `resolved_at`, partial filter `resolved_at exists`. It does not enforce resolved
-status itself. Both anonymous anomaly counts were zero at that observation:
-date-valued non-strictly-resolved SOS and strictly resolved SOS without a BSON date.
+### Approved read-only verification — 2026-11-19 20:50 UTC
 
-**That connection has NOT been matched to the database serving Railway. These
-are not verified production results.** Existing provenance notes warn of a
-different database. Require trusted non-secret serving cluster/database identity
-before repeating read-only metadata/aggregate checks against the correct target.
-Inspect active/date and resolved/missing-date anomalies plus exact index options.
-No personal rows need be exported. Any index mismatch, migration or data repair
-requires a new explicit approval. A fresh local TTL index proves nothing about
-which index exists in production.
+The owner supplied the serving cluster hostname and database name. The existing
+connection's hostname and default database matched them; queries explicitly
+selected the confirmed database. This closes the previous target uncertainty
+**based on owner-confirmed configuration**, not independent access to Railway's
+withheld database settings. No credentials or personal rows are recorded here.
+
+Existing index: **`ttl_resolved_at`**, key `resolved_at: 1`,
+**`expireAfterSeconds: 2592000`** (30 days), partial filter
+**`resolved_at: {$exists: true}`**. The index does not enforce resolved status.
+Application writers must keep active/unresolved incidents ineligible.
+
+| Anonymous serving-database snapshot | Count |
+| --- | --- |
+| SOS records | 4 |
+| Strictly resolved with scalar BSON resolution date | 4 |
+| Not strictly resolved with a TTL-capable scalar/array date | 0 |
+| Strictly resolved without a scalar BSON date | 0 |
+| Strictly resolved and already older than 30 days | 0 |
+| Strictly resolved with a future resolution date | 0 |
+| Array-valued resolution date | 0 |
+
+No index migration, timestamp repair or cleanup is indicated by this snapshot.
+This is not proof of a production TTL deletion: no overdue record was present,
+no live record was backdated, and native TTL deletion was observed only on the
+owned local replica. The undeployed source correction and physical/operational
+acceptance remain separate. Future index/data repairs require new approval.
+
+### Credential safety — separate unresolved operational concern
+
+Permission inspection showed the existing secret labelled read-only is actually
+write-capable. An initial check stopped on that discovery; the subsequent
+verification used an explicit command allowlist: collection/index metadata and
+an `alerts` aggregate restricted to `$match`/`$group`. No `$out`, `$merge`,
+record mutation, index operation or configuration change was performed.
+
+A credential was also disclosed in chat. Treat it as exposed: arrange separately
+authorized rotation through secure tooling and a genuinely least-privilege
+verification login. Do not copy the credential into code, reports, task plans,
+logs or comments. No credential value is retained in this report. No evidence
+of unauthorized use is claimed. Rotation and any backend-secret/restart sequence
+are production changes and were not performed under verification-only approval.
 
 Read-only Railway inspection found the live backend-root service connected to
 repository `main`, with source check-suite waiting disabled and a successful
@@ -248,9 +280,10 @@ Never delete a real family or place a non-emergency emergency call.
 
 ## Recommended next action and stop
 
-Approve only trusted serving-database identification and read-only retention
-verification, together with planning the merge/deployment hold. Do not approve
-data repair, index changes, merges or delivery by implication.
+The approved serving-target identification and read-only index/state verification
+are complete. Next, approve a controlled credential-safety and deployment-hold
+plan before any merge. Planning is not authorization to rotate credentials,
+change configuration, repair data, alter indexes, merge or deploy.
 
 Then review the remaining operational and two-phone evidence before deciding
 whether to close Phase 3. Existing broader prelaunch holds remain; no Railway

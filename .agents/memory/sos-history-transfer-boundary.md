@@ -80,8 +80,12 @@ domain and source branch, but its OAuth variable listing returns names only.
 A TTL result from the workspace read-only Mongo connection is not production
 evidence until its cluster and database match the serving service.
 
-**Why:** The read-only URI default and the historical migration guide named
-different databases; only the former had the SOS-matching TTL index.
+**Why:** Historical connection/database provenance was ambiguous, and a secret
+labelled read-only proved write-capable. Neither its label nor default database
+establishes serving identity or least privilege.
 
 **How to apply:** Get a trusted, non-secret cluster identifier and database name
 for the serving service and compare them before labeling index results live.
+Keep owner-confirmed mapping distinct from independently retrieved configuration.
+Check privileges without exposing credentials; restrict verification commands
+to metadata and read-only pipelines, and prefer a genuinely read-only login.

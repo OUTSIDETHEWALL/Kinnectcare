@@ -12,8 +12,10 @@ deletion's three High findings and a subsequent SOS compatibility regression
 are corrected and independently closed. The owner approved minimum delivery
 coordination; final independent security/data-integrity/evidence review is PASS,
 with 536 distinct targeted checks passed and no unresolved Critical/High finding.
-Retention and the consolidated report remain separate downstream work, after
-reporting deletion results and remaining risks to the owner.
+Existing retention draft #190 is now updated and independently reviewed; the
+consolidated Phase 3 report is complete. The owner-confirmed serving database's
+30-day index and anonymous SOS state were verified without mutation. Credential
+safety, controlled delivery and two-phone acceptance remain unresolved.
 
 ## Current phase status
 
@@ -21,7 +23,7 @@ reporting deletion results and remaining risks to the owner.
 | --- | --- | --- |
 | 1 — SOS safety | [PR #196](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/196) owner-merged at `0396e5b9b168699ca0e1baa7952b7afa08548a12` | Deployment/physical acceptance pending certification; do not infer acceptance from a merge. A newer Railway deployment was observed read-only, but Phase 1 runtime behavior was not certified here. |
 | 2 — Medication/check-in reliability | [Medication #197](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/197) and [check-in #198](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/198) owner-merged; both passed independent adversarial re-review with no unresolved Critical/High findings in their affected implementations | Separately approved rollout/physical acceptance; stage/refill decisions remain unapproved |
-| 3 — Family/deletion/SOS retention | [Rotation draft #199](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/199) implemented, independent PASS. [Deletion draft #200](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/200): final independent PASS, all four High findings closed; 259 focused/integration + 277 offline checks passed. Existing retention draft #190 untouched | Results/risk report before retention/consolidated report. Unknown interrupted sends fail closed pending controlled review; approved old-worker drain/index evaluation and physical acceptance remain future gates. No merge/release authorization |
+| 3 — Family/deletion/SOS retention | Drafts #199, #200 and updated #190 passed scoped independent review; consolidated report complete. Current assessment: 356 passes plus 2 known raw-write failures. Owner-confirmed serving database: 30-day TTL present, 4 resolved SOS, 0 checked anomalies | Credential safety, explicit merge/deployment hold, unknown-send operator handling, old-worker drain/performance-index evaluation and physical acceptance remain open. No merge/release authorization |
 | 4 — Google Play Billing | Pending | Architecture approval before implementation/configuration |
 | 5 — Security and automated checks | Pending | Triage confirmed risks and repair test causes; baseline failures are not green |
 | 6 — Final Android AAB/Play verification | Pending | Approved reviewed corrections, separate build/upload/physical acceptance authorization |
@@ -38,6 +40,8 @@ Phase 3 evidence:
 - `docs/prelaunch-phase3-account-deletion.md` — deletion implementation, review,
   test evidence, recovery/rollout limitations and rejected-request incident;
   not the final consolidated Phase 3 report.
+- `docs/prelaunch-phase3-report.md` — consolidated source assessment, serving
+  database snapshot, credential safety, merge order and two-phone acceptance.
 
 ## Phase 1 corrections
 
@@ -68,7 +72,7 @@ generation, incident location fallback, or retention/index implementation change
 | Three-stage/refill scope mismatch | High product-scope gap: only two automatic medication stages; refill workflow absent | Separate source-based reports complete; recommend minimal designs without choosing timing/thresholds/recipients | Documentation in merged #198; no new product behavior implemented | Owner decisions/implementation approval required | Backend/client scope depends on design; native delivery requirements not assumed |
 | Family-code rotation unreachable | High, reproduced: client URL returned 404; dormant write lacked family fence; review additionally found Medium auth provisioning before rotation | Register endpoint; current-owner check and replacement share admission's fence; read-only rotation auth prevents implicit family creation; preserve memberships/INV tokens | Draft #199; independent closure PASS, no C/H/M remaining; 29 new + 113 existing Mongo passed, 126 offline passed, 21 skipped; 3 baseline permission-fixture failures unchanged; see Phase 3A report | Owner review/merge, approved backend delivery and acceptance | Backend deployment only; no migration/index changes |
 | Ordinary care history blocks deletion | High: ordinary self-care history rejected; retained OTP/invite/send races identified during review | Classify verified self records, revoke original identity, fence invitations and reserve sensitive sends; qualify retained SOS/security data | Draft #200; independent PASS, four High findings closed; 536 historical targeted passes plus 2 disclosure checks; current combined assessment in Phase 3 report | Owner approval; unknown sends may block indefinitely; drain old workers, hold automatic deployment and perform physical acceptance | Backend/client delivery; additive collection/counters and separately approved performance indexes; no destructive backfill |
-| Resolved-SOS expiration / policy mismatch | Critical potential data-integrity risk: retained expiry could delete reopened SOS; no verified production loss | Existing #190 updated without replacement/history rewrite; atomically clear reopened expiry, preserve resolution clock and reconcile disclosures | Independent source review PASS, no unresolved C/H; 13 retention cases passed; stacked #199 → #200 → #190 | Serving database/index provenance and legacy anomalies NOT production-verified; owner merge/release approval and two-phone acceptance remain open | No startup alerts-index change/backfill; any production index/data repair separately approved |
+| Resolved-SOS expiration / policy mismatch | Critical potential data-integrity risk: retained expiry could delete reopened SOS; no verified production loss | Existing #190 updated without replacement/history rewrite; atomically clear reopened expiry, preserve resolution clock and reconcile disclosures | Independent source review PASS, no unresolved C/H; 13 retention cases passed; owner-confirmed serving index/state verified read-only; stacked #199 → #200 → #190 | Production TTL deletion itself not observed; credential safety, owner merge/release approval and physical acceptance remain open | No startup alerts-index change/backfill; no repair indicated by snapshot; any future production index/data repair separately approved |
 | Android subscription blocker | Critical release gate: Stripe-only native upgrade flow | Architecture proposal for Play purchases + unified backend entitlements, preserving legitimate Stripe use | Not started | Architecture approval before billing implementation; independent review | Backend + native dependency + AAB + Console configuration |
 | Security findings/logging | High pending reachability triage | Separate real deployed risks from duplicates/conditional/dev findings; redact sensitive logs | Not started | Phase 5 investigation and focused review | Depends on confirmed findings; no broad upgrade assumed |
 | Automated verification failures | High quality gate: mixed defects, stale mocks and environment gaps | Repair causes, not assertions; isolated databases/network controls | Baseline frontend: 4 failed suites/8 failures; backend incomplete plus check-in mock failures | Phase 5; focused Phase 1 tests do not declare the entire repository green | Mostly development-only; deployment if a production defect is corrected |
@@ -77,9 +81,10 @@ generation, incident location fallback, or retention/index implementation change
 ## Review and release boundaries
 
 The 30-day resolved-SOS rule is approved. The subsequent Phase 3 source review
-updated existing draft #190, but did not certify serving-production index or legacy
-data state. See `docs/prelaunch-phase3-report.md` for current evidence, merge order
-and open gates. No blanket alerts TTL or production migration is introduced.
+updated existing draft #190 and verified the owner-confirmed serving database's
+index and anonymous SOS state without writes. This does not certify actual live
+TTL deletion or Android acceptance. See `docs/prelaunch-phase3-report.md` for
+evidence, merge order and open gates. No blanket TTL or migration is introduced.
 
 Notification explainability is unchanged: user SOS activation causes the existing
 family-scoped fanout; current visible/silent payloads, timing and deduplication are
