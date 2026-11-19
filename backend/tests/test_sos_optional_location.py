@@ -45,6 +45,8 @@ def test_real_sos_accepts_optional_location_and_preserves_family_fanout(sos, pay
         assert alert["type"] == "sos"
         assert alert["family_group_id"] == "sos-family"
         assert alert["owner_id"] == "sender"
+        assert "Emergency services notified" not in alert["message"]
+        assert "Emergency calling is not confirmed by Kinnship" in alert["message"]
         assert alert["latitude"] == payload.get("latitude")
         assert alert["longitude"] == payload.get("longitude")
         assert sos.push.await_count == 2
@@ -88,3 +90,16 @@ def test_http_sos_still_requires_authentication(sos):
         sos.push.assert_not_awaited()
     finally:
         server.app.dependency_overrides.update(previous)
+
+
+def test_both_entrypoints_avoid_unsupported_emergency_dispatch_claims():
+    """Guard the stale root entrypoint too without importing or starting it."""
+    import ast
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    for relative in ("backend/server.py", "server.py"):
+        tree = ast.parse((root / relative).read_text())
+        endpoint = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "trigger_sos")
+        literals = [n.value for n in ast.walk(endpoint) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        assert not any("Emergency services notified" in text for text in literals)
+        assert any("Emergency calling is not confirmed by Kinnship" in text for text in literals)

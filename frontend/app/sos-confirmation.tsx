@@ -1,21 +1,28 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, Animated, Linking, Alert, Platform,
+  View, Text, StyleSheet, TouchableOpacity, Animated, Platform, ScrollView,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../src/theme';
+import { EmergencyCallAction } from '../src/components/EmergencyCallAction';
+import { clearSosSendReceipt, readSosSendReceipt, sosAccountScope, subscribeSosSendReceipt } from '../src/sosSendReceipt';
+import { useAuth } from '../src/AuthContext';
 
 /**
- * SOS confirmation screen — shown only after sos-sending.tsx confirms the
- * POST /sos call succeeded. We never show this screen unless the server has
- * acknowledged receipt, so "Emergency Alert Sent" is always truthful.
- *
- * The "Waiting for acknowledgement" row is a static placeholder; when backend
- * support for family acknowledgements ships it will become a live poll.
+ * A route/deep link is not evidence. Only this process's matching server receipt
+ * confirms recording, not push delivery, GPS freshness, or an emergency call.
  */
 export default function SOSConfirmation() {
   const router = useRouter();
+  const { receiptId } = useLocalSearchParams<{ receiptId?: string }>();
+  const { user } = useAuth();
+  const scope = sosAccountScope(user);
+  const receipt = useSyncExternalStore(
+    subscribeSosSendReceipt,
+    () => readSosSendReceipt(receiptId, scope),
+    () => null,
+  );
   const scale = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -23,17 +30,18 @@ export default function SOSConfirmation() {
       toValue: 1, friction: 5, tension: 80, useNativeDriver: true,
     }).start();
   }, [scale]);
-
-  const dial911 = async () => {
-    const url = 'tel:911';
-    try {
-      const supported = await Linking.canOpenURL(url);
-      if (supported) await Linking.openURL(url);
-      else Alert.alert('Could not open dialer', 'Please dial 911 manually.');
-    } catch {
-      Alert.alert('Could not open dialer', 'Please dial 911 manually.');
-    }
-  };
+  useEffect(() => () => {
+    if (typeof receiptId === 'string') clearSosSendReceipt(receiptId);
+  }, [receiptId, scope]);
+  const locationLabel = !receipt ? 'Location status unknown' : receipt.location === 'unavailable' ? 'Location unavailable'
+    : receipt.location === 'gps' ? 'GPS location recorded'
+      : receipt.location === 'last-known' ? 'Last-known location recorded' : 'Location coordinates recorded';
+  const locationDetail = !receipt || receipt.location === 'unavailable'
+    ? 'No coordinates were confirmed with this alert.'
+    : receipt.capturedAt
+      ? `Captured ${new Date(receipt.capturedAt).toLocaleString()}`
+        + (receipt.accuracy !== undefined ? ` · accuracy ±${Math.round(receipt.accuracy)} m` : ' · accuracy unavailable')
+      : 'Capture time and freshness are not confirmed. See emergency details.';
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
@@ -50,50 +58,50 @@ export default function SOSConfirmation() {
         </TouchableOpacity>
       </View>
 
-      <View style={styles.content}>
+      <ScrollView contentContainerStyle={styles.content}>
         <Animated.View style={[styles.iconWrap, { transform: [{ scale }] }]}>
           <Text style={styles.iconText}>🆘</Text>
         </Animated.View>
 
-        <Text testID="sos-title" style={styles.title}>Emergency Alert Sent</Text>
+        <Text testID="sos-title" style={styles.title}>
+          {receipt ? 'SOS Alert Recorded' : 'SOS Status Not Confirmed'}
+        </Text>
         <Text style={styles.subtitle}>
-          Your family has been notified and emergency services were dialled.
+          {receipt
+            ? 'The server recorded your SOS. Notification delivery and emergency calls are not confirmed.'
+            : 'No matching server receipt is available on this screen. Check Alerts or call 911 if you need help.'}
         </Text>
 
         <View style={styles.statusList}>
           <StatusRow
             icon="🔔"
-            label="Family notified"
-            sub="Push notification delivered to all devices"
+            label={receipt?.notificationRequested ? 'Family notification requested' : 'Family notification status unknown'}
+            sub="Delivery to family devices is not confirmed."
+            pending
           />
           <StatusRow
             icon="📍"
-            label="Current location shared"
-            sub="Coordinates sent with the alert"
+            label={locationLabel}
+            sub={locationDetail}
+            pending={!receipt || receipt.location === 'unavailable'}
           />
           <StatusRow
             icon="🕐"
-            label="Time recorded"
-            sub="Alert timestamped for your family"
+            label={receipt?.recordedAt ? 'Server receipt time' : 'Receipt time unavailable'}
+            sub={receipt?.recordedAt ? new Date(receipt.recordedAt).toLocaleString() : 'No confirmed timestamp on this screen.'}
+            pending={!receipt?.recordedAt}
           />
           <StatusRow
             icon="👀"
-            label="Waiting for your family to respond..."
-            sub="You'll be notified as soon as someone sees this"
+            label="Family response not confirmed here"
+            sub="Check Alerts for acknowledgments and resolution."
             pending
           />
         </View>
-      </View>
+      </ScrollView>
 
       <View style={styles.bottom}>
-        <TouchableOpacity
-          testID="sos-call-911"
-          onPress={dial911}
-          activeOpacity={0.85}
-          style={styles.callBtn}
-        >
-          <Text style={styles.callBtnText}>📞 Call 911</Text>
-        </TouchableOpacity>
+        <EmergencyCallAction key={`${scope}:${receiptId}`} initiallyOpened={receipt?.dialerOpened} />
         <TouchableOpacity
           testID="sos-done"
           onPress={() => router.replace('/(tabs)/dashboard')}
@@ -143,8 +151,8 @@ const styles = StyleSheet.create({
     color: '#FFFFFF', fontSize: 16, fontWeight: '800', letterSpacing: 0.2,
   },
   content: {
-    flex: 1, alignItems: 'center', justifyContent: 'center',
-    paddingHorizontal: 28, paddingTop: 12,
+    flexGrow: 1, alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 28, paddingVertical: 12,
   },
   iconWrap: {
     width: 130, height: 130, borderRadius: 65, backgroundColor: Colors.sos,
@@ -181,9 +189,4 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   ctaText: { color: Colors.surface, fontSize: 16, fontWeight: '800' },
-  callBtn: {
-    height: 52, borderRadius: 16, alignItems: 'center', justifyContent: 'center',
-    backgroundColor: Colors.surface, borderWidth: 2, borderColor: Colors.sos,
-  },
-  callBtnText: { color: Colors.sos, fontSize: 15, fontWeight: '800' },
 });
