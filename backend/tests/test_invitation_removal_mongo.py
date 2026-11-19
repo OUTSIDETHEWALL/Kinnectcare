@@ -57,11 +57,14 @@ async def accept(s, mode):
     if mode == "legacy":
         return await s.http.post("/api/family-group/join", headers={"x-test-actor": "invitee"},
                                  json={"invite_code": s.invite["token"]})
-    await s.db.otp_codes.insert_one({
+    current_user = await s.db.users.find_one({"email": "invitee@example.com"})
+    identity = await s.db.email_link_identities.find_one({"_id": links.digest("invitee@example.com")}) or {}
+    await s.db.otp_codes.update_one({"email": "invitee@example.com"}, {"$set": {
         "email": "invitee@example.com", "code_hash": "123456", "purpose": "signup",
-        "credential_id": uuid.uuid4().hex, "issued_user_id": "invitee", "deletion_generation": 0,
+        "credential_id": uuid.uuid4().hex, "issued_user_id": current_user["id"] if current_user else None,
+        "deletion_generation": identity.get("deletion_generation", 0),
         "invite_code": s.invite["token"], "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
-    })
+    }}, upsert=True)
     try:
         body = await retained_otp(s.db)(SimpleNamespace(email="invitee@example.com", code="123456"))
         return SimpleNamespace(status_code=200, json=lambda: body)

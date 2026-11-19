@@ -1,13 +1,14 @@
 # Phase 3B — safe account deletion
 
-## Status: independent code re-review PASS; final regression evidence pending
+## Status: independent final review PASS; draft remains unmerged
 
 **Do not merge or deploy.** The owner explicitly approved correction of the
 three High findings and minimum deletion-sensitive delivery coordination,
 including interruption, retries and recovery. Implementation and focused tests
 have been added. Independent code re-review explicitly closed the original
 three High findings and the additional SOS regression, with no further concrete
-Critical/High defect identified. Final regression evidence review is pending.
+Critical/High defect identified. Final security/data-integrity and evidence
+review is **PASS**, with **zero unresolved Critical/High findings** in this scope.
 PR #200 remains draft, stacked on unmerged PR #199.
 
 The sections below through “Initial verification” record the initial draft's
@@ -263,6 +264,10 @@ previously authorized work can arrive after deletion even when its call ended.
 - No billing implementation, native dependency, OTA, AAB, Play configuration,
   provider configuration or production database/index change was performed.
   Physical Android behavior and signed-in visual acceptance remain unverified.
+- The extra short reservation transactions depend on database availability and
+  may add send latency, including to SOS fanout. Provider calls never hold a
+  transaction open, and the existing emergency priority/quiet-hours exceptions
+  remain intact; physical-device latency has not been accepted here.
 
 ## Verification incident
 
@@ -291,9 +296,59 @@ prohibits non-loopback TCP during imports as well as test execution.
    to run the focused Mongo suites was blocked by review-shell filesystem
    permissions before fixtures could start; no independent runtime pass count
    is claimed.
-4. Final evidence review: pending the guarded regression results.
+4. Final independent security/data-integrity/evidence review: **PASS**; all four
+   High findings remain **CLOSED**, no unresolved Critical/High in the reviewed
+   scope. The reviewer inspected the retained run logs, verified the
+   `121 + 96 + 42 + 277 = 536` accounting and independently reran collection to
+   confirm the 96-test passing prefix. They approved the test-adapter corrections
+   as accurate fresh-issuance/transaction fixtures, not assertion weakening or
+   security bypasses. They did not independently rerun the passing suites.
 
 The reviewer explicitly confirmed that unknown interrupted sends remaining
 blocked meets the approved fail-closed scope, not an unattended-recovery
 guarantee. No review verdict is permission to merge, deploy, change production
 indexes, publish OTA or build/upload Android.
+
+## Final guarded verification
+
+Implementation commit: `bc0c0465` (subsequent test-adapter/evidence updates do not
+change production logic). GitHub `main` was rechecked and remains
+`56b0d7634e5cf3131c3f972fe0971f5f8d11cf67`.
+
+| Check | Final result / boundary |
+| --- | --- |
+| Deletion, coordination, email-link Mongo and family-write-fence suites | **121 passed** in one completed guarded run |
+| Invitation-removal, medication-midnight Mongo, check-in scheduler and rotation | **96 passed** as the complete first four suites of the safety batch; a later refresh test stopped that batch |
+| Refresh authorization/evidence and real-Mongo SOS priority | **42 passed** in the final completed guarded run after correcting the refresh storage fixture |
+| Distinct guarded tests across these integration/focused groups | **259 passed**; do not add preceding partial-run pass counts again |
+| New tests in this correction | **25 coordination tests**, in addition to the existing draft's **48 deletion/race tests**; all **73** are included in the 259, not additive |
+| Fresh-process guarded offline groups | Email links **59**, optional-location SOS **7**, consent writes **11**, family-snapshot privacy **51**, location history **32**, pipeline **40**, refresh trace **32**, medication reliability **34**, device presence **11**: **277 passed** |
+| Overall distinct targeted checks above | **536 passed**; not a full-repository green claim |
+| Python compilation / whitespace | Passed for changed application/test modules; no dependency changes |
+| Preview | Restarted, compiled, screenshot reached existing Important Notice; signed-in deletion and Android UI/delivery not verified |
+
+The 96-test group count was independently collected to identify the passing
+prefix exactly. Earlier combined attempts stopped at **100**, **125**, **139**
+and **124** passes respectively because old AST/storage test adapters did not
+yet model the helper extraction and bound-credential contract. These are not
+additional pass counts. The adapters now execute both actual OTP functions and
+issue credentials bound to the actual present/absent account and mailbox
+generation, matching fresh issuance. Repeated fixture issuance replaces the
+email's current credential, matching the route rather than accumulating
+duplicate synthetic rows. Original transaction/authority assertions were kept.
+
+The relay-sanitization test previously used a nontransactional fake database.
+It now runs the **actual** authority lookup, reservation, provider stub and
+private-evidence persistence against owned Mongo; the safe-field assertions are
+unchanged. It explicitly requires the real-Mongo opt-in instead of pretending a
+collection-only mock establishes transaction behavior.
+
+All final groups loaded the precollection loopback prohibition. The separate
+historical rejected remote test described above is excluded from these counts.
+Run logs and the preview image are retained locally in `generated-artifacts/`;
+they are intentionally excluded from Git and deployment uploads.
+
+Baseline full-repository failures, including the previously reported TypeScript
+error and five legacy offline transaction/mock groups, remain outside this
+correction. No new full-repository or physical-device certification is claimed.
+No source or assertions were changed to hide those baseline failures.
