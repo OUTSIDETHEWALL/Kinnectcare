@@ -1420,7 +1420,7 @@ export default function MeScreen() {
         <View style={[styles.card, { borderColor: '#F2C3C0' }]}>
           <NavRow testID="me-delete-account" icon="🗑" label="Delete Account" onPress={openDelete} danger />
         </View>
-        <Text style={styles.dangerHint}>Permanently deletes your account and all associated data. This cannot be undone.</Text>
+        <Text style={styles.dangerHint}>Deletes your account and verified personal data. Resolved SOS history and minimal security records may be retained.</Text>
 
         {/* Footer */}
         <Text style={styles.footer}>{APP_NAME} · © {new Date().getFullYear()} {COMPANY_NAME}</Text>
@@ -1505,11 +1505,13 @@ export default function MeScreen() {
             <Text style={styles.modalEmoji}>⚠️</Text>
             <Text style={styles.modalTitle}>Delete your account?</Text>
             <Text style={styles.modalBody}>
-              This will permanently delete your Kinnship account and all related data:
-              {'\n'}• family member profiles
-              {'\n'}• medications, routines, and check-ins
-              {'\n'}• alerts and SOS history
-              {'\n'}• any active subscription (will be canceled)
+              This permanently deletes your account and verified personal data:
+              {'\n'}• your linked profile, medications, routines, and check-ins
+              {'\n'}• your registered devices, pending notifications, and sign-in links
+              {'\n\n'}Other family members&apos; information is not deleted. Resolve active SOS incidents and hand off dependent care or family ownership first.
+              {'\n\n'}Resolved SOS history is retained under the 30-day policy. Notifications already in progress may still arrive.
+              {'\n\n'}Unresolved notification or email attempts can delay deletion pending review. Minimal hashed security records are retained to prevent old credentials being reused.
+              {'\n\n'}Cancellation of an existing subscription is attempted after deletion; it is not guaranteed if the billing service fails.
               {'\n\n'}
               This action cannot be undone.
             </Text>

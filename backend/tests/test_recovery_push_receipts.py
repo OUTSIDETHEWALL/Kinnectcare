@@ -11,6 +11,8 @@ import httpx
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
+TICKET_ONE = "a2d103e0-d39b-4fb5-8e51-340cfc70e3b6"
+TICKET_TWO = "b2d103e0-d39b-4fb5-8e51-340cfc70e3b6"
 
 
 class _FakeResponse:
@@ -206,7 +208,7 @@ def test_collector_persists_receipt_and_post_acceptance_signal_outcome():
         "sent_at": accepted_at,
         "receipt_attempts": 0,
         "receipt_check_after": accepted_at + timedelta(minutes=15),
-        "tickets": [{"ticket_id": "ticket-1", "status": "ok"}],
+        "tickets": [{"ticket_id": TICKET_ONE, "status": "ok"}],
     }
     evidence_collection = SimpleNamespace(
         update_one=AsyncMock(return_value=SimpleNamespace(matched_count=1)),
@@ -228,7 +230,8 @@ def test_collector_persists_receipt_and_post_acceptance_signal_outcome():
             server,
             "get_expo_push_receipts",
             AsyncMock(return_value={
-                "ticket-1": {"status": "ok", "error": None, "message": None},
+                TICKET_ONE: {"status": "ok", "error": "private-token 33.1234567", "message": "private-message"},
+                "unrequested-private-id": {"status": "ok", "error": None},
             }),
         ),
     ):
@@ -244,7 +247,7 @@ def test_collector_persists_receipt_and_post_acceptance_signal_outcome():
     assert saved["receipt_status"] == "complete"
     assert saved["receipt_attempts"] == 1
     assert saved["receipts"] == {
-        "ticket-1": {"status": "ok", "error": None},
+        TICKET_ONE: {"status": "ok", "error": "unknown"},
     }
     assert saved["signals_after_send"]["location_contact_advanced"] is True
     assert saved["signals_after_send"]["gps_capture_advanced"] is False
@@ -267,8 +270,8 @@ def test_partial_receipt_is_requeued_without_sleeping_in_process():
         "receipt_attempts": 0,
         "receipt_check_after": accepted_at + timedelta(minutes=15),
         "tickets": [
-            {"ticket_id": "ticket-1", "status": "ok"},
-            {"ticket_id": "ticket-2", "status": "ok"},
+            {"ticket_id": TICKET_ONE, "status": "ok"},
+            {"ticket_id": TICKET_TWO, "status": "ok"},
         ],
     }
     evidence_collection = SimpleNamespace(
@@ -285,7 +288,7 @@ def test_partial_receipt_is_requeued_without_sleeping_in_process():
             server,
             "get_expo_push_receipts",
             AsyncMock(return_value={
-                "ticket-1": {"status": "ok", "error": None, "message": None},
+                TICKET_ONE: {"status": "ok", "error": None, "message": None},
             }),
         ),
     ):

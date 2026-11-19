@@ -57,6 +57,8 @@
  *  B3. AppState 'background' does NOT trigger load() — no extra API calls.
  */
 
+import * as Haptics from 'expo-haptics';
+
 // React 19 act() support — must precede all React imports.
 (global as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -85,6 +87,7 @@ const focusHarness = {
 
 // ── AppState listener capture ─────────────────────────────────────────────────
 const appStateListeners: Array<(state: string) => void> = [];
+const mockDashboardPush = jest.fn();
 
 // ── react-native mock ─────────────────────────────────────────────────────────
 
@@ -109,7 +112,21 @@ jest.mock('react-native', () => {
   const Animated = {
     Value: AnimatedValue,
     View: AnimatedView,
-    timing: () => ({ start: (cb?: any) => { cb?.({ finished: false }); }, stop: () => {} }),
+    timing: (_value: unknown, { duration }: { duration: number }) => {
+      let timer: ReturnType<typeof setTimeout>;
+      let completion: ((result: { finished: boolean }) => void) | undefined;
+      return {
+        start: (cb?: typeof completion) => {
+          completion = cb;
+          timer = setTimeout(() => { completion = undefined; cb?.({ finished: true }); }, duration);
+        },
+        stop: () => {
+          clearTimeout(timer);
+          completion?.({ finished: false });
+          completion = undefined;
+        },
+      };
+    },
     spring: () => ({ start: () => {} }),
     createAnimatedComponent: (C: any) => C,
   };
@@ -148,7 +165,7 @@ jest.mock('react-native', () => {
 // focusHarness.blur() + focusHarness.focus() to simulate a full tab-switch.
 
 jest.mock('expo-router', () => ({
-  useRouter: () => ({ push: jest.fn() }),
+  useRouter: () => ({ push: mockDashboardPush }),
   useFocusEffect: (cb: () => (() => void) | void) => {
     // Always update harness with the latest callback closure.
     // Dashboard wraps its callback in useCallback([members.length]) so a
@@ -512,6 +529,80 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.useRealTimers();
+});
+
+describe('Family dashboard — fixed SOS control', () => {
+  let tree: any;
+  const find = (id: string) => tree.root.findAll((node: any) =>
+    typeof node.type === 'string' && node.props.testID === id)[0];
+  const advance = (ms: number) => act(async () => { jest.advanceTimersByTime(ms); });
+
+  beforeEach(async () => {
+    mockApiGet.mockImplementation(async (url: string) => {
+      if (url === '/members') return membersResponse();
+      if (url === '/summary') return summaryResponse();
+      return { data: [] };
+    });
+    tree = await mountAndSettle();
+  });
+  afterEach(async () => { await act(async () => tree.unmount()); });
+
+  it('reserves a fixed sibling row, keeping the scroll viewport and SOS hit target separate', () => {
+    const screen = tree.root.findByType('SafeAreaView');
+    const scroll = screen.findAllByType('ScrollView')[0];
+    const dock = find('family-sos-dock');
+    const button = find('sos-button');
+    expect(screen.props.edges).toEqual(['top', 'left', 'right']);
+    expect(scroll.findAllByProps({ testID: 'sos-button' })).toHaveLength(0);
+    expect(scroll.props.style).toMatchObject({ flex: 1, minHeight: 0 });
+    expect(scroll.props.contentContainerStyle.paddingBottom).toBeGreaterThan(0);
+    expect(dock.props.style).toMatchObject({ flexDirection: 'row', flexShrink: 0 });
+    expect(dock.props.style.position).toBeUndefined();
+    expect(dock.findByType('AnimatedView').props.style[0]).toMatchObject({ width: 92, height: 92 });
+    expect(dock.findByType('Svg').props.width).toBeGreaterThan(92 * 1.07 + 16);
+    expect(button.props).toMatchObject({
+      accessibilityRole: 'button', accessibilityLabel: 'SOS', accessibilityHint: 'Press and hold for SOS',
+    });
+  });
+
+  it('keeps hold feedback, early release, countdown cancellation and one completed activation', async () => {
+    const pressIn = () => act(async () => find('sos-button').props.onPressIn());
+    const pressOut = () => act(async () => find('sos-button').props.onPressOut());
+    const dockText = () => collectTextContent(find('family-sos-dock'));
+
+    await pressIn();
+    expect(dockText()).toContain('Release to cancel');
+    expect(find('family-sos-dock').findAllByType('Circle')).toHaveLength(2);
+    await advance(2499);
+    expect(find('sos-countdown-overlay')).toBeUndefined();
+    await pressOut();
+    await advance(3500);
+    expect(dockText()).toContain('Press & hold');
+    expect(find('family-sos-dock').findAllByType('Circle')).toHaveLength(0);
+    expect(mockDashboardPush).not.toHaveBeenCalled();
+    expect(Haptics.impactAsync).toHaveBeenCalledWith(Haptics.ImpactFeedbackStyle.Light);
+    expect(Haptics.notificationAsync).not.toHaveBeenCalled();
+
+    await pressIn();
+    await advance(2500);
+    expect(find('sos-countdown-overlay')).toBeDefined();
+    await pressOut();
+    await act(async () => find('sos-countdown-cancel').props.onPress());
+    await advance(3000);
+    expect(find('sos-countdown-overlay')).toBeUndefined();
+    expect(mockDashboardPush).not.toHaveBeenCalled();
+
+    await pressIn();
+    await advance(2500);
+    await pressOut();
+    await advance(2999);
+    expect(mockDashboardPush).not.toHaveBeenCalled();
+    await advance(1);
+    expect(mockDashboardPush).toHaveBeenCalledTimes(1);
+    expect(mockDashboardPush).toHaveBeenCalledWith('/sos-sending');
+    expect(Haptics.notificationAsync).toHaveBeenCalledTimes(2);
+    expect(Haptics.impactAsync).toHaveBeenCalledWith(Haptics.ImpactFeedbackStyle.Heavy);
+  });
 });
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

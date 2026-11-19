@@ -2598,7 +2598,7 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         owner_id=current["id"], family_group_id=current["family_group_id"], member_id=member_id, member_name=member_name,
         type="sos", severity="critical",
         title=f"SOS Emergency — {member_name}",
-        message=f"{member_name} triggered SOS at {local_time_str}.{coord_str} Emergency services notified.",
+        message=f"{member_name} triggered SOS at {local_time_str}.{coord_str} Emergency calling is not confirmed by Kinnship.",
         latitude=data.latitude, longitude=data.longitude,
     )
     await db.alerts.insert_one(alert.model_dump())

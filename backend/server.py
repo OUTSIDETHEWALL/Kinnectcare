@@ -3,8 +3,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import ReturnDocument
+from pymongo import ReadPreference, ReturnDocument
 from pymongo.errors import DuplicateKeyError
+from pymongo.read_concern import ReadConcern
 import os
 import json
 import logging
@@ -59,10 +60,12 @@ from expo_push import (
 import billing
 import family_group as fg
 import sos_history as sh
+import account_deletion as account_cleanup
 import family_write_fence as fw
 import invitation_presentation
 import sms
 import med_scheduler
+import checkin_scheduler
 import geocoding
 
 # Module-level set of fire-and-forget background tasks (SOS fanout, etc.).
@@ -746,10 +749,11 @@ def create_access_token(user_id: str) -> str:
     return jwt.encode({"sub": user_id, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
 
 
-async def get_current_user(
+async def get_authenticated_user(
     request: Request,
     creds: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
+    """Authenticate only; administrative operations need not provision a family."""
     try:
         payload = jwt.decode(creds.credentials, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("sub")
@@ -760,6 +764,14 @@ async def get_current_user(
     user = await db.users.find_one({"id": user_id}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
+async def get_current_user(
+    request: Request,
+    creds: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    user = await get_authenticated_user(request, creds)
     # Ensure user has a family_group_id (lazy-creates for legacy users)
     await fg.ensure_family_group(db, user)
     # Presence middleware deliberately reads this only after the dependency
@@ -949,7 +961,18 @@ async def push_to_user(user_id: str, title: str, body: str, data: dict) -> int:
 
     dead_tokens: List[str] = []
     try:
-        dead_tokens = await send_expo_push(tokens, title, body, data) or []
+        import deletion_delivery as dd
+        outcome = await dd.run(
+            db, lambda: send_expo_push(tokens, title, body, data),
+            user_ids=[user_id], data=data,
+            operation_key=(
+                f"push:{user_id}:{data.get('type')}:{data.get('stage')}:" +
+                str(data.get("occurrence_id") or data.get("alert_id") or data.get("request_id"))
+            ) if data and (data.get("occurrence_id") or data.get("alert_id") or data.get("request_id")) else None,
+        )
+        if outcome is None:
+            return 0
+        dead_tokens = outcome or []
     except Exception as e:
         logger.warning(f"push_to_user failed for {user_id}: {e}")
     # Prune dead tokens out of the user's push_tokens array so subsequent
@@ -1039,192 +1062,8 @@ async def reset_daily_reminder_statuses(family_group_id: str, user: dict):
 
 
 async def detect_missed_checkins(family_group_id: str, user: dict):
-    """Detect members who have missed their expected check-in.
-
-    Two modes are supported per member:
-      - Fixed-time mode (`daily_checkin_time` = "HH:MM" in the owner's tz).
-        Expectation: at least one check-in today after that time.
-      - Interval mode (`checkin_interval_hours` = N, `checkin_interval_started_at`
-        anchor). Expectation: at least one check-in within the last N hours.
-
-    Modes are mutually exclusive. We grace-period each window by 15 minutes
-    before flagging it as missed.
-    """
-    tz = user_tz(user)
-    now_local = datetime.now(tz)
-    now_utc = datetime.now(timezone.utc)
-    now_minutes = now_local.hour * 60 + now_local.minute
-    day_start_local = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz)
-    day_start_utc = day_start_local.astimezone(timezone.utc)
-
-    GRACE_MIN = 15  # minutes of leeway before raising a missed alert
-
-    # NEW-MEMBER GRACE WINDOW (v6.11.6):
-    #
-    # When a caregiver adds a brand-new family member, the moment they
-    # save a `daily_checkin_time` or `checkin_interval_hours` we should
-    # NOT immediately fire missed-checkin alerts — there's been no time
-    # for the senior to check in yet, and the alert is obviously a
-    # false positive that erodes trust in the system. Industry-standard
-    # practice (Apple Health, Google Fit, every "habit" app) is to
-    # silently start tracking the next full cycle and only escalate if
-    # they miss that one.
-    #
-    # We give every newly-added member a 24-hour grace window after
-    # creation during which missed-checkin alerts are suppressed.
-    # That covers every fixed-time schedule (next-day-at-09:00 etc.)
-    # AND every interval schedule up to 24h. Intervals shorter than
-    # 24h still get their full first cycle of leeway.
-    NEW_MEMBER_GRACE_HOURS = 24
-    new_member_grace = timedelta(hours=NEW_MEMBER_GRACE_HOURS)
-
-    members = await db.members.find(
-        {
-            "family_group_id": family_group_id,
-            "$or": [
-                {"daily_checkin_time": {"$ne": None}},
-                {"checkin_interval_hours": {"$ne": None}},
-            ],
-        },
-        {"_id": 0},
-    ).to_list(500)
-
-    for m in members:
-        # Honor the new-member grace window FIRST, before any mode-specific
-        # logic. A member created less than 24h ago is "fresh" — we don't
-        # know their normal rhythm yet, and any "missed" alert here is
-        # noise.
-        m_created = m.get("created_at")
-        if m_created:
-            if isinstance(m_created, str):
-                try:
-                    m_created = datetime.fromisoformat(m_created.replace("Z", "+00:00"))
-                except Exception:
-                    m_created = None
-            if m_created and m_created.tzinfo is None:
-                m_created = m_created.replace(tzinfo=timezone.utc)
-            if m_created and (now_utc - m_created) < new_member_grace:
-                continue
-
-        interval = m.get("checkin_interval_hours")
-        fixed = m.get("daily_checkin_time")
-
-        # -------- Interval mode --------
-        if interval and interval in ALLOWED_CHECKIN_INTERVALS:
-            anchor = m.get("checkin_interval_started_at")
-            if not anchor:
-                continue
-            if isinstance(anchor, str):
-                try:
-                    anchor = datetime.fromisoformat(anchor.replace("Z", "+00:00"))
-                except Exception:
-                    continue
-            if anchor.tzinfo is None:
-                anchor = anchor.replace(tzinfo=timezone.utc)
-            window = timedelta(hours=interval)
-            grace = timedelta(minutes=GRACE_MIN)
-            # Number of complete windows since anchor.
-            elapsed = now_utc - anchor
-            if elapsed < window + grace:
-                # Still inside (or just past) the first window — not yet due.
-                continue
-            # Latest window cut-off that we EXPECT the senior to have checked in by.
-            # If now is t, the last expected check-in was at (now - elapsed % window)
-            # but to avoid false-positives right at the boundary we subtract the grace.
-            slots_passed = int(elapsed.total_seconds() // window.total_seconds())
-            last_due_utc = anchor + window * slots_passed
-            if now_utc < last_due_utc + grace:
-                # Inside grace period for the most-recent slot — still OK.
-                continue
-            # Did the senior check in at any point AFTER the previous slot?
-            previous_slot_utc = anchor + window * max(0, slots_passed - 1)
-            has_ci = await db.checkins.find_one(
-                {
-                    "family_group_id": family_group_id,
-                    "member_id": m["id"],
-                    "created_at": {"$gte": previous_slot_utc},
-                }
-            )
-            if has_ci:
-                continue
-            # RACE-SAFE INSERT: relies on the unique partial index
-            # `uniq_alert_slot` on (family_group_id, member_id, type, slot_key)
-            # ensured at startup.  Multiple concurrent callers all see no
-            # alert at find_one time, race to insert, and exactly ONE wins
-            # — the rest get DuplicateKeyError and are skipped.  Without
-            # this guard, every poll of /api/alerts or /api/summary from
-            # every device in the family group fired its own duplicate
-            # push (see duplicate missed-check-in reports).
-            label = f"every {interval} hours"
-            slot_key = f"interval_{last_due_utc.replace(microsecond=0).isoformat()}"
-            a = Alert(
-                owner_id=user["id"],
-                family_group_id=family_group_id,
-                member_id=m["id"],
-                member_name=m["name"],
-                type="missed_checkin",
-                severity="critical",
-                title=f"{m['name']} missed scheduled check-in",
-                message=(
-                    f"Expected {label}. The most recent {interval}-hour window has "
-                    f"passed without a check-in."
-                ),
-            )
-            doc = a.model_dump()
-            doc["slot_key"] = slot_key
-            try:
-                if not await fw.insert_background_record(db, "alerts", doc):
-                    continue
-            except DuplicateKeyError:
-                # Another concurrent request already inserted + pushed for
-                # this slot.  Do NOT fan out a duplicate push.
-                continue
-            await db.members.update_one({"id": m["id"]}, {"$set": {"status": "warning"}})
-            await push_to_family_group(
-                family_group_id,
-                f"⚠️ {m['name']} missed check-in",
-                f"Expected {label}. Tap to call or check on them.",
-                {"type": "missed_checkin", "member_id": m["id"], "alert_id": a.id},
-            )
-            continue
-
-        # -------- Fixed-time mode --------
-        if not fixed:
-            continue
-        expected = parse_hhmm(fixed)
-        if expected is None or now_minutes < expected + GRACE_MIN:
-            continue
-        has_ci = await db.checkins.find_one(
-            {"family_group_id": family_group_id, "member_id": m["id"], "created_at": {"$gte": day_start_utc}}
-        )
-        if has_ci:
-            continue
-        # RACE-SAFE INSERT — see explanation in interval branch above.
-        # slot_key combines the local date and the expected HH:MM so the
-        # same alert never fires twice in the same day for the same slot.
-        slot_key = f"fixed_{now_local.date().isoformat()}_{fixed}"
-        a = Alert(
-            owner_id=user["id"], family_group_id=family_group_id,
-            member_id=m["id"], member_name=m["name"],
-            type="missed_checkin", severity="critical",
-            title=f"{m['name']} missed daily check-in",
-            message=f"Expected by {fixed} ({user.get('timezone') or 'UTC'}) today. They haven't checked in yet.",
-        )
-        doc = a.model_dump()
-        doc["slot_key"] = slot_key
-        try:
-            if not await fw.insert_background_record(db, "alerts", doc):
-                continue
-        except DuplicateKeyError:
-            # Another concurrent request already inserted + pushed.
-            continue
-        await db.members.update_one({"id": m["id"]}, {"$set": {"status": "warning"}})
-        await push_to_family_group(
-            family_group_id,
-            f"⚠️ {m['name']} missed check-in",
-            f"Expected by {fixed}. Tap to call or check on them.",
-            {"type": "missed_checkin", "member_id": m["id"], "alert_id": a.id},
-        )
+    """Compatibility discovery; the backend worker owns reliable delivery."""
+    await checkin_scheduler.process_family(db, family_group_id)
 
 
 async def push_to_family_group(family_group_id: str, title: str, body: str, data: dict, exclude_user_id: Optional[str] = None) -> int | dict:
@@ -1524,7 +1363,7 @@ def _deliver_otp_email_sync(to_email: str, code: str, purpose: str) -> tuple[boo
     return False, "none"
 
 
-async def _deliver_otp_and_record(to_email: str, code: str, purpose: str) -> None:
+async def _deliver_otp_and_record(to_email: str, code: str, purpose: str, credential_id: str) -> None:
     """Background task: deliver the OTP via whichever transport is
     available, then record the delivery status back onto the otp_codes
     document so the client can poll for it.
@@ -1535,13 +1374,18 @@ async def _deliver_otp_and_record(to_email: str, code: str, purpose: str) -> Non
         delivery_attempted_at: datetime (UTC)
     """
     import asyncio
-    loop = asyncio.get_event_loop()
-    delivered, transport = await loop.run_in_executor(
-        None, _deliver_otp_email_sync, to_email, code, purpose
-    )
+    import deletion_delivery as dd
+    async def valid(tx):
+        return bool(await tx.otp_codes.find_one({"email": to_email, "credential_id": credential_id}))
+    async def deliver():
+        return await asyncio.to_thread(_deliver_otp_email_sync, to_email, code, purpose)
+    result = await dd.run(db, deliver, email=to_email, validate=valid, operation_key=f"otp:{credential_id}")
+    if result is None:
+        return
+    delivered, transport = result
     try:
         await db.otp_codes.update_one(
-            {"email": to_email},
+            {"email": to_email, "credential_id": credential_id},
             {"$set": {
                 "delivered": delivered,
                 "delivery_transport": transport,
@@ -1584,6 +1428,7 @@ async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, reque
     """
     email = data.email.lower().strip()
     purpose = (data.purpose or "").strip().lower()
+    observed_identity = await db.email_link_identities.find_one({"_id": el.digest(email)}) or {}
     client_host = request.client.host if request.client else "?"
     logger.info(
         f"[OTP] request-otp from ip={client_host} email={email} "
@@ -1664,6 +1509,7 @@ async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, reque
     now = datetime.now(timezone.utc)
     rec = {
         "email": email,
+        "credential_id": str(uuid.uuid4()),
         "purpose": purpose,
         "code_hash": code_hash,
         "expires_at": now + timedelta(minutes=OTP_TTL_MINUTES),
@@ -1678,7 +1524,22 @@ async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, reque
         if data.invite_code:
             rec["invite_code"] = data.invite_code.strip().upper()
 
-    await db.otp_codes.update_one({"email": email}, {"$set": rec}, upsert=True)
+    async def issue_otp(session):
+        tx = fw.SessionDatabase(db, session)
+        await tx.email_link_identities.update_one(
+            {"_id": el.digest(email)}, {"$inc": {"generation": 1}}, upsert=True,
+        )
+        fresh_user = await tx.users.find_one({"email": email})
+        if existing_user and (not fresh_user or fresh_user["id"] != existing_user["id"]):
+            raise HTTPException(410, "Your account changed. Request a fresh sign-in code.")
+        identity = await tx.email_link_identities.find_one({"_id": el.digest(email)})
+        if identity.get("deletion_generation", 0) != observed_identity.get("deletion_generation", 0):
+            raise HTTPException(410, "Your account changed. Request a fresh sign-in code.")
+        rec["issued_user_id"] = fresh_user["id"] if fresh_user else None
+        rec["deletion_generation"] = identity.get("deletion_generation", 0)
+        await tx.otp_codes.update_one({"email": email}, {"$set": rec}, upsert=True)
+
+    await fw.transaction(db, issue_otp)
     # Fire-and-forget delivery via background task.  The mongo record is
     # already written above, so the user CAN already verify their code
     # as soon as the email arrives — whether that's 200ms or 8 seconds
@@ -1687,7 +1548,7 @@ async def request_otp(data: OtpRequest, background_tasks: BackgroundTasks, reque
     # on the otp_codes row so the client can poll /auth/otp-status and
     # show a real error message if delivery fails, instead of the user
     # sitting forever staring at an empty inbox.
-    background_tasks.add_task(_deliver_otp_and_record, email, code, purpose)
+    background_tasks.add_task(_deliver_otp_and_record, email, code, purpose, rec["credential_id"])
     return {
         "ok": True,
         "message": (
@@ -1750,6 +1611,27 @@ async def otp_status(email: str):
 
 @api_router.post("/auth/verify-otp", response_model=TokenResponse)
 async def verify_otp(data: OtpVerify):
+    async def redeem(tx):
+        return await _verify_otp_transaction(data, tx)
+    result = await fw.run(db, [], redeem, timeout=fw.FAMILY_TRANSFER_TIMEOUT_SECONDS, sos_priority=True)
+    if isinstance(result, HTTPException):
+        raise result
+    if isinstance(result, tuple):
+        response, user, inv = result
+        if inv and inv.get("invited_by_user_id") != user["id"]:
+            try:
+                await push_to_user(
+                    inv["invited_by_user_id"], "✅ Family invite accepted",
+                    f"{user['full_name']} just joined your Kinnship family.",
+                    {"type": "family_join", "user_id": user["id"], "invite_id": inv["id"]},
+                )
+            except Exception:
+                logger.warning("inviter push failed")
+        return response
+    return result
+
+
+async def _verify_otp_transaction(data: OtpVerify, db):
     """Verify a 6-digit code. On success, return a fresh JWT — and if
     the code was issued for signup, create the user record + family
     group at the same time.
@@ -1759,8 +1641,16 @@ async def verify_otp(data: OtpVerify):
     if not (code.isdigit() and len(code) == OTP_LENGTH):
         raise HTTPException(status_code=400, detail="Invalid code")
 
+    await db.email_link_identities.update_one(
+        {"_id": el.digest(email)}, {"$inc": {"generation": 1}}, upsert=True,
+    )
     rec = await db.otp_codes.find_one({"email": email})
-    if not rec:
+    if not rec or any(key not in rec for key in ("issued_user_id", "deletion_generation", "credential_id")):
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+    identity = await db.email_link_identities.find_one({"_id": el.digest(email)})
+    user = await db.users.find_one({"email": email})
+    if (rec["deletion_generation"] != identity.get("deletion_generation", 0)
+            or rec["issued_user_id"] != (user["id"] if user else None)):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
 
     # Expiry
@@ -1769,13 +1659,13 @@ async def verify_otp(data: OtpVerify):
         exp = exp.replace(tzinfo=timezone.utc)
     if not exp or exp < datetime.now(timezone.utc):
         await db.otp_codes.delete_one({"_id": rec["_id"]})
-        raise HTTPException(status_code=400, detail="Invalid or expired code")
+        return HTTPException(status_code=400, detail="Invalid or expired code")
 
     # Attempt throttle
     attempts = int(rec.get("attempts", 0))
     if attempts >= OTP_MAX_ATTEMPTS:
         await db.otp_codes.delete_one({"_id": rec["_id"]})
-        raise HTTPException(
+        return HTTPException(
             status_code=429,
             detail="Too many attempts. Please request a new code.",
         )
@@ -1783,16 +1673,17 @@ async def verify_otp(data: OtpVerify):
     if not verify_password(code, rec.get("code_hash", "")):
         await db.otp_codes.update_one({"_id": rec["_id"]}, {"$inc": {"attempts": 1}})
         remaining = max(0, OTP_MAX_ATTEMPTS - attempts - 1)
-        raise HTTPException(
+        return HTTPException(
             status_code=400,
             detail=f"Invalid code. {remaining} attempt(s) remaining.",
         )
 
     # Code matches — consume it.
-    await db.otp_codes.delete_one({"_id": rec["_id"]})
+    consumed = await db.otp_codes.delete_one({"_id": rec["_id"], "credential_id": rec["credential_id"]})
+    if consumed.deleted_count != 1:
+        raise HTTPException(400, "Invalid or expired code")
 
     purpose = rec.get("purpose", "login")
-    user = await db.users.find_one({"email": email})
 
     if purpose == "signup" and fg.normalize_invite_code(rec.get("invite_code") or "").startswith("INV-"):
         # Retained Play clients can still redeem recipient invitations via OTP.
@@ -1817,18 +1708,11 @@ async def verify_otp(data: OtpVerify):
         user = result["user"]
         # Preserve the old new-signup invitation notification; existing-user OTP
         # joins did not send it. Retries cannot create a second new account.
-        inv = result["invitation"]
-        inviter_id = inv.get("invited_by_user_id")
-        if new_user and inviter_id and inviter_id != user["id"]:
-            try:
-                await push_to_user(
-                    inviter_id, "✅ Family invite accepted",
-                    f"{user['full_name']} just joined your Kinnship family.",
-                    {"type": "family_join", "user_id": user["id"], "invite_id": inv["id"]},
-                )
-            except Exception:
-                logger.warning("inviter push failed")
-        return TokenResponse(access_token=create_access_token(user["id"]), user=_user_response(user))
+        # Notification is emitted only after this transaction commits.
+        return (
+            TokenResponse(access_token=create_access_token(user["id"]), user=_user_response(user)),
+            user, result["invitation"] if new_user else None,
+        )
 
     # === SIGNUP path: create the user + family group on the fly. ===
     if purpose == "signup" and not user:
@@ -2327,9 +2211,9 @@ class DeleteAccountRequest(BaseModel):
 @api_router.delete("/auth/account")
 async def delete_account(
     data: DeleteAccountRequest = None,
-    current=Depends(get_current_user),
+    current=Depends(get_authenticated_user),
 ):
-    """Permanently delete the authenticated user and ALL of their data.
+    """Delete verified personal data, revoke access, and retain protected SOS.
 
     Delete eligible data and the account in one transaction, retaining SOS.
     Stripe cleanup is best-effort and only runs after the database commits.
@@ -2661,10 +2545,15 @@ async def update_member(member_id: str, data: FamilyMemberUpdate, current=Depend
         )
         return FamilyMember(**_member_location_view(doc, current, doc))
     payload["last_seen"] = datetime.now(timezone.utc)
-    r = await db.members.update_one(
-        {"id": member_id, "family_group_id": current["family_group_id"]},
-        {"$set": payload},
-    )
+    if {"daily_checkin_time", "checkin_interval_hours", "checkin_interval_started_at"} & payload.keys():
+        r = await checkin_scheduler.update_settings(
+            db, member_id, current, payload, datetime.now(timezone.utc),
+        )
+    else:
+        r = await db.members.update_one(
+            {"id": member_id, "family_group_id": current["family_group_id"]},
+            {"$set": payload},
+        )
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
     doc = await db.members.find_one(
@@ -3869,7 +3758,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     #   • did the GPS capture timestamp guard accept or reject the write?
     #   • what were the incoming vs. stored GPS capture times?
     try:
-        await db.location_ingest_log.insert_one({
+        await account_cleanup.persist_subject_evidence(db, "location_ingest_log", {
             "at":                   server_now,
             "member_id":            member_id,
             "family_group_id":      current["family_group_id"],
@@ -3897,7 +3786,8 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             # Geocoding is now lazy (resolved in GET /members, not here).
             # location_name is intentionally cleared on each upload so the
             # read path always resolves from fresh coordinates.
-        })
+        }, member_id=member_id, family_id=current["family_group_id"],
+            subject_user_id=target.get("user_id"))
     except Exception:
         pass
 
@@ -3911,7 +3801,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     # collection bounded without a manual cleanup job.
     if write_accepted:
         try:
-            await db.location_history.insert_one({
+            await account_cleanup.persist_subject_evidence(db, "location_history", {
                 "accepted_at":      server_now,
                 "captured_at":      incoming_captured_at,
                 "member_id":        member_id,
@@ -3935,7 +3825,8 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 "battery_level":    data.battery_level,
                 "is_charging":      data.is_charging,
                 "raw_battery":      data.battery,
-            })
+            }, member_id=member_id, family_id=current["family_group_id"],
+                subject_user_id=target.get("user_id"))
         except Exception:
             pass
 
@@ -4221,9 +4112,8 @@ async def update_checkin_settings(member_id: str, data: CheckinSettings, current
         ),
     }
 
-    r = await db.members.update_one(
-        {"id": member_id, "family_group_id": current["family_group_id"]},
-        {"$set": update},
+    r = await checkin_scheduler.update_settings(
+        db, member_id, current, update, datetime.now(timezone.utc),
     )
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
@@ -4510,16 +4400,19 @@ async def _legacy_mark_occurrence(
             minute=parsed % 60,
             second=0,
             microsecond=0,
+            fold=0,
         )
         slot_local = (
             today_slot
-            if today_slot <= now_local
+            if today_slot.astimezone(timezone.utc) <= now_utc
             else today_slot - timedelta(days=1)
         )
         candidates.append((slot_local, slot_time, slot_local.date().isoformat()))
     if not candidates:
         return None
-    slot_local, slot_time, local_date = max(candidates, key=lambda item: item[0])
+    slot_local, slot_time, local_date = max(
+        candidates, key=lambda item: item[0].astimezone(timezone.utc)
+    )
     return {
         "occurrence_id": med_scheduler.build_occurrence_id(
             rem["id"], rem["member_id"], slot_time, local_date
@@ -5497,7 +5390,8 @@ async def send_checkin_request(member_id: str, current=Depends(get_current_user)
         sharing_on = (tgt_user or {}).get("location_sharing_enabled", True)
         if tokens and sharing_on:
             import time as _t
-            await send_expo_push(
+            import deletion_delivery as dd
+            await dd.run(db, lambda: send_expo_push(
                 tokens=tokens, title="", body="",
                 data={
                     "type": "request_location_refresh",
@@ -5507,7 +5401,7 @@ async def send_checkin_request(member_id: str, current=Depends(get_current_user)
                     "_sentAt": _t.time(),
                     "_source_tag": "are_you_ok_gps_refresh",
                 },
-            )
+            ), user_ids=[current["id"], target_user_id], data={"member_id": member_id})
     except Exception as e:
         logger.warning(f"checkin_request silent-refresh push failed (non-fatal): {e}")
 
@@ -6001,7 +5895,7 @@ async def trigger_sos(data: SOSRequest, current=Depends(get_current_user)):
         owner_id=current["id"], family_group_id=current["family_group_id"], member_id=member_id, member_name=member_name,
         type="sos", severity="critical",
         title=f"SOS Emergency — {member_name}",
-        message=f"{member_name} triggered SOS at {local_time_str}.{coord_str} Emergency services notified.",
+        message=f"{member_name} triggered SOS at {local_time_str}.{coord_str} Emergency calling is not confirmed by Kinnship.",
         latitude=data.latitude, longitude=data.longitude,
     )
     committed, current = await fw.persist_sos(
@@ -6407,24 +6301,47 @@ def _signal_advanced(value: Any, sent_at: datetime) -> bool:
     return value > sent_at
 
 
+def _relay_ticket_id(value):
+    """Accept Expo's canonical UUID ticket format, not arbitrary relay text."""
+    if not isinstance(value, str) or len(value) != 36:
+        return None
+    try:
+        return value if str(uuid.UUID(value)) == value else None
+    except ValueError:
+        return None
+
+
+def _relay_diagnostic_fields(item):
+    status = item.get("status")
+    error = item.get("error")
+    safe_errors = (
+        "DeviceNotRegistered", "MessageTooBig", "MessageRateExceeded",
+        "MismatchSenderId", "InvalidCredentials",
+    )
+    return {
+        "status": status if status in ("ok", "error") else "unknown",
+        "error": error if error is None or error in safe_errors else "unknown",
+    }
+
+
 async def _collect_recovery_push_receipts(evidence: Dict[str, Any]) -> None:
     """Collect one receipt attempt for a database-claimed evidence record."""
     request_id = evidence["request_id"]
     claim_id = evidence.get("receipt_claim_id")
     try:
         ticket_ids = [
-            ticket.get("ticket_id")
+            validated
             for ticket in (evidence.get("tickets") or [])
-            if isinstance(ticket, dict) and isinstance(ticket.get("ticket_id"), str)
+            if isinstance(ticket, dict)
+            and (validated := _relay_ticket_id(ticket.get("ticket_id")))
         ]
-        if not ticket_ids:
-            return
 
         receipts: Dict[str, Dict[str, Any]] = {}
         last_error_type: Optional[str] = None
         attempts = int(evidence.get("receipt_attempts") or 0) + 1
         try:
-            receipts = await get_expo_push_receipts(ticket_ids)
+            if ticket_ids:
+                receipts = await get_expo_push_receipts(ticket_ids)
         except Exception as receipt_error:
             last_error_type = type(receipt_error).__name__
             logger.warning(
@@ -6449,11 +6366,9 @@ async def _collect_recovery_push_receipts(evidence: Dict[str, Any]) -> None:
             },
         ) or {}
         safe_receipts = {
-            ticket_id: {
-                "status": receipt.get("status"),
-                "error": receipt.get("error"),
-            }
-            for ticket_id, receipt in receipts.items()
+            ticket_id: _relay_diagnostic_fields(receipts[ticket_id])
+            for ticket_id in ticket_ids
+            if isinstance(receipts.get(ticket_id), dict)
         }
         found_all = all(ticket_id in safe_receipts for ticket_id in ticket_ids)
         retry = not found_all and attempts < _RECOVERY_RECEIPT_MAX_ATTEMPTS
@@ -6470,7 +6385,9 @@ async def _collect_recovery_push_receipts(evidence: Dict[str, Any]) -> None:
                 "$set": {
                     "receipts": safe_receipts,
                     "receipt_status": (
-                        "complete"
+                        "not_available"
+                        if not ticket_ids
+                        else "complete"
                         if found_all
                         else "pending"
                         if retry
@@ -6558,16 +6475,89 @@ async def _recovery_receipt_worker_loop() -> None:
             await asyncio.sleep(_RECOVERY_RECEIPT_POLL_S)
 
 
+async def _refresh_authority(member_id: str, caller_id: str, family_id: str):
+    """Read the link, both memberships, consent, and tokens in one snapshot."""
+    account_fields = {"_id": 0, "id": 1, "family_group_id": 1}
+    members = db.members.with_options(
+        read_concern=ReadConcern("snapshot"), read_preference=ReadPreference.PRIMARY,
+    )
+    rows = await members.aggregate([
+        {"$match": {"id": member_id}},
+        {"$limit": 2},
+        {"$project": {"_id": 0, "id": 1, "family_group_id": 1, "user_id": 1,
+                      "location_sharing_enabled": 1, "location_consent_generation": 1}},
+        {"$lookup": {
+            "from": "family_groups", "pipeline": [
+                {"$match": {"id": family_id}}, {"$limit": 2}, {"$project": {"_id": 0, "id": 1}},
+            ], "as": "families",
+        }},
+        {"$lookup": {
+            "from": "users", "pipeline": [
+                {"$match": {"id": caller_id}}, {"$limit": 2}, {"$project": account_fields},
+            ], "as": "callers",
+        }},
+        {"$lookup": {
+            "from": "users", "localField": "user_id", "foreignField": "id", "pipeline": [
+                {"$limit": 2},
+                {"$project": {**account_fields, "location_sharing_enabled": 1, "push_tokens": 1}},
+            ], "as": "targets",
+        }},
+    ], maxTimeMS=3000).to_list(2)
+    if len(rows) != 1:
+        raise HTTPException(404, "Member not found in your family group")
+    member = rows[0]
+    families = member["families"]
+    callers = member["callers"]
+    if (member.get("id") != member_id or member.get("family_group_id") != family_id
+            or len(families) != 1 or families[0].get("id") != family_id
+            or len(callers) != 1 or callers[0].get("id") != caller_id
+            or callers[0].get("family_group_id") != family_id):
+        raise HTTPException(404, "Member not found in your family group")
+
+    target_id = member.get("user_id")
+    if target_id is None or target_id == "":
+        return None, [], "no_user_link"
+    targets = member["targets"]
+    if (not isinstance(target_id, str) or len(targets) != 1
+            or targets[0].get("id") != target_id
+            or targets[0].get("family_group_id") != family_id):
+        raise HTTPException(404, "Member not found in your family group")
+    target = targets[0]
+    generation = member.get("location_consent_generation", 0)
+    if (member.get("location_sharing_enabled") is not True
+            or target.get("location_sharing_enabled") is not True
+            or not isinstance(generation, int) or isinstance(generation, bool) or generation < 0):
+        return None, [], "target_sharing_off"
+    tokens = target.get("push_tokens", [])
+    if not isinstance(tokens, list) or not all(isinstance(token, str) for token in tokens):
+        return target_id, [], None
+    return target_id, tokens, None
+
+
+async def _authenticate_location_refresh(
+    request: Request, creds: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    try:
+        return await get_current_user(request, creds)
+    except HTTPException:
+        raise
+    except Exception:
+        # Database errors may include identifying details. Don't let the
+        # server's unhandled-exception logger dump the exception for this route.
+        logger.warning("[refresh-pipeline] STAGE=authentication_unavailable")
+        raise HTTPException(503, "Could not verify location refresh permissions") from None
+
+
 @api_router.post("/members/{member_id}/request-location-refresh")
-async def request_location_refresh(member_id: str, current=Depends(get_current_user)):
+async def request_location_refresh(member_id: str, current=Depends(_authenticate_location_refresh)):
     """v1.3.0 — sends a silent data push to the target member's device
     asking it to upload a fresh GPS fix.  This bypasses Android Doze /
     Samsung One UI App-Standby throttling on the location task because
     push notifications wake the device regardless of background quota.
 
     Caller must share a family_group with the target.  Target must be
-    a linked user (has user_id and push_tokens).  Server-side throttle
-    of 30 s per member protects against the dashboard's auto-pull
+    a linked user with affirmative sharing on both records. Server-side throttle
+    of 5 minutes per member protects against the dashboard's auto-pull
     firing on every refetch tick.
 
     v1.3.3 — every invocation writes a refresh-trace row (in-memory)
@@ -6576,75 +6566,36 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
     """
     import uuid as _uuid
     request_id = _uuid.uuid4().hex[:12]
-    # Build #56 — Diagnostics polish.  `member_not_found` was showing up
-    # in the refresh-trace log for stale client caches (e.g. a device
-    # still holding an old family group's member id after leaving that
-    # group).  It's not evidence of a real problem — the endpoint is
-    # correctly rejecting the request — so we probe FIRST and skip the
-    # trace insertion entirely when the target member simply doesn't
-    # exist for this caller.  Real errors (throttled, no_tokens,
-    # push_error) still get logged so we can investigate them.
-    target = await db.members.find_one(
-        {"id": member_id, "family_group_id": current["family_group_id"]},
-        {"_id": 0, "id": 1, "user_id": 1, "name": 1},
-    )
-    if not target:
-        raise HTTPException(status_code=404, detail="Member not found in your family group")
+    caller_id, family_id = current.get("id"), current.get("family_group_id")
+    if not isinstance(caller_id, str) or not caller_id:
+        raise HTTPException(401, "Authenticated user required")
+    if not isinstance(family_id, str) or not family_id:
+        raise HTTPException(404, "Member not found in your family group")
 
-    trace = _trace_record_request(member_id, current["id"], request_id)
-    target_user_id = target.get("user_id")
-    logger.info(
-        f"[refresh-pipeline] STAGE=request_received "
-        f"request_id={request_id} member_id={member_id} "
-        f"caller={current['id']} target_user_id={target_user_id!r}"
-    )
-    if not target_user_id:
-        trace["push_skipped_reason"] = "no_user_link"
-        logger.info(
-            f"[refresh-pipeline] STAGE=push_skipped reason=no_user_link "
-            f"request_id={request_id}"
-        )
-        return {"ok": True, "skipped": "no_user_link", "request_id": request_id}
-
-    # Build #58 — CRITICAL PIPELINE FIX.
-    #
-    # Root cause of blank-K notifications correlating with Refresh
-    # Traces (Charles's device QA finding): the refresh push was being
-    # sent to every target regardless of whether that target had
-    # Location Sharing turned OFF.  The receiving device would:
-    #   1. Wake for the FCM message
-    #   2. Briefly draw the notification in the tray (OS default while
-    #      JS boots on cold-launched apps — Samsung/Xiaomi especially)
-    #   3. Fire the JS listener, which checks the on-device sharing
-    #      flag, and RETURNS EARLY — no GPS upload happens
-    #   4. Try to dismiss the tray entry — but the "blank K" is
-    #      already visible for ~1-3 s
-    # Net result: caregiver sees ghost K + zero benefit.
-    #
-    # Fix: short-circuit at the server BEFORE we send the push if the
-    # target has explicitly disabled sharing.  Nothing useful will
-    # happen if we do send it, and we're paying UX cost for no work.
+    # Last DB operation before starting the push. A committed change after
+    # the snapshot can still race transport; Mongo cannot atomically
+    # authorize or revoke an external Expo delivery.
     try:
-        tgt_user = await db.users.find_one(
-            {"id": target_user_id},
-            {"_id": 0, "location_sharing_enabled": 1},
-        )
-        tgt_sharing_off = (
-            tgt_user is not None and tgt_user.get("location_sharing_enabled") is False
-        )
+        async with asyncio.timeout(5):
+            target_user_id, tokens, skipped = await _refresh_authority(
+                member_id, caller_id, family_id,
+            )
+    except HTTPException:
+        raise
     except Exception:
-        tgt_sharing_off = False
-    if tgt_sharing_off:
-        trace["push_skipped_reason"] = "target_sharing_off"
-        logger.info(
-            f"[refresh-pipeline] STAGE=push_skipped reason=target_sharing_off "
-            f"request_id={request_id} target_user_id={target_user_id}"
+        logger.warning(
+            f"[refresh-pipeline] STAGE=authorization_unavailable request_id={request_id}"
         )
-        return {
-            "ok": True,
-            "skipped": "target_sharing_off",
-            "request_id": request_id,
-        }
+        raise HTTPException(503, "Could not verify location refresh permissions") from None
+
+    trace = _trace_record_request(member_id, caller_id, request_id)
+    logger.info(f"[refresh-pipeline] STAGE=request_received request_id={request_id}")
+    if skipped:
+        trace["push_skipped_reason"] = skipped
+        logger.info(
+            f"[refresh-pipeline] STAGE=push_skipped reason={skipped} request_id={request_id}"
+        )
+        return {"ok": True, "skipped": skipped, "request_id": request_id}
 
     import time as _t
     now = _t.time()
@@ -6683,14 +6634,11 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
             "request_id": request_id,
         }
     _REFRESH_PUSH_THROTTLE[member_id] = now
-
-    target_user = await db.users.find_one({"id": target_user_id}, {"push_tokens": 1})
-    tokens = (target_user or {}).get("push_tokens", []) or []
     if not tokens:
         trace["push_skipped_reason"] = "no_tokens"
         logger.info(
             f"[refresh-pipeline] STAGE=push_skipped reason=no_tokens "
-            f"request_id={request_id} target_user_id={target_user_id}"
+            f"request_id={request_id}"
         )
         return {"ok": True, "sent_to": 0, "request_id": request_id}
 
@@ -6704,7 +6652,8 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
             f"request_id={request_id} tokens={len(tokens)} priority=high channel=silent_v2"
         )
         send_started_at = datetime.now(timezone.utc)
-        send_result = await send_expo_push_with_tickets(
+        import deletion_delivery as dd
+        send_result = await dd.run(db, lambda: send_expo_push_with_tickets(
             tokens=tokens,
             title="",
             body="",
@@ -6733,8 +6682,20 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
             # title, body, and top-level channelId, so there is no notification
             # payload for Android to render even when priority is high.
             priority="high",
-        )
-        tickets = send_result.get("tickets") or []
+        ), user_ids=[caller_id, target_user_id], data={"member_id": member_id}, operation_key=f"refresh:{request_id}")
+        if send_result is None:
+            trace["push_skipped_reason"] = "account_changed_or_delivery_active"
+            return {"ok": True, "sent_to": 0, "request_id": request_id, "skipped": trace["push_skipped_reason"]}
+        tickets = [
+            {
+                **_relay_diagnostic_fields(ticket),
+                "ticket_id": _relay_ticket_id(ticket.get("ticket_id")) if ticket.get("status") == "ok" else None,
+                # Generated by our sender from the input token, not supplied by Expo.
+                "token_fingerprint": ticket.get("token_fingerprint"),
+            }
+            for ticket in (send_result.get("tickets") or [])
+            if isinstance(ticket, dict)
+        ]
         ticket_ids = [
             ticket.get("ticket_id")
             for ticket in tickets
@@ -6768,12 +6729,14 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
         persist_error: Optional[Exception] = None
         for persist_attempt in range(1, 4):
             try:
-                await db.recovery_push_evidence.update_one(
-                    {"request_id": request_id},
-                    {"$set": evidence},
-                    upsert=True,
+                persisted = await account_cleanup.persist_subject_evidence(
+                    db, "recovery_push_evidence", evidence,
+                    member_id=member_id, family_id=current["family_group_id"],
+                    subject_user_id=target_user_id,
+                    upsert_selector={"request_id": request_id},
                 )
-                persisted = True
+                if not persisted:
+                    raise HTTPException(409, "The target account changed before evidence was recorded.")
                 break
             except Exception as error:
                 persist_error = error
@@ -6791,9 +6754,9 @@ async def request_location_refresh(member_id: str, current=Depends(get_current_u
             f"request_id={request_id} tokens={len(tokens)} "
             f"transport={send_result.get('transport_status')} tickets={len(ticket_ids)}"
         )
-    except Exception as e:
-        logger.warning(f"[refresh-pipeline] STAGE=push_error request_id={request_id} error={type(e).__name__}: {e}")
-        trace["push_skipped_reason"] = f"push_error:{type(e).__name__}"
+    except Exception:
+        logger.warning(f"[refresh-pipeline] STAGE=push_error request_id={request_id}")
+        trace["push_skipped_reason"] = "push_error"
     return {"ok": True, "sent_to": len(tokens), "request_id": request_id}
 
 
@@ -7224,6 +7187,7 @@ async def health():
 # Single shared scheduler instance; started on app.startup, stopped on shutdown.
 _med_scheduler: Optional[med_scheduler.MedicationScheduler] = None
 _med_scheduler_ready = False
+_checkin_scheduler: Optional[checkin_scheduler.CheckinScheduler] = None
 
 
 @api_router.post("/medications/_tick")
@@ -7512,7 +7476,10 @@ async def reset_test_user(data: _ResetTestUserRequest, request: Request):
 import email_links as el
 api_router.include_router(el.build_router(db, get_current_user, send_email_via_resend_async, create_access_token, _user_response))
 el.install_public_routes(app)
-api_router.include_router(fg.build_router(db, get_current_user, push_to_user=push_to_user, send_email=send_email_via_resend_async))
+api_router.include_router(fg.build_router(
+    db, get_current_user, push_to_user=push_to_user,
+    send_email=send_email_via_resend_async, get_rotation_user=get_authenticated_user,
+))
 
 
 app.include_router(api_router)
@@ -7631,7 +7598,10 @@ async def _migrate_family_groups():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    global _med_scheduler, _med_scheduler_ready, _RECOVERY_RECEIPT_WORKER
+    global _med_scheduler, _med_scheduler_ready, _RECOVERY_RECEIPT_WORKER, _checkin_scheduler
+    if _checkin_scheduler:
+        await _checkin_scheduler.stop()
+        _checkin_scheduler = None
     if _RECOVERY_RECEIPT_WORKER and not _RECOVERY_RECEIPT_WORKER.done():
         _RECOVERY_RECEIPT_WORKER.cancel()
         try:
@@ -7646,6 +7616,17 @@ async def shutdown_db_client():
         except Exception:
             pass
     client.close()
+
+
+@app.on_event("startup")
+async def _start_checkin_scheduler():
+    """Fail startup if durable missed-check-in coordination cannot be ensured."""
+    global _checkin_scheduler
+    await checkin_scheduler.ensure_indexes(db)
+    _checkin_scheduler = checkin_scheduler.CheckinScheduler(
+        db, send=send_expo_push_with_tickets, quiet=_is_in_quiet_hours,
+    )
+    _checkin_scheduler.start()
 
 
 @app.on_event("startup")

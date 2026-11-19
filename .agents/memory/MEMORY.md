@@ -29,6 +29,7 @@
 - [Missed medication occurrence source](missed-medication-occurrence-source.md) — dashboard missed counts and details come from durable active missed-alert occurrences, never reminder status.
 - [Stripe entitlement webhook reconciliation](stripe-entitlement-webhook-reconciliation.md) — reconcile current subscription state, use supported object conversion, and fail non-2xx when persistence does not match a user.
 - [Medication acknowledgment occurrence safety](medication-acknowledgment-occurrence-safety.md) — acknowledgments and T+15 escalation coordinate on one exact occurrence with durable retry and terminal delivery states.
+- [Medication DST occurrence identity](medication-dst-occurrence.md) — first-fold scheduler and legacy acknowledgment must compare actual UTC instants during the repeated hour.
 - [BackgroundFetch execution generations](background-fetch-execution-generations.md) — task IDs are reused; timeout and completion guards must be scoped to one invocation.
 - [Caregiver battery and device status](caregiver-battery-device-status.md) — one battery incident escalates in place; dashboard device states reuse movement-aware tolerance.
 - [Android recovery push invariant](android-recovery-push-invariant.md) — stale-device recovery must be high-priority and strictly data-only so Doze cannot defer it and Android cannot render it.
@@ -46,3 +47,7 @@
 - [Invitation removal authority](invitation-removal-authority.md) — owner removal must invalidate outstanding recipient invitations, including acceptance from retained clients.
 - [SOS history transfer boundary](sos-history-transfer-boundary.md) — retain verified self history without new family access; snapshot transactions do not fence new obligations.
 - [Motor commit retry boundary](motor-commit-retry-boundary.md) — verify unknown-commit retries with a real failpoint; the installed context can auto-commit outside its retry loop.
+- [SOS transfer priority](sos-transfer-priority.md) — long transfers must yield their family fences without bypassing fresh SOS authorization or extending its deadline.
+- [SOS retention policy](sos-retention-policy.md) — resolved SOS expires after 30 days; active/unresolved incidents must never expire automatically.
+- [Check-in schedule lifetime](checkin-schedule-lifetime.md) — activation/revision and family fencing must apply across all settings writers and delivery reservations.
+- [Account deletion boundary](account-deletion-boundary.md) — atomic cleanup does not cancel retained credentials, unfenced invitations or tokens captured before an await.

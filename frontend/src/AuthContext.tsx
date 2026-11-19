@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react';
+import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, ReactNode } from 'react';
 import { api, saveToken, clearToken, User } from './api';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
@@ -13,6 +13,7 @@ import { captureInstallReferrerInvite } from './installReferrerInvite';
 import { logStartupEvent } from './startupDiagnostics';
 import { recordNativeStartupCheckpoint } from './nativeStartupRecorder';
 import { beginStartupApiTiming } from './startupApiTiming';
+import { clearSosSendReceipt } from './sosSendReceipt';
 
 const TOKEN_KEY = 'kc_token';
 // v1.2 beta — cache the user object alongside the token so we can
@@ -104,6 +105,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const sessionLifetime = useRef(0);
+
+  // Before child passive SOS effects can start in the new account/family.
+  useLayoutEffect(() => { clearSosSendReceipt(); }, [user?.id, user?.family_group_id]);
 
   useEffect(() => {
     const stopStartupApiTiming = Platform.OS === 'android' ? beginStartupApiTiming() : undefined;
@@ -270,6 +274,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             await AsyncStorage.setItem('kc_auth_clear_diag', JSON.stringify(arr));
           } catch (_e) {}
           if (!isCurrent()) return;
+          clearSosSendReceipt();
           await clearToken();
           if (!isCurrent()) return;
           await writeUserCache(null);
@@ -372,6 +377,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    */
   const verifyOtp = async ({ email, code }: { email: string; code: string }) => {
     const lifetime = ++sessionLifetime.current;
+    clearSosSendReceipt();
     const requireCurrent = () => {
       if (sessionLifetime.current !== lifetime) throw new Error('Sign-in was cancelled. Please try again.');
     };
@@ -516,6 +522,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const acceptEmailSession = async (data: { access_token: string; user: User }) => {
     const lifetime = ++sessionLifetime.current;
+    clearSosSendReceipt();
     const requireCurrent = () => {
       if (sessionLifetime.current !== lifetime) throw new Error('Sign-in was cancelled. Request a fresh email link.');
     };
@@ -541,6 +548,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     sessionLifetime.current += 1;
+    clearSosSendReceipt();
     forgetSessionUnlock(user?.id);
     // Build #55 — also clear the persistent 24 h PIN session on
     // sign-out so a new user on the same device can't inherit the

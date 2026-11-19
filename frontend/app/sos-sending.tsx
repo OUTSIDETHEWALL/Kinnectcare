@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Platform,
-  Linking, Alert,
+  View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Platform, ScrollView,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -9,6 +8,12 @@ import * as Location from 'expo-location';
 import * as Haptics from 'expo-haptics';
 import { api } from '../src/api';
 import { Colors } from '../src/theme';
+import { EmergencyCallAction } from '../src/components/EmergencyCallAction';
+import {
+  clearSosSendReceipt, getSosReceiptEpoch, noteSosDialerOpened,
+  recordSosSendReceipt, sosAccountScope, SosLocationEvidence,
+} from '../src/sosSendReceipt';
+import { useAuth } from '../src/AuthContext';
 
 /**
  * SOS sending screen — shown immediately after the 3-2-1 countdown fires.
@@ -18,14 +23,14 @@ import { Colors } from '../src/theme';
  * bump. It shows live progress rows so the user can see what is happening.
  *
  * Navigation: router.replace('/sos-confirmation') on success only — we never
- * tell the user "help is on the way" until the server has confirmed receipt.
+ * claim delivery or emergency dispatch. Calling is an independent user action.
  */
 
 type SendStep = 'preparing' | 'locating' | 'sending' | 'done' | 'error';
 
 // Total permission + GPS budget, not a separate wait for each native callback.
 const SOS_LOCATION_BUDGET_MS = 1500;
-type SosCoordinates = { latitude?: number; longitude?: number };
+type SosCoordinates = SosLocationEvidence & { latitude?: number; longitude?: number };
 
 async function bestEffortSosLocation(isCurrent: () => boolean): Promise<SosCoordinates> {
   let finished = false;
@@ -34,11 +39,20 @@ async function bestEffortSosLocation(isCurrent: () => boolean): Promise<SosCoord
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (finished || !isCurrent() || status !== 'granted') return {};
+      const requestedAt = Date.now();
       const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       if (finished || !isCurrent()) return {};
       const { latitude, longitude } = pos.coords;
-      return Number.isFinite(latitude) && Number.isFinite(longitude)
-        ? { latitude, longitude } : {};
+      const capturedAt = Number.isFinite(pos.timestamp) && pos.timestamp > 0 && pos.timestamp <= Date.now()
+        ? pos.timestamp : undefined;
+      return Number.isFinite(latitude) && Math.abs(latitude) <= 90
+        && Number.isFinite(longitude) && Math.abs(longitude) <= 180
+        ? {
+          latitude, longitude, capturedAt,
+          acquiredDuringAttempt: capturedAt !== undefined && capturedAt >= requestedAt,
+          accuracy: Number.isFinite(pos.coords.accuracy) && (pos.coords.accuracy ?? -1) >= 0
+            ? pos.coords.accuracy! : undefined,
+        } : {};
     } catch {
       return {}; // Includes rejection after the fallback has already sent SOS.
     }
@@ -58,12 +72,25 @@ async function bestEffortSosLocation(isCurrent: () => boolean): Promise<SosCoord
 
 export default function SOSSending() {
   const router = useRouter();
+  const { user } = useAuth();
+  const scope = sosAccountScope(user);
+  const currentScope = useRef(scope);
+  currentScope.current = scope;
   const [step, setStep] = useState<SendStep>('preparing');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const hasFired = useRef(false);
   const mounted = useRef(true);
   const operation = useRef(0);
   const inFlight = useRef(false);
+  const dialerOpened = useRef(false);
+  const dialerScope = useRef(scope);
+  if (dialerScope.current !== scope) {
+    dialerOpened.current = false;
+    dialerScope.current = scope;
+  }
+  const recordedId = useRef<string | null>(null);
+  const handedOff = useRef(false);
+  const [locationLabel, setLocationLabel] = useState('Checking GPS location');
 
   useEffect(() => {
     mounted.current = true;
@@ -72,6 +99,7 @@ export default function SOSSending() {
       operation.current += 1;
       inFlight.current = false;
       hasFired.current = false;
+      if (!handedOff.current && recordedId.current) clearSosSendReceipt(recordedId.current);
     };
   }, []);
 
@@ -79,9 +107,21 @@ export default function SOSSending() {
     if (inFlight.current || !mounted.current) return;
     inFlight.current = true;
     const id = ++operation.current;
-    const isCurrent = () => mounted.current && operation.current === id;
     setStep('preparing');
     setErrorMsg(null);
+    setLocationLabel('Checking GPS location');
+    clearSosSendReceipt();
+    recordedId.current = null;
+    handedOff.current = false;
+    const receiptEpoch = getSosReceiptEpoch();
+    const isCurrent = () => mounted.current && operation.current === id
+      && currentScope.current === scope && getSosReceiptEpoch() === receiptEpoch;
+    if (!scope) {
+      setStep('error');
+      setErrorMsg('Your signed-in family could not be confirmed. You can still call 911.');
+      inFlight.current = false;
+      return;
+    }
     // Brief settling pause so the screen renders before GPS starts.
     await new Promise<void>(resolve => setTimeout(resolve, 350));
     try {
@@ -90,13 +130,18 @@ export default function SOSSending() {
       setStep('locating');
       const coordinates = await bestEffortSosLocation(isCurrent);
       if (!isCurrent()) return;
+      setLocationLabel(coordinates.latitude === undefined ? 'Location unavailable — sending without GPS'
+        : coordinates.acquiredDuringAttempt ? 'GPS location available'
+          : 'Location available — freshness not confirmed');
 
       // Step 2 — POST /sos (the network call that must succeed)
       setStep('sending');
-      await api.post('/sos', {
+      const response = await api.post('/sos', {
         latitude: coordinates.latitude, longitude: coordinates.longitude,
       });
       if (!isCurrent()) return;
+      const receipt = recordSosSendReceipt(response.data, coordinates, dialerOpened.current, scope);
+      recordedId.current = receipt.alertId;
 
       // Step 3 — post-send housekeeping (best-effort; never blocks success)
       void import('../src/backgroundLocation').then(bg => {
@@ -108,49 +153,23 @@ export default function SOSSending() {
       setStep('done');
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
 
-      // Step 5 — launch 911 dialer NOW that the backend has confirmed the
-      // SOS and push notifications are on their way to caregivers.
-      //
-      // Design principle (Charles addendum): the family notification and the
-      // 911 call are related but must not depend on each other.  Caregivers
-      // are already notified at this point regardless of whether the user
-      // reaches a 911 operator.  Failure to open the dialer is non-fatal —
-      // we show an explicit prompt so the user can call manually.
-      try {
-        const canDial = await Linking.canOpenURL('tel:911');
-        if (!isCurrent()) return;
-        if (canDial) {
-          await Linking.openURL('tel:911');
-        } else {
-          // Tablet, Wi-Fi-only device, or dialer app missing
-          Alert.alert(
-            '🆘 Call 911 Now',
-            'Your family has been notified. Please call 911 manually.',
-            [{ text: 'OK' }],
-          );
-        }
-      } catch (_e) {
-        // Dialer rejected the intent — warn the user explicitly
-        Alert.alert(
-          '🆘 Call 911 Now',
-          'Your family has been notified. Please call 911 manually.',
-          [{ text: 'OK' }],
-        );
-      }
-
       // Brief pause — success rows stay visible before navigating.
       await new Promise<void>(resolve => setTimeout(resolve, 900));
-      if (isCurrent()) router.replace('/sos-confirmation');
-    } catch (e: any) {
+      if (isCurrent()) {
+        handedOff.current = true;
+        router.replace({ pathname: '/sos-confirmation', params: { receiptId: receipt.alertId } });
+      }
+    } catch {
       if (!isCurrent()) return;
       setErrorMsg(
-        e?.response?.data?.detail || 'Network error. Tap Retry to try again.',
+        'Could not confirm that your family alert was recorded. It may have reached the server. '
+        + 'You can retry or call 911 independently.',
       );
       setStep('error');
     } finally {
       if (operation.current === id) inFlight.current = false;
     }
-  }, [router]);
+  }, [router, scope]);
 
   useEffect(() => {
     if (hasFired.current) return;
@@ -168,14 +187,14 @@ export default function SOSSending() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <View style={styles.content}>
+      <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.iconWrap}>
           <Text style={styles.icon}>🆘</Text>
         </View>
 
         <Text style={styles.title}>Sending Emergency Alert</Text>
         <Text style={styles.sub}>
-          Keep this screen open while we alert your family.
+          Family alerts and emergency calling are separate. You can call 911 now.
         </Text>
 
         <View style={styles.rows}>
@@ -185,12 +204,12 @@ export default function SOSSending() {
             active={step === 'preparing'}
           />
           <StatusRow
-            label="Attaching location"
+            label={locationLabel}
             ok={locationDone}
             active={step === 'locating'}
           />
           <StatusRow
-            label="Sending to family"
+            label={sendingDone ? 'SOS alert recorded' : 'Recording SOS alert'}
             ok={sendingDone}
             active={step === 'sending'}
           />
@@ -200,15 +219,19 @@ export default function SOSSending() {
           <View style={styles.errorBox}>
             <Text style={styles.errorEmoji}>⚠️</Text>
             <View style={{ flex: 1 }}>
-              <Text style={styles.errorTitle}>Alert failed to send</Text>
+              <Text style={styles.errorTitle}>Family alert not confirmed</Text>
               <Text style={styles.errorBody}>{errorMsg}</Text>
             </View>
           </View>
         )}
-      </View>
+      </ScrollView>
 
-      {step === 'error' && (
-        <View style={styles.bottom}>
+      <View style={styles.bottom}>
+        <EmergencyCallAction key={scope} onOpened={() => {
+          dialerOpened.current = true;
+          noteSosDialerOpened(recordedId.current);
+        }} />
+        {step === 'error' && (
           <TouchableOpacity
             testID="sos-retry"
             onPress={retry}
@@ -217,8 +240,8 @@ export default function SOSSending() {
           >
             <Text style={styles.retryText}>Retry</Text>
           </TouchableOpacity>
-        </View>
-      )}
+        )}
+      </View>
     </SafeAreaView>
   );
 }
@@ -244,7 +267,7 @@ function StatusRow({
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background, justifyContent: 'space-between' },
-  content: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 },
+  content: { flexGrow: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
   iconWrap: {
     width: 120, height: 120, borderRadius: 60, backgroundColor: Colors.sos,
     alignItems: 'center', justifyContent: 'center',
@@ -282,7 +305,7 @@ const styles = StyleSheet.create({
   errorEmoji: { fontSize: 22 },
   errorTitle: { fontSize: 14, fontWeight: '800', color: '#7A4A00' },
   errorBody: { fontSize: 13, color: '#7A4A00', marginTop: 4, lineHeight: 18 },
-  bottom: { paddingHorizontal: 24, paddingBottom: 28 },
+  bottom: { paddingHorizontal: 24, paddingBottom: 20, gap: 12 },
   retryBtn: {
     height: 56, backgroundColor: Colors.sos, borderRadius: 16,
     alignItems: 'center', justifyContent: 'center',

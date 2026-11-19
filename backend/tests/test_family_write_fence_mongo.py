@@ -15,7 +15,8 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_serializer
+from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
@@ -134,15 +135,20 @@ async def test_transfer_first_reauthorizes_later_writer(scenario, monkeypatch, w
         ))
     await asyncio.sleep(0.03)
     release.set()
-    assert (await asyncio.wait_for(transfer, 10)).status_code == 200
+    response = await asyncio.wait_for(transfer, 10)
     if writer == "self_sos":
         committed, actor = await asyncio.wait_for(pending, 10)
-        assert committed["family_group_id"] == actor["family_group_id"] == "target"
+        assert response.status_code in (200, 409), response.text
+        # Either the transfer committed first and SOS is freshly authorized in
+        # target, or SOS preempted it and remains correctly scoped to solo.
+        expected = "target" if response.status_code == 200 else "solo"
+        assert committed["family_group_id"] == actor["family_group_id"] == expected
         assert await s.db.alerts.count_documents({"id": "priority-sos"}) == 1
         elapsed = (time.perf_counter() - started) * 1000
         print("SOS_TRANSFER_CONTENTION_MS", elapsed)
         assert elapsed < 2500
     else:
+        assert response.status_code == 200, response.text
         with pytest.raises(HTTPException) as error:
             await asyncio.wait_for(pending, 10)
         assert error.value.status_code == 409
@@ -226,20 +232,25 @@ class Incident:
 
 
 def sos_endpoint(db):
-    """Compile the actual endpoint, stub only model/delivery (no live imports)."""
+    """Compile the actual endpoint and Alert schema; stub delivery, not persistence."""
     path = Path(__file__).resolve().parents[1] / "server.py"
-    node = next(n for n in ast.parse(path.read_text()).body
+    tree = ast.parse(path.read_text())
+    node = next(n for n in tree.body
                 if isinstance(n, ast.AsyncFunctionDef) and n.name == "trigger_sos")
+    model = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Alert")
+    serialize = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_to_utc_iso")
     node.decorator_list = []
     pushes, messages = AsyncMock(return_value=0), AsyncMock(return_value=[])
     jobs = set()
-    scope = {"db": db, "fw": fw, "Alert": Incident, "SOSRequest": SimpleNamespace,
+    scope = {"db": db, "fw": fw, "BaseModel": BaseModel, "Field": Field,
+             "Optional": Optional, "uuid": uuid, "field_serializer": field_serializer,
+             "SOSRequest": SimpleNamespace,
              "Depends": lambda dep: None, "get_current_user": lambda: None,
              "user_tz": lambda user: timezone.utc, "datetime": datetime, "timezone": timezone,
              "push_to_family_group": pushes, "sms": SimpleNamespace(
                  send_sms_to_many=messages, mode=lambda: "mock", normalize_e164=lambda x: x),
              "asyncio": asyncio, "_BG_TASKS": jobs, "logger": logging.getLogger(__name__)}
-    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), scope)
+    exec(compile(ast.Module(body=[serialize, model, node], type_ignores=[]), str(path), "exec"), scope)
     return scope["trigger_sos"], pushes, messages, jobs
 
 
@@ -306,10 +317,12 @@ def otp_app(db):
     transitions, linkage, transaction retries and HTTP errors are real.
     """
     path = Path(__file__).resolve().parents[1] / "server.py"
-    node = next(n for n in ast.parse(path.read_text()).body
-                if isinstance(n, ast.AsyncFunctionDef) and n.name == "verify_otp")
-    node.decorator_list = []
-    scope = {"db": db, "fg": fg, "el": links, "OtpVerify": SyntheticOtp,
+    nodes = [n for n in ast.parse(path.read_text()).body
+             if isinstance(n, ast.AsyncFunctionDef) and n.name in ("verify_otp", "_verify_otp_transaction")]
+    assert len(nodes) == 2
+    for node in nodes:
+        node.decorator_list = []
+    scope = {"db": db, "fg": fg, "el": links, "fw": fw, "OtpVerify": SyntheticOtp,
              "OTP_LENGTH": 6, "OTP_MAX_ATTEMPTS": 5, "HTTPException": HTTPException,
              "verify_password": lambda value, proof: value == "123456" and proof == "synthetic-proof",
              "datetime": datetime, "timezone": timezone, "uuid": uuid,
@@ -318,7 +331,7 @@ def otp_app(db):
              "TokenResponse": lambda **kwargs: kwargs,
              "create_access_token": lambda uid: "synthetic-session",
              "_user_response": lambda user: {key: user[key] for key in ("id", "family_group_id")}}
-    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), scope)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), scope)
     app = FastAPI()
     app.post("/api/auth/verify-otp")(scope["verify_otp"])
     return app
@@ -329,6 +342,8 @@ async def otp_request(s, new_account):
     email = "new-synthetic@example.com" if new_account else "invitee@example.com"
     await s.db.otp_codes.insert_one({
         "email": email, "code_hash": "synthetic-proof", "purpose": "signup",
+        "credential_id": uuid.uuid4().hex, "issued_user_id": None if new_account else "invitee",
+        "deletion_generation": 0,
         "invite_code": "KINN-SAFE", "full_name": "New Synthetic", "timezone": "UTC",
         "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
     })

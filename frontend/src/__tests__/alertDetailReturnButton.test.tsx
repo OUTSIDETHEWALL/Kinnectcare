@@ -67,6 +67,11 @@ jest.mock('react-native', () => {
 });
 
 const mockRouterReplace = jest.fn();
+let mockViewer: { id: string; family_group_id: string } | null;
+let mockFocused = true;
+
+jest.mock('../AuthContext', () => ({ useAuth: () => ({ user: mockViewer }) }));
+jest.mock('@react-navigation/native', () => ({ useIsFocused: () => mockFocused }));
 
 jest.mock('expo-router', () => ({
   useLocalSearchParams: () => ({ id: 'sos-alert-001', member_phone: '' }),
@@ -82,8 +87,14 @@ jest.mock('react-native-safe-area-context', () => {
 });
 
 jest.mock('../Icon', () => ({ Icon: () => null }));
-jest.mock('../MemberMap', () => ({ __esModule: true, default: () => null }));
-jest.mock('../timeFormat', () => ({ formatRelativeLocal: () => '2 min ago' }));
+jest.mock('../MemberMap', () => {
+  const React = require('react');
+  return { __esModule: true, default: (props: object) => React.createElement('MemberMap', props) };
+});
+jest.mock('../timeFormat', () => ({
+  formatRelativeLocal: () => '2 min ago',
+  formatDateTimeLocal: (iso: string) => iso,
+}));
 jest.mock('../theme', () => ({
   Colors: {
     background: '#F9FAFB',
@@ -103,21 +114,6 @@ jest.mock('../theme', () => ({
   },
 }));
 
-// memberStore: return a live member with coords so the map card renders.
-jest.mock('../store/memberStore', () => ({
-  useMember: () => ({
-    id: 'member-001',
-    name: 'Test Member',
-    latitude: 33.45,
-    longitude: -112.07,
-    last_seen: new Date(Date.now() - 30_000).toISOString(),
-    location_name: '123 Main St',
-    emergency_contact_phone: '',
-  }),
-  fetchOne: jest.fn(() => Promise.resolve()),
-  requestRefresh: jest.fn(() => Promise.resolve()),
-}));
-
 jest.mock('../resumeDiagnostics', () => ({
   logResumeDecision: jest.fn(),
   markAlertDismissed: jest.fn(),
@@ -125,10 +121,6 @@ jest.mock('../resumeDiagnostics', () => ({
 
 jest.mock('../activeEmergency', () => ({
   setActiveEmergency: jest.fn(),
-}));
-
-jest.mock('../tracking/TrackingStatusPill', () => ({
-  TrackingStatusPill: () => null,
 }));
 
 // ── API mock ─────────────────────────────────────────────────────────────────
@@ -157,6 +149,8 @@ import AlertDetail from '../../app/alert/[id]';
 function makeSosAlert(overrides: Record<string, unknown> = {}) {
   return {
     id: 'sos-alert-001',
+    owner_id: 'owner-account',
+    family_group_id: 'family-001',
     member_id: 'member-001',
     member_name: 'Test Member',
     type: 'sos',
@@ -201,7 +195,9 @@ function allTextContent(root: ReturnType<typeof create>['root']): string[] {
 async function renderAlertDetail(
   alerts: ReturnType<typeof makeSosAlert>[],
 ): Promise<ReturnType<typeof create>> {
-  mockApiGet.mockResolvedValue({ data: alerts });
+  mockApiGet.mockImplementation(async (path: string) => ({
+    data: path === '/alerts' ? alerts : [],
+  }));
 
   let renderer!: ReturnType<typeof create>;
   await act(async () => {
@@ -218,12 +214,331 @@ async function renderAlertDetail(
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockViewer = { id: 'viewer', family_group_id: 'family-001' };
+  mockFocused = true;
   mockAppStateChangeHandler = null;
   jest.useFakeTimers();
+  jest.setSystemTime(new Date('2026-11-18T21:53:10Z'));
+  mockApiPost.mockResolvedValue({ data: { sent_to: 1 } });
 });
 
 afterEach(() => {
+  jest.clearAllTimers();
   jest.useRealTimers();
+});
+
+describe('SOS location — real detail screen with offline responses', () => {
+  let tree: ReturnType<typeof create>;
+  let incident: ReturnType<typeof makeSosAlert>;
+  let members: Record<string, unknown>[];
+  const profile = (extra: Record<string, unknown> = {}) => ({
+    id: 'linked-profile', user_id: 'owner-account', family_group_id: 'family-001',
+    location_consent_generation: 3, location_sharing_enabled: true,
+    latitude: 20, longitude: 30, gps_accuracy: 11.65,
+    coordinate_captured_at: '2026-11-18T21:52:03.914Z',
+    last_seen: '2026-11-18T21:53:09Z',
+    ...extra,
+  });
+  const find = (testID: string) => findByTestID(tree.root, testID);
+  const lat = () => tree.root.findAll((n: any) => n.type === 'MemberMap')[0]?.props.latitude;
+  const text = () => allTextContent(tree.root).join(' ');
+  const advance = (ms: number) => act(async () => { await jest.advanceTimersByTimeAsync(ms); });
+  const mount = async () => { await act(async () => { tree = create(<AlertDetail />); }); };
+  const defer = () => {
+    let resolve!: (result: { data: unknown }) => void;
+    const promise = new Promise<{ data: unknown }>(done => { resolve = done; });
+    return { promise, resolve };
+  };
+
+  beforeEach(() => {
+    incident = makeSosAlert({ member_id: 'owner-account', latitude: null, longitude: null,
+      created_at: '2026-11-18T21:53:08Z' });
+    members = [profile()];
+    mockApiGet.mockImplementation(async (path: string) => ({
+      data: path === '/alerts' ? [incident] : members,
+    }));
+  });
+  afterEach(async () => { if (tree) await act(async () => tree.unmount()); });
+
+  it('reproduces the ID mismatch, shows the authorized fallback before the fresh request returns, and accepts only a newer fix', async () => {
+    const push = defer();
+    mockApiPost.mockReturnValueOnce(push.promise);
+    await mount();
+    expect(lat()).toBe(20);
+    expect(text()).toContain('Last known location');
+    expect(text()).toContain('2026-11-18T21:52:03.914Z');
+    expect(text()).toContain('Accuracy about 12 m');
+    expect(mockApiPost).toHaveBeenCalledWith('/members/linked-profile/request-location-refresh', undefined, expect.anything());
+    await act(async () => push.resolve({ data: { sent_to: 1 } }));
+    members = [profile({ latitude: 21, coordinate_captured_at: '2026-11-18T21:51:00Z' })];
+    await advance(4000);
+    expect(lat()).toBe(20);
+    members = [profile({ latitude: 23, coordinate_captured_at: '2026-11-18T21:53:12Z' })];
+    await advance(4000);
+    expect(lat()).toBe(23);
+    expect(text()).toContain('Fresh location');
+    await advance(35000);
+    expect(text()).toContain('Last known location');
+    expect(mockApiPost).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['missing', 'ambiguous', 'foreign', 'sharing off'])('does not expose or request a %s profile', async mode => {
+    if (mode === 'missing') members = [];
+    if (mode === 'ambiguous') members.push(profile({ id: 'other-linked-profile' }));
+    if (mode === 'foreign') members = [profile({ family_group_id: 'other-family' })];
+    if (mode === 'sharing off') members = [profile({ location_sharing_enabled: false })];
+    await mount();
+    expect(lat()).toBeUndefined();
+    expect(text()).toContain('Location unavailable');
+    expect(mockApiPost).not.toHaveBeenCalled();
+    expect(find('sos-call-911')).not.toBeNull();
+  });
+
+  it('uses the explicitly selected subject and never substitutes the SOS owner', async () => {
+    incident = { ...incident, member_id: 'explicit-profile' };
+    members.push(profile({ id: 'explicit-profile', user_id: 'explicit-account', latitude: 24 }));
+    await mount();
+    expect(lat()).toBe(24);
+    expect(mockApiPost).toHaveBeenCalledWith('/members/explicit-profile/request-location-refresh', undefined, expect.anything());
+  });
+
+  it.each(['timeout', 'network error', 'no tokens'])('ends the waiting state without a fix: %s', async mode => {
+    members = [profile({ latitude: null, longitude: null })];
+    if (mode === 'network error') mockApiPost.mockRejectedValueOnce(new Error('offline'));
+    if (mode === 'no tokens') mockApiPost.mockResolvedValueOnce({ data: { sent_to: 0 } });
+    if (mode === 'timeout') mockApiPost.mockReturnValueOnce(defer().promise);
+    await mount();
+    if (mode === 'timeout') {
+      expect(text()).toContain('Looking for a location');
+      await advance(30_000);
+    }
+    expect(text()).toContain('Location unavailable');
+    expect(find('sos-call-911')).not.toBeNull();
+  });
+
+  it('clears a withdrawn fix and rejects an older consent generation on a subsequent response', async () => {
+    await mount();
+    expect(lat()).toBe(20);
+    members = [profile({ location_sharing_enabled: false, location_consent_generation: 4 })];
+    await advance(4000);
+    expect(lat()).toBeUndefined();
+    members = [profile({ latitude: 21, coordinate_captured_at: '2026-11-18T21:53:12Z' })];
+    await advance(4000);
+    expect(lat()).toBeUndefined();
+    expect(text()).toContain('Location unavailable');
+  });
+
+  it('records an initial denial, rejects stale and same-generation grants, and resumes on a newer grant', async () => {
+    members = [profile({ location_sharing_enabled: false, location_consent_generation: 4 })];
+    await mount();
+    expect(lat()).toBeUndefined();
+    for (const generation of [3, 4]) {
+      members = [profile({ location_consent_generation: generation })];
+      await advance(4000);
+      expect(lat()).toBeUndefined();
+      expect(mockApiPost).not.toHaveBeenCalled();
+      expect(text()).toContain('Location unavailable');
+    }
+    members = [profile({ location_consent_generation: 5 })];
+    await advance(4000);
+    expect(lat()).toBe(20);
+    expect(mockApiPost).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not show or navigate to an attached SOS pin after a sharing denial', async () => {
+    incident = { ...incident, latitude: 38, longitude: 42 };
+    members = [profile({ location_sharing_enabled: false, location_consent_generation: 4 })];
+    await mount();
+    expect(lat()).toBeUndefined();
+    expect(text()).not.toContain('Open in Maps');
+    expect(text()).toContain('Location unavailable');
+    expect(mockApiPost).not.toHaveBeenCalled();
+    members = [profile({ location_consent_generation: 5, latitude: null, longitude: null })];
+    await advance(4000);
+    expect(lat()).toBeUndefined(); // A later grant does not reauthorize the old attached pin.
+  });
+
+  it('never lowers the highest generation, even after an older denial', async () => {
+    members = [profile({ location_consent_generation: 5 })];
+    await mount();
+    for (const sharing of [false, true]) {
+      members = [profile({ location_consent_generation: 4, location_sharing_enabled: sharing })];
+      await advance(4000);
+      expect(lat()).toBeUndefined();
+    }
+    members = [profile({ location_consent_generation: 5 })];
+    await advance(4000);
+    expect(lat()).toBe(20);
+    expect(mockApiPost).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['blur', 'background'])('retains a denial watermark across %s', async mode => {
+    members = [profile({ location_sharing_enabled: false, location_consent_generation: 4 })];
+    await mount();
+    await act(async () => {
+      if (mode === 'background') mockAppStateChangeHandler?.('background');
+      else {
+        mockFocused = false;
+        tree.update(<AlertDetail />);
+      }
+    });
+    members = [profile()];
+    await act(async () => {
+      if (mode === 'background') mockAppStateChangeHandler?.('active');
+      else {
+        mockFocused = true;
+        tree.update(<AlertDetail />);
+      }
+    });
+    expect(lat()).toBeUndefined();
+    expect(mockApiPost).not.toHaveBeenCalled();
+  });
+
+  it('revalidates while the refresh POST is pending; its late result cannot restore a withdrawn fix', async () => {
+    const push = defer();
+    mockApiPost.mockReturnValueOnce(push.promise);
+    await mount();
+    expect(lat()).toBe(20);
+    members = [profile({ location_sharing_enabled: false, location_consent_generation: 4 })];
+    await advance(4000);
+    expect(lat()).toBeUndefined();
+    await act(async () => push.resolve({ data: { sent_to: 0 } }));
+    expect(lat()).toBeUndefined();
+    expect(text()).toContain('Location unavailable');
+  });
+
+  it('ignores a late POST denial from a superseded consent generation', async () => {
+    const push = defer();
+    mockApiPost.mockReturnValueOnce(push.promise);
+    await mount();
+    members = [profile({ location_consent_generation: 5, latitude: 26,
+      coordinate_captured_at: '2026-11-18T21:53:12Z' })];
+    await advance(4000);
+    expect(lat()).toBe(26);
+    await act(async () => push.resolve({ data: { skipped: 'target_sharing_off' } }));
+    expect(lat()).toBe(26);
+  });
+
+  it('honors a current server refresh denial and rejects the same generation from a later member read', async () => {
+    mockApiPost.mockResolvedValueOnce({ data: { skipped: 'target_sharing_off' } });
+    await mount();
+    expect(lat()).toBeUndefined();
+    await advance(4000);
+    expect(lat()).toBeUndefined();
+    expect(mockApiPost).toHaveBeenCalledTimes(1);
+  });
+
+  it('never accepts a different linked account for the same explicit SOS profile', async () => {
+    incident = { ...incident, member_id: 'linked-profile' };
+    await mount();
+    expect(lat()).toBe(20);
+    members = [profile({ user_id: 'different-account', location_consent_generation: 6 })];
+    await advance(4000);
+    expect(lat()).toBeUndefined();
+    members = [profile({ location_consent_generation: 7 })];
+    await advance(4000);
+    expect(lat()).toBeUndefined();
+  });
+
+  it('expires a displayed pin if a timed-out authority check never settles', async () => {
+    await mount();
+    expect(lat()).toBe(20);
+    mockApiGet.mockImplementation(async (path: string) => (
+      path === '/alerts' ? { data: [incident] } : defer().promise
+    ));
+    await advance(30_000);
+    expect(lat()).toBeUndefined();
+    expect(text()).toContain('Location unavailable');
+  });
+
+  it('aborts overlapping reads on Return and ignores callbacks completing after exit', async () => {
+    const pending = defer();
+    const signal = new AbortController();
+    const signals: AbortSignal[] = [];
+    mockApiGet.mockImplementation(async (path: string, options = { signal: signal.signal }) => {
+      if (path === '/alerts') return { data: [incident] };
+      signals.push(options.signal);
+      return pending.promise;
+    });
+    await mount();
+    await act(async () => find('alert-back')!.props.onPress());
+    expect(signals[0].aborted).toBe(true);
+    await act(async () => pending.resolve({ data: [profile()] }));
+    expect(lat()).toBeUndefined();
+    expect(mockApiPost).not.toHaveBeenCalled();
+  });
+
+  it.each(['family change', 'account change', 'blur', 'background'])('aborts pending reads and rejects late coordinates on %s', async mode => {
+    const pending = defer();
+    const calls: AbortSignal[] = [];
+    mockApiGet.mockImplementation(async (path: string, options: { signal: AbortSignal }) => {
+      if (path === '/alerts') return { data: [incident] };
+      calls.push(options.signal);
+      return pending.promise;
+    });
+    await mount();
+    expect(calls).toHaveLength(1);
+    await act(async () => {
+      if (mode === 'family change') mockViewer = { id: 'viewer', family_group_id: 'new-family' };
+      if (mode === 'account change') mockViewer = null;
+      if (mode === 'blur') mockFocused = false;
+      if (mode === 'background') mockAppStateChangeHandler?.('background');
+      tree.update(<AlertDetail />);
+    });
+    expect(calls[0].aborted).toBe(true);
+    await act(async () => pending.resolve({ data: [profile()] }));
+    expect(lat()).toBeUndefined();
+    expect(mockApiPost).not.toHaveBeenCalled();
+  });
+
+  it('clears the shared fix and stops polling on remote resolution', async () => {
+    await mount();
+    expect(lat()).toBe(20);
+    incident = { ...incident, resolved: true };
+    await advance(4000);
+    expect(find('sos-banner-resolved')).not.toBeNull();
+    expect(lat()).toBeUndefined();
+    const count = mockApiGet.mock.calls.length;
+    await advance(60_000);
+    expect(mockApiGet.mock.calls).toHaveLength(count);
+  });
+
+  it('preserves Call 911 and local resolution even if no location exists', async () => {
+    members = [];
+    await mount();
+    const { Linking } = jest.requireMock('react-native');
+    await act(async () => find('sos-call-911')!.props.onPress());
+    expect(Linking.openURL).toHaveBeenCalledWith('tel:911');
+    await act(async () => find('sos-resolve')!.props.onPress());
+    const buttons = (RNAlert.alert as jest.Mock).mock.calls[0][2];
+    mockApiPost.mockResolvedValueOnce({ data: { alert: { ...incident, resolved: true, acknowledged: true } } });
+    await act(async () => buttons.find((b: { text: string }) => b.text === 'Resolve').onPress());
+    expect(mockApiPost).toHaveBeenCalledWith('/alerts/sos-alert-001/resolve');
+    expect(find('sos-banner-resolved')).not.toBeNull();
+    const count = mockApiGet.mock.calls.length;
+    await advance(60_000);
+    expect(mockApiGet.mock.calls).toHaveLength(count);
+  });
+
+  it('never substitutes device contact time for a missing GPS timestamp', async () => {
+    members = [profile({ coordinate_captured_at: null })];
+    await mount();
+    expect(lat()).toBe(20);
+    expect(text()).toContain('Last known location');
+    expect(text()).toContain('Capture time unavailable');
+    members = [profile({ latitude: 22, coordinate_captured_at: '2026-11-18T21:53:12Z' })];
+    await advance(4000);
+    expect(lat()).toBe(22); // This GPS fix is newer than the first observation.
+    expect(text()).toContain('Fresh location');
+  });
+
+  it('keeps an attached emergency pin when the shared fix is older, without inventing capture time', async () => {
+    incident = { ...incident, latitude: 38, longitude: 42 };
+    await mount();
+    expect(lat()).toBe(38);
+    expect(text()).toContain('Location attached to SOS');
+    expect(text()).toContain('Capture time unavailable');
+  });
 });
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

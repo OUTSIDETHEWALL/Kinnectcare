@@ -24,6 +24,7 @@ import family_group as fg
 import sos_history as sh
 from family_write_fence import SessionCollection, SessionDatabase
 import family_write_fence as fw
+import deletion_delivery as dd
 
 TOKEN_RE = re.compile(r"^[a-f0-9]{64}$")
 TTL = timedelta(minutes=15)
@@ -197,7 +198,7 @@ async def join_family_code(db, user_id, code, *, new_user=None, link_by_name=Fal
                         raise HTTPException(409, "The invited member changed; try again.")
         await join_verified(tx, user, None, target, family_code=code)
         return user, target
-    return await fw.run(db, [], action, timeout=1.0)
+    return await fw.run(db, [], action, timeout=fw.FAMILY_TRANSFER_TIMEOUT_SECONDS, sos_priority=True)
 
 
 async def rate_limit(db, key: str, limit: int, window: int):
@@ -218,8 +219,7 @@ async def accept_legacy_invitation(db, token, *, user_id=None, new_user=None):
     Called only after existing session/OTP identity proof. Never trust a caller's
     cached family or invitation: removal can commit while a request is waiting.
     """
-    async def transaction(session):
-        tx = SessionDatabase(db, session)
+    async def transaction(tx):
         user = await tx.users.find_one({"id": user_id}) if user_id else None
         inv, target = await invitation(tx, token, accepted_user=user["id"] if user else None)
         if not user:
@@ -232,7 +232,7 @@ async def accept_legacy_invitation(db, token, *, user_id=None, new_user=None):
         return {"user": user, "group": target, "invitation": inv,
                 "already_member": already_member}
 
-    return await fw.transaction(db, transaction)
+    return await fw.run(db, [], transaction, timeout=fw.FAMILY_TRANSFER_TIMEOUT_SECONDS, sos_priority=True)
 
 
 def build_router(db, get_current_user, send_email, make_token, public_user):
@@ -283,19 +283,34 @@ def build_router(db, get_current_user, send_email, make_token, public_user):
         else:
             raise HTTPException(400, "Enter your email address.")
         await rate_limit(db, f"email:{email}", 1, 60)
-        user = await db.users.find_one({"email": email})
+        observed_identity = await db.email_link_identities.find_one({"_id": digest(email)}) or {}
+        observed_user = await db.users.find_one({"email": email})
         token = secrets.token_hex(32)
         now = datetime.now(timezone.utc)
-        await db.email_links.insert_one({
-            "_id": digest(token), "challenge": data.challenge, "email": email,
-            # Bind pre-existing account identity. Deletion/recreation cannot
-            # cause an old email link to sign in to a different user.
-            "issued_user_id": user["id"] if user else None,
-            "invite_token": fg.normalize_invite_code(data.invite_token) if inv else None,
-            "full_name": data.full_name.strip() or (inv.get("invitee_name", "") if inv else ""),
-            "timezone": data.timezone, "create_family": data.create_family,
-            "created_at": now, "expires_at": now + TTL, "used": False,
-        })
+
+        async def issue(session):
+            tx = SessionDatabase(db, session)
+            await tx.email_link_identities.update_one(
+                {"_id": digest(email)}, {"$inc": {"generation": 1}}, upsert=True,
+            )
+            user = await tx.users.find_one({"email": email})
+            identity = await tx.email_link_identities.find_one({"_id": digest(email)})
+            if identity.get("deletion_generation", 0) != observed_identity.get("deletion_generation", 0):
+                raise HTTPException(410, "Your account changed. Request a fresh email link.")
+            if observed_user and (not user or user["id"] != observed_user["id"]):
+                raise HTTPException(410, "Your account changed. Request a fresh email link.")
+            await tx.email_links.insert_one({
+                "_id": digest(token), "challenge": data.challenge, "email": email,
+                # Bind pre-existing account identity. Deletion/recreation cannot
+                # cause an old email link to sign in to a different user.
+                "issued_user_id": user["id"] if user else None,
+                "invite_token": fg.normalize_invite_code(data.invite_token) if inv else None,
+                "full_name": data.full_name.strip() or (inv.get("invitee_name", "") if inv else ""),
+                "timezone": data.timezone, "create_family": data.create_family,
+                "created_at": now, "expires_at": now + TTL, "used": False,
+            })
+
+        await fw.transaction(db, issue)
         # Fragments are not included in HTTP requests or web-server access logs.
         origin = (os.environ.get("KINNSHIP_LINK_ORIGIN") or "https://kinnectcare-production.up.railway.app").rstrip("/")
         if not origin.startswith("https://"):
@@ -304,9 +319,14 @@ def build_router(db, get_current_user, send_email, make_token, public_user):
         body = ("Tap Continue to Kinnship on the phone where you requested this email. "
                 "This link expires in 15 minutes and works once. "
                 "If you did not request it, do not open it.\n\n" + url)
-        sent = await send_email(
-            email, "Continue to Kinnship", body,
-            html=f'<p>Continue on the phone where you requested this email.</p><p><a href="{html.escape(url)}">Continue to Kinnship</a></p><p>Valid for 15 minutes, once. If you did not request this, ignore this email.</p>',
+        async def valid(tx):
+            return bool(await tx.email_links.find_one({"_id": digest(token), "used": False}))
+        sent = await dd.run(
+            db, lambda: send_email(
+                email, "Continue to Kinnship", body,
+                html=f'<p>Continue on the phone where you requested this email.</p><p><a href="{html.escape(url)}">Continue to Kinnship</a></p><p>Valid for 15 minutes, once. If you did not request this, ignore this email.</p>',
+            ),
+            email=email, validate=valid, suppressed=False, operation_key=f"link:{digest(token)}",
         )
         if not sent:
             await db.email_links.delete_one({"_id": digest(token)})
@@ -384,8 +404,7 @@ def build_router(db, get_current_user, send_email, make_token, public_user):
     async def confirm_invite(data: InviteConfirm, current=Depends(get_current_user)):
         if not data.confirmed:
             raise HTTPException(400, "Please confirm joining this family.")
-        async def transaction(session):
-            tx = SessionDatabase(db, session)
+        async def transaction(tx):
             user = await tx.users.find_one({"id": current["id"]})
             if not user:
                 raise HTTPException(401, "Please sign in again.")
@@ -396,7 +415,7 @@ def build_router(db, get_current_user, send_email, make_token, public_user):
                 raise HTTPException(409, "Your current family changed. Please review the invitation again.")
             await join_verified(tx, user, inv, target)
             return {"ok": True, "group": fg.public_group(target)}
-        return await fw.transaction(db, transaction)
+        return await fw.run(db, [], transaction, timeout=fw.FAMILY_TRANSFER_TIMEOUT_SECONDS, sos_priority=True)
 
     return router
 

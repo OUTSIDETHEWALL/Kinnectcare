@@ -772,7 +772,9 @@ def _resolve_slot(now_local: datetime, slot_time: str) -> Optional[Dict[str, Any
     if _parse_hhmm(slot_time) is None:
         return None
     hh, mm = slot_time.split(":")
-    slot_local = now_local.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+    # One slot/date is one occurrence. Do not inherit the current instant's
+    # fold during fall-back and silently move that occurrence an hour later.
+    slot_local = now_local.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0, fold=0)
     slot_utc = slot_local.astimezone(timezone.utc)
     now_utc = now_local.astimezone(timezone.utc)
     return {
@@ -1061,6 +1063,17 @@ async def process_pending_notifications(
             resolved = _resolve_slot(now_local, slot_time)
             if not resolved:
                 continue
+            # Tonight's slot is still in the future after local midnight.
+            # Recover yesterday ONLY while its existing family-stage window
+            # is open; do not replay self/routine reminders or scan history.
+            if not is_routine and resolved["delta_min"] < 0:
+                previous = _resolve_slot(now_local - timedelta(days=1), slot_time)
+                previous_delta = (
+                    now_utc - previous["slot_utc"]
+                ).total_seconds() / 60.0
+                if (STAGE_OFFSETS_MIN[STAGE_FAMILY] <= previous_delta
+                        <= STAGE_MAX_STALE_MIN[STAGE_FAMILY]):
+                    resolved = {**previous, "delta_min": previous_delta}
             delta_min = resolved["delta_min"]
             slot_utc = resolved["slot_utc"]
             local_date = resolved["local_date"]

@@ -1,6 +1,7 @@
 import React from 'react';
 import { act, create } from 'react-test-renderer';
 import { AuthProvider, useAuth } from '../AuthContext';
+import { clearSosSendReceipt, readSosSendReceipt, recordSosSendReceipt } from '../sosSendReceipt';
 
 const mockGet = jest.fn();
 const mockPut = jest.fn();
@@ -51,6 +52,7 @@ describe('real AuthProvider first usable state', () => {
   });
   afterEach(async () => {
     if (tree) await act(async () => tree.unmount());
+    clearSosSendReceipt();
     jest.useRealTimers();
   });
 
@@ -122,5 +124,37 @@ describe('real AuthProvider first usable state', () => {
     await act(async () => { complete(null); await flush(); });
     expect(require('../api').clearToken).toHaveBeenCalledTimes(1);
     expect(auth!.user?.id).toBe(next.id);
+  });
+
+  const receiptScope = JSON.stringify([user.id, 'synthetic-family']);
+  const saveReceipt = () => recordSosSendReceipt({
+    ok: true, alert_id: 'synthetic-sos', coordinates: null, fanout_mode: 'background',
+  }, {}, false, receiptScope);
+
+  it('logout revokes SOS evidence synchronously before slow credential cleanup', async () => {
+    await act(async () => { tree = create(<AuthProvider><Probe /></AuthProvider>); await flush(); });
+    saveReceipt();
+    let finish!: () => void;
+    require('../api').clearToken.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+    let logout!: Promise<void>;
+    await act(async () => { logout = auth!.logout(); await flush(); });
+    expect(readSosSendReceipt('synthetic-sos', receiptScope)).toBeNull();
+    await act(async () => { finish(); await logout; });
+  });
+
+  it('starting a new sign-in invalidates SOS evidence even for the same account', async () => {
+    await act(async () => { tree = create(<AuthProvider><Probe /></AuthProvider>); await flush(); });
+    saveReceipt();
+    mockPost.mockResolvedValue({ data: { user, access_token: 'synthetic-session' } });
+    await act(async () => { await auth!.verifyOtp({ email: 'test@example.com', code: '000000' }); });
+    expect(readSosSendReceipt('synthetic-sos', receiptScope)).toBeNull();
+  });
+
+  it('refreshing family membership invalidates prior family SOS evidence', async () => {
+    await act(async () => { tree = create(<AuthProvider><Probe /></AuthProvider>); await flush(); });
+    saveReceipt();
+    mockGet.mockResolvedValue({ data: { ...user, family_group_id: 'replacement-family' } });
+    await act(async () => { await auth!.refreshUser(); });
+    expect(readSosSendReceipt('synthetic-sos', receiptScope)).toBeNull();
   });
 });
