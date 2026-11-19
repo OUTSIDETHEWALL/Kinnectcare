@@ -65,6 +65,8 @@ async def account_client(s, *, token=None, billing_failure=False, send_email=Non
         "logger": logging.getLogger("synthetic-account-tests"),
         "datetime": datetime, "timezone": timezone, "timedelta": timedelta,
         "uuid": uuid,
+        # Explicit test-only handoff attestation; production defaults stay closed.
+        "os": SimpleNamespace(environ={"ACCOUNT_DELETION_HANDOFF_VERIFIED": "true"}),
     }
     execute(scope, "get_authenticated_user", "get_current_user", "DeleteAccountRequest", "delete_account")
     app = FastAPI()

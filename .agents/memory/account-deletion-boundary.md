@@ -36,3 +36,15 @@ uncertain-send replay are not authorized.
 distinct user-subject and member-subject forms, and document fail-closed
 interruption recovery as an operational limitation rather than silently
 releasing a blocker.
+
+Reopening account deletion after the launch cutover requires verified retirement
+of old senders and the owner's explicit approval for the production enablement.
+Merging the temporary server gate is not permission to open it.
+
+**Why:** The owner approved only a narrow server-enforced gate and required
+deletion to remain blocked until worker handoff is verified, with production
+configuration and deployment separately approved.
+
+**How to apply:** Keep deletion closed during the transition. Do not infer
+handoff completion from elapsed time, client behavior or a healthy new container;
+restore deletion only after the handoff evidence and approval are present.

@@ -1594,6 +1594,13 @@ async def delete_account(
       2. Delete all user-owned collections.
       3. Delete the user document.
     """
+    # Operator-only release gate: enable only after the worker handoff is verified.
+    if os.environ.get("ACCOUNT_DELETION_HANDOFF_VERIFIED") != "true":
+        raise HTTPException(
+            status_code=503,
+            detail="Account deletion is temporarily unavailable while a safety update is verified. No data was deleted.",
+        )
+
     user_id = current["id"]
     payload = data or DeleteAccountRequest()
     if (payload.confirm or "").strip().upper() != "DELETE":
