@@ -17,6 +17,12 @@ Dedicated branch: `fix/account-deletion-care-records`, stacked on rotation draft
 #199's branch at `496cc5d4cd7d0bab17d841ad04427c1327661b54`. The parent PR is
 still unmerged; platform task completion is not GitHub merge evidence.
 
+Incomplete [draft PR #200](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/200),
+initial WIP implementation/evidence commit
+`981913cfaa84faf501f994a1e593a7107b88d230`. Its explicit base is
+`fix/family-code-rotation-security`, not `main`. The PR records all three open
+High findings and must remain draft/unmerged pending approval and closure.
+
 ## Original failure and partial correction
 
 **High — legitimate account deletion blocked; high confidence.** An owned
