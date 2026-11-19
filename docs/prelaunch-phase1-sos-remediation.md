@@ -1,16 +1,37 @@
-# Pre-launch remediation tracker — Phase 1
+# Pre-launch remediation tracker — Phases 1 and 2
 
 Baseline: `1f83570b3145a5bec441d46f9dc0b21e0fbdbca0`.
 
-Scope: SOS safety only. No merges, deployments, OTA, AAB, live pushes,
-production data/index changes, or billing configuration changes are authorized.
+Phase 1 implementation scope was SOS safety only. The owner subsequently merged
+PR #196 and authorized Phase 2's two reliability corrections plus investigation
+of medication-stage/refill gaps. Agent merges, deployments, OTA, AAB, live
+pushes, production data/index/configuration changes and billing changes remain
+unauthorized. Phase 3 has not started.
+
+## Current phase status
+
+| Phase | Status / evidence | Remaining gate |
+| --- | --- | --- |
+| 1 — SOS safety | [PR #196](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/196) owner-merged at `0396e5b9b168699ca0e1baa7952b7afa08548a12` | Deployment/physical acceptance pending certification; do not infer acceptance from a merge. A newer Railway deployment was observed read-only, but Phase 1 runtime behavior was not certified here. |
+| 2 — Medication/check-in reliability | [Medication draft #197](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/197) and [check-in draft #198](https://github.com/OUTSIDETHEWALL/Kinnectcare/pull/198); both passed independent adversarial re-review with no unresolved Critical/High findings in their affected implementations | Owner review/merge and separately approved rollout/physical acceptance; stage/refill decisions remain unapproved |
+| 3 — Family/deletion/SOS retention | Pending; existing draft #190 left untouched | Separate authorization and validation of authority, deletion and actual retention/index behavior |
+| 4 — Google Play Billing | Pending | Architecture approval before implementation/configuration |
+| 5 — Security and automated checks | Pending | Triage confirmed risks and repair test causes; baseline failures are not green |
+| 6 — Final Android AAB/Play verification | Pending | Approved reviewed corrections, separate build/upload/physical acceptance authorization |
+
+Phase 2 reports:
+- `docs/prelaunch-phase2-report.md`
+- `docs/prelaunch-phase2-medication-midnight.md`
+- `docs/prelaunch-phase2-checkin-reliability.md`
+- `docs/prelaunch-phase2-medication-stages-review.md`
+- `docs/prelaunch-phase2-refill-review.md`
 
 ## Phase 1 corrections
 
 | Finding | Severity / root cause | Correction | PR / tests / independent review | Remaining evidence | Eventual delivery |
 | --- | --- | --- | --- | --- | --- |
-| Unsupported SOS success assertions | Critical: UI assumed server receipt meant all-device delivery and emergency dispatch; stored message claimed dispatch too | Require a matching, account/family/session-scoped volatile server receipt; distinguish recording, notification request, absent/unknown/GPS/last-known location, capture time/accuracy, and dialer-open versus unverified call. Remove unsupported dispatch message from both backend entrypoints. | This Phase 1 draft. Focused regressions passed; independent adversarial review PASS after closing two findings. | Play-installed physical SOS test; no delivery or call completion claim without actual evidence | Backend deployment + Android client release; new final AAB for first install |
-| Emergency dialer gated on network/GPS success | Critical: dialer intent ran only after POST success | Always expose an explicit Call 911 action through preparation, GPS, sending, failure and retry. Open only on tap; dialer rejection cannot alter SOS success. A 3-second UI timeout provides manual guidance and permits another explicit tap without automatic retry. | Same Phase 1 draft; pending/late dialer tests passed; independent review PASS | Physical dialer-open/rejection test; do not place a non-emergency call | Android client release; no native dependency or permission change |
+| Unsupported SOS success assertions | Critical: UI assumed server receipt meant all-device delivery and emergency dispatch; stored message claimed dispatch too | Require a matching, account/family/session-scoped volatile server receipt; distinguish recording, notification request, absent/unknown/GPS/last-known location, capture time/accuracy, and dialer-open versus unverified call. Remove unsupported dispatch message from both backend entrypoints. | PR #196 owner-merged. Focused regressions passed; independent adversarial review PASS after closing two findings. | Play-installed physical SOS test; no delivery or call completion claim without actual evidence | Backend deployment + Android client release; new final AAB for first install |
+| Emergency dialer gated on network/GPS success | Critical: dialer intent ran only after POST success | Always expose an explicit Call 911 action through preparation, GPS, sending, failure and retry. Open only on tap; dialer rejection cannot alter SOS success. A 3-second UI timeout provides manual guidance and permits another explicit tap without automatic retry. | Same merged PR #196; pending/late dialer tests passed; independent review PASS | Physical dialer-open/rejection test; do not place a non-emergency call | Android client release; no native dependency or permission change |
 
 The successful-send automatic dialer launch is replaced by the explicit,
 always-visible Call 911 action requested for this phase. No emergency call is
@@ -25,13 +46,13 @@ Existing SOS creation, family fanout, boost, acknowledgment and resolution
 implementations are otherwise unchanged. No tracking, authorization, consent
 generation, incident location fallback, or retention/index implementation changes.
 
-## Deferred tracker — no implementation authorized in this phase
+## Remediation findings and deferred work
 
 | Audit finding | Severity / root cause | Proposed correction / decision | PR / tests / review | Remaining blocker | Eventual delivery |
 | --- | --- | --- | --- | --- | --- |
-| Midnight medication escalation | High: only today's slots evaluated | Include bounded previous-day occurrences, preserve identity and deduplication | Not started | Phase 2 authorization after Phase 1 report | Backend deployment |
-| Missed check-ins require polling | High: detection runs from read requests | Independent server scheduling preserving existing rules/timezone/deduplication | Not started | Phase 2 investigation | Backend deployment |
-| Three-stage/refill scope mismatch | High: implemented stages differ; refill workflow incomplete | Document current behavior and request approval for intervals, recipients and thresholds | Not started | Product decisions required before implementation | Backend/client; final AAB if native changes require it |
+| Midnight medication escalation | Critical safety reliability: only today's slots evaluated; related High DST acknowledgment mismatch | Bounded prior-day family window and UTC/first-fold identity consistency; preserve existing arbitration/deduplication | Draft #197; re-review PASS; implementer 86 passed/1 baseline failure plus 2 real Mongo tests; reviewer 100 passed/1 baseline failure | Owner review/merge, approved delivery and physical acceptance | Backend deployment only for this correction |
+| Missed check-ins require polling | Critical safety reliability: detection runs from read requests; no durable fanout recovery | Independent startup worker, family-fenced per-device outbox and versioned schedule lifetime | Draft #198; re-review PASS; 40 real Mongo tests passed; relevant baseline fixtures 34 passed/32 failed unchanged | Owner review/merge, startup indexes and approved delivery/physical acceptance | Backend deployment; additive outbox/revision data and indexes, no destructive migration |
+| Three-stage/refill scope mismatch | High product-scope gap: only two automatic medication stages; refill workflow absent | Separate source-based reports complete; recommend minimal designs without choosing timing/thresholds/recipients | Documentation in draft #198; no new product behavior implemented | Owner decisions/implementation approval required | Backend/client scope depends on design; native delivery requirements not assumed |
 | Family-code rotation unreachable | High: missing endpoint registration | Owner-authorized transactional rotation; prove old code invalidation | Not started | Phase 3 investigation | Backend deployment |
 | Ordinary care history blocks deletion | High: ambiguous ownership and terminal records rejected | Classify proven self records, preserve others and safety restrictions | Not started | Privacy/data-deletion adversarial review required | Backend deployment; migration only if justified and approved |
 | Resolved-SOS expiration / policy mismatch | High: expiration/index behavior needs reconciliation | Approved rule: resolved SOS expires after 30 days; never expire active/unresolved; clear expiry on reopen | Existing draft PR #190 identified, not duplicated or modified; not validated here | Phase 3 actual index/reopen/policy verification; production migration separately approved | Backend/client and possibly approved index migration |
