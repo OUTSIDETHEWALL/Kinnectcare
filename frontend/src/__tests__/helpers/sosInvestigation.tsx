@@ -73,6 +73,10 @@ export function setupSosInvestigation({ realMap = false, root = false } = {}) {
   };
   const router = { replace: jest.fn(h.navigate), push: jest.fn(h.navigate) };
   h.router = router;
+  const navigation = {
+    isFocused: () => h.route.startsWith('/alert/'),
+    addListener: () => () => {},
+  };
   jest.doMock('expo-router', () => {
     function Stack() {
       return h.route.startsWith('/alert/')
@@ -81,13 +85,12 @@ export function setupSosInvestigation({ realMap = false, root = false } = {}) {
     }
     Stack.Screen = () => null;
     return {
-      Stack, useRouter: () => router,
+      Stack, useRouter: () => router, useNavigation: () => navigation,
       usePathname: () => h.route.replace('/(tabs)', ''),
       useSegments: () => h.route.startsWith('/alert/') ? ['alert', '[id]'] : ['(tabs)', h.route.split('/').pop()],
       useLocalSearchParams: () => ({ id: h.route.split('/').pop() }),
     };
   });
-  jest.doMock('@react-navigation/native', () => ({ useIsFocused: () => h.route.startsWith('/alert/') }));
   jest.doMock('react-native', () => ({
     View: 'View', Text: 'Text', ScrollView: 'ScrollView', TouchableOpacity: 'TouchableOpacity',
     ActivityIndicator: 'ActivityIndicator', StyleSheet: { create: (v: any) => v },
