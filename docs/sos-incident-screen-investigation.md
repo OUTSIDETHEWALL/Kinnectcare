@@ -1,0 +1,150 @@
+# Shared SOS incident-screen investigation
+
+## Outcome and release status
+
+**Critical launch blocker: unresolved.** Controlled valid-data scenarios did not
+reproduce the reported blank screen. They do not establish that either Android
+phone can safely open, operate or resume the incident screen. Both phones still
+require separately authorized real-world acceptance.
+
+This PR changes tests, this report and the standing PR-target instruction only.
+It contains **no functional application change**. No real SOS, dialer action,
+production API call, incident mutation, merge, deployment, native build or OTA
+was performed. The notification-dismissal correction remains separate.
+
+## Baseline and chronology
+
+Inspected source: `514e6fcb146547345976a59f216af014a4d1f425`, the source of the
+reported Android OTA `01a1f635-2071-7a10-ba40-0ce546a0896b`.
+
+The owner's complete sequence, not a newly reproduced result:
+
+1. Originating phone sent SOS; recipient saw and opened its notification.
+2. Recipient immediately blanked; originating phone also blanked when its
+   incident was opened to resolve it.
+3. Reopening either phone displayed Family for roughly two seconds, then blanked.
+4. After force-close/reopen, quickly switching to Alerts avoided that transition.
+5. Clearing Alerts temporarily hid the rows, then restored them.
+6. Normal navigation subsequently returned. The SOS rows remained.
+
+The prior exports establish a recipient notification route attempt, not successful
+incident rendering, and have no attributable JS exception or Android crash trace.
+Normal navigation now working is **not incident-screen functional acceptance**.
+
+## Shared paths and evidence boundaries
+
+- Push response: the real durable response queue in `push.ts` invokes the real
+  root callback after launch gates, which replaces the route with `/alert/[id]`.
+- Manual opening: the Family active-emergency banner pushes that same route.
+  Sending itself opens a separate confirmation screen. This investigation
+  exercises the destination, but does not drive the actual dashboard banner.
+- Automatic opening: RootNav starts its first check after 800 ms and opens the
+  newest unresolved, unacknowledged, non-dismissed SOS no more than five minutes
+  old. A foreground check starts after 400 ms, subject to its cooldown.
+- Alerts cards use a separate renderer. Clear All preserves backend SOS records
+  and is not evidence of incident resolution or blank-screen repair.
+
+### What the new harness actually runs
+
+The navigation suite mounts the **production RootLayout/RootNav**, production
+notification-response queue/listener, production incident component and production
+location hook. It drives their real lifecycle subscriptions and asserts the
+destination's mounted safety controls, not merely a `replace` spy.
+
+**The Expo Stack/router is an explicit committing in-memory test adapter.**
+It updates pathname/segments and mounts the real destination. It is not an
+actual Expo navigator, native ScreenStack, Android Activity, layout/compositor,
+Hermes runtime, or WebView renderer. Router commitment within this adapter does
+not exclude a native navigation failure. Authentication and unrelated startup,
+tracking, permissions and telemetry boundaries are controlled fixtures, not a
+revalidation of those systems.
+
+The incident suite additionally runs **real MemberMap** around an inert WebView
+double, compares a substituted-map control, and executes the actual generated
+HTML script in a local VM with inert document objects. No Google Maps request
+is sent. This is JS/HTML isolation evidence, not browser or Android rendering.
+
+## Controlled evidence matrix
+
+| Area | Controlled scenario and observation | Conclusion |
+| --- | --- | --- |
+| Navigation | Eligible startup check does not open before 800 ms; subsequently mounts the incident banner, Return and emergency controls | Shared JS path works in the committing adapter |
+| Notification | Cold and warm synthetic SOS responses pass through the real queue and mount the incident; consumed marker is recorded | Response handoff works under tested fixture readiness |
+| Warm root | A new root in the same JS/module process holds a cold response while authentication is pending, then mounts the incident after readiness | Tested warm-root handoff did not reproduce blanking |
+| Early tab switch | Moving to Alerts at 500 ms prevents navigation at the original deadline, but a newly scheduled check still opens the eligible incident later | Timer postponement is possible; tab switching is not a fix |
+| Resume | Actual registered background-to-active listeners open the eligible incident after the foreground check | JS lifecycle path works under controlled timing |
+| Eligibility | Acknowledged, resolved and older-than-five-minute incidents do not auto-open without a notification | A later reopening cannot be attributed to auto-resume without proving eligibility |
+| Incident rendering | Active, acknowledged-unresolved and resolved records; sender/recipient account contexts; absent/invalid coordinates | Valid fixture cases keep expected controls and status |
+| Initial fetch delayed | Destination commits while initial fetch is pending; only spinner is present; controls appear when data settles | Route selection, fetch completion and usable rendering are distinct |
+| Initial fetch never settles | Spinner persists for 60 simulated seconds; no Return or emergency controls appear | No screen-local escape while loading; this deliberately bypasses real Axios timeout |
+| Fetch rejected/malformed/absent | Screen renders “Alert no longer active” and requests dashboard after 1.5 s | Not a blank reproduction; errors and genuine absence are conflated |
+| Member lookup | Rejected, malformed and never-settling member requests leave incident actions available | Optional member/location work did not gate basic controls |
+| Disposal | Pending initial read is aborted; late completion does not issue refresh actions | Tested initial-load cancellation works |
+| Map comparison | Same authorized coordinate fixture renders with substituted map and real MemberMap/inert WebView | No JS failure observed in either control |
+| Map HTML | Actual script's load-error and eight-second timeout handlers display its internal fallback; outer controls remain | These HTML-level failure paths stay inside the map |
+| Background/return | Map is removed on background, restored after authorized reread; Return removes it; late/malformed messages do not reopen it | Tested JS lifecycle/map messages do not reproduce whole-screen blanking |
+| Injected map render throw | Deliberately throwing WebView double propagates to a **test-only ancestor boundary**, removing incident controls | No local incident/map render-error containment; **not proof a native exception occurred** |
+| Malformed render field | Object-valued member name throws after successful incident read | Invalid data can fail rendering; **not evidence production returned this shape** |
+
+## Important loading qualification
+
+The production Axios instance has a **45-second default timeout**. Its retries
+apply only to listed OTP endpoints, not `/alerts`. The synthetic never-settling
+promise does not model that timeout and must not be reported as proof of an
+unbounded production HTTP request. A pending initial fetch nevertheless currently
+withholds the entire incident's Return and emergency actions until it settles.
+
+The real load catch also marks this incident session-dismissed, clears the active
+emergency store and uses the same “no longer active” view for a network failure.
+The controlled rejection demonstrates that misleading presentation. It is a
+separate, source-supported safety concern, **not the original blank-screen cause**.
+
+## Smallest supported next changes — proposed, not implemented
+
+1. **Data-loading safety:** distinguish request failure from confirmed absence;
+   retain an incident-safe shell with Return, explicit loading/error state and an
+   independent user-initiated emergency action. Provide bounded retry and do not
+   session-dismiss a genuine incident merely because its read failed. Do not
+   change backend incident state.
+2. **Render attribution/containment:** if approved, put a narrowly scoped incident
+   render boundary around the incident content and map, with a visible safe exit
+   and a redacted, durable exception/checkpoint record. Record root route request,
+   actual destination mount/commit, load outcome and map readiness/error
+   separately. Preserve consent and scope checks. A React boundary does **not**
+   catch Android native process crashes, and must not be sold as fixing those.
+3. Do not change auto-resume delays, suppress legitimate incident opening or remove
+   the map without an attributable failure. If controlled JS testing remains
+   clean, an approved evidence build or Android system capture is still needed
+   for the original native failure. No new real SOS is requested by this report.
+
+Any functional correction needs its own explicit scope presentation/approval,
+separate verification and PR targeting `main`. No such correction is included here.
+
+## Verification
+
+First focused run: **24 passed / 24**, two new suites, 8.417 s.
+Expanded run: **90 passed / 90**, four suites, 7.063 s, comprising **31 new
+investigation scenarios** plus the existing detail-return/location and push
+reliability regressions.
+After the final HTML-extraction test adjustment, the two investigation suites
+were rerun independently: **31 passed / 31**, 2.250 s.
+
+```sh
+cd frontend
+npm test -- --runInBand --runTestsByPath \
+  src/__tests__/sosIncidentInvestigation.test.tsx \
+  src/__tests__/sosNavigationInvestigation.test.tsx \
+  src/__tests__/alertDetailReturnButton.test.tsx \
+  src/__tests__/pushMedicationReliability.test.ts
+npx tsc --noEmit --pretty false
+```
+
+Type checking reports only the pre-existing
+`src/__tests__/schedulingTracing.test.ts:68` callback signature mismatch
+(`TS2345`), also recorded before this investigation. No new-file type error was
+reported. The change does not repair that unrelated issue.
+
+All new tests use synthetic identifiers. API requests are intercepted, POST
+paths are allowlisted to an inert fixture, external URLs/dialer throw if invoked,
+and unexpected `fetch` use fails the suite. No native acceptance, signed-in UI
+screenshot, Android process recreation or hardware map result is claimed.
