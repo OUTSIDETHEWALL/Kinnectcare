@@ -9,6 +9,9 @@ hooks, rather than the application's direct React Navigation dependency.
 **Why:** Separate installed navigation copies create separate React context
 objects, even when their APIs are compatible. A focus hook can throw before a
 screen's loading state or controls render. Mocked navigation hides this failure.
+The owner confirmed that a scoped router-owned context correction restored the
+tested two-phone Android SOS workflow; unrelated dependency upgrades were not
+needed for that recovery.
 
 **How to apply:** Preserve focus/blur subscriptions and cancellation when changing
 the import boundary. Verify context identity using the installed libraries as
