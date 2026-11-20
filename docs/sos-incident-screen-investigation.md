@@ -7,7 +7,9 @@ reproduce the reported blank screen. They do not establish that either Android
 phone can safely open, operate or resume the incident screen. Both phones still
 require separately authorized real-world acceptance.
 
-This PR changes tests, this report and the standing PR-target instruction only.
+The original PR #203 changed tests, this report and the standing PR-target
+instruction only. The focused continuation below adds Android-wrapper tests,
+extends the existing test helper and updates this report only.
 It contains **no functional application change**. No real SOS, dialer action,
 production API call, incident mutation, merge, deployment, native build or OTA
 was performed. The notification-dismissal correction remains separate.
@@ -148,3 +150,103 @@ All new tests use synthetic identifiers. API requests are intercepted, POST
 paths are allowlisted to an inert fixture, external URLs/dialer throw if invoked,
 and unexpected `fetch` use fails the suite. No native acceptance, signed-in UI
 screenshot, Android process recreation or hardware map result is claimed.
+
+## Focused continuation after PR #203
+
+### Scope and result
+
+Baseline: merged `main`, `025c4ed92880ea4531bcb25616655617a2079013`.
+The owner's renewed authorization was limited to this blank-screen failure.
+Notification dismissal, backend/retention changes and unrelated repairs were
+not investigated or changed.
+
+**Critical; root cause still unproved. No functional repair is included.**
+Confidence is high in the additional JavaScript observations below, not in
+attributing the original two-phone failure to a particular component.
+
+PR #203 replaced the entire WebView with a controlled component. The added
+suite instead mounts the **installed react-native-webview 13.15.0 Android JS
+wrapper and its real shared loading/error logic**, inside the real incident
+component, real location hook and real MemberMap. Real icons, screen-render
+logging and map-observation functions also run. Only the wrapper's native
+host, TurboModule, callable-module bridge and native event emitter are inert.
+HTTP, storage, authentication and navigator/platform boundaries remain controlled
+as documented above. No native component is instantiated, and no map request,
+external link or emergency action is dispatched.
+
+### New observations, not repeated PR #203 cases
+
+| Added case | Observed result | What it does not prove |
+| --- | --- | --- |
+| Installed Android wrapper mounts | Incident status, Return, emergency call and Resolve controls remain mounted; real icon and map-props logging execute | Native view-manager availability or Android layout/composition |
+| Native document-load-error event | The wrapper renders its own “Error loading page” view; incident controls remain | That the original document request failed, or that Google Maps subresource errors generate this event |
+| Native HTTP-error event | Existing JS handler leaves incident controls mounted | Actual networking or successful map rendering |
+| Render-process-gone, `didCrash=false` | JS callback completes without removing incident controls; no reload command is issued | That an Android renderer survived, recovered or retained pixels |
+| Render-process-gone, `didCrash=true` | Same JS result; no automatic recovery handler is supplied by MemberMap | That native renderer death cannot blank or terminate the application |
+| Load start/finish and background return | Actual wrapper JS mounts, is removed in background, then remounts after the authorized member reread; controls remain | Native Activity/process recreation or ScreenStack/WebView interaction |
+
+The actual shared WebView callback forwards `onRenderProcessGone` only when an
+application handler exists. MemberMap supplies no such handler. This means that
+callback alone does not recover a lost map renderer. **It is not evidence that
+renderer loss occurred on either phone, and a potentially unrecovered map is not
+an established explanation for the entire incident screen disappearing.**
+
+The targeted source review also confirmed:
+
+- The screen calls its location hook before loading/not-found early returns.
+  MemberMap calls its hooks before its coordinate/key/platform early returns.
+  No conditional-hook-order defect was established in these paths.
+- The root's full-screen startup gate renders an ActivityIndicator, rather than
+  an intentional null/empty incident. Its App Lock check depends on account ID,
+  not opening `/alert/[id]`. This does not certify native navigator commitment.
+- Time-format helpers already reject invalid dates. Map logging catches storage
+  failures; map-props observation with no member trace returns without mutation.
+  The newly unmocked presentation/logging path did not produce a JS exception.
+
+### Evidence still missing — stopping boundary
+
+The original valid-data failure remains unreproduced. The available phone
+exports and PR #203 evidence do not contain either:
+
+1. An attributable first JavaScript exception/component stack, or Android
+   Activity/native/WebView-renderer failure trace, from the actual blanking.
+2. Same-run evidence distinguishing the requested route from its native
+   destination commit, initial incident-read completion, component rendering and
+   map-native initialization. A notification route log alone supplies none of
+   those later observations.
+
+The exact redacted response **field shapes** from the failed initial read are
+also not retained; synthetic malformed-field injections cannot stand in for them.
+The known f635 source baseline and the owner's chronology are already recorded;
+they are not being requested again.
+
+This workspace has no `adb` or attached Android/emulator environment. The added
+event tests therefore cannot close the native-navigation/compositor boundary.
+Further attribution needs either an existing failing-run native/JS trace or a
+controlled fixture-only replay on the affected Android runtime with emergency
+delivery disabled. Do not trigger another real SOS to obtain it. No device
+capture, new binary, deployment or OTA was performed or silently requested.
+
+Without that evidence there is no justified smallest causal correction.
+Changing navigation timing, removing the map, adding blanket error suppression
+or implementing unrelated loading/dismissal proposals would not establish a fix.
+**The stopping result is unresolved, not CLEAN, fixed, or accepted on either
+phone.**
+
+### Continuation verification
+
+```sh
+cd frontend
+npm test -- --runInBand --runTestsByPath \
+  src/__tests__/sosAndroidWebViewInvestigation.test.tsx \
+  src/__tests__/sosIncidentInvestigation.test.tsx \
+  src/__tests__/sosNavigationInvestigation.test.tsx \
+  src/__tests__/alertDetailReturnButton.test.tsx \
+  src/__tests__/pushMedicationReliability.test.ts
+./node_modules/.bin/tsc --noEmit --pretty false
+```
+
+**96 passed / 96, five suites, 11.615 s.** Six added cases; the other 90 are
+regression verification, not 90 new findings. Type checking reports only the
+same pre-existing `schedulingTracing.test.ts:68` TS2345. There are no new reported
+type errors. No signed-in UI screenshot or native runtime verification is claimed.
