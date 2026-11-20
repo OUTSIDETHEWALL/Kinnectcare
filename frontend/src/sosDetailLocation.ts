@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { AppState } from 'react-native';
-import { useIsFocused } from '@react-navigation/native';
+import { useNavigation } from 'expo-router';
 import { api, type Alert, type Member } from './api';
 
 // These fields are already returned by the family-scoped APIs.
@@ -70,7 +70,18 @@ export function useSosDetailLocation(
   incident: FamilyAlert | null,
   onIncidentEnded: (alert: FamilyAlert | null) => void,
 ) {
-  const focused = useIsFocused();
+  // Expo Router owns this screen's navigation context. Importing useIsFocused
+  // directly can read a different installed copy of React Navigation and throw
+  // before the incident (including its loading/return UI) can render.
+  const navigation = useNavigation();
+  const subscribeFocus = useCallback((notify: () => void) => {
+    const removeFocus = navigation.addListener('focus', notify);
+    const removeBlur = navigation.addListener('blur', notify);
+    return () => { removeFocus(); removeBlur(); };
+  }, [navigation]);
+  const focused = useSyncExternalStore(
+    subscribeFocus, navigation.isFocused, navigation.isFocused,
+  );
   const [state, setState] = useState(EMPTY);
   // The detail screen is keyed by account, family and alert ID. Do not
   // reset this watermark on blur or background within that same screen.

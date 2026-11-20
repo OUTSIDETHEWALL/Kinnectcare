@@ -16,6 +16,7 @@
 - [Active Railway backend](active-railway-backend.md) — production serves the `backend/` tree; the root backend copy is stale and can mislead release reviews.
 - [Mobile deployment workflow](mobile-deployment-workflow.md) — Kinnship releases through Railway plus Expo EAS OTA; never use Replit Web Publish unless website deployment is explicitly requested.
 - [App-level lifecycle test boundary](resume-navigation-test-boundary.md) — startup/resume tests need the real root and requesting UI, not only engine calls or permission getters.
+- [Expo Router context identity](expo-router-context-identity.md) — route hooks must use router-owned navigation; duplicate libraries create distinct contexts that mocked navigation hides.
 - [Hero health clock-skew tolerance](hero-health-clock-skew-tolerance.md) — persisted upload timestamps up to 5s ahead render as just now; larger future jumps are rejected.
 - [Expo iOS notification actions](expo-ios-notification-actions.md) — SDK 54 needs native handling for terminated iOS action taps; Keychain lookup must match SecureStore storage semantics.
 - [Exact Diagnostics crash attribution](diagnostics-crash-attribution.md) — attach storage provenance to the exact thrown error via per-record React boundaries; never use global last-read context.

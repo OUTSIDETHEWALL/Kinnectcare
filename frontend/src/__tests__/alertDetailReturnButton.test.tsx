@@ -71,9 +71,13 @@ let mockViewer: { id: string; family_group_id: string } | null;
 let mockFocused = true;
 
 jest.mock('../AuthContext', () => ({ useAuth: () => ({ user: mockViewer }) }));
-jest.mock('@react-navigation/native', () => ({ useIsFocused: () => mockFocused }));
+const mockNavigation = {
+  isFocused: () => mockFocused,
+  addListener: jest.fn(() => () => {}),
+};
 
 jest.mock('expo-router', () => ({
+  useNavigation: () => mockNavigation,
   useLocalSearchParams: () => ({ id: 'sos-alert-001', member_phone: '' }),
   useRouter: () => ({ replace: mockRouterReplace }),
 }));
