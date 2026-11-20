@@ -37,6 +37,7 @@ Speculative fixes are not acceptable. Low confidence must be stated explicitly.
 - Direct commits to `main` are never permitted for any reason, by any actor
 - Branch naming: `fix/<short-description>`, `docs/<short-description>`, `chore/<short-description>`
 - PR description must follow the engineering process format
+- All PRs must target `main`, as explicitly required by the owner.
 - **No force-pushes to any branch without the product owner's explicit written approval**
 - The product owner reviews and approves every merge
 - The history of `main` should tell the story of Kinnship's evolution — every PR title and description is part of that record
