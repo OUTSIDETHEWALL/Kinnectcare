@@ -31,7 +31,7 @@ export async function flush() {
  * It mounts the destination and updates pathname/segments on the next render.
  * Platform boundaries, unrelated startup services and all HTTP are intercepted.
  */
-export function setupSosInvestigation({ realMap = false, root = false } = {}) {
+export function setupSosInvestigation({ realMap = false, root = false, androidWebView = false } = {}) {
   jest.resetModules();
   jest.doMock('react', () => React);
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -90,7 +90,8 @@ export function setupSosInvestigation({ realMap = false, root = false } = {}) {
   jest.doMock('@react-navigation/native', () => ({ useIsFocused: () => h.route.startsWith('/alert/') }));
   jest.doMock('react-native', () => ({
     View: 'View', Text: 'Text', ScrollView: 'ScrollView', TouchableOpacity: 'TouchableOpacity',
-    ActivityIndicator: 'ActivityIndicator', StyleSheet: { create: (v: any) => v },
+    ActivityIndicator: 'ActivityIndicator', Image: { resolveAssetSource: (v: any) => v },
+    StyleSheet: { create: (v: any) => v, flatten: (v: any) => v },
     Platform: { OS: 'android', select: (v: any) => v.android ?? v.default },
     Alert: { alert: noop },
     Linking: {
@@ -108,18 +109,26 @@ export function setupSosInvestigation({ realMap = false, root = false } = {}) {
     SafeAreaView: 'SafeAreaView', SafeAreaProvider: ({ children }: any) => children,
   }));
   h.webview = { injectJavaScript: jest.fn() };
-  jest.doMock('react-native-webview', () => ({
+  jest.doMock('react-native-webview', () => androidWebView ? {
+    WebView: jest.requireActual('react-native-webview/lib/WebView.android').default,
+  } : ({
     WebView: React.forwardRef((props: any, ref: any) => {
       React.useImperativeHandle(ref, () => h.webview);
       if (h.mapThrows) throw new Error('Synthetic native map mount error');
       return React.createElement('ControlledWebView', props);
     }),
   }));
-  jest.doMock('../../Icon', () => ({ Icon: () => null }));
+  if (androidWebView) jest.dontMock('../../Icon');
+  else jest.doMock('../../Icon', () => ({ Icon: () => null }));
   if (realMap) jest.dontMock('../../MemberMap');
   else jest.doMock('../../MemberMap', () => ({ __esModule: true, default: () => React.createElement('SubstitutedMap') }));
-  jest.doMock('../../screenRenderLog', () => ({ logScreenRender: asyncNoop }));
-  jest.doMock('../../pipelineSnapshot', () => ({ observeMapProps: noop, observeMapRendered: noop }));
+  if (androidWebView) {
+    jest.dontMock('../../screenRenderLog');
+    jest.dontMock('../../pipelineSnapshot');
+  } else {
+    jest.doMock('../../screenRenderLog', () => ({ logScreenRender: asyncNoop }));
+    jest.doMock('../../pipelineSnapshot', () => ({ observeMapProps: noop, observeMapRendered: noop }));
+  }
   jest.doMock('../../AuthContext', () => ({
     AuthProvider: ({ children }: any) => children, useAuth: () => h.auth,
   }));
