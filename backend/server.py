@@ -58,6 +58,8 @@ from expo_push import (
     send_expo_push_with_tickets,
 )
 import billing
+import google_billing
+import google_billing_routes
 import family_group as fg
 import sos_history as sh
 import account_deletion as account_cleanup
@@ -5696,6 +5698,29 @@ def _billing_required():
         raise HTTPException(status_code=503, detail="Billing is not configured")
 
 
+api_router.include_router(google_billing_routes.router(db, get_current_user))
+_google_billing_worker = None
+
+
+@app.on_event("startup")
+async def start_google_billing_worker():
+    global _google_billing_worker
+    if google_billing.enabled():
+        # Optional billing must not gate SOS or the rest of API startup.
+        # Its worker retries initialization; billing routes fail closed.
+        _google_billing_worker = asyncio.create_task(google_billing.worker(db))
+
+
+@app.on_event("shutdown")
+async def stop_google_billing_worker():
+    if _google_billing_worker:
+        _google_billing_worker.cancel()
+        try:
+            await _google_billing_worker
+        except asyncio.CancelledError:
+            pass
+
+
 @api_router.get("/billing/status")
 async def billing_status(portal: int = 0, current=Depends(get_current_user)):
     # Only mint a Stripe billing portal URL when the client explicitly asks
@@ -5738,7 +5763,7 @@ async def billing_resume(current=Depends(get_current_user)):
 @api_router.post("/billing/checkout-session")
 async def billing_checkout_session(payload: CheckoutRequest, current=Depends(get_current_user)):
     _billing_required()
-    if billing.is_paid(current):
+    if await billing.get_member_limit_for_group(db, current) == math.inf:
         raise HTTPException(status_code=400, detail="Already on the Family Plan")
     base = (os.environ.get("EXPO_BACKEND_URL") or "").rstrip("/")
     interval = billing.normalize_interval(payload.interval)

@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import stripe
+from google_billing import google_access
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +160,8 @@ def plan_for_user(user_doc: dict) -> str:
     # Treat paid plan as active only if Stripe reports it active or trialing.
     if plan == "family_plan" and status in ("active", "trialing", "past_due"):
         return "family_plan"
+    if google_access(user_doc):
+        return "family_plan"
     return "free"
 
 
@@ -167,11 +170,12 @@ async def group_is_paid(db, family_group_id: Optional[str]) -> bool:
     if not family_group_id:
         return False
     cursor = db.users.find(
-        {"family_group_id": family_group_id, "subscription.plan": "family_plan"},
-        {"_id": 0, "subscription": 1},
+        {"family_group_id": family_group_id, "$or": [
+            {"subscription.plan": "family_plan"}, {"google_subscription.verified": True},
+        ]},
+        {"_id": 0, "id": 1, "family_group_id": 1, "subscription": 1, "google_subscription": 1},
     )
-    docs = await cursor.to_list(50)
-    for d in docs:
+    async for d in cursor:
         if plan_for_user(d) == "family_plan":
             return True
     return False
@@ -569,4 +573,25 @@ async def build_status_payload(user_doc: dict, db, free_limit: int = FREE_LIMIT_
             payload["manage_url"] = None
     else:
         payload["manage_url"] = None
+    # Keep legacy Stripe fields untouched in storage; overlay only the display
+    # for Google purchasers. Family beneficiaries cannot manage another payer.
+    stripe_owned = bool(sub.get("stripe_subscription_id"))
+    stripe_eligible = sub.get("plan") == "family_plan" and sub.get("status") in ("active", "trialing", "past_due")
+    google_sub = user_doc.get("google_subscription") or {}
+    google_owned = bool(google_sub.get("verified"))
+    payload["billing_providers"] = (
+        (["stripe"] if stripe_owned else []) + (["google_play"] if google_owned else [])
+    )
+    payload["billing_provider"] = "stripe" if stripe_owned else ("google_play" if google_owned else None)
+    payload["is_billing_owner"] = stripe_owned or google_owned
+    payload["stripe_manage_url"] = payload.get("manage_url")
+    if google_owned and (not stripe_owned or (google_access(user_doc) and not stripe_eligible)):
+        payload["billing_provider"] = "google_play"
+        payload.update(
+            status=google_sub.get("status"), interval=google_sub.get("interval"),
+            current_period_end=google_sub.get("current_period_end"),
+            cancel_at_period_end=google_sub.get("cancel_at_period_end", False),
+            paid_plan=None, manage_url="https://play.google.com/store/account/subscriptions",
+            plan_label="Annual Plan" if google_sub.get("interval") == "year" else "Monthly Plan",
+        )
     return payload

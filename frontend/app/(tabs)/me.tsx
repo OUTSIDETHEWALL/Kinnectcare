@@ -1511,7 +1511,8 @@ export default function MeScreen() {
               {'\n\n'}Other family members&apos; information is not deleted. Resolve active SOS incidents and hand off dependent care or family ownership first.
               {'\n\n'}Resolved SOS history is retained under the 30-day policy. Notifications already in progress may still arrive.
               {'\n\n'}Unresolved notification or email attempts can delay deletion pending review. Minimal hashed security records are retained to prevent old credentials being reused.
-              {'\n\n'}Cancellation of an existing subscription is attempted after deletion; it is not guaranteed if the billing service fails.
+              {'\n\n'}Cancellation of an existing Stripe subscription is attempted after deletion; it is not guaranteed if the billing service fails.
+              {'\n\n'}Google Play subscriptions must be cancelled in Google Play. Deleting your Kinnship account does not cancel Google Play charges. Cancel in Play before deleting your account.
               {'\n\n'}
               This action cannot be undone.
             </Text>

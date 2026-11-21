@@ -52,3 +52,4 @@
 - [SOS retention policy](sos-retention-policy.md) — resolved SOS expires after 30 days; active/unresolved incidents must never expire automatically.
 - [Check-in schedule lifetime](checkin-schedule-lifetime.md) — activation/revision and family fencing must apply across all settings writers and delivery reservations.
 - [Account deletion boundary](account-deletion-boundary.md) — atomic cleanup does not cancel retained credentials, unfenced invitations or tokens captured before an await.
+- [Google billing ownership](google-billing-ownership.md) — approved RevenueCat approach preserves separate Stripe billing and backend-owned family access; activation and release remain separate approvals.

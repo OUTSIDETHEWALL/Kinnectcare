@@ -8,6 +8,7 @@ import { useRouter, Stack } from 'expo-router';
 import Icon from '@expo/vector-icons/Ionicons';
 import { Colors } from '../src/theme';
 import { api } from '../src/api';
+import { useGoogleBilling } from '../src/useGoogleBilling';
 
 export default function ManageSubscription() {
   const router = useRouter();
@@ -19,6 +20,7 @@ export default function ManageSubscription() {
   // because that hides a paid subscription behind an Upgrade button. We
   // surface an explicit error state with Retry instead.
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const google = useGoogleBilling(() => { void load(); });
 
   const load = useCallback(async () => {
     setFetchError(null);
@@ -38,6 +40,8 @@ export default function ManageSubscription() {
   useEffect(() => { load(); }, [load]);
 
   const isPaid = status?.plan === 'family_plan' || status?.plan === 'premium';
+  const googleOwned = status?.billing_provider === 'google_play';
+  const familyBeneficiary = status?.is_billing_owner === false && isPaid;
   const cancellingAtEnd = !!status?.cancel_at_period_end;
   const cpe = status?.current_period_end || null;
   // Full date in user's local tz.
@@ -105,7 +109,7 @@ export default function ManageSubscription() {
 
   const onUpgrade = () => router.push('/upgrade');
 
-  const onOpenPortal = async () => {
+  const onOpenStripePortal = async () => {
     if (busy) return;
     setBusy(true);
     try {
@@ -115,7 +119,7 @@ export default function ManageSubscription() {
       // pay that cost when the user taps "Payment methods & invoices".
       const r = await api.get('/billing/status?portal=1');
       setStatus(r.data);
-      const url: string | null = r.data?.manage_url;
+      const url: string | null = r.data?.stripe_manage_url || r.data?.manage_url;
       if (!url) {
         Alert.alert('Unavailable', 'The billing portal is currently unavailable. Please try again in a moment.');
         return;
@@ -127,6 +131,15 @@ export default function ManageSubscription() {
       Alert.alert('Failed', e?.response?.data?.detail || 'Could not open the billing portal.');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const onOpenPortal = async () => {
+    if (!googleOwned) return onOpenStripePortal();
+    try {
+      await Linking.openURL('https://play.google.com/store/account/subscriptions');
+    } catch {
+      Alert.alert('Could not open Google Play', 'Open Play Store and choose Payments & subscriptions.');
     }
   };
 
@@ -239,7 +252,7 @@ export default function ManageSubscription() {
         <View style={{ height: 24 }} />
 
         {/* Billing portal (payment methods, invoices, history) — paid users only */}
-        {isPaid && (
+        {status?.is_billing_owner !== false && (isPaid || googleOwned) && (
           <TouchableOpacity
             testID="subscription-portal"
             onPress={onOpenPortal}
@@ -249,8 +262,8 @@ export default function ManageSubscription() {
           >
             <Icon name="card-outline" size={20} color={Colors.primary} />
             <View style={{ flex: 1, marginLeft: 12 }}>
-              <Text style={styles.portalBtnTitle}>Payment methods & invoices</Text>
-              <Text style={styles.portalBtnSub}>Update card, view receipts, download invoices.</Text>
+              <Text style={styles.portalBtnTitle}>{googleOwned ? 'Manage in Google Play' : 'Payment methods & invoices'}</Text>
+              <Text style={styles.portalBtnSub}>{googleOwned ? 'Manage renewal, payment methods or cancellation in Google Play.' : 'Update card, view receipts, download invoices.'}</Text>
             </View>
             {busy
               ? <ActivityIndicator color={Colors.primary} />
@@ -269,7 +282,7 @@ export default function ManageSubscription() {
           </TouchableOpacity>
         )}
 
-        {isPaid && !cancellingAtEnd && (
+        {isPaid && !googleOwned && !familyBeneficiary && !cancellingAtEnd && (
           <TouchableOpacity
             testID="subscription-cancel"
             onPress={onCancel}
@@ -283,7 +296,7 @@ export default function ManageSubscription() {
           </TouchableOpacity>
         )}
 
-        {isPaid && cancellingAtEnd && (
+        {isPaid && !googleOwned && !familyBeneficiary && cancellingAtEnd && (
           <TouchableOpacity
             testID="subscription-resume"
             onPress={onResume}
@@ -297,10 +310,32 @@ export default function ManageSubscription() {
           </TouchableOpacity>
         )}
 
+        {google.enabled && (
+          <TouchableOpacity testID="subscription-google-restore" disabled={busy}
+            style={styles.portalBtn} onPress={async () => {
+              setBusy(true);
+              try {
+                const verified = await google.restore();
+                setStatus(verified);
+                Alert.alert('Restore complete', verified.plan === 'family_plan'
+                  ? 'Family Plan access is available.' : 'No active Google purchase was found for this account.');
+              } catch (e: any) {
+                Alert.alert('Could not restore', e?.response?.data?.detail || e?.message || 'Try again later.');
+              } finally { setBusy(false); }
+            }}>
+            <Text style={styles.portalBtnTitle}>Restore Google Play purchases</Text>
+          </TouchableOpacity>
+        )}
+        {familyBeneficiary && <Text style={styles.fineprint}>Your Family Plan is provided by another family member. Only the purchaser can manage billing.</Text>}
+        {status?.billing_providers?.length > 1 && <TouchableOpacity
+          style={styles.portalBtn}
+          onPress={googleOwned ? onOpenStripePortal : () => Linking.openURL('https://play.google.com/store/account/subscriptions')}>
+          <Text style={styles.portalBtnTitle}>Also manage your separate {googleOwned ? 'Stripe' : 'Google Play'} subscription</Text>
+        </TouchableOpacity>}
         <Text style={styles.fineprint}>
-          Billing is handled securely by Stripe. Cancelling here disables
+          {googleOwned ? 'Google Play handles this subscription. Manage or cancel it in Google Play; access continues for the eligible paid period.' : <>Billing is handled securely by Stripe. Cancelling here disables
           auto-renewal — your card will not be charged again.
-          {isPaid ? ' Use "Payment methods & invoices" above to update your card or download receipts.' : ''}
+          {isPaid ? ' Use "Payment methods & invoices" above to update your card or download receipts.' : ''}</>}
         </Text>
       </ScrollView>
     </SafeAreaView>
