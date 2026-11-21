@@ -8,7 +8,7 @@ import os
 import pathlib
 import sys
 from datetime import timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from types import SimpleNamespace
 
 import httpx
@@ -29,6 +29,8 @@ def config(monkeypatch):
     assert pathlib.Path(billing.__file__).resolve().parent == pathlib.Path(google.__file__).resolve().parent
     for key, value in {
         "GOOGLE_BILLING_ENABLED": "true",
+        "GOOGLE_BILLING_RECONCILIATION_ENABLED": "true",
+        "GOOGLE_BILLING_PURCHASES_ENABLED": "true",
         "GOOGLE_BILLING_ORIGINAL_OWNER_CONFIRMED": "true",
         "REVENUECAT_PROJECT_ID": "proj_test",
         "REVENUECAT_GOOGLE_APP_ID": "app_test",
@@ -41,6 +43,7 @@ def config(monkeypatch):
         "REVENUECAT_WEBHOOK_SIGNING_SECRET": "synthetic-hook-signing",
     }.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.delenv("GOOGLE_BILLING_EMERGENCY_ACCESS_DISABLED", raising=False)
     monkeypatch.setattr(billing, "is_configured", lambda: False)
     return google.settings()
 
@@ -78,14 +81,108 @@ def test_non_access_lifecycle_never_grants(config, status):
     assert grant["status"] == status
 
 
-def test_grace_uses_exact_entitlement_expiry(config):
+def test_grace_uses_subscription_specific_short_verification_lease(config):
+    at = google.now()
     subs, ent, products = snapshot(status="in_grace_period")
     subs[0]["ends_at"] = (google.now() - timedelta(minutes=1)).timestamp() * 1000
     ent[0]["expires_at"] = (google.now() + timedelta(days=2)).timestamp() * 1000
-    grant, _ = google.projection(config, "opaque-id", subs, ent, products)
+    grant, _ = google.projection(config, "opaque-id", subs, ent, products, at=at)
     assert google.google_access({"google_subscription": grant})
-    assert grant["access_until"] == google.millis(ent[0]["expires_at"])
+    assert grant["access_until"] == at + timedelta(minutes=5)
+    assert grant["subscription_id"] == subs[0]["id"]
+    assert grant["verification_mode"] == "subscription_grace_lease"
     assert not google.google_access({"google_subscription": grant}, grant["access_until"])
+
+
+@pytest.mark.parametrize("extra_expiry_days", [0, 365, 3650])
+def test_other_entitlements_cannot_shorten_or_extend_google_grace(config, extra_expiry_days):
+    at = google.now()
+    subs, ent, products = snapshot(status="in_grace_period")
+    subs[0]["ends_at"] = (at - timedelta(hours=1)).timestamp() * 1000
+    ent[0]["expires_at"] = (at + timedelta(days=extra_expiry_days)).timestamp() * 1000
+    grant, _ = google.projection(config, "opaque-id", subs, ent, products, at=at)
+    assert grant["access_until"] == at + timedelta(minutes=5)
+    subs[0]["gives_access"] = False
+    revoked, _ = google.projection(config, "opaque-id", subs, ent, products, at=at)
+    assert not google.google_access({"google_subscription": revoked})
+
+
+def test_switches_preserve_verified_google_and_stripe_until_emergency_revocation(config, monkeypatch):
+    grant, _ = google.projection(config, "opaque-id", *snapshot())
+    user = {"id": "buyer", "google_subscription": grant}
+    for switch in ("GOOGLE_BILLING_PURCHASES_ENABLED", "GOOGLE_BILLING_RECONCILIATION_ENABLED", "GOOGLE_BILLING_ENABLED"):
+        monkeypatch.setenv(switch, "false")
+        assert not google.purchases_enabled()
+        assert google.google_access(user)
+        assert billing.plan_for_user(user) == "family_plan"
+    monkeypatch.setenv("GOOGLE_BILLING_EMERGENCY_ACCESS_DISABLED", "true")
+    assert not google.google_access(user)
+    assert billing.plan_for_user(user) == "free"
+    user["subscription"] = {"plan": "family_plan", "status": "active"}
+    assert billing.plan_for_user(user) == "family_plan"
+
+
+def test_empty_verified_lookup_is_not_purchase_ownership(config):
+    grant, _ = google.projection(config, "opaque-id", [], [], {})
+    assert not google.owns_purchase({"google_subscription": grant})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["cancel", "resume"])
+@pytest.mark.parametrize("account,provider,status", [
+    ("google", None, 409), ("google", "google_play", 409), ("google", "stripe", 409),
+    ("stripe", None, 200), ("stripe", "stripe", 200),
+    ("dual", None, 409), ("dual", "google_play", 409), ("dual", "stripe", 200),
+])
+async def test_real_management_routes_are_provider_aware(config, monkeypatch, route, account, provider, status):
+    # Mount actual legacy routes; mock only authentication, DB and Stripe I/O.
+    import server
+    grant, _ = google.projection(config, "opaque-id", *snapshot())
+    user = {"id": "buyer"}
+    if account in ("google", "dual"):
+        user["google_subscription"] = grant
+    if account in ("stripe", "dual"):
+        user["subscription"] = {"plan": "family_plan", "status": "active", "stripe_subscription_id": "stripe-owned"}
+    db = SimpleNamespace(users=SimpleNamespace(find_one=AsyncMock(return_value=user), update_one=AsyncMock()))
+    monkeypatch.setattr(server, "db", db)
+    monkeypatch.setattr(billing, "is_configured", lambda: True)
+    modify = MagicMock(return_value={"status": "active", "current_period_end": 2000000000})
+    monkeypatch.setattr(billing.stripe.Subscription, "modify", modify)
+    monkeypatch.setattr(billing, "build_status_payload", AsyncMock(return_value={"plan": "family_plan"}))
+    app = FastAPI()
+    for candidate in server.app.routes:
+        if candidate.path == f"/api/billing/{route}":
+            app.add_api_route(candidate.path, candidate.endpoint, methods=["POST"])
+    assert app.router.routes[-1].path == f"/api/billing/{route}"
+    async def current():
+        return user
+    app.dependency_overrides[server.get_current_user] = current
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test.invalid") as http:
+        result = await http.post(f"/api/billing/{route}", json={} if provider is None else {"provider": provider})
+    assert result.status_code == status, result.text
+    if status != 200:
+        modify.assert_not_called()
+        db.users.update_one.assert_not_awaited()
+        assert "Google Play" in result.json()["detail"]
+    else:
+        modify.assert_called_once_with("stripe-owned", cancel_at_period_end=route == "cancel")
+        result_key = "cancelled" if route == "cancel" else "resumed"
+        assert result.json()[result_key] is True
+        for call in db.users.update_one.await_args_list:
+            assert all(k.startswith("subscription.") for k in call.args[1]["$set"])
+        if account == "dual":
+            assert google.google_access(user)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", [billing.cancel_subscription_at_period_end, billing.resume_subscription])
+async def test_unavailable_stripe_never_claims_success_or_rewrites_access(config, action):
+    db = SimpleNamespace(users=SimpleNamespace(update_one=AsyncMock()))
+    user = {"id": "buyer", "subscription": {"stripe_subscription_id": "owned"}}
+    with pytest.raises(HTTPException) as exc:
+        await action(db, user)
+    assert exc.value.status_code == 503
+    db.users.update_one.assert_not_awaited()
 
 
 def test_cancellation_preserves_paid_period(config):
@@ -332,6 +429,40 @@ class TestMongoBilling:
             await db.users.update_one({"id": "other"}, {"$set": {"family_group_id": "family"}})
             response = await http.post("/api/billing/google/identity", json={}, headers={"x-test-user": "other"})
             assert response.json()["can_purchase"] is False
+
+    @pytest.mark.asyncio
+    async def test_purchase_pause_still_allows_identity_bound_recovery_and_retains_existing_access(self, db, config, monkeypatch):
+        monkeypatch.setenv("GOOGLE_BILLING_PURCHASES_ENABLED", "false")
+        client = type("Fake", (), {"snapshot": AsyncMock(return_value=snapshot())})()
+        monkeypatch.setattr(google, "RevenueCat", lambda config: client)
+        app = FastAPI()
+        async def current():
+            return await db.users.find_one({"id": "buyer"})
+        app.include_router(google_billing_routes.router(db, current), prefix="/api")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test.invalid") as http:
+            binding = await http.post("/api/billing/google/identity", json={})
+            assert binding.status_code == 200
+            assert binding.json()["can_purchase"] is False
+            assert binding.json()["purchases_enabled"] is False
+            restored = await http.post("/api/billing/google/reconcile", json={})
+            assert restored.status_code == 200
+            assert restored.json()["plan"] == "family_plan"
+            assert restored.json()["google_billing"]["purchases_enabled"] is False
+            mirror = (await db.users.find_one({"id": "buyer"}))["google_subscription"]
+            monkeypatch.setenv("GOOGLE_BILLING_RECONCILIATION_ENABLED", "false")
+            stopped = await http.post("/api/billing/google/reconcile", json={})
+            assert stopped.status_code == 503
+            assert (await db.users.find_one({"id": "buyer"}))["google_subscription"] == mirror
+            assert await billing.group_is_paid(db, "family")
+
+    @pytest.mark.asyncio
+    async def test_paused_reconciliation_still_queues_authenticated_lifecycle_events(self, db, config, monkeypatch):
+        monkeypatch.setenv("GOOGLE_BILLING_RECONCILIATION_ENABLED", "false")
+        monkeypatch.setattr(google.time, "time", lambda: 2000000000)
+        raw, auth, signature = signed()
+        await google.receive_webhook(db, raw, auth, signature)
+        assert await db.google_billing_events.count_documents({"done": False}) == 1
+        assert not (await db.users.find_one({"id": "buyer"})).get("google_subscription")
 
     @pytest.mark.asyncio
     async def test_webhook_inbox_deduplicates_and_does_not_persist_attributes(self, db, config, monkeypatch):

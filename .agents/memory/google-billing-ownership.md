@@ -27,3 +27,16 @@ Google verification and restored ownership still depend on external setup.
 
 **How to apply:** Verify settings independently before activation; never mark
 Play acceptance passed from Test Store, mocked SDK, or backend-only tests.
+
+Purchase availability, reconciliation, and emergency denial of Google-derived
+access are separate controls. Disabling new purchases must preserve legitimate
+verified paid access and existing Stripe checkout during the transition.
+
+**Why:** The owner explicitly authorized this separation to avoid removing paid
+access or preventing Android subscriptions during staged activation.
+
+**How to apply:** Require an explicit two-sided rollout for Google checkout and
+never fall back to Stripe after a Google purchase starts. Provider management
+must remain truthful for legacy clients; a UI-only restriction is insufficient.
+Use bounded, non-interactive recovery after authentication, never as a prerequisite
+for core startup or emergency/tracking functionality.

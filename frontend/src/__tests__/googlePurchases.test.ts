@@ -10,8 +10,12 @@ const mockSDK = {
   purchasePackage: jest.fn(),
   restorePurchases: jest.fn(),
   getCustomerInfo: jest.fn(),
+  syncPurchasesForResult: jest.fn(),
 };
-jest.mock('react-native', () => ({ Platform: { OS: 'android' } }));
+jest.mock('react-native', () => ({
+  Platform: { OS: 'android' }, NativeModules: { RNPurchases: { setupPurchases: jest.fn() } },
+  TurboModuleRegistry: { get: jest.fn() },
+}));
 jest.mock('../api', () => ({ api: { post: (...args: unknown[]) => mockPost(...args) } }));
 jest.mock('react-native-purchases', () => ({ __esModule: true, default: mockSDK }));
 
@@ -19,7 +23,7 @@ let subject: typeof import('../googlePurchases');
 const monthly = { identifier: '$rc_monthly', product: { identifier: 'family_plan:monthly', priceString: '$11.99' } };
 const annual = { identifier: '$rc_annual', product: { identifier: 'family_plan:annual', priceString: '$99.99' } };
 const binding = {
-  user_id: 'buyer', app_user_id: 'opaque-server-identity', can_purchase: true,
+  user_id: 'buyer', app_user_id: 'opaque-server-identity', can_purchase: true, purchases_enabled: true,
   products: { month: 'family_plan:monthly', year: 'family_plan:annual' },
 };
 const backendStatus = { plan: 'family_plan', billing_provider: 'google_play' };
@@ -28,6 +32,7 @@ beforeEach(() => {
   jest.resetModules();
   jest.clearAllMocks();
   process.env.EXPO_PUBLIC_GOOGLE_BILLING_ENABLED = 'true';
+  process.env.EXPO_PUBLIC_GOOGLE_PURCHASES_ENABLED = 'true';
   process.env.EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY = 'goog_synthetic_public_key';
   mockPost.mockImplementation(async (url: string) => ({
     data: url.endsWith('identity') ? binding : backendStatus,
@@ -36,12 +41,14 @@ beforeEach(() => {
   mockSDK.getAppUserID.mockResolvedValue(binding.app_user_id);
   mockSDK.purchasePackage.mockResolvedValue({ customerInfo: { entitlements: { active: { untrusted: {} } } } });
   mockSDK.getCustomerInfo.mockResolvedValue({});
+  mockSDK.syncPurchasesForResult.mockResolvedValue({});
   mockSDK.restorePurchases.mockResolvedValue({});
   subject = require('../googlePurchases');
 });
 
 afterEach(() => {
   delete process.env.EXPO_PUBLIC_GOOGLE_BILLING_ENABLED;
+  delete process.env.EXPO_PUBLIC_GOOGLE_PURCHASES_ENABLED;
   delete process.env.EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY;
 });
 
@@ -109,8 +116,53 @@ test('failed purchase never grants or reconciles', async () => {
 
 test('foreground reconciliation never calls restore or trusts cached customer entitlements', async () => {
   expect(await subject.reconcileGooglePurchases('buyer', () => 'buyer')).toEqual(backendStatus);
-  expect(mockSDK.getCustomerInfo).toHaveBeenCalled();
+  expect(mockSDK.syncPurchasesForResult).toHaveBeenCalled();
   expect(mockSDK.restorePurchases).not.toHaveBeenCalled();
+});
+
+test('Build 81 without native billing keeps Stripe routing and never imports or configures the SDK', async () => {
+  require('react-native').NativeModules.RNPurchases = undefined;
+  expect(subject.googlePurchasesEnabled()).toBe(false);
+  expect(subject.usesGoogleCheckout({ google_billing: { purchases_enabled: true } } as any)).toBe(false);
+  await expect(subject.reconcileGooglePurchases('buyer', () => 'buyer')).rejects.toThrow('not enabled');
+  expect(mockPost).not.toHaveBeenCalled();
+  expect(mockSDK.configure).not.toHaveBeenCalled();
+});
+
+test.each(['client', 'server'])('disabled %s purchase switch preserves Stripe routing and permits recovery', async side => {
+  if (side === 'client') delete process.env.EXPO_PUBLIC_GOOGLE_PURCHASES_ENABLED;
+  const status = { google_billing: { purchases_enabled: side !== 'server' } };
+  expect(subject.usesGoogleCheckout(status as any)).toBe(false);
+  expect(await subject.reconcileGooglePurchases('buyer', () => 'buyer')).toEqual(backendStatus);
+  expect(mockSDK.purchasePackage).not.toHaveBeenCalled();
+});
+
+test('backend purchase pause is enforced at binding even with an already-open Google screen', async () => {
+  mockPost.mockResolvedValue({ data: { ...binding, purchases_enabled: false, can_purchase: false } });
+  await expect(subject.purchaseGooglePlan('month', 'buyer', () => 'buyer')).rejects.toThrow('paused');
+  expect(mockSDK.purchasePackage).not.toHaveBeenCalled();
+});
+
+test('hung native recovery times out and never rebinds queued or late work to another owner', async () => {
+  jest.useFakeTimers();
+  let resolve: (value: any) => void = () => {};
+  mockSDK.syncPurchasesForResult.mockReturnValueOnce(new Promise(done => { resolve = done; }));
+  const old = subject.reconcileGooglePurchases('buyer', () => 'buyer');
+  const failed = expect(old).rejects.toThrow('timed out');
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  await jest.advanceTimersByTimeAsync(15_000);
+  await failed;
+  const queued = subject.reconcileGooglePurchases('other', () => 'other');
+  const queuedFailure = expect(queued).rejects.toThrow('timed out');
+  await jest.advanceTimersByTimeAsync(15_000);
+  await queuedFailure;
+  expect(mockPost.mock.calls.filter(c => c[0].endsWith('reconcile'))).toHaveLength(0);
+  resolve({});
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  expect(mockPost.mock.calls.filter(c => c[0].endsWith('reconcile'))).toHaveLength(0);
+  expect(mockSDK.logIn).not.toHaveBeenCalled();
+  expect(mockPost.mock.calls.filter(c => c[0].endsWith('identity'))).toHaveLength(1);
+  jest.useRealTimers();
 });
 
 test('unavailable store product never falls back to Stripe or a hardcoded purchase', async () => {

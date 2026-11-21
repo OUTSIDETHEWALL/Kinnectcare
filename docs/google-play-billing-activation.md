@@ -28,6 +28,12 @@ Existing Stripe subscriptions are not migrated, repriced or cancelled.
   trigger current-state reads, not blind event-state assignments. Expired leases
   cannot publish. Provider failures preserve only already-verified access until
   its authoritative expiry; they never invent a renewal or indefinite extension.
+- Grace access never uses the customer-wide entitlement expiry: API v2 exposes
+  `gives_access` for the particular subscription but no individual grace-end
+  timestamp. An original-owned, approved subscription in grace receives a
+  five-minute verification lease, refreshed after one minute. On verification
+  failure it expires; this may temporarily withhold legitimate grace access,
+  rather than borrow a later expiry from a sandbox or unrelated product.
 - A durable minimal inbox retries webhook failures; periodic sweeps reconcile
   accounts even when webhook delivery is missed. No full webhook body is stored.
 - Billing configuration/worker failures never gate core API startup. Billing
@@ -39,7 +45,10 @@ Server-only, explicitly approved deployment configuration:
 
 | Name | Purpose |
 | --- | --- |
-| `GOOGLE_BILLING_ENABLED` | Must be exactly `true` to enable endpoints and worker. |
+| `GOOGLE_BILLING_ENABLED` | Master configuration gate; exactly `true` enables the configured integration. It does not revoke already-verified access. |
+| `GOOGLE_BILLING_PURCHASES_ENABLED` | Separately enables offering new Google purchases; defaults off and additionally requires working reconciliation configuration. |
+| `GOOGLE_BILLING_RECONCILIATION_ENABLED` | Separately enables identity-bound recovery and projection updates; defaults off. Signed lifecycle events can still queue while processing is paused. |
+| `GOOGLE_BILLING_EMERGENCY_ACCESS_DISABLED` | Defaults off. The explicit emergency switch denies Google-derived access only; it never removes independently valid Stripe access. |
 | `REVENUECAT_PROJECT_ID` | Company-owned Kinnship project. |
 | `REVENUECAT_GOOGLE_APP_ID` | RevenueCat Google Play app resource ID, not Test Store. |
 | `REVENUECAT_SECRET_API_KEY` | Server-only API v2 key with customer subscriptions/entitlements and product read access. |
@@ -56,6 +65,9 @@ Server-only, explicitly approved deployment configuration:
 Client build-time public configuration:
 
 - `EXPO_PUBLIC_GOOGLE_BILLING_ENABLED=true`
+- `EXPO_PUBLIC_GOOGLE_PURCHASES_ENABLED=true` only when explicitly switching new
+  Android checkout to Google; leave off to preserve existing Stripe checkout
+  while still allowing authenticated Google receipt recovery.
 - `EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY` = Google app public `goog_` SDK key.
 
 Never place a secret API key, webhook secret or Google service-account JSON under
@@ -96,14 +108,18 @@ Railway: a workspace connection alone does not configure Railway's runtime.
 ## Native and release gates
 
 - No Android binary was produced by this PR. No OTA was published. Native billing
-  cannot be added to Build 81 by OTA. Keep both feature flags off until approved.
+  cannot be added to Build 81 by OTA. Keep activation switches off until approved.
+  Native capability is checked before the deferred SDK import.
 - Select the next versionCode/runtime under the existing approved release process,
   isolate it from Build 81, inspect the resulting AAB's billing permission,
   classes and dependency version, then obtain separate delivery authorization.
 - Check purchase interruption / Android Activity launchMode against existing
   invite/auth deep links; do not change Activity behavior without native evidence.
-- Review Google payment-policy compliance for existing Stripe-management links;
-  new Android checkout never falls back to Stripe.
+- While either purchase rollout side is off (server or client), preserve the
+  existing Android Stripe checkout. Switching to Google requires both sides plus
+  native capability. A started/failed Google purchase NEVER falls back to Stripe.
+  Review Google payment-policy/region compliance before publishing the transition;
+  this code change is not store-policy or production-release approval.
 - Account deletion warns that Google Play subscriptions must be cancelled in
   Play separately; it does not promise automatic Google cancellation.
 - No live verification, acknowledgment deadline, RTDN delivery, original-owner
@@ -111,6 +127,26 @@ Railway: a workspace connection alone does not configure Railway's runtime.
   proven by mocked SDK tests.
 
 ## Acceptance after separate authorization
+
+The authenticated root schedules non-interactive original-owner receipt recovery
+after 1.5 seconds, without gating auth/navigation/tracking/SOS. Each attempt has
+a 15-second caller budget and there are at most three attempts per authenticated
+root lifetime (5- and 30-second retry delays). Sign-out/account changes invalidate
+pending callbacks. A timed-out native operation retains the identity serialization
+lock until it settles; late or expired queued work cannot rebind another owner.
+No automatic interactive `restorePurchases()` runs at startup.
+
+`/billing/cancel` and `/billing/resume` accept optional `provider: "stripe"` for
+explicit Stripe management. Legacy empty requests remain valid for Stripe-only
+accounts. Google-only and ambiguous dual-provider legacy requests return 409
+with guidance rather than false success. Provider outages return errors without
+locally pretending to cancel recurring charges. Google renewal is managed in Play.
+
+Disabling new purchases does not revoke existing paid entitlements. Pausing
+reconciliation freezes projection updates, not signed-event intake, until restart/
+re-enable; the last verified access still expires normally. Emergency access denial
+is independent and Google-only. Operational switches cannot cancel a store payment
+already in progress. All configuration changes still require separate approval.
 
 Install the approved AAB through the approved internal track using a license
 tester. Before every purchase, verify the correct Google account, explicit test
@@ -139,6 +175,9 @@ KINNSHIP_RUN_LOCAL_MONGO_TESTS=1 PYTHONPATH=backend:backend/tests python -m pyte
   backend/tests/test_billing_webhook_reconciliation.py -q
 cd frontend
 npx jest --runInBand src/__tests__/googlePurchases.test.ts \
+  src/__tests__/googleBillingRecovery.test.tsx \
+  src/__tests__/googleCheckoutRollout.test.tsx \
+  src/__tests__/rootLocationPermissionRecovery.test.tsx \
   src/__tests__/upgradeCheckoutReturn.test.ts --forceExit
 ```
 

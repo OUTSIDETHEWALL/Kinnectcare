@@ -61,12 +61,12 @@ export default function ManageSubscription() {
       return;
     }
     if (cancellingAtEnd) {
-      Alert.alert('Already cancelling', `Your subscription will end on ${renewalLabel}.`);
+      Alert.alert('Already cancelling', `This Stripe subscription will end on ${renewalLabel}. Other subscriptions are unchanged.`);
       return;
     }
     Alert.alert(
-      'Cancel Family Plan?',
-      `You'll keep Family Plan features until ${renewalLabel || 'the end of this billing period'}. After that you'll be moved to the free tier (2 members max). You won't be charged again.`,
+      'Cancel Stripe auto-renewal?',
+      `This stops renewal of your Stripe subscription after ${renewalLabel || 'this billing period'}. Any separate Google Play subscription continues until cancelled in Google Play. Family access provided by another payer is unchanged.`,
       [
         { text: 'Keep my plan', style: 'cancel' },
         {
@@ -75,13 +75,11 @@ export default function ManageSubscription() {
           onPress: async () => {
             setBusy(true);
             try {
-              const r = await api.post('/billing/cancel', {});
+              const r = await api.post('/billing/cancel', { provider: 'stripe' });
               setStatus(r.data.billing_status || status);
               Alert.alert(
-                r.data.immediate ? 'Subscription ended' : 'Subscription cancelled',
-                r.data.immediate
-                  ? 'You are now on the free tier.'
-                  : `You'll keep Family Plan access until ${renewalLabel || 'the end of this period'}.`
+                'Stripe auto-renewal cancelled',
+                `This Stripe subscription remains eligible until ${renewalLabel || 'the end of this period'}. Any separate Google Play subscription continues until cancelled in Google Play. Other family access is unchanged.`
               );
             } catch (e: any) {
               Alert.alert('Failed', e?.response?.data?.detail || 'Could not cancel. Please try again.');
@@ -97,9 +95,9 @@ export default function ManageSubscription() {
   const onResume = async () => {
     setBusy(true);
     try {
-      const r = await api.post('/billing/resume', {});
+      const r = await api.post('/billing/resume', { provider: 'stripe' });
       setStatus(r.data.billing_status || status);
-      Alert.alert('Subscription resumed', 'Your Family Plan will continue to auto-renew.');
+      Alert.alert('Stripe auto-renewal resumed', 'Your Stripe subscription will continue to auto-renew. Other subscriptions are unchanged.');
     } catch (e: any) {
       Alert.alert('Failed', e?.response?.data?.detail || 'Could not resume. Please try again.');
     } finally {
@@ -230,8 +228,9 @@ export default function ManageSubscription() {
                 <Text style={styles.infoValue} testID="renewal-date">{renewalLabel}</Text>
                 {cancellingAtEnd && (
                   <Text style={styles.warnNote}>
-                    Your subscription will not auto-renew. You&apos;ll keep Family Plan
-                    features until this date, then move to the free tier.
+                    This subscription will not auto-renew. Access from this
+                    subscription continues until this date. Other subscriptions
+                    and family-provided access are unchanged.
                   </Text>
                 )}
               </View>
@@ -334,7 +333,7 @@ export default function ManageSubscription() {
         </TouchableOpacity>}
         <Text style={styles.fineprint}>
           {googleOwned ? 'Google Play handles this subscription. Manage or cancel it in Google Play; access continues for the eligible paid period.' : <>Billing is handled securely by Stripe. Cancelling here disables
-          auto-renewal — your card will not be charged again.
+          this Stripe subscription&apos;s auto-renewal. Separate Google Play subscriptions are unchanged.
           {isPaid ? ' Use "Payment methods & invoices" above to update your card or download receipts.' : ''}</>}
         </Text>
       </ScrollView>

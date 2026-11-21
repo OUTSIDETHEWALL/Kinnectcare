@@ -25,7 +25,9 @@ def router(db, get_current_user):
         app_user_id = await google.identity(db, current["id"])
         paid = await billing.get_member_limit_for_group(db, fresh) == float("inf")
         return {
-            "user_id": current["id"], "app_user_id": app_user_id, "can_purchase": not paid,
+            "user_id": current["id"], "app_user_id": app_user_id,
+            "can_purchase": google.purchases_enabled() and not paid,
+            "purchases_enabled": google.purchases_enabled(),
             "products": {"month": config["GOOGLE_MONTHLY_PRODUCT"],
                          "year": config["GOOGLE_ANNUAL_PRODUCT"]},
         }

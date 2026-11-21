@@ -243,6 +243,21 @@ describe('RootNav location recovery independent of notification onboarding', () 
     await flush();
   }
   const behaviors = ['granted', 'denied', 'reject', 'never'];
+  it('the real authenticated root starts billing recovery without delaying tracking or requiring a billing route', async () => {
+    const billing = require('../googlePurchases');
+    jest.spyOn(billing, 'googlePurchasesEnabled').mockReturnValue(true);
+    const recovery = jest.spyOn(billing, 'reconcileGooglePurchases')
+      .mockImplementation(() => new Promise(() => {}));
+    await mount();
+    expect(segments).toEqual(['(tabs)', 'dashboard']);
+    expect(sdk.start).toHaveBeenCalled();
+    expect(recovery).not.toHaveBeenCalled();
+    await act(async () => { jest.advanceTimersByTime(1500); });
+    await flush();
+    expect(recovery).toHaveBeenCalledWith('owner', expect.any(Function));
+    expect((recovery.mock.calls[0][1] as () => string)()).toBe('owner');
+    expect(enabled).toBe(true);
+  });
   it.each(behaviors)('actual RootNav repairs a disabled tracker with notification query %s', async behavior => {
     notificationBehavior(behavior);
     await mount();

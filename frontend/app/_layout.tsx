@@ -49,12 +49,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { logStartupEvent } from '../src/startupDiagnostics';
 import { recordNativeStartupCheckpoint } from '../src/nativeStartupRecorder';
 import { captureEmailLink } from '../src/emailLinks';
+import { useGoogleBillingRecovery } from '../src/useGoogleBillingRecovery';
 
 // This is the first executed JS-side checkpoint in the root bundle.
 recordNativeStartupCheckpoint('js_runtime_initialized');
 
 function RootNav() {
   const { user, loading } = useAuth();
+  useGoogleBillingRecovery();
   const segments = useSegments();
   const router = useRouter();
   const pathname = usePathname();

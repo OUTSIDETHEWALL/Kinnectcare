@@ -10,6 +10,7 @@ import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { getBillingStatus, createCheckoutSession, BillingStatus, PaidPlan } from '../src/api';
 import { useGoogleBilling } from '../src/useGoogleBilling';
+import { usesGoogleCheckout } from '../src/googlePurchases';
 
 function formatPrice(cents: number, currency = 'usd'): string {
   const amount = (cents / 100).toFixed(2);
@@ -42,7 +43,7 @@ export default function UpgradeScreen() {
   const [submitting, setSubmitting] = useState<'month' | 'year' | null>(null);
   const [restoring, setRestoring] = useState(false);
   const google = useGoogleBilling(() => { void load(); });
-  const android = Platform.OS === 'android';
+  const googleCheckout = usesGoogleCheckout(status);
 
   const load = async () => {
     try {
@@ -75,7 +76,7 @@ export default function UpgradeScreen() {
     if (submitting) return;
     setSubmitting(interval);
     try {
-      if (android) {
+      if (googleCheckout) {
         if (!google.enabled) throw new Error('Google Play subscriptions are not available in this version yet.');
         const verified = await google.purchase(interval);
         setStatus(verified);
@@ -193,7 +194,7 @@ export default function UpgradeScreen() {
                   </View>
                 ) : null}
 
-                {android ? (
+                {googleCheckout ? (
                   <>
                     <Text style={styles.footer}>
                       {!google.enabled ? 'Google Play subscriptions are not available in this version yet.' : google.error}
@@ -268,20 +269,20 @@ export default function UpgradeScreen() {
               </View>
             )}
 
-            {android && google.enabled && (
+            {google.enabled && (
               <TouchableOpacity testID="google-restore" onPress={restore}
                 disabled={restoring || !!submitting} style={styles.ctaSecondary}>
                 <Text style={styles.ctaSecondaryText}>{restoring ? 'Restoring…' : 'Restore Google Play purchases'}</Text>
               </TouchableOpacity>
             )}
             <Text style={styles.footer}>
-              {android
+              {googleCheckout
                 ? 'New Android subscriptions are billed by Google Play and renew automatically until cancelled. Manage or cancel in Google Play. Existing Stripe subscriptions remain separate.'
                 : 'Payments are processed securely by Stripe. Your card is charged immediately and your subscription renews automatically until cancelled.'}
             </Text>
 
             <View style={{ height: 16 }} />
-            {!android && <TouchableOpacity
+            {!googleCheckout && <TouchableOpacity
               onPress={() => Linking.openURL('https://stripe.com/legal/consumer')}
               hitSlop={10}
             >

@@ -529,6 +529,11 @@ export type PaidPlan = {
 };
 
 export type BillingStatus = {
+  google_billing?: {
+    purchases_enabled: boolean;
+    reconciliation_enabled?: boolean;
+    emergency_access_disabled?: boolean;
+  };
   billing_provider?: 'stripe' | 'google_play' | null;
   billing_providers?: ('stripe' | 'google_play')[];
   is_billing_owner?: boolean;

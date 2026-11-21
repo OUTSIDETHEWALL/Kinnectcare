@@ -32,14 +32,44 @@ def enabled():
     return os.getenv("GOOGLE_BILLING_ENABLED") == "true"
 
 
-def settings():
+def reconciliation_enabled():
+    return enabled() and os.getenv("GOOGLE_BILLING_RECONCILIATION_ENABLED") == "true"
+
+
+def emergency_access_disabled():
+    # This is the ONLY operational switch that revokes an existing Google grant.
+    # It never affects Stripe access.
+    return os.getenv("GOOGLE_BILLING_EMERGENCY_ACCESS_DISABLED") == "true"
+
+
+def purchases_enabled():
+    if not reconciliation_enabled() or emergency_access_disabled():
+        return False
+    if os.getenv("GOOGLE_BILLING_PURCHASES_ENABLED") != "true":
+        return False
+    try:
+        settings()
+        return True
+    except HTTPException:
+        return False
+
+
+def controls():
+    return {
+        "purchases_enabled": purchases_enabled(),
+        "reconciliation_enabled": reconciliation_enabled(),
+        "emergency_access_disabled": emergency_access_disabled(),
+    }
+
+
+def settings(require_reconciliation=True):
     """Configuration is explicit; no test-store or unverified catalog fallback."""
     values = {k: os.getenv(k, "").strip() for k in (
         "REVENUECAT_PROJECT_ID", "REVENUECAT_GOOGLE_APP_ID",
         "REVENUECAT_SECRET_API_KEY", "REVENUECAT_ENTITLEMENT_ID",
         "GOOGLE_MONTHLY_PRODUCT", "GOOGLE_ANNUAL_PRODUCT",
     )}
-    if not enabled() or not all(values.values()):
+    if not enabled() or not all(values.values()) or (require_reconciliation and not reconciliation_enabled()):
         raise HTTPException(503, "Google billing is not enabled and configured")
     if os.getenv("GOOGLE_BILLING_ORIGINAL_OWNER_CONFIRMED") != "true":
         raise HTTPException(503, "Original-purchaser restoration must be confirmed before activation")
@@ -68,6 +98,8 @@ def millis(value):
 
 
 def google_access(user, at=None):
+    if emergency_access_disabled():
+        return False
     sub = (user or {}).get("google_subscription") or {}
     if not allowed_account(user, sub.get("environment")):
         return False
@@ -75,6 +107,13 @@ def google_access(user, at=None):
     if isinstance(expiry, datetime) and expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
     return sub.get("verified") is True and isinstance(expiry, datetime) and expiry > (at or now())
+
+
+def owns_purchase(user):
+    sub = (user or {}).get("google_subscription") or {}
+    # An empty successful lookup is NOT ownership. product_identifier supports
+    # mirrors written by the first draft without inventing a second purchaser.
+    return sub.get("verified") is True and bool(sub.get("has_purchase") or sub.get("product_identifier"))
 
 
 async def identity(db, user_id):
@@ -144,7 +183,7 @@ class RevenueCat:
 def projection(config, app_user_id, subs, entitlements, products, at=None):
     """Fail closed on ownership mismatch; never use a client entitlement claim."""
     at = at or now()
-    grant = {"verified": True, "status": "expired", "access_until": at,
+    grant = {"verified": True, "has_purchase": False, "status": "expired", "access_until": at,
              "checked_at": at, "environment": config["environment"]}
     chains = set()
     allowed = {config["GOOGLE_MONTHLY_PRODUCT"]: "month", config["GOOGLE_ANNUAL_PRODUCT"]: "year"}
@@ -174,20 +213,25 @@ def projection(config, app_user_id, subs, entitlements, products, at=None):
             raise HTTPException(502, "Verified purchase identity is missing")
         chains.add("order:" + order.split("..", 1)[0])
         chains.add("subscription:" + sub["id"])
+        grant["has_purchase"] = True
         linked = {e.get("id") for e in (sub.get("entitlements") or {}).get("items", [])}
         if config["REVENUECAT_ENTITLEMENT_ID"] not in linked:
             continue
-        # gives_access is authoritative, but cache it no later than the exact
-        # entitlement expiry (including configured grace), never indefinitely.
-        expiry = entitlement_expiry
-        if sub.get("status") != "in_grace_period":
-            expiry = min(expiry, millis(sub.get("ends_at")) or at)
+        # API v2 exposes gives_access on this exact subscription, but does not
+        # expose its grace end. Never borrow another product/environment's
+        # customer-wide expiry. Grace gets a short, renewable verification lease.
+        grace = sub.get("status") == "in_grace_period"
+        expiry = at + timedelta(minutes=5) if grace else min(
+            entitlement_expiry, millis(sub.get("ends_at")) or at,
+        )
         if sub.get("gives_access") is True and expiry > grant["access_until"]:
             grant.update(
                 access_until=expiry, status=sub.get("status", "unknown"),
                 interval=allowed[identifier], product_identifier=identifier,
                 current_period_end=millis(sub.get("current_period_ends_at")),
                 cancel_at_period_end=sub.get("auto_renewal_status") == "will_not_renew",
+                subscription_id=sub["id"],
+                verification_mode="subscription_grace_lease" if grace else "paid_period",
             )
     return grant, chains
 
@@ -213,6 +257,7 @@ async def reconcile(db, user_id, client=None):
     try:
         snapshot = await (client or RevenueCat(config)).snapshot(app_user_id)
         grant, chains = projection(config, app_user_id, *snapshot)
+        settings()  # A reconciliation pause during a provider await fences writes.
         for chain in sorted(chains):
             key = hashlib.sha256((config["REVENUECAT_GOOGLE_APP_ID"] + ":" +
                                   config["environment"] + ":" + chain).encode()).hexdigest()
@@ -230,7 +275,8 @@ async def reconcile(db, user_id, client=None):
              "family_group_id": user.get("family_group_id"),
              "google_billing_lock.token": token, "google_billing_lock.until": {"$gt": now()}},
             {"$set": {"google_subscription": grant,
-                      "google_billing_next_check": now() + timedelta(minutes=5)}},
+                       "google_billing_next_check": now() + timedelta(
+                           minutes=1 if grant.get("verification_mode") == "subscription_grace_lease" else 5)}},
         )
         if result.matched_count != 1:
             raise HTTPException(409, "Account changed during verification; retry")
@@ -260,7 +306,8 @@ def verify_webhook(raw, authorization, signature, timestamp=None):
 
 
 async def receive_webhook(db, raw, authorization, signature):
-    config = settings()
+    # Pausing processing does not discard incoming lifecycle evidence.
+    config = settings(require_reconciliation=False)
     verify_webhook(raw, authorization, signature)
     try:
         event = json.loads(raw)["event"]

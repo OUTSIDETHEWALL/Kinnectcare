@@ -5693,6 +5693,11 @@ class CheckoutRequest(BaseModel):
     interval: Optional[str] = "month"  # 'month' or 'year'
 
 
+class BillingManagementRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: Optional[str] = None
+
+
 def _billing_required():
     if not billing.is_configured():
         raise HTTPException(status_code=503, detail="Billing is not configured")
@@ -5705,7 +5710,7 @@ _google_billing_worker = None
 @app.on_event("startup")
 async def start_google_billing_worker():
     global _google_billing_worker
-    if google_billing.enabled():
+    if google_billing.reconciliation_enabled():
         # Optional billing must not gate SOS or the rest of API startup.
         # Its worker retries initialization; billing routes fail closed.
         _google_billing_worker = asyncio.create_task(google_billing.worker(db))
@@ -5731,13 +5736,13 @@ async def billing_status(portal: int = 0, current=Depends(get_current_user)):
 
 
 @api_router.post("/billing/cancel")
-async def billing_cancel(current=Depends(get_current_user)):
+async def billing_cancel(payload: Optional[BillingManagementRequest] = None, current=Depends(get_current_user)):
     """Cancel the user's Family Plan subscription at the end of the current
     billing period. The user keeps Family Plan access until `current_period_end`.
     Idempotent — calling on an already-cancelling sub is a no-op success.
     """
     try:
-        result = await billing.cancel_subscription_at_period_end(db, current)
+        result = await billing.cancel_subscription_at_period_end(db, current, payload.provider if payload else None)
     except stripe.error.StripeError as e:
         logger.error(f"cancel stripe error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -5748,10 +5753,10 @@ async def billing_cancel(current=Depends(get_current_user)):
 
 
 @api_router.post("/billing/resume")
-async def billing_resume(current=Depends(get_current_user)):
+async def billing_resume(payload: Optional[BillingManagementRequest] = None, current=Depends(get_current_user)):
     """Undo a pending cancel — the subscription will renew normally again."""
     try:
-        result = await billing.resume_subscription(db, current)
+        result = await billing.resume_subscription(db, current, payload.provider if payload else None)
     except stripe.error.StripeError as e:
         logger.error(f"resume stripe error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
