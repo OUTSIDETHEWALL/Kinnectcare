@@ -57,7 +57,7 @@ jest.mock('expo-router', () => ({
       const cleanup = cb();
       return cleanup ?? undefined;
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [cb]);
   },
 }));
 
@@ -124,7 +124,7 @@ jest.mock('../api', () => ({
 // ── AuthContext mock ──────────────────────────────────────────────────────────
 
 const MOCK_USER_ID = 'user-42';
-const CACHE_KEY = `@kinnship/alerts_v1_${MOCK_USER_ID}`;
+const CACHE_KEY = `@kinnship/alerts_v2_${JSON.stringify([MOCK_USER_ID, null])}`;
 const mockAuthUser: { id: string | null | undefined } = { id: MOCK_USER_ID };
 
 const mockFocusHarness = {
@@ -321,7 +321,7 @@ describe('Alerts screen — AsyncStorage cache', () => {
     expect(mockGetItem).toHaveBeenCalledWith(CACHE_KEY);
 
     const newUserId = 'user-99';
-    const newCacheKey = `@kinnship/alerts_v1_${newUserId}`;
+    const newCacheKey = `@kinnship/alerts_v2_${JSON.stringify([newUserId, null])}`;
     mockGetItem.mockClear();
     mockAuthUser.id = newUserId;
 

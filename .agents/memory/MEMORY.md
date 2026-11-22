@@ -50,5 +50,6 @@
 - [Motor commit retry boundary](motor-commit-retry-boundary.md) — verify unknown-commit retries with a real failpoint; the installed context can auto-commit outside its retry loop.
 - [SOS transfer priority](sos-transfer-priority.md) — long transfers must yield their family fences without bypassing fresh SOS authorization or extending its deadline.
 - [SOS retention policy](sos-retention-policy.md) — resolved SOS expires after 30 days; active/unresolved incidents must never expire automatically.
+- [SOS inbox dismissal](sos-inbox-dismissal.md) — resolved notifications dismiss locally per account/family; acknowledgment never clears an unresolved emergency.
 - [Check-in schedule lifetime](checkin-schedule-lifetime.md) — activation/revision and family fencing must apply across all settings writers and delivery reservations.
 - [Account deletion boundary](account-deletion-boundary.md) — atomic cleanup does not cancel retained credentials, unfenced invitations or tokens captured before an await.
