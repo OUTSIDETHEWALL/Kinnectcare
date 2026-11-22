@@ -13,6 +13,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@replit/revenuecat-sdk": "^5.0.0",
     "mongodb": "^7.5.0"
   }
 }

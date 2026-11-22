@@ -529,6 +529,14 @@ export type PaidPlan = {
 };
 
 export type BillingStatus = {
+  google_billing?: {
+    purchases_enabled: boolean;
+    reconciliation_enabled?: boolean;
+    emergency_access_disabled?: boolean;
+  };
+  billing_provider?: 'stripe' | 'google_play' | null;
+  billing_providers?: ('stripe' | 'google_play')[];
+  is_billing_owner?: boolean;
   plan: 'free' | 'family_plan';
   plan_label?: string | null;
   status?: string | null;
@@ -545,7 +553,7 @@ export type BillingStatus = {
     currency: string;
     interval: string;
     product_name: string;
-  };
+  } | null;
   paid_plans: PaidPlan[];
   annual_savings_cents: number;
 };

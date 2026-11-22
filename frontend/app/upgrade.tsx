@@ -9,6 +9,8 @@ import * as WebBrowser from 'expo-web-browser';
 import { Icon } from '../src/Icon';
 import { Colors } from '../src/theme';
 import { getBillingStatus, createCheckoutSession, BillingStatus, PaidPlan } from '../src/api';
+import { useGoogleBilling } from '../src/useGoogleBilling';
+import { usesGoogleCheckout } from '../src/googlePurchases';
 
 function formatPrice(cents: number, currency = 'usd'): string {
   const amount = (cents / 100).toFixed(2);
@@ -39,6 +41,9 @@ export default function UpgradeScreen() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState<'month' | 'year' | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  const google = useGoogleBilling(() => { void load(); });
+  const googleCheckout = usesGoogleCheckout(status);
 
   const load = async () => {
     try {
@@ -60,8 +65,7 @@ export default function UpgradeScreen() {
   useEffect(() => { load(); }, []);
 
   useEffect(() => {
-    if (params?.status === 'success') {
-      Alert.alert('Subscription Active', 'Welcome to Kinnship Family Plan!');
+    if (params?.status === 'success' && Platform.OS !== 'android') {
       load();
     } else if (params?.status === 'cancel') {
       Alert.alert('Checkout Canceled', 'No worries — you can upgrade anytime.');
@@ -72,6 +76,16 @@ export default function UpgradeScreen() {
     if (submitting) return;
     setSubmitting(interval);
     try {
+      if (googleCheckout) {
+        if (!google.enabled) throw new Error('Google Play subscriptions are not available in this version yet.');
+        const verified = await google.purchase(interval);
+        setStatus(verified);
+        Alert.alert(
+          verified.plan === 'family_plan' ? 'Subscription Active' : 'Purchase pending verification',
+          verified.plan === 'family_plan' ? 'Welcome to Kinnship Family Plan!' : 'Your purchase will be rechecked. Please do not purchase again.',
+        );
+        return;
+      }
       const returnUrl = 'kinnship://upgrade';
       const { checkout_url } = await createCheckoutSession(returnUrl, interval);
       if (!checkout_url) throw new Error('No checkout URL returned');
@@ -84,10 +98,22 @@ export default function UpgradeScreen() {
         await load();
       }
     } catch (e: any) {
-      Alert.alert('Could not start checkout', e?.response?.data?.detail || e?.message || 'Please try again.');
+      if (!e?.userCancelled) Alert.alert('Could not complete checkout', e?.response?.data?.detail || e?.message || 'Please try again.');
     } finally {
       setSubmitting(null);
     }
+  };
+
+  const restore = async () => {
+    setRestoring(true);
+    try {
+      const verified = await google.restore();
+      setStatus(verified);
+      Alert.alert('Restore complete', verified.plan === 'family_plan'
+        ? 'Family Plan access is available.' : 'No active purchase was found for this Kinnship account.');
+    } catch (e: any) {
+      Alert.alert('Could not restore', e?.response?.data?.detail || e?.message || 'Try again later.');
+    } finally { setRestoring(false); }
   };
 
   const onManage = async () => {
@@ -168,6 +194,28 @@ export default function UpgradeScreen() {
                   </View>
                 ) : null}
 
+                {googleCheckout ? (
+                  <>
+                    <Text style={styles.footer}>
+                      {!google.enabled ? 'Google Play subscriptions are not available in this version yet.' : google.error}
+                    </Text>
+                    {(['year', 'month'] as const).map(interval => (
+                      <PlanOption
+                        key={interval}
+                        testID={`upgrade-google-${interval}`}
+                        title={interval === 'year' ? 'Annual' : 'Monthly'}
+                        price={google.plans[interval]?.product.priceString || 'Price unavailable'}
+                        pricePerMonth={interval === 'year' ? 'Billed annually · auto-renews until cancelled' : 'Billed monthly · auto-renews until cancelled'}
+                        ctaLabel={submitting === interval ? 'Processing…' : `Choose ${interval === 'year' ? 'Annual' : 'Monthly'}`}
+                        ctaTestID={`upgrade-google-buy-${interval}`}
+                        submitting={submitting === interval}
+                        disabled={!google.plans[interval] || !!submitting || restoring || !!loadError}
+                        onPress={() => onUpgrade(interval)}
+                      />
+                    ))}
+                  </>
+                ) : (
+                  <>
                 {/* Annual plan (recommended, highlighted) */}
                 <PlanOption
                   testID="upgrade-plan-annual"
@@ -194,6 +242,8 @@ export default function UpgradeScreen() {
                   submitting={submitting === 'month'}
                   onPress={() => onUpgrade('month')}
                 />
+                  </>
+                )}
               </>
             ) : (
               <View style={styles.activePlanCard} testID="upgrade-current-plan">
@@ -210,27 +260,34 @@ export default function UpgradeScreen() {
                   testID="upgrade-manage"
                   style={[styles.ctaSecondary]}
                   onPress={onManage}
-                  disabled={!status?.manage_url}
                   activeOpacity={0.85}
                 >
                   <Text style={styles.ctaSecondaryText}>
-                    {status?.manage_url ? 'Manage Subscription' : 'Manage Subscription (unavailable)'}
+                    Manage Subscription
                   </Text>
                 </TouchableOpacity>
               </View>
             )}
 
+            {google.enabled && (
+              <TouchableOpacity testID="google-restore" onPress={restore}
+                disabled={restoring || !!submitting} style={styles.ctaSecondary}>
+                <Text style={styles.ctaSecondaryText}>{restoring ? 'Restoring…' : 'Restore Google Play purchases'}</Text>
+              </TouchableOpacity>
+            )}
             <Text style={styles.footer}>
-              Payments are processed securely by Stripe. Your card is charged immediately and your subscription renews automatically until cancelled.
+              {googleCheckout
+                ? 'New Android subscriptions are billed by Google Play and renew automatically until cancelled. Manage or cancel in Google Play. Existing Stripe subscriptions remain separate.'
+                : 'Payments are processed securely by Stripe. Your card is charged immediately and your subscription renews automatically until cancelled.'}
             </Text>
 
             <View style={{ height: 16 }} />
-            <TouchableOpacity
+            {!googleCheckout && <TouchableOpacity
               onPress={() => Linking.openURL('https://stripe.com/legal/consumer')}
               hitSlop={10}
             >
               <Text style={styles.fineprint}>Powered by Stripe</Text>
-            </TouchableOpacity>
+            </TouchableOpacity>}
           </>
         )}
       </ScrollView>
@@ -249,6 +306,7 @@ function PlanOption(props: {
   ctaLabel: string;
   ctaTestID: string;
   submitting: boolean;
+  disabled?: boolean;
   onPress: () => void;
 }) {
   return (
@@ -281,7 +339,7 @@ function PlanOption(props: {
           props.submitting && { opacity: 0.6 },
         ]}
         onPress={props.onPress}
-        disabled={props.submitting}
+        disabled={props.submitting || props.disabled}
         activeOpacity={0.85}
       >
         {props.submitting ? (
