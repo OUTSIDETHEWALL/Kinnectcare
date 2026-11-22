@@ -24,6 +24,23 @@ substitute a source reconnect or commit pin for disabling automatic deployment.
 
 ## Manual Google Play uploads
 
+### Streamlined owner-led build process
+
+Build directly from approved main using production configuration. Perform
+essential build-integrity and signing checks, but do not initiate extended
+testing campaigns, additional test builds or repeated rebuilds without the
+owner's approval. The owner installs the finished app on both Android phones
+and conducts real-world acceptance testing. Keep Google purchases disabled
+until ready. Do not publish an OTA or release to Google Play without explicit
+owner approval.
+
+**Why:** The owner prioritizes getting a working build efficiently and
+controlling development costs.
+
+**How to apply:** Keep the build process within that scope; do not substitute
+extra validation builds or repeated test campaigns for delivering the approved
+artifacts. Preserve separately stated merge-confirmation and build-start gates.
+
 The owner downloads the verified AAB and manually uploads it to Google Play
 Console. The agent builds only when explicitly authorized, verifies the artifact,
 provides the direct EAS AAB download link, and then stops for instructions.

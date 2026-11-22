@@ -92,8 +92,17 @@
         "KINNSHIP_DIAGNOSTIC_BUILD": "77"
       }
     },
+    "production-apk": {
+      "extends": "production",
+      "environment": "production",
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      }
+    },
     "production": {
       "channel": "production",
+      "autoIncrement": false,
       "ios": {
         "resourceClass": "m-medium"
       },
@@ -101,7 +110,9 @@
         "buildType": "app-bundle"
       },
       "env": {
-        "KINNSHIP_DIAGNOSTIC_BUILD": "81",
+        "KINNSHIP_DIAGNOSTIC_BUILD": "82",
+        "EXPO_PUBLIC_GOOGLE_BILLING_ENABLED": "false",
+        "EXPO_PUBLIC_GOOGLE_PURCHASES_ENABLED": "false",
         "EXPO_PUBLIC_BACKEND_URL": "https://kinnectcare-production.up.railway.app",
         "EXPO_PUBLIC_GOOGLE_MAPS_API_KEY": "AIzaSyBeIZ4yanf7KrSzOaGpGoqsoBWbnyBsc_I"
       }
