@@ -3,6 +3,18 @@ name: Android source validation constraints
 description: Expo prebuilt publications can bypass native patches; full SDK validation needs workspace-backed cache storage.
 ---
 
+## Isolated Expo type-check prerequisites
+
+An isolated Git checkout omits Expo's generated route types. Restore the matching
+generated types before comparing its TypeScript diagnostics with the working app.
+
+**Why:** Without those ignored files, an otherwise compatible combined source
+reported false tuple-length errors when reading the second navigation segment.
+
+**How to apply:** Reuse existing generated types only when both checkouts have the
+same route-file set; otherwise regenerate them in the isolated environment.
+Do not edit route declarations or weaken compiler checks to hide these errors.
+
 ## Native patches must be compiled from source
 
 Explicitly opt patched Expo modules out of published precompiled Android AARs using Expo's autolinking buildFromSource configuration.

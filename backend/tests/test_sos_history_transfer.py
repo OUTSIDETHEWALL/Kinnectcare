@@ -296,6 +296,29 @@ async def test_current_family_alert_scope_preserves_ordinary_and_active_sos(scen
 
 
 @pytest.mark.asyncio
+async def test_clear_from_either_phone_keeps_every_sos_and_its_original_retention_date(scenario):
+    """Real endpoint/database boundary behind the two independent client inboxes."""
+    s = scenario
+    assert (await join(s)).status_code == 200
+    resolved = await history(s, id="resolved", family_group_id="target")
+    active = await history(s, id="active", family_group_id="target",
+                           resolved=False, resolved_at=None, acknowledged=False)
+    ack_only = await history(s, id="ack-only", family_group_id="target",
+                             resolved=False, resolved_at=None, acknowledged=True)
+    unknown = await history(s, id="unknown", family_group_id="target",
+                            resolved=None, resolved_at=None, acknowledged=True)
+    endpoints = alert_endpoints(s.db)
+    for actor in ("owner", "invitee"):
+        await history(s, id=f"ordinary-{actor}", family_group_id="target", type="routine")
+        await endpoints.clear_all_alerts({"id": actor, "family_group_id": "target"})
+        assert await s.db.alerts.find_one({"id": f"ordinary-{actor}"}) is None
+        for original in (resolved, active, ack_only, unknown):
+            assert await s.db.alerts.find_one({"id": original["id"]}) == original
+        # Clear All is not resolution and cannot move the 30-day retention origin.
+        assert (await s.db.alerts.find_one({"id": "resolved"}))["resolved_at"] == resolved["resolved_at"]
+
+
+@pytest.mark.asyncio
 async def test_resolution_change_during_transfer_retries_and_blocks(scenario, monkeypatch):
     s = scenario
     original = await history(s)

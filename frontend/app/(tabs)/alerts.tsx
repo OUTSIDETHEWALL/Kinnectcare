@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator, Linking, Platform, Alert as RNAlert } from 'react-native';
-import { useFocusEffect } from 'expo-router';
 import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../src/theme';
@@ -8,8 +7,9 @@ import { api, Alert } from '../../src/api';
 import { acknowledgmentErrorMessage } from '../../src/acknowledgmentErrorMessage';
 import { formatRelativeLocal } from '../../src/timeFormat';
 import MemberMap from '../../src/MemberMap';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../src/AuthContext';
+import { isClearedAlert, sosResolution } from '../../src/alertDismissals';
+import { useAlertInbox } from '../../src/useAlertInbox';
 
 function alertIcon(type: string) {
   if (type === 'missed_checkin') return 'time-outline';
@@ -47,84 +47,8 @@ function severityTheme(sev: string) {
 
 export default function Alerts() {
   const { user } = useAuth();
-  const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { alerts, loading, loadError, clearing, load, prepareClear } = useAlertInbox(user);
   const [refreshing, setRefreshing] = useState(false);
-  const [loadError, setLoadError] = useState(false);
-
-  const load = async () => {
-    try {
-      const r = await api.get('/alerts');
-      const fresh = r.data as Alert[];
-      setAlerts(fresh);
-      // Clear any previous error only once the fetch succeeds — keeps the error
-      // card visible during a retry rather than flashing "All clear!" while the
-      // request is in flight.
-      setLoadError(false);
-      // Persist the fresh list so it survives a force-kill restart.
-      if (user?.id) {
-        try {
-          await AsyncStorage.setItem(`@kinnship/alerts_v1_${user.id}`, JSON.stringify(fresh));
-        } catch (_e) {}
-      }
-    } catch (_e) {
-      // On failure preserve the existing state (cache or last successful fetch)
-      // rather than blanking the list — the user should see stale alerts
-      // rather than a misleading empty screen.
-      setLoadError(true);
-    }
-  };
-
-  useFocusEffect(useCallback(() => {
-    let cancelled = false;
-
-    const hydrateAndRefresh = async () => {
-      // Step 1 — Read the AsyncStorage cache synchronously before starting the
-      // network fetch.  If a cached list exists, populate state immediately and
-      // dismiss the full-screen spinner so caregivers see their alerts right
-      // away after a force-kill restart, even while the network request is
-      // still in flight.
-      let hasCached = false;
-      if (user?.id) {
-        try {
-          const cached = await AsyncStorage.getItem(`@kinnship/alerts_v1_${user.id}`);
-          if (cached && !cancelled) {
-            setAlerts(JSON.parse(cached) as Alert[]);
-            hasCached = true;
-          }
-        } catch (_e) {}
-      }
-
-      // Step 2 — Only keep the full-screen spinner up when there is genuinely
-      // nothing to show yet (no cache, no prior in-memory data).  When cached
-      // data exists, the spinner is dismissed so the list is visible while the
-      // background refresh completes.
-      if (!hasCached && !cancelled) {
-        setLoading(true);
-      } else if (!cancelled) {
-        setLoading(false);
-      }
-
-      // Step 3 — Network refresh (non-blocking when cache exists).
-      await load();
-      if (!cancelled) setLoading(false);
-    };
-
-    hydrateAndRefresh();
-
-    // Poll briefly after focus to catch in-flight SOS background fanout
-    // and other late-arriving alerts (Bug 3 — SOS not appearing in Alerts).
-    // The /sos endpoint inserts the alert row synchronously BEFORE the
-    // push fanout, so within ~1s of dialer dismiss the row exists.
-    const t1 = setTimeout(() => { if (!cancelled) load(); }, 1500);
-    const t2 = setTimeout(() => { if (!cancelled) load(); }, 4000);
-    return () => {
-      cancelled = true;
-      clearTimeout(t1);
-      clearTimeout(t2);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]));
 
   const ack = async (id: string) => {
     try {
@@ -141,15 +65,19 @@ export default function Alerts() {
     setRefreshing(false);
   };
 
-  // Clear All — deletes every alert in the user's family group via
-  // the new DELETE /api/alerts endpoint. Confirmed via a native
-  // Alert.alert so an accidental tap can't wipe the history (these
-  // are safety-relevant records the user may want to keep).
+  const eligible = alerts.filter(a => a.type !== 'sos' || sosResolution(a) !== null);
   const clearAll = () => {
-    if (alerts.length === 0) return;
+    if (!eligible.length || clearing) return;
+    const clear = prepareClear();
+    const resolvedCount = eligible.filter(a => a.type === 'sos').length;
+    const ordinaryCount = eligible.length - resolvedCount;
     RNAlert.alert(
-      'Clear all alerts?',
-      `This will permanently delete all ${alerts.length} alert${alerts.length === 1 ? '' : 's'} in your family group — including SOS, medication and check-in history. This cannot be undone.`,
+      'Clear eligible alerts?',
+      [
+        resolvedCount ? `Dismiss ${resolvedCount} resolved SOS notification(s) from Alerts on this phone only. SOS incidents and history are not deleted. Other phones must dismiss their own notifications.` : '',
+        ordinaryCount ? 'Delete ordinary alerts for everyone in your family using the existing Clear All action. This cannot be undone.' : '',
+        'Active or unresolved SOS emergencies stay visible. SOS history keeps its existing 30-day retention after resolution.',
+      ].filter(Boolean).join('\n\n'),
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -157,17 +85,9 @@ export default function Alerts() {
           style: 'destructive',
           onPress: async () => {
             try {
-              await api.delete('/alerts');
-              setAlerts([]);
-              // Invalidate the cache so a force-kill restart after a clear-all
-              // doesn't restore stale alerts from a prior session.
-              if (user?.id) {
-                try {
-                  await AsyncStorage.removeItem(`@kinnship/alerts_v1_${user.id}`);
-                } catch (_e) {}
-              }
-            } catch (_e) {
-              RNAlert.alert('Could not clear', 'Please check your connection and try again.');
+              await clear();
+            } catch (error) {
+              RNAlert.alert('Could not clear', error instanceof Error ? error.message : 'Please try again.');
             }
           },
         },
@@ -185,8 +105,8 @@ export default function Alerts() {
     );
   }
 
-  const active = alerts.filter(a => !a.acknowledged);
-  const cleared = alerts.filter(a => a.acknowledged);
+  const active = alerts.filter(a => !isClearedAlert(a));
+  const cleared = alerts.filter(isClearedAlert);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -195,11 +115,12 @@ export default function Alerts() {
           <Text style={styles.title}>Alerts</Text>
           <Text style={styles.sub}>{active.length} active · {cleared.length} cleared</Text>
         </View>
-        {alerts.length > 0 && (
+        {eligible.length > 0 && (
           <TouchableOpacity
             testID="alerts-clear-all"
             style={styles.clearAllBtn}
             onPress={clearAll}
+            disabled={clearing}
             activeOpacity={0.7}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             accessibilityLabel="Clear all alerts"
@@ -304,13 +225,13 @@ export default function Alerts() {
                       <Text style={[styles.callText, { color: t.fg }]}>Call {a.member_name.split(' ')[0]}</Text>
                     </TouchableOpacity>
                   )}
-                  <TouchableOpacity
+                  {!a.acknowledged && <TouchableOpacity
                     testID={`alert-ack-${a.id}`}
                     onPress={() => ack(a.id)}
                     style={[styles.ackBtn, { borderColor: t.fg }]}
                   >
                     <Text style={[styles.ackText, { color: t.fg }]}>Acknowledge</Text>
-                  </TouchableOpacity>
+                  </TouchableOpacity>}
                 </View>
               </View>
             </View>
@@ -319,7 +240,7 @@ export default function Alerts() {
 
         {cleared.length > 0 && <Text style={styles.section}>Cleared</Text>}
         {cleared.slice(0, 10).map(a => (
-          <View key={a.id} style={styles.clearedCard}>
+          <View key={a.id} testID={`alert-${a.id}`} style={styles.clearedCard}>
             <Icon name="checkmark-circle" size={18} color={Colors.success} />
             <View style={{ flex: 1, marginLeft: 10 }}>
               <Text style={styles.clearedTitle}>{a.title}</Text>
