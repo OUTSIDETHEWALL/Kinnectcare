@@ -92,6 +92,18 @@
         "KINNSHIP_DIAGNOSTIC_BUILD": "77"
       }
     },
+    "billing-sos82": {
+      "extends": "production",
+      "environment": "production",
+      "distribution": "store",
+      "channel": "internal-billing-sos82",
+      "autoIncrement": false,
+      "env": {
+        "KINNSHIP_DIAGNOSTIC_BUILD": "82",
+        "EXPO_PUBLIC_GOOGLE_BILLING_ENABLED": "false",
+        "EXPO_PUBLIC_GOOGLE_PURCHASES_ENABLED": "false"
+      }
+    },
     "production": {
       "channel": "production",
       "ios": {
