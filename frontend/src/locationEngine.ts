@@ -85,8 +85,8 @@ import { fenceNativeSdk, interruptNativeTracking } from './androidNativeShutdown
 import { recordTrackingEvidence, observeTrackingMovement,
   completeNativeTrackingShutdown, recordTrackingRecoveryFailure, readTrackingAuthority,
   describeOperationalRecovery, observeNativeEnabledState, withTrackingConfiguration, armNativeMotionRecovery,
-  withConfirmedTrackingShutdown } from './trackingReliability';
-import type { TrackingAuthority } from './trackingReliability';
+  withConfirmedTrackingShutdown, maintainNativeMotionRecovery } from './trackingReliability';
+import type { TrackingAuthority, GPSAcquisitionPurpose } from './trackingReliability';
 import { acquireAndUploadAndroidPosition, GUARDED_POSITION_MARKER } from './androidLocationAcquisition';
 import { appendEngineEvidence, readEngineEvidence, clearEngineEvidence } from './engineEvidenceJournal';
 import { verifiedDelivery } from './verifiedDelivery';
@@ -486,6 +486,7 @@ function registerHeadlessTaskOnce(): void {
           if (Platform.OS === 'android' && (!authorizedTransport || !await authorizedTransport.isCurrent())) return;
           const pos = await acquireGuardedPosition(lib, {
             samples: 1,
+            acquisitionPurpose: 'watchdog',
             persist: true,
             timeout: 30,
             extras: { source: 'headless-heartbeat',
@@ -702,6 +703,7 @@ function registerHeadlessTaskOnce(): void {
               if (Platform.OS === 'android' && (!authorizedTransport || !await authorizedTransport.isCurrent())) return;
               const loc = await acquireGuardedPosition(lib, {
                 samples: 1, persist: true, timeout: 30,
+                acquisitionPurpose: 'recovery',
                 extras: { source: 'headless-motionchange' },
               }, authorizedTransport, executionCurrent);
               // Android returned only after a fenced HTTP acceptance; iOS
@@ -925,7 +927,10 @@ async function acquireGuardedPosition(
   lib: any, options: any, transport?: AuthorizedBatteryTransport,
   executionCurrent: () => boolean = () => true,
 ): Promise<any> {
-  if (Platform.OS !== 'android') return lib.getCurrentPosition(options);
+  if (Platform.OS !== 'android') {
+    const { acquisitionPurpose: _purpose, ...sdkOptions } = options;
+    return lib.getCurrentPosition(sdkOptions);
+  }
   if (!executionCurrent()) throw new Error('gps_authorization_obsolete');
   const generation = engineGeneration;
   let proof = transport;
@@ -1338,6 +1343,7 @@ function attachSdkListeners(lib: any): void {
             void logEvent('getCurrentPosition_start', { source: 'js' });
             const loc = await acquireGuardedPosition(lib, {
               samples: 1, persist: true, timeout: 30,
+              acquisitionPurpose: 'recovery',
               extras: { source: 'js-motionchange' },
             });
             void logEvent('gps_fix_received', {
@@ -1489,6 +1495,7 @@ function attachSdkListeners(lib: any): void {
       try {
         await acquireGuardedPosition(lib, {
           samples: 1,
+          acquisitionPurpose: 'watchdog',
           persist: true,
           timeout: 30,
           extras: { source: 'js-heartbeat' },
@@ -2270,6 +2277,9 @@ export async function recoverWithOperationalReport(
 ) {
   const result = await recoverFromIndependentWake(trigger, isCurrent, onAuthorizedBattery, evidenceWakeId);
   const report = describeOperationalRecovery(result, readTrackingAuthority());
+  // Registration maintenance does not start the SDK/FGS from a heartbeat.
+  // It is native-budgeted and permission/owner-fenced, even when enabled=true.
+  if (report.authorization === 'AUTHORIZED' && isCurrent()) maintainNativeMotionRecovery();
   recordTrackingEvidence('recovery_verdict', {
     source: trigger, authorization: report.authorization, outcome: report.state,
     nextEligibleAt: report.nextEligibleAt, capturedAt: report.capturedAt,
@@ -2303,6 +2313,7 @@ export async function recoverAndRefreshFromIndependentWake(
     if (!lib) return 'native_unavailable';
     await acquireAndUploadAndroidPosition(lib, proof, {
       samples: 1, timeout: 20,
+      acquisitionPurpose: 'explicit',
       extras: { source: trigger },
     }, () => generation === engineGeneration && operationRevision === engineOperationRevision,
     (reason, expected) => stop(reason, 'independent_acquisition_withdrawal', expected));
@@ -2519,13 +2530,12 @@ export function isAvailable(): boolean {
 }
 
 /**
- * Force a single fresh GPS sample and queue it through the SDK's
- * native HTTP transport.  Used by Leonidas (Build 45) for intelligent
- * recovery when a stationary phone has gone silent too long.
- * Returns void on success / throws on SDK error.  Caller should treat
- * an absence of `sdk_onHttp` events as failure even if this resolves.
+ * Explicit refresh uses native intent admission, never the ordinary stationary
+ * hour. Automatic patrol callers must pass 'recovery'. Android success means a
+ * fresh persist:false fix was receipt-confirmed by the existing HTTP endpoint.
  */
-export async function requestFreshLocation(source = 'leonidas-recovery'): Promise<void> {
+export async function requestFreshLocation(source = 'explicit-refresh',
+  acquisitionPurpose: GPSAcquisitionPurpose = 'explicit'): Promise<void> {
   const lib = bgGeo();
   if (!lib) {
     await logEvent('requestFreshLocation_skipped', { reason: 'native_module_unavailable' });
@@ -2535,6 +2545,7 @@ export async function requestFreshLocation(source = 'leonidas-recovery'): Promis
   try {
     await acquireGuardedPosition(lib, {
       samples: 1,
+      acquisitionPurpose,
       persist: true,
       timeout: 30,
       extras: { source },

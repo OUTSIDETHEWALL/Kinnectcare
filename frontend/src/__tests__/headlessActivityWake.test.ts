@@ -31,9 +31,16 @@ jest.mock('../permissionCoordinator', () => ({
 }));
 
 describe('headless activity wake recovery', () => {
+  let purposeClaim: jest.Mock;
+  let maintain: jest.Mock;
   beforeEach(() => {
+    purposeClaim = jest.fn((owner, generation, operation, now) =>
+      require('../__mocks__/trackingNative').trackingNative.trackingClaim(owner, generation, operation, now));
+    maintain = jest.fn(() => 'requested');
     jest.doMock('expo', () => ({ requireOptionalNativeModule: () => ({
       ...require('../__mocks__/trackingNative').trackingNative,
+      trackingClaimPurpose: purposeClaim,
+      motionRecoveryMaintain: maintain,
       headlessTaskCurrent: (token: string) => token === 'test-active',
       headlessTaskEnd: jest.fn(),
     }) }));
@@ -50,6 +57,7 @@ describe('headless activity wake recovery', () => {
     ['activitychange', { activity: 'running' }, 'running'],
     ['activitychange', { activity: 'on_bicycle' }, 'on_bicycle'],
     ['activitychange', { activity: 'in_vehicle' }, 'in_vehicle'],
+    ['heartbeat', {}, null],
   ])(
     'forces and records a persisted upload for a moving %s headless event',
     async (eventName, params, expectedActivity) => {
@@ -124,9 +132,19 @@ describe('headless activity wake recovery', () => {
     );
     expect(mockGetCurrentPosition).toHaveBeenCalledWith(expect.objectContaining({
       persist: false,
-      extras: expect.objectContaining({ source: 'headless-motionchange' }),
+      extras: expect.objectContaining({ source: eventName === 'heartbeat' ? 'headless-heartbeat' : 'headless-motionchange' }),
     }));
+    expect(purposeClaim).toHaveBeenCalledWith(
+      'test:member-1', 0, expect.any(String), expect.any(Number), expect.any(String),
+      eventName === 'heartbeat' ? 'watchdog' : 'recovery',
+    );
+    expect(maintain).toHaveBeenCalledWith('test:member-1', 0);
     const entries = JSON.parse(storage.get(LOG_KEY) ?? '[]');
+    if (eventName === 'heartbeat') {
+      expect(entries).toEqual(expect.arrayContaining([expect.objectContaining({ event: 'headless_heartbeat_ok' })]));
+      expect(entries.some((e: any) => e.event === 'motion_recovery_start')).toBe(false);
+      return;
+    }
     expect(entries).toEqual(expect.arrayContaining([
       expect.objectContaining({
         event: 'motion_recovery_start',

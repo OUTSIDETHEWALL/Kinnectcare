@@ -216,7 +216,7 @@ describe('Android one-shot publication across real independent paths', () => {
   it.each(paths.flatMap(path => [...boundaries.slice(0, 4), 'unchanged'].map(boundary => [path, boundary])))(
     '%s privacy shutdown bypasses never-settling GPS after %s',
     async (path, boundary) => {
-      void run(path).catch(() => {});
+      const pending = run(path).catch(() => {});
       await gpsStarted();
       await withdraw(boundary);
       if (boundary === 'unchanged') expect(sdk.stop).not.toHaveBeenCalled();
@@ -224,6 +224,11 @@ describe('Android one-shot publication across real independent paths', () => {
       expect(enabled).toBe(boundary === 'unchanged');
       expect(uploads()).toHaveLength(0);
       expect(nativeWrites).toBe(0);
+      // The assertion above proves shutdown did not wait for GPS. Settle the
+      // fixture only AFTER asserting it, before restoring globals/modules.
+      // Otherwise its real 20s watchdog executes in a destroyed Jest runtime.
+      finishGps();
+      await pending;
     },
   );
 });

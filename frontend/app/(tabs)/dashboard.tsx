@@ -35,6 +35,7 @@ import { logPipelineEvent } from '../../src/refreshPipelineLog';
 import { useActiveEmergency } from '../../src/activeEmergency';
 import { buildNeedsAttentionIssues, NeedsAttentionIssue } from '../../src/needsAttention';
 import { getFamilyCardStatus } from '../../src/familyCardStatus';
+import { useGpsFreshnessClock } from '../../src/useGpsFreshnessClock';
 import { confirmPendingInviteCancellation } from '../../src/pendingInviteCancellation';
 import { stampMembersResponse } from '../../src/pipelineSnapshot';
 import { recordLocationUploadSuccess } from '../../src/locationUploadSuccess';
@@ -1301,7 +1302,8 @@ function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfa
   useEffect(() => subscribeRefreshing(member.id, setRefreshing), [member.id]);
   const seenMs = member.coordinate_captured_at ? new Date(member.coordinate_captured_at).getTime() : 0;
   const ageLabel = seenMs ? formatTimeAgo(seenMs) : '';
-  const cardStatus = getFamilyCardStatus(member, issues);
+  const freshnessNow = useGpsFreshnessClock(member.coordinate_captured_at, member.location_sharing_enabled !== false);
+  const cardStatus = getFamilyCardStatus(member, issues, freshnessNow);
   const deviceStatus = cardStatus.device;
   const dot = { private: '🔒', unknown: '⚪', healthy: '🟢', warning: '🟡', danger: '🔴' }[cardStatus.indicator];
   const dotColor = cardStatus.indicator === 'private' || cardStatus.indicator === 'unknown'
@@ -1373,6 +1375,12 @@ function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfa
               </Text>
               {deviceStatus.kind !== 'healthy' && cardStatus.contactLabel ? (
                  <Text style={styles.memberMetaFreshness}>{cardStatus.contactLabel}</Text>
+              ) : null}
+              {cardStatus.gpsWarning ? (
+                <Text testID={`member-gps-stale-${member.id}`}
+                  style={[styles.memberMetaFreshness, styles.deviceStatusDelayed]}>
+                  {cardStatus.gpsWarning}
+                </Text>
               ) : null}
             </>
           )}

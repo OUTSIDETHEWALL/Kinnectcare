@@ -228,7 +228,7 @@ export async function runOnePatrol(): Promise<HealthSnapshot> {
           result = outcome === 'location_persisted' ? 'success' : 'failure';
           await logRecovery('recovery-invoked', verdict.state, { outcome, sustainedTracking: 'unverified' });
         } else {
-        await locationEngine.requestFreshLocation();
+        await locationEngine.requestFreshLocation('leonidas-recovery', 'recovery');
         // Verify by polling the engine log for a new sdk_onHttp success
         // within RECOVERY_VERIFY_TIMEOUT_SECONDS.
         const deadline = startedAt + RECOVERY_VERIFY_TIMEOUT_SECONDS * 1000;

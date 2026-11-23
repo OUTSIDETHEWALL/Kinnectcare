@@ -106,6 +106,29 @@ object NativeMotionRecovery {
     return true
   }
 
+  /**
+   * Re-register the existing transition PendingIntent, not the location service.
+   * Registration does NOT start an FGS or force changePace(true). Only a real,
+   * fresh activity transition may enter the existing exempt recovery path.
+   * Claim the maintenance budget under the same cross-runtime authority lock;
+   * retain it even if Play Services fails/never invokes its callback.
+   */
+  fun maintain(c: Context, owner: String, generation: Long): String {
+    if (!permissions(c)) return "permission_unverified"
+    val result = TrackingReliability.claimMotionMaintenance(c, owner, generation, System.currentTimeMillis()) {
+      check(prefs(c).edit().putString("owner", owner).putLong("generation", generation).commit())
+    }
+    if (result != "requested") return result
+    return try {
+      register(c)
+      record(c, "maintenance_requested")
+      result
+    } catch (_: Exception) {
+      record(c, "maintenance_failed")
+      "failed"
+    }
+  }
+
   /** Package upgrade must not require mounting the UI to adopt a valid legacy
    * installation. Absence is NOT consent: require the existing native owner,
    * live grants, and that owner's persisted SDK transport/lifecycle settings. */
