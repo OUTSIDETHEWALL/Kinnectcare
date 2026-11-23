@@ -110,7 +110,7 @@
         "buildType": "app-bundle"
       },
       "env": {
-        "KINNSHIP_DIAGNOSTIC_BUILD": "82",
+        "KINNSHIP_DIAGNOSTIC_BUILD": "83",
         "EXPO_PUBLIC_GOOGLE_BILLING_ENABLED": "false",
         "EXPO_PUBLIC_GOOGLE_PURCHASES_ENABLED": "false",
         "EXPO_PUBLIC_BACKEND_URL": "https://kinnectcare-production.up.railway.app",
