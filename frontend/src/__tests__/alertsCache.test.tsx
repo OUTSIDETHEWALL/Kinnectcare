@@ -50,6 +50,7 @@ jest.mock('react-native', () => {
 });
 
 jest.mock('expo-router', () => ({
+  useRouter: () => ({ push: jest.fn() }),
   useFocusEffect: (cb: () => (() => void) | void) => {
     mockFocusHarness.latestCb = cb;
     const { useEffect } = require('react');

@@ -54,6 +54,7 @@ jest.mock('react-native', () => {
 });
 
 jest.mock('expo-router', () => ({
+  useRouter: () => ({ push: jest.fn() }),
   useFocusEffect: (cb: () => (() => void) | void) => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { useEffect } = require('react');
