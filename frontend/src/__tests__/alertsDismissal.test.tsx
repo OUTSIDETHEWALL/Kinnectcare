@@ -11,7 +11,9 @@ jest.mock('react-native', () => {
   };
 });
 let mockFocus: (() => void | (() => void)) | undefined;
+const mockPush = jest.fn();
 jest.mock('expo-router', () => ({
+  useRouter: () => ({ push: mockPush }),
   useFocusEffect: (cb: () => void | (() => void)) => {
     mockFocus = cb;
     require('react').useEffect(cb, [cb]);
@@ -49,7 +51,7 @@ jest.mock('../timeFormat', () => ({ formatRelativeLocal: () => 'just now' }));
 
 import React from 'react';
 import { act, create } from 'react-test-renderer';
-import { Alert as RNAlert } from 'react-native';
+import { Alert as RNAlert, Linking } from 'react-native';
 import Alerts from '../../app/(tabs)/alerts';
 import { alertScope, isClearedAlert, sosResolution } from '../alertDismissals';
 
@@ -111,6 +113,50 @@ afterEach(async () => {
   await act(async () => { trees.splice(0).forEach(tree => tree.unmount()); });
   jest.clearAllTimers();
   jest.useRealTimers();
+});
+
+test.each([false, true])('opening an unresolved SOS only navigates, acknowledged=%s', async acknowledged => {
+  server = [sos('incident', { resolved: false, resolved_at: null, acknowledged })];
+  const original = JSON.stringify(server);
+  const tree = await mount();
+  const card = nodes(tree, 'alert-incident').find(node => node.type === 'TouchableOpacity')!;
+  await act(async () => { card.props.onPress(); });
+  expect(mockPush).toHaveBeenCalledWith({ pathname: '/alert/[id]', params: { id: 'incident' } });
+  expect(mockPush).toHaveBeenCalledTimes(1);
+  expect(mockPost).not.toHaveBeenCalled();
+  expect(mockDelete).not.toHaveBeenCalled();
+  expect(mockSetItem.mock.calls.some(([key]) => key.includes('sos_dismissals'))).toBe(false);
+  expect(dialogs).not.toHaveBeenCalled();
+  expect(JSON.stringify(server)).toBe(original);
+});
+
+test('SOS acknowledgment and map controls stop propagation without opening the incident', async () => {
+  server = [sos('incident', {
+    resolved: false, resolved_at: null, acknowledged: false, latitude: 33, longitude: -112,
+  })];
+  const original = JSON.stringify(server);
+  (Linking.openURL as jest.Mock).mockResolvedValue(undefined);
+  const tree = await mount();
+  const ackEvent = { stopPropagation: jest.fn() };
+  const mapEvent = { stopPropagation: jest.fn() };
+  await act(async () => { await nodes(tree, 'alert-ack-incident')[0].props.onPress(ackEvent); });
+  await act(async () => { nodes(tree, 'alert-map-incident')[0].props.onPress(mapEvent); });
+  expect(ackEvent.stopPropagation).toHaveBeenCalledTimes(1);
+  expect(mapEvent.stopPropagation).toHaveBeenCalledTimes(1);
+  expect(mockPost.mock.calls).toEqual([['/alerts/incident/ack']]);
+  expect(Linking.openURL).toHaveBeenCalledWith(expect.stringContaining('geo:33,-112'));
+  expect(mockPush).not.toHaveBeenCalled();
+  expect(mockDelete).not.toHaveBeenCalled();
+  expect(JSON.stringify(server)).toBe(original);
+});
+
+test('ordinary active alerts and resolved SOS cards do not gain incident navigation', async () => {
+  server = [ordinary(), sos('resolved')];
+  const tree = await mount();
+  for (const id of ['ordinary', 'resolved']) {
+    for (const node of nodes(tree, `alert-${id}`)) expect(node.props.onPress).toBeUndefined();
+  }
+  expect(mockPush).not.toHaveBeenCalled();
 });
 
 test('resolved dismissal survives refresh, focus, polling and cached offline process restart without touching incident history', async () => {
@@ -343,7 +389,7 @@ test('sender and caregiver phones both keep an acknowledged SOS active until res
     server[0] = { ...server[0], acknowledged: true };
     return { data: { ok: true } };
   });
-  await act(async () => { await nodes(tree, 'alert-ack-incident')[0].props.onPress(); });
+  await act(async () => { await nodes(tree, 'alert-ack-incident')[0].props.onPress({ stopPropagation: jest.fn() }); });
   expect(text(tree)).toContain('1 active · 0 cleared');
   expect(nodes(tree, 'alerts-clear-all')).toHaveLength(0);
   await act(async () => { tree.unmount(); });

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useRouter } from 'expo-router';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator, Linking, Platform, Alert as RNAlert } from 'react-native';
 import { Icon } from '../../src/Icon';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -46,6 +47,7 @@ function severityTheme(sev: string) {
 }
 
 export default function Alerts() {
+  const router = useRouter();
   const { user } = useAuth();
   const { alerts, loading, loadError, clearing, load, prepareClear } = useAlertInbox(user);
   const [refreshing, setRefreshing] = useState(false);
@@ -180,8 +182,15 @@ export default function Alerts() {
         {active.length > 0 && <Text style={styles.section}>Active</Text>}
         {active.map(a => {
           const t = severityTheme(a.severity);
+          const Card = a.type === 'sos' ? TouchableOpacity : View;
+          const navigationProps = a.type === 'sos' ? {
+            onPress: () => router.push({ pathname: '/alert/[id]', params: { id: a.id } }),
+            accessibilityRole: 'button' as const,
+            accessibilityLabel: `Open ${a.member_name}'s SOS emergency`,
+            activeOpacity: 0.85,
+          } : {};
           return (
-            <View key={a.id} testID={`alert-${a.id}`} style={[styles.alertCard, { backgroundColor: t.bg }]}>
+            <Card key={a.id} testID={`alert-${a.id}`} style={[styles.alertCard, { backgroundColor: t.bg }]} {...navigationProps}>
               <View style={[styles.iconBubble, { backgroundColor: Colors.surface }]}>
                 <Icon name={alertIcon(a.type) as any} size={22} color={t.fg} />
               </View>
@@ -192,7 +201,10 @@ export default function Alerts() {
                   <TouchableOpacity
                     testID={`alert-map-${a.id}`}
                     style={styles.mapTouch}
-                    onPress={() => openInMaps(a.latitude as number, a.longitude as number, a.member_name)}
+                    onPress={event => {
+                      event.stopPropagation();
+                      openInMaps(a.latitude as number, a.longitude as number, a.member_name);
+                    }}
                     activeOpacity={0.85}
                     accessibilityRole="button"
                     accessibilityLabel={`Open ${a.member_name}'s location in Maps`}
@@ -227,14 +239,17 @@ export default function Alerts() {
                   )}
                   {!a.acknowledged && <TouchableOpacity
                     testID={`alert-ack-${a.id}`}
-                    onPress={() => ack(a.id)}
+                    onPress={event => {
+                      if (a.type === 'sos') event.stopPropagation();
+                      return ack(a.id);
+                    }}
                     style={[styles.ackBtn, { borderColor: t.fg }]}
                   >
                     <Text style={[styles.ackText, { color: t.fg }]}>Acknowledge</Text>
                   </TouchableOpacity>}
                 </View>
               </View>
-            </View>
+            </Card>
           );
         })}
 
