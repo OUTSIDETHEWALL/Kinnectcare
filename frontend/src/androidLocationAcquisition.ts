@@ -9,7 +9,7 @@ import { fenceNativeSdk } from './androidNativeShutdown';
 import {
   readTrackingAuthority, claimTrackingAcquisition, completeTrackingAcquisition, recordTrackingEvidence,
 } from './trackingReliability';
-import type { TrackingAuthority } from './trackingReliability';
+import type { TrackingAuthority, GPSAcquisitionPurpose } from './trackingReliability';
 import { appendEngineEvidence } from './engineEvidenceJournal';
 import { nextSeq } from './diagSeq';
 import { recordEvidence, startupTraceId } from './evidenceTrace';
@@ -17,7 +17,10 @@ import { operationOrigin, originPhase, withRequestOrigin } from './requestOrigin
 import { backgroundHttp } from './backgroundHttp';
 
 export const GUARDED_POSITION_MARKER = 'kc_guarded_one_shot';
-type PositionOptions = { samples?: number; timeout?: number; extras?: Record<string, unknown> };
+type PositionOptions = {
+  samples?: number; timeout?: number; extras?: Record<string, unknown>;
+  acquisitionPurpose?: GPSAcquisitionPurpose;
+};
 type PositionSdk = {
   getCurrentPosition: (options: any) => Promise<any>;
   stop: () => Promise<unknown>;
@@ -86,14 +89,16 @@ export async function acquireAndUploadAndroidPosition(
   if (!authorized) throw new Error('gps_authorization_unverified');
   const consentGeneration = getVerifiedConsentGeneration(authority.owner);
   if (consentGeneration === null) throw new Error('gps_consent_generation_unverified');
-  if (!claimTrackingAcquisition(authority.owner, authority.generation, operation, evidenceId)) throw new Error('gps_recovery_not_due');
+  if (!claimTrackingAcquisition(authority.owner, authority.generation, operation, evidenceId,
+    options.acquisitionPurpose ?? 'periodic')) throw new Error('gps_recovery_not_due');
    recordTrackingEvidence('acquisition_attempt', { operation, generation: authority.generation, owner: authority.owner,
      source: typeof options.extras?.source === 'string' ? options.extras.source : 'UNKNOWN' });
   let settled = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-  const position = await Promise.race([owned.getCurrentPosition({
-    ...options, timeout: Math.min(options.timeout ?? 20, 20), persist: false,
+   const { acquisitionPurpose: _purpose, ...sdkOptions } = options;
+   const position = await Promise.race([owned.getCurrentPosition({
+     ...sdkOptions, timeout: Math.min(options.timeout ?? 20, 20), persist: false,
     extras: { ...options.extras, [GUARDED_POSITION_MARKER]: true,
       ...(evidenceId ? { kc_evidence_id: evidenceId } : {}) },
   }), new Promise<never>((_, reject) => {

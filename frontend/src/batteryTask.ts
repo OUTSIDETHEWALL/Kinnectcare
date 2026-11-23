@@ -320,6 +320,7 @@ async function executeBatteryRefresh(taskId: string, evidenceWakeId: string | nu
             const position = await acquireAuthorizedAndroidPosition(BGL, transport, {
               samples: 1,
               timeout: 20,
+              acquisitionPurpose: 'watchdog',
               extras: { source: 'workmanager-stationary-refresh',
                 ...(evidenceWakeId ? { kc_evidence_wake_id: evidenceWakeId } : {}) },
             }, () => isActiveExecution(execution));

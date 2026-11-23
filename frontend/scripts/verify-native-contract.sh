@@ -10,6 +10,7 @@ classpath="$work/android.jar:$work/json.jar"
 kotlinc -classpath "$classpath" \
   scripts/native-contract/EvidenceTrace.kt \
   modules/startup-diagnostics/android/src/main/java/expo/modules/startupdiagnostics/TrackingReliability.kt \
+  modules/startup-diagnostics/android/src/main/java/expo/modules/startupdiagnostics/TrackingAcquisitionPolicy.kt \
   modules/startup-diagnostics/android/src/main/java/expo/modules/startupdiagnostics/NativeMotionPolicy.kt \
   -d "$work/tracking.jar"
 echo "PASS production TrackingReliability.kt compilation against Android API"
@@ -24,4 +25,6 @@ kotlin -classpath "$runtime:$work/harness.jar" TrackingHarnessKt "$work/policy.p
 kotlin -classpath "$runtime:$work/harness.jar" TrackingHarnessKt "$work/motion-state.properties" native-motion
 kotlinc -classpath "$runtime" scripts/native-contract/NativeMotionHarness.kt -d "$work/motion.jar"
 kotlin -classpath "$runtime:$work/motion.jar" NativeMotionHarnessKt
+kotlinc -classpath "$runtime" scripts/native-contract/GpsRecoveryHarness.kt -d "$work/gps-recovery.jar"
+kotlin -classpath "$runtime:$work/gps-recovery.jar" GpsRecoveryHarnessKt "$work/gps-recovery"
 echo "LIMIT: fake storage/clock and evidence recorder; Expo app, ReactHost, chooser, Android scheduling NOT verified"

@@ -115,6 +115,34 @@ describe('B1: async evidence belongs to its requesting authority', () => {
     expect(store.get(policy.TRACKING_INTENT_KEY)).toBe(before.intent);
   }
 
+  it.each(['explicit', 'recovery', 'watchdog'])('honors native denial for %s before asking the SDK for GPS', async purpose => {
+    native.trackingClaimPurpose = jest.fn(() => false);
+    const acquisition = require('../androidLocationAcquisition').acquireAndUploadAndroidPosition;
+    await expect(acquisition(sdk, { token, memberId: 'member-A', baseUrl: base,
+      isCurrent: async () => true }, { acquisitionPurpose: purpose }, () => true, jest.fn()))
+      .rejects.toThrow('gps_recovery_not_due');
+    expect(native.trackingClaimPurpose).toHaveBeenCalledWith(
+      'A:member-A', state().generation, expect.any(String), expect.any(Number), expect.any(String), purpose,
+    );
+    expect(sdk.getCurrentPosition).not.toHaveBeenCalled();
+    expect(sdk.stop).not.toHaveBeenCalled();
+  });
+
+  it('keeps purpose out of SDK options and preserves persist:false after native admission', async () => {
+    native.trackingClaimPurpose = jest.fn((owner, generation, operation, now) =>
+      native.trackingClaim(owner, generation, operation, now));
+    sdk.getCurrentPosition.mockRejectedValueOnce(new Error('test GPS failure'));
+    const acquisition = require('../androidLocationAcquisition').acquireAndUploadAndroidPosition;
+    await expect(acquisition(sdk, { token, memberId: 'member-A', baseUrl: base,
+      isCurrent: async () => true }, { acquisitionPurpose: 'explicit' }, () => true, jest.fn()))
+      .rejects.toThrow('test GPS failure');
+    const options = sdk.getCurrentPosition.mock.calls[0][0];
+    expect(options.persist).toBe(false);
+    expect(options).not.toHaveProperty('acquisitionPurpose');
+    expect(state().failures).toBe(1);
+    expect(sdk.stop).not.toHaveBeenCalled();
+  });
+
   it('discards the original delayed acquisition denial without touching B', async () => {
     const gate = deferred<any>(); const entered = deferred<void>();
     permissions.readPermissionSnapshot.mockImplementationOnce(() => { entered.resolve(); return gate.promise; });

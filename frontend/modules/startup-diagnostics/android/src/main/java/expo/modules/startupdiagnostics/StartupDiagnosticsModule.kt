@@ -60,6 +60,9 @@ class StartupDiagnosticsModule : Module() {
     Function("motionRecoveryArm") { owner: String, generation: Long ->
       NativeMotionRecovery.arm(requireNotNull(appContext.reactContext), owner, generation)
     }
+    Function("motionRecoveryMaintain") { owner: String, generation: Long ->
+      NativeMotionRecovery.maintain(requireNotNull(appContext.reactContext), owner, generation)
+    }
     Function("trackingRead") {
       TrackingReliability.read(requireNotNull(appContext.reactContext))
     }
@@ -80,6 +83,9 @@ class StartupDiagnosticsModule : Module() {
     }
     Function("trackingClaimEvidence") { owner: String, generation: Long, operation: String, now: Long, evidenceId: String ->
       TrackingReliability.claim(requireNotNull(appContext.reactContext), owner, generation, operation, now, false, evidenceId)
+    }
+    Function("trackingClaimPurpose") { owner: String, generation: Long, operation: String, now: Long, evidenceId: String, purpose: String ->
+      TrackingReliability.claim(requireNotNull(appContext.reactContext), owner, generation, operation, now, false, evidenceId, purpose)
     }
     Function("trackingClaimConfiguration") { owner: String, generation: Long, operation: String, now: Long ->
       TrackingReliability.claim(requireNotNull(appContext.reactContext), owner, generation, operation, now, true)

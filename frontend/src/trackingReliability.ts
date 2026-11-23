@@ -1,3 +1,5 @@
+import { GPS_STALE_AFTER_MS } from './gpsFreshness';
+
 /**
  * Android cross-runtime authority and acquisition gate. No tokens or GPS
  * coordinates cross this boundary. A missing native extension is explicit:
@@ -28,12 +30,14 @@ export type OperationalRecoveryReport = {
 type ReliabilityModule = {
   trackingRead(): string;
   motionRecoveryArm?(owner: string, generation: number): boolean;
+  motionRecoveryMaintain?(owner: string, generation: number): string;
   trackingAuthorize(owner: string, expectedGeneration: number): string;
   trackingRevoke(reason: string): string;
   trackingRevokeIfCurrent(owner: string, generation: number, reason: string, operation: string): boolean;
   trackingRearmConsent(generation: number): boolean;
   trackingClaim(owner: string, generation: number, operation: string, now: number): boolean;
   trackingClaimEvidence?(owner: string, generation: number, operation: string, now: number, evidenceId: string): boolean;
+  trackingClaimPurpose?(owner: string, generation: number, operation: string, now: number, evidenceId: string, purpose: string): boolean;
   trackingClaimConfiguration(owner: string, generation: number, operation: string, now: number): boolean;
   trackingComplete(operation: string, outcome: string, capturedAt: number, moving: boolean): void;
   trackingRecord(event: string, detail: string): void;
@@ -155,9 +159,34 @@ export function recordTrackingEvidence(event: string, detail: Record<string, unk
   try { native()?.trackingRecord(event, JSON.stringify(detail)); } catch { /* evidence cannot gate shutdown */ }
 }
 
-export function claimTrackingAcquisition(owner: string, generation: number, operation: string, evidenceId?: string | null): boolean {
+export type GPSAcquisitionPurpose = 'periodic' | 'watchdog' | 'recovery' | 'explicit';
+
+export function maintainNativeMotionRecovery(): void {
+  const authority = readTrackingAuthority();
+  if (!authority || authority.revoked) return;
+  const module = native();
+  if (!module?.motionRecoveryMaintain) {
+    // Build 82 can still use the old admission policy, never a JS bypass.
+    return;
+  }
+  try {
+    const reason = module.motionRecoveryMaintain(authority.owner, authority.generation);
+    if (reason !== 'not_due') recordTrackingEvidence('motion_monitor_maintenance', { reason });
+  } catch {
+    recordTrackingEvidence('motion_monitor_maintenance', { reason: 'failed' });
+  }
+}
+
+export function claimTrackingAcquisition(owner: string, generation: number, operation: string,
+  evidenceId?: string | null, purpose: GPSAcquisitionPurpose = 'periodic'): boolean {
   const module = native();
   if (!module) throw new Error('tracking_native_extension_required');
+  if (purpose !== 'periodic' && module.trackingClaimPurpose) {
+    return module.trackingClaimPurpose(owner, generation, operation, Date.now(), evidenceId ?? '', purpose);
+  }
+  // Compatibility is intentionally conservative on an older binary. Do not
+  // simulate admission by mutating movement or borrowing a configuration claim.
+  if (purpose !== 'periodic') recordTrackingEvidence('acquisition_legacy_policy', { reason: 'new_binary_required' });
   return evidenceId && module.trackingClaimEvidence
     ? module.trackingClaimEvidence(owner, generation, operation, Date.now(), evidenceId)
     : module.trackingClaim(owner, generation, operation, Date.now());
@@ -215,10 +244,8 @@ export function describeOperationalRecovery(
     'session_rejected', 'late_start_stopped'].includes(configurationResult);
   const authorized = ['already_enabled', 'restarted', 'cooldown'].includes(configurationResult);
   const capture = authority?.capturedAt ?? 0;
-  const recentMoving = authority?.moving === true && !!authority.movementAt
-    && authority.movementAt <= now && now - authority.movementAt < 10 * 60_000;
   const fresh = capture > 0 && capture <= now + 5000
-    && now - capture < (recentMoving ? 10 : 60) * 60_000;
+    && now - capture < GPS_STALE_AFTER_MS;
   const blocked = authority?.outcome === 'background_start_blocked';
   let state: OperationalRecoveryReport['state'] = 'CONFIGURED_UNVERIFIED';
   if (capture > 0) state = fresh ? 'RECENT_LOCATION_VERIFIED' : 'LOCATION_DUE_STALE';

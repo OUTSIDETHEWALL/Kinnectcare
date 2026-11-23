@@ -57,6 +57,26 @@ object TrackingReliability {
       true
     }
 
+  fun claimMotionMaintenance(context: Context, owner: String, generation: Long, now: Long,
+    bind: () -> Unit): String = synchronized(lock) {
+    var result = "not_authorized"
+    nativeRecoveryBinding(context, owner, generation) {
+      val s = state(context)
+      if (!TrackingAcquisitionPolicy.maintenanceDue(s.optLong("capturedAt", 0),
+          s.optBoolean("moving", false), s.optLong("lastMotionMaintenanceAt", 0), now)) {
+        result = "not_due"
+      } else {
+        // Reserve BEFORE calling Play Services; a missing callback must not
+        // turn every heartbeat/runtime into another registration attempt.
+        s.put("lastMotionMaintenanceAt", now)
+        save(context, s)
+        bind()
+        result = "requested"
+      }
+    }
+    result
+  }
+
   /**
    * A native recovery command shares JS's configuration quarantine. Revocation
    * invalidates authority immediately, while replacement stays blocked until
@@ -181,12 +201,13 @@ object TrackingReliability {
   }
 
   fun claim(context: Context, owner: String, generation: Long, operation: String, now: Long,
-    configurationOnly: Boolean = false, evidenceId: String = ""): Boolean = synchronized(lock) {
+    configurationOnly: Boolean = false, evidenceId: String = "", purpose: String = "periodic"): Boolean = synchronized(lock) {
     val s = state(context)
     val elapsed = SystemClock.elapsedRealtime()
     fun decision(accepted: Boolean, reason: String): Boolean {
       EvidenceTrace.record(context, "gps", if (configurationOnly) "configuration_claim_decision" else "claim_decision", evidenceId, JSONObject()
         .put("accepted", accepted).put("reason", reason).put("generation", s.optLong("generation"))
+        .put("purpose", purpose)
         .put("expectedGeneration", generation)
         .put("captureAgeMs", now - s.optLong("capturedAt", now))
         .put("leaseAgeMs", elapsed - s.optLong("claimedElapsed", elapsed))
@@ -213,10 +234,13 @@ object TrackingReliability {
     val next = s.optLong("nextEligibleAt", 0)
     if (next > now && next - now <= 30 * 60000) return@synchronized decision(false, "backoff")
     val capture = s.optLong("capturedAt", 0)
-    // SDK state persists until an observed transition; an old movement stamp
-    // does not establish that a moving phone became genuinely stationary.
-    val threshold = if (s.optBoolean("moving", false)) 5 * 60000 else 60 * 60000
-    if (!configurationOnly && capture > 0 && capture <= now && now - capture < threshold) return@synchronized decision(false, "capture_recent")
+    // Never obtain intent-specific admission by using configurationOnly:
+    // every GPS purpose retains the SAME native lease and failure backoff.
+    val denied = TrackingAcquisitionPolicy.denial(purpose, s.optBoolean("moving", false), capture, now,
+      s.optLong("lastIntentClaimAt", 0), s.optLong("lastWatchdogClaimAt", 0))
+    if (denied != null) return@synchronized decision(false, denied)
+    if (purpose == "explicit" || purpose == "recovery") s.put("lastIntentClaimAt", now)
+    if (purpose == "watchdog") s.put("lastWatchdogClaimAt", now)
     s.put("operation", operation).put("claimedElapsed", elapsed)
     save(context, s)
     decision(true, "allowed")

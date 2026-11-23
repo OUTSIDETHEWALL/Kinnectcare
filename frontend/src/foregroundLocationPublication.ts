@@ -19,7 +19,8 @@ export async function refreshForegroundLocation(
   if (Platform.OS === 'android') {
     const engine = require('./locationEngine') as typeof import('./locationEngine');
     // The guarded engine owns identity, permission and generation validation.
-    if (isCurrent() && epoch === trackingIntentEpoch()) await engine.requestFreshLocation(source);
+    // Focus/resume polling is recovery, not an unbounded explicit user request.
+    if (isCurrent() && epoch === trackingIntentEpoch()) await engine.requestFreshLocation(source, 'recovery');
     return;
   }
   const token = await getCurrentToken();
