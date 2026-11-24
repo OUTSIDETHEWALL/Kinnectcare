@@ -20,18 +20,24 @@ substitute for reviewing the eventual public Google billing launch.
 
 ## 1. Confirm the phone identity and choose an isolated tester
 
-- Obtain **current** Me → Software evidence from each Play-installed phone:
-  Android versionCode/build, runtime and active OTA ID. Do not infer installation
-  from an AAB receipt, an OTA publication or an older diagnostics export.
-- **Pending:** current runtime evidence from both phones. Earlier owner reports
-  indicate Build 83, but this has not been independently confirmed for this
-  activation. No activation export or runtime override has been prepared.
-- Build 82 requires `1.3.1-diagnostic82`; Build 83 requires
-  `1.3.1-diagnostic83`. These are not interchangeable. Do not retarget Build 83's
-  newer native-recovery JavaScript to Build 82 without a separate compatibility
-  review of a Build-82-based activation source.
-- If the phones differ, choose one confirmed target for the first purchase;
-  do not publish two runtime updates under one authorization.
+- **Owner-confirmed directly on both Play-installed phones on 2026-11-24:**
+  app `1.3.1 (Build 83)`, runtime `1.3.1-diagnostic83`, channel `production`,
+  OTA status Installed, OTA ID prefix `01a20e77…`, published
+  2026-11-24 16:50 UTC. This is the owner's current on-phone observation,
+  not an installation inferred from a release receipt.
+- **The proposed activation target is Android Build 83 only**, runtime
+  `1.3.1-diagnostic83`, production channel. Do not prepare a Build 82 activation
+  or override the runtime to `1.3.1-diagnostic82`.
+- Native compatibility was checked against the delivered Build 83 AAB:
+  SHA-256 `327a2e1c2656020f05ed84f8e0c245790c08eeb42f73ca48037abc5ff5044aa5`.
+  It contains `RNPurchasesModule`, `RNPurchasesPackage`, RevenueCat `Purchases`
+  and Google `BillingClient`, with implementations for `setupPurchases`,
+  `setLogLevel`, `getAppUserID`, `logIn`, `getOfferings`, `purchasePackage`,
+  `restorePurchases` and `syncPurchasesForResult`.
+- Dependency evidence matches the unchanged client SDK: react-native-purchases
+  9.12.0 → hybrid-common 17.46.1 → purchases-android 9.23.1 → Play Billing 8.0.0.
+  No new native build is required. This proves static bridge compatibility,
+  not successful live purchasing or provider configuration.
 - Select an unpaid Kinnship test account in an isolated test family. Record its
   existing backend user ID and family ID privately; do not use an email address
   or invent IDs. Do not alter or cancel a paid Stripe family to make it eligible.
@@ -162,7 +168,8 @@ Reference: https://www.revenuecat.com/docs/integrations/webhooks
 
 ## 5. Prepare the compatible client activation — do not publish yet
 
-Only after step 1 identifies the actual runtime:
+The runtime gate is resolved: target Android Build 83,
+`1.3.1-diagnostic83`, production channel only.
 
 - Review an Android-only activation source compatible with that binary. Preserve
   existing GPS/recovery, SOS, senior-friendly UI and RevenueCat implementation.
@@ -176,8 +183,10 @@ Only after step 1 identifies the actual runtime:
   profile. The reviewed production channel and exact Android runtime must match
   the confirmed phone. Verify the exported flags/catalog/identity gates without
   making any store purchase.
-- Request separate owner approval for **one** Android activation OTA. No native
-  build is needed based on the verified Build 82/83 native billing evidence.
+- No activation bundle has been exported and no purchases have been enabled.
+  Client SDK-key/configuration readiness and separate publication authorization
+  remain required. Request separate owner approval for **one** Android Build 83
+  activation OTA; do not publish an update for another runtime.
 
 ## 6. Authorize the final purchase switch and one license-test purchase
 
