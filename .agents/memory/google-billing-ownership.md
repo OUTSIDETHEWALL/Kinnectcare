@@ -40,3 +40,14 @@ never fall back to Stripe after a Google purchase starts. Provider management
 must remain truthful for legacy clients; a UI-only restriction is insufficient.
 Use bounded, non-interactive recovery after authentication, never as a prerequisite
 for core startup or emergency/tracking functionality.
+
+Initial Google purchase activation is tester-only: require both an approved
+Kinnship account and approved current family, while everyone else retains Stripe
+checkout. Do not treat a sandbox environment selection alone as rollout scoping.
+
+**Why:** The owner explicitly requires a genuine Play license test without
+disrupting existing Stripe customers or exposing checkout to other accounts.
+
+**How to apply:** Keep approval on the backend's advertised checkout and purchase
+identity response. Do not use purchase allowlists to revoke existing verified
+production access, and obtain a separate review before any public expansion.

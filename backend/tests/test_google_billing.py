@@ -44,6 +44,8 @@ def config(monkeypatch):
     }.items():
         monkeypatch.setenv(key, value)
     monkeypatch.delenv("GOOGLE_BILLING_EMERGENCY_ACCESS_DISABLED", raising=False)
+    monkeypatch.delenv("GOOGLE_BILLING_TEST_USER_IDS", raising=False)
+    monkeypatch.delenv("GOOGLE_BILLING_TEST_FAMILY_IDS", raising=False)
     monkeypatch.setattr(billing, "is_configured", lambda: False)
     return google.settings()
 
@@ -109,10 +111,13 @@ def test_other_entitlements_cannot_shorten_or_extend_google_grace(config, extra_
 
 def test_switches_preserve_verified_google_and_stripe_until_emergency_revocation(config, monkeypatch):
     grant, _ = google.projection(config, "opaque-id", *snapshot())
-    user = {"id": "buyer", "google_subscription": grant}
+    user = {"id": "buyer", "family_group_id": "family", "google_subscription": grant}
+    monkeypatch.setenv("GOOGLE_BILLING_TEST_USER_IDS", "buyer")
+    monkeypatch.setenv("GOOGLE_BILLING_TEST_FAMILY_IDS", "family")
+    assert google.purchases_enabled(user)
     for switch in ("GOOGLE_BILLING_PURCHASES_ENABLED", "GOOGLE_BILLING_RECONCILIATION_ENABLED", "GOOGLE_BILLING_ENABLED"):
         monkeypatch.setenv(switch, "false")
-        assert not google.purchases_enabled()
+        assert not google.purchases_enabled(user)
         assert google.google_access(user)
         assert billing.plan_for_user(user) == "family_plan"
     monkeypatch.setenv("GOOGLE_BILLING_EMERGENCY_ACCESS_DISABLED", "true")
@@ -234,6 +239,43 @@ def test_sandbox_requires_both_approved_user_and_family(config, monkeypatch):
     assert not google.google_access(user)
 
 
+@pytest.mark.parametrize("environment", ["sandbox", "production"])
+@pytest.mark.parametrize("users,families,expected", [
+    ("", "", False),
+    ("buyer", "", False),
+    ("", "family", False),
+    ("other", "family", False),
+    ("buyer", "other-family", False),
+    ("buyer", "family", True),
+    (" other, buyer, ", " other-family, family, ", True),
+])
+def test_checkout_requires_both_test_allowlists_in_every_environment(
+    config, monkeypatch, environment, users, families, expected,
+):
+    monkeypatch.setenv("GOOGLE_BILLING_ENVIRONMENT", environment)
+    monkeypatch.setenv("GOOGLE_BILLING_TEST_USER_IDS", users)
+    monkeypatch.setenv("GOOGLE_BILLING_TEST_FAMILY_IDS", families)
+    user = {"id": "buyer", "family_group_id": "family"}
+    assert google.purchases_enabled(user) is expected
+    assert google.controls(user)["purchases_enabled"] is expected
+    # Missing authentication context is never global purchase authorization.
+    assert google.controls()["purchases_enabled"] is False
+    assert google.purchases_enabled({"id": "buyer"}) is False
+    assert google.purchases_enabled({"family_group_id": "family"}) is False
+    assert google.purchases_enabled({"id": "", "family_group_id": ""}) is False
+
+
+def test_checkout_approval_does_not_revoke_existing_production_grants(config, monkeypatch):
+    grant, _ = google.projection(config, "opaque-id", *snapshot())
+    user = {"id": "buyer", "family_group_id": "family", "google_subscription": grant}
+    assert not google.controls(user)["purchases_enabled"]
+    assert google.google_access(user)
+    assert billing.plan_for_user(user) == "family_plan"
+    user["subscription"] = {"plan": "family_plan", "status": "active"}
+    user.pop("google_subscription")
+    assert billing.plan_for_user(user) == "family_plan"
+
+
 def test_activation_and_restore_confirmation_fail_closed(config, monkeypatch):
     monkeypatch.delenv("GOOGLE_BILLING_ENABLED")
     with pytest.raises(HTTPException):
@@ -333,6 +375,47 @@ async def db(local_replica):
 
 @RUN_MONGO
 class TestMongoBilling:
+    @pytest.mark.asyncio
+    async def test_status_and_identity_agree_on_tester_scoped_checkout(self, db, config, monkeypatch):
+        monkeypatch.setenv("GOOGLE_BILLING_TEST_USER_IDS", "buyer")
+        monkeypatch.setenv("GOOGLE_BILLING_TEST_FAMILY_IDS", "family")
+        app = FastAPI()
+
+        async def current(request: Request):
+            user = await db.users.find_one({"id": request.headers.get("x-test-user")})
+            if not user:
+                raise HTTPException(401, "Sign in")
+            return user
+
+        app.include_router(google_billing_routes.router(db, current), prefix="/api")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test.invalid") as http:
+            for user_id, expected in [("buyer", True), ("other", False)]:
+                user = await db.users.find_one({"id": user_id})
+                status = await billing.build_status_payload(user, db)
+                assert status["google_billing"]["purchases_enabled"] is expected
+                response = await http.post("/api/billing/google/identity", json={},
+                                           headers={"x-test-user": user_id})
+                assert response.status_code == 200
+                assert response.json()["purchases_enabled"] is expected
+                assert response.json()["can_purchase"] is expected
+            # Moving out of the approved family fences the next identity check.
+            await db.users.update_one({"id": "buyer"}, {"$set": {"family_group_id": "other-family"}})
+            response = await http.post("/api/billing/google/identity", json={},
+                                       headers={"x-test-user": "buyer"})
+            assert response.json()["can_purchase"] is False
+            # A live Stripe grant is neither modified nor made purchasable.
+            stripe = {"plan": "family_plan", "status": "active", "stripe_subscription_id": "sub_synthetic"}
+            await db.users.update_one({"id": "buyer"}, {"$set": {
+                "family_group_id": "family", "subscription": stripe,
+            }})
+            response = await http.post("/api/billing/google/identity", json={},
+                                       headers={"x-test-user": "buyer"})
+            assert response.json()["can_purchase"] is False
+            status = await billing.build_status_payload(await db.users.find_one({"id": "buyer"}), db)
+            assert status["plan"] == "family_plan"
+            assert status["billing_provider"] == "stripe"
+            assert (await db.users.find_one({"id": "buyer"}))["subscription"] == stripe
+
     @pytest.mark.asyncio
     async def test_reconcile_and_revoke_do_not_modify_stripe(self, db, config):
         stripe = {"plan": "family_plan", "status": "active", "stripe_subscription_id": "sub_stripe"}
