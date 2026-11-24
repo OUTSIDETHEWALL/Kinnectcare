@@ -1305,8 +1305,8 @@ function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfa
   const freshnessNow = useGpsFreshnessClock(member.coordinate_captured_at, member.location_sharing_enabled !== false);
   const cardStatus = getFamilyCardStatus(member, issues, freshnessNow);
   const deviceStatus = cardStatus.device;
-  const dot = { private: '🔒', unknown: '⚪', healthy: '🟢', warning: '🟡', danger: '🔴' }[cardStatus.indicator];
-  const dotColor = cardStatus.indicator === 'private' || cardStatus.indicator === 'unknown'
+  const dot = { private: '🔒', unknown: '⚪', neutral: '⚪', healthy: '🟢', warning: '🟡', danger: '🔴' }[cardStatus.indicator];
+  const dotColor = cardStatus.indicator === 'private' || cardStatus.indicator === 'unknown' || cardStatus.indicator === 'neutral'
     ? '#9CA3AF' : StatusColor(cardStatus.indicator === 'danger' ? 'critical' : cardStatus.indicator);
 
   // v1.2.0 (44) — log every render with the exact prop value the card
@@ -1378,7 +1378,7 @@ function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfa
               ) : null}
               {cardStatus.gpsWarning ? (
                 <Text testID={`member-gps-stale-${member.id}`}
-                  style={[styles.memberMetaFreshness, styles.deviceStatusDelayed]}>
+                  style={styles.memberGpsOutdated}>
                   {cardStatus.gpsWarning}
                 </Text>
               ) : null}
@@ -1408,12 +1408,14 @@ function MemberCard({ member, sum, isSenior, issues, onPress, onCheckIn, onWelfa
           })()}
           {(member as any).location_sharing_enabled !== false ? (
             <>
-              <Text style={styles.memberMeta}>
+              <Text style={[styles.memberMeta, cardStatus.locationTone === 'neutral' && styles.memberGpsNeutral]}>
                 📍 {cardStatus.locationLabel === 'Last known location' ? 'Last known location: ' : ''}
                 {member.location_name || 'Unknown'}
               </Text>
               {cardStatus.locationAgeLabel ? (
-                <Text style={styles.memberMetaAge}>{cardStatus.locationAgeLabel}</Text>
+                <Text style={[styles.memberMetaAge, cardStatus.locationTone === 'neutral' && styles.memberGpsNeutral]}>
+                  {cardStatus.locationAgeLabel}
+                </Text>
               ) : null}
             </>
           ) : null}
@@ -1649,6 +1651,8 @@ const styles = StyleSheet.create({
   statusEmoji: { fontSize: 12 },
   memberMeta: { fontSize: 13, color: Colors.textTertiary, marginTop: 1 },
   memberMetaAge: { fontSize: 11, color: Colors.textTertiary, marginTop: 1, opacity: 0.75 },
+  memberGpsNeutral: { color: '#6B7280' },
+  memberGpsOutdated: { fontSize: 12, color: '#9A6700', fontWeight: '400', marginTop: 2 },
   // Build XX — freshness-first family card labels.
   memberMetaFreshness: { fontSize: 12, color: Colors.textSecondary, fontWeight: '600', marginTop: 2 },
   deviceStatus: { fontSize: 14, fontWeight: '800', marginTop: 3 },

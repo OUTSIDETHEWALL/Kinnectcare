@@ -10,10 +10,11 @@ export type FamilyCardStatus = {
   contactLabel: string | null;
   locationLabel: 'Location' | 'Last known location';
   locationAgeLabel: string | null;
+  locationTone: ReturnType<typeof getGpsFreshness>['kind'];
   gpsWarning: string | null;
   battery: BatteryDisplay | null;
   hasActiveProblem: boolean;
-  indicator: 'healthy' | 'warning' | 'danger' | 'unknown' | 'private';
+  indicator: 'healthy' | 'neutral' | 'warning' | 'danger' | 'unknown' | 'private';
 };
 
 const MAX_CLOCK_SKEW_MS = 5_000;
@@ -44,11 +45,6 @@ export function getFamilyCardStatus(
       ? 'low'
       : null;
   const locationStatus = getGpsFreshness(coordinateAt, nowMs);
-  // Keep existing prolonged-outage escalation; only the FIRST warning loses
-  // its dependence on motion. Do not weaken an existing critical condition.
-  const prolongedLocationFailure = getDeviceCommunicationStatus({
-    device_presence_at: null, last_seen: coordinateAt, is_moving: member.is_moving,
-  }, nowMs).kind === 'not-responding';
   const batteryFreshness = batteryUpdatedAt
     ? getDeviceCommunicationStatus({
         device_presence_at: null,
@@ -57,14 +53,14 @@ export function getFamilyCardStatus(
       }, nowMs)
     : null;
 
-  // Overall warning may include GPS; the device badge uses device.kind alone.
-  // Retain existing danger escalation. First GPS warning is fifteen minutes.
+  // GPS age alone is never a danger/disconnection verdict. Preserve real
+  // critical incidents and use only a subtle amber indication after an hour.
   const indicator: FamilyCardStatus['indicator'] = member.location_sharing_enabled === false ? 'private'
-    : member.status === 'critical' || issues.some(issue => issue.severity === 'critical') || device.kind === 'not-responding'
-      || prolongedLocationFailure ? 'danger'
+    : member.status === 'critical' || issues.some(issue => issue.severity === 'critical') || device.kind === 'not-responding' ? 'danger'
     : member.status === 'warning' || issues.length > 0 || device.kind === 'delayed'
       || locationStatus.kind === 'stale' ? 'warning'
-    : member.status !== 'healthy' || device.kind !== 'healthy' || locationStatus.kind !== 'fresh' ? 'unknown'
+    : member.status !== 'healthy' || device.kind !== 'healthy' || locationStatus.kind === 'unknown' ? 'unknown'
+    : locationStatus.kind === 'neutral' ? 'neutral'
     : 'healthy';
 
   return {
@@ -72,8 +68,9 @@ export function getFamilyCardStatus(
     device,
     contactLabel,
     locationLabel: locationStatus.kind === 'fresh' ? 'Location' : 'Last known location',
+    locationTone: locationStatus.kind,
     gpsWarning: member.location_sharing_enabled !== false && locationStatus.kind === 'stale'
-      ? 'GPS location stale — last known location' : null,
+      ? 'Location may be outdated.' : null,
     locationAgeLabel: coordinateAt
       ? `Last location captured ${formatContactAge(coordinateAt, nowMs)}`
       : 'Capture time unavailable',
@@ -85,8 +82,8 @@ export function getFamilyCardStatus(
       condition,
       nowMs,
     ),
-    hasActiveProblem: issues.length > 0
-      || (member.location_sharing_enabled !== false && locationStatus.kind === 'stale'),
+    // GPS age is informational, not an incident requiring a card-wide border.
+    hasActiveProblem: issues.length > 0,
   };
 }
 
