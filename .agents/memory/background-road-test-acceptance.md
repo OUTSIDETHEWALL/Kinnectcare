@@ -37,6 +37,21 @@ test while addressing the remaining launch friction.
 **How to apply:** Treat startup, notification opening and health presentation
 as separate problems unless evidence establishes a shared tracking defect.
 
+## Accepted initial stationary and road-test results
+
+On 2026-11-24, the owner reported another successful overnight stationary test
+followed by a successful real-world road test, and was satisfied with the initial
+results. Preserve the existing GPS tracking and recovery behavior while making
+caregiver freshness presentation less alarming.
+
+**Why:** The owner explicitly accepted these initial results and requested a
+display-only adjustment, not another tracking or battery-policy change.
+
+**How to apply:** Keep native tracking, motion detection, watchdog probes,
+acquisition guards, heartbeat intervals and battery optimization unchanged.
+Initial satisfaction does not establish exhaustive physical acceptance or
+authorize a public release.
+
 ## Launch hold and separate investigations
 
 Google Play production remains on HOLD pending resolution/acceptance of the

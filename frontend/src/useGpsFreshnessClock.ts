@@ -3,8 +3,8 @@ import { AppState } from 'react-native';
 import { gpsFreshnessBoundaryDelay } from './gpsFreshness';
 
 /**
- * One deadline, not an interval/poll: a card must become stale even if no
- * store update arrives. Re-evaluate on resume because suspended timers lag.
+ * One pending display deadline, not an interval/poll: re-arm at 30 minutes
+ * for the 60-minute boundary, even without a store update. Re-evaluate on resume.
  * No GPS, networking, or background wake is requested by this display clock.
  */
 export function useGpsFreshnessClock(capturedAt: string | null | undefined, enabled: boolean): number {
@@ -15,7 +15,7 @@ export function useGpsFreshnessClock(capturedAt: string | null | undefined, enab
     const arm = () => {
       if (timer) clearTimeout(timer);
       const delay = gpsFreshnessBoundaryDelay(capturedAt);
-      if (delay !== null) timer = setTimeout(redraw, delay);
+      if (delay !== null) timer = setTimeout(() => { redraw(); arm(); }, delay);
     };
     arm();
     const listener = AppState.addEventListener('change', state => {

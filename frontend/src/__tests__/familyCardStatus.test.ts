@@ -47,10 +47,13 @@ describe('Family card caregiver presentation', () => {
       coordinate_captured_at: ago(180), battery_updated_at: ago(180),
     }), [], NOW)).toMatchObject({ device: { kind: 'delayed' }, indicator: 'warning' });
   });
-  it('does not let fresh battery/contact hide twelve-hour-old coordinates', () => {
+  it('shows only subtle amber for twelve-hour-old GPS when communication is current', () => {
     expect(getFamilyCardStatus(member({
       coordinate_captured_at: ago(720), is_moving: true,
-    }), [], NOW).indicator).toBe('danger');
+    }), [], NOW)).toMatchObject({
+      indicator: 'warning', gpsWarning: 'Location may be outdated.',
+      device: { kind: 'healthy' }, hasActiveProblem: false,
+    });
   });
   it('retains privacy neutrality and never paints missing GPS evidence green', () => {
     expect(getFamilyCardStatus(member({ location_sharing_enabled: false }), [], NOW).indicator).toBe('private');
