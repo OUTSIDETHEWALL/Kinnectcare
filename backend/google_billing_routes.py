@@ -24,10 +24,11 @@ def router(db, get_current_user):
         # Renewal/restoration must remain available; only purchase is blocked.
         app_user_id = await google.identity(db, current["id"])
         paid = await billing.get_member_limit_for_group(db, fresh) == float("inf")
+        purchase_available = google.purchases_enabled(fresh)
         return {
             "user_id": current["id"], "app_user_id": app_user_id,
-            "can_purchase": google.purchases_enabled() and not paid,
-            "purchases_enabled": google.purchases_enabled(),
+            "can_purchase": purchase_available and not paid,
+            "purchases_enabled": purchase_available,
             "products": {"month": config["GOOGLE_MONTHLY_PRODUCT"],
                          "year": config["GOOGLE_ANNUAL_PRODUCT"]},
         }

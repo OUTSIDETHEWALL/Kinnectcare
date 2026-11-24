@@ -1,5 +1,8 @@
 # Google Play billing: implementation and separate activation gates
 
+For the current, ordered first-purchase procedure and verified catalog values,
+use [the license-test checklist](google-play-license-test-checklist.md).
+
 ## Authorization boundary
 
 This integration is disabled by default. Code/test/PR preparation does not
@@ -120,6 +123,11 @@ Railway: a workspace connection alone does not configure Railway's runtime.
   native capability. A started/failed Google purchase NEVER falls back to Stripe.
   Review Google payment-policy/region compliance before publishing the transition;
   this code change is not store-policy or production-release approval.
+- Initial Google checkout is tester-scoped regardless of store environment:
+  both `GOOGLE_BILLING_TEST_USER_IDS` and `GOOGLE_BILLING_TEST_FAMILY_IDS` must
+  approve the authenticated purchaser. Billing status and identity responses
+  apply the same check. This does not revoke verified production Google access
+  or alter Stripe subscriptions.
 - Account deletion warns that Google Play subscriptions must be cancelled in
   Play separately; it does not promise automatic Google cancellation.
 - No live verification, acknowledgment deadline, RTDN delivery, original-owner

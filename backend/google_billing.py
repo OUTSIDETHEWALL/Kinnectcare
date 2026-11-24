@@ -42,7 +42,17 @@ def emergency_access_disabled():
     return os.getenv("GOOGLE_BILLING_EMERGENCY_ACCESS_DISABLED") == "true"
 
 
-def purchases_enabled():
+def approved_test_account(user):
+    """New checkout requires BOTH approvals, even if environment is mis-set."""
+    users = {value.strip() for value in os.getenv("GOOGLE_BILLING_TEST_USER_IDS", "").split(",") if value.strip()}
+    families = {value.strip() for value in os.getenv("GOOGLE_BILLING_TEST_FAMILY_IDS", "").split(",") if value.strip()}
+    return bool(user and user.get("id") in users
+                and user.get("family_group_id") in families)
+
+
+def purchases_enabled(user=None):
+    if not approved_test_account(user):
+        return False
     if not reconciliation_enabled() or emergency_access_disabled():
         return False
     if os.getenv("GOOGLE_BILLING_PURCHASES_ENABLED") != "true":
@@ -54,9 +64,9 @@ def purchases_enabled():
         return False
 
 
-def controls():
+def controls(user=None):
     return {
-        "purchases_enabled": purchases_enabled(),
+        "purchases_enabled": purchases_enabled(user),
         "reconciliation_enabled": reconciliation_enabled(),
         "emergency_access_disabled": emergency_access_disabled(),
     }
@@ -82,10 +92,7 @@ def settings(require_reconciliation=True):
 def allowed_account(user, environment):
     if environment != "sandbox":
         return True
-    users = os.getenv("GOOGLE_BILLING_TEST_USER_IDS", "").split(",")
-    families = os.getenv("GOOGLE_BILLING_TEST_FAMILY_IDS", "").split(",")
-    return bool(user and user.get("id") in users and user.get("family_group_id")
-                and user["family_group_id"] in families)
+    return approved_test_account(user)
 
 
 def millis(value):

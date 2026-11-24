@@ -572,7 +572,7 @@ async def build_status_payload(user_doc: dict, db, free_limit: int = FREE_LIMIT_
     stripe_eligible = sub.get("plan") == "family_plan" and sub.get("status") in ("active", "trialing", "past_due")
     google_sub = user_doc.get("google_subscription") or {}
     google_owned = google_billing.owns_purchase(user_doc)
-    payload["google_billing"] = google_billing.controls()
+    payload["google_billing"] = google_billing.controls(user_doc)
     payload["billing_providers"] = (
         (["stripe"] if stripe_owned else []) + (["google_play"] if google_owned else [])
     )
