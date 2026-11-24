@@ -52,6 +52,7 @@ import { startLegacyLocationFallback } from '../../src/locationEngineExclusivity
 import { fetchAll as refetchMembers } from '../../src/store/memberStore';
 import { getEngineLog, getLastHttpSuccessTs } from '../../src/locationEngine';
 import { computeHealthItems, worstHealthStatus, HealthItem } from '../../src/healthCheck';
+import { meHealthItems } from '../../src/meHealthPresentation';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { formatTimezone, formatPhone } from '../../src/timeFormat';
 import {
@@ -1085,10 +1086,11 @@ export default function MeScreen() {
           />
         </View>
 
-        {/* Health indicator — shown only when something needs attention.
+        {/* Heartbeat age stays in Diagnostics, not this senior-facing banner.
+            Other health warnings retain their existing behavior.
             Always navigates to Diagnostics so non-developer users can
             share a health snapshot without the 7-tap unlock. */}
-        <HealthIndicator items={healthItems} onPress={onOpenDiagnostics} />
+        <HealthIndicator items={meHealthItems(healthItems)} onPress={onOpenDiagnostics} />
 
         {/* Profile — member fields visible to your family */}
         {myMemberId ? (
