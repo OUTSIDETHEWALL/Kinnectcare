@@ -8,6 +8,23 @@ function source(relativePath: string): string {
 }
 
 describe('native startup Diagnostics contract', () => {
+  it('retains bounded safe failure metadata through every native recovery callback', () => {
+    const recovery = source(
+      'modules/startup-diagnostics/android/src/main/java/expo/modules/startupdiagnostics/NativeMotionRecovery.kt',
+    );
+    for (const stage of ['start_failed', 'ready_failed', 'movement_failed']) {
+      expect(recovery).toContain(`settle("${stage}", error)`);
+    }
+    expect(recovery).toContain('trace("cleanup_failed", error)');
+    expect(recovery).toContain('NativeRecoveryFailure.category(error)');
+    expect(recovery).toContain('NativeRecoveryFailure.code(error)');
+    expect(recovery).toContain('stage.put("failureCategory", failureCategory)');
+    expect(recovery).toContain('stage.put("sdkCode", sdkCode)');
+    expect(recovery).not.toMatch(/\.put\("(?:error|message)"\s*,\s*error/);
+    expect(recovery).toContain('stages.length() - 24');
+    expect(recovery).toContain('attempts.length() - 16');
+  });
+
   it('keeps native checkpoint retrieval isolated from asynchronous Diagnostics reload', () => {
     const diagnostics = source('src/diagnosticsFull.tsx');
 
