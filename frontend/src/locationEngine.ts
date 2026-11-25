@@ -1691,6 +1691,9 @@ export function buildSdkConfig(lib: any, cfg: LocationEngineConfig): Record<stri
     method: 'PUT',
     autoSync: true,
     batchSync: false,
+    // A current fix must not wait behind minutes of historical replay.
+    // Requires backend history retention independent of coordinate promotion.
+    ...(Platform.OS === 'android' ? { locationsOrderDirection: 'DESC' } : {}),
     maxBatchSize: 50,
     httpRootProperty: '.',
     // No locationTemplate — the SDK's native payload is accepted directly.

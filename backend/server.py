@@ -3800,15 +3800,27 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
     except Exception:
         pass
 
-    # Build XX — Rolling GPS quality history.  Written for all accepted fixes,
-    # including replay-suppressed ones (coord_suppressed=True), so the GPS
-    # diagnostics screen shows the full picture of what the SDK uploaded
-    # during a dead-zone catch-up sequence.  The coord_suppressed flag lets
-    # the diagnostics UI distinguish points that reached location_history from
-    # ones that actually moved the caregiver map pin.
+    # History admission is independent of promotion to the current map tuple.
+    # Newest-first native replay must retain older valid fixes with their ORIGINAL
+    # capture time, without weakening the atomic coordinate/consent CAS above.
+    # Only an ordering rejection is historical evidence; revoked/relinked/moved
+    # or invalid/undated requests must not gain this new retention path.
+    historical_only = (
+        not write_accepted
+        and rejection_reason == "older_timestamp"
+        and incoming_captured_at is not None
+        and incoming_captured_at <= server_now
+        and doc is not None
+        and doc.get("family_group_id") == current["family_group_id"]
+        and doc.get("user_id") == target.get("user_id")
+        and doc.get("location_sharing_enabled") is True
+        and doc.get("location_consent_generation", 0) == consent_generation
+    )
+    # Immutable subject/consent tags and existing account-deletion fences remain
+    # mandatory. History readers revalidate family sharing at disclosure time.
     # 7-day TTL (enforced by MongoDB TTL index on accepted_at) keeps the
     # collection bounded without a manual cleanup job.
-    if write_accepted:
+    if write_accepted or historical_only:
         try:
             await account_cleanup.persist_subject_evidence(db, "location_history", {
                 "accepted_at":      server_now,
@@ -3830,6 +3842,7 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
                 "provider":         raw_provider,
                 "event":            raw_event,
                 "coord_suppressed": coord_suppressed,
+                "historical_only": historical_only,
                 # TEMP DIAG — battery timeline.
                 "battery_level":    data.battery_level,
                 "is_charging":      data.is_charging,
@@ -3837,7 +3850,11 @@ async def update_member_location(member_id: str, data: LocationUpdate, current=D
             }, member_id=member_id, family_id=current["family_group_id"],
                 subject_user_id=target.get("user_id"))
         except Exception:
-            pass
+            # Do not acknowledge and delete an SDK queue record whose history
+            # failed to persist. Retry also works after current-tuple promotion:
+            # the same capture will enter the historical-only branch above.
+            logger.warning("location_history persistence failed; upload must retry")
+            raise HTTPException(status_code=503, detail="Location history temporarily unavailable")
 
     # v1.2.6 diagnostic: every successful location write logs the
     # write-vs-read shape so we can correlate Railway logs against

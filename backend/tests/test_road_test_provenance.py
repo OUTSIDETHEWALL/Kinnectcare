@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from test_coordinate_capture_integrity import server, run
+from test_location_consent_write_race import configure_evidence_session
 
 
 def matches(query, doc):
@@ -32,11 +33,12 @@ def harness():
                name="Test", age=70, phone="", gender="", role="senior", status="healthy",
                location_sharing_enabled=True, location_consent_generation=1)
     db = MagicMock()
+    configure_evidence_session(db)
     db.users.find_one = AsyncMock(return_value={"location_sharing_enabled": True})
     db.members.find_one = AsyncMock(side_effect=lambda *a, **k: copy.deepcopy(doc))
     inject = [None]
 
-    async def update(query, mutation):
+    async def update(query, mutation, **options):
         if "latitude" in mutation.get("$set", {}) and inject[0]:
             callback, inject[0] = inject[0], None
             callback(doc)
