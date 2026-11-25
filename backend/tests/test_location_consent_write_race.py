@@ -21,6 +21,25 @@ def run(coro):
         return runner.run(coro)
 
 
+def configure_evidence_session(db):
+    """Unit storage adapter only; production evidence transactions still execute."""
+    class UnitSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def with_transaction(self, callback, **options):
+            return await callback(self)
+
+        async def commit_transaction(self):
+            pass
+
+    db.client.start_session = AsyncMock(side_effect=UnitSession)
+    db.__getitem__.side_effect = lambda name: getattr(db, name)
+
+
 def matches(doc, query):
     """Enforce every clause; in particular do not mock away the consent CAS."""
     for key, value in query.items():
@@ -62,21 +81,7 @@ class Harness:
         # Storage-interface adapter only. Consent predicates below still execute
         # unchanged. Real transaction isolation, retries and deletion ordering
         # are exercised against Mongo in test_account_deletion_races.
-        class UnitSession:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return False
-
-            async def with_transaction(self, callback, **options):
-                return await callback(self)
-
-            async def commit_transaction(self):
-                pass
-
-        self.db.client.start_session = AsyncMock(side_effect=UnitSession)
-        self.db.__getitem__.side_effect = lambda name: getattr(self.db, name)
+        configure_evidence_session(self.db)
         self.db.users.find_one = AsyncMock(side_effect=lambda *a, **k: copy.deepcopy(self.user))
         self.db.users.update_one = AsyncMock(side_effect=self.update_user)
         self.db.members.find_one = AsyncMock(side_effect=lambda query, *a, **k:

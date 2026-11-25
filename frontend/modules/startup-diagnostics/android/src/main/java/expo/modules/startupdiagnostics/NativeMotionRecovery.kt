@@ -53,9 +53,12 @@ object NativeMotionRecovery {
     PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0))
 
   private fun record(c: Context, result: String, operation: String = "", trigger: String = "",
-    activity: Int = -1, ageMs: Long = -1) {
+    activity: Int = -1, ageMs: Long = -1, error: String? = null) {
     val at = System.currentTimeMillis()
     val elapsed = SystemClock.elapsedRealtime()
+    val failed = result.endsWith("_failed") || result == "start_denied"
+    val failureCategory = if (failed) NativeRecoveryFailure.category(error) else null
+    val sdkCode = if (failed) NativeRecoveryFailure.code(error) else null
     // No recorder/JSON/IO inside the authority-command critical section.
     main.post {
       try {
@@ -80,7 +83,10 @@ object NativeMotionRecovery {
           }
           if (activity >= 0) attempt.put("activity", activity).put("transitionAgeMs", ageMs)
           val stages = attempt.getJSONArray("stages")
-          stages.put(JSONObject().put("stage", result).put("at", at).put("elapsedMs", elapsed))
+          val stage = JSONObject().put("stage", result).put("at", at).put("elapsedMs", elapsed)
+          if (failureCategory != null) stage.put("failureCategory", failureCategory)
+          if (sdkCode != null) stage.put("sdkCode", sdkCode)
+          stages.put(stage)
           val boundedStages = JSONArray()
           for (index in maxOf(0, stages.length() - 24) until stages.length()) boundedStages.put(stages.get(index))
           attempt.put("stages", boundedStages).put("lastStage", result).put("lastStageAt", at)
@@ -169,7 +175,8 @@ object NativeMotionRecovery {
       Intent.ACTION_MY_PACKAGE_REPLACED -> "package_replaced"
       else -> "motion"
     }
-    fun trace(result: String) = record(c, result, operation, trigger)
+    fun trace(result: String, error: String? = null) =
+      record(c, result, operation, trigger, error = error)
     trace("receiver_received")
     if (boot) migrateBinding(c)
     if (!eligible(c, snapshot(c))) { trace("not_authorized"); finished(); return }
@@ -205,8 +212,8 @@ object NativeMotionRecovery {
     val finish = Runnable { trace("receiver_timeout"); finished() }
     timeout.postDelayed(finish, 8_000)
     var sdk: BackgroundGeolocation? = null
-    fun done(result: String) {
-      trace(result)
+    fun done(result: String, error: String? = null) {
+      trace(result, error)
       TrackingReliability.complete(c, operation, "operation_discarded", 0, false)
       timeout.removeCallbacks(finish)
       finished()
@@ -219,7 +226,7 @@ object NativeMotionRecovery {
           override fun onSuccess() = done("obsolete_owner_stopped")
           override fun onFailure(error: String?) {
             // Retain quarantine: an unconfirmed stop cannot authorize rebind.
-            trace("cleanup_failed")
+            trace("cleanup_failed", error)
             finished()
           }
         })
@@ -232,7 +239,7 @@ object NativeMotionRecovery {
         stale()
       }
     }
-    fun settle(result: String) = command { done(result) }
+    fun settle(result: String, error: String? = null) = command { done(result, error) }
     try {
       command {
         val instance = BackgroundGeolocation.getInstance(c)
@@ -250,17 +257,17 @@ object NativeMotionRecovery {
                   trace("change_pace_requested")
                   instance.changePace(true, object : TSCallback {
                     override fun onSuccess() = settle("movement_requested")
-                    override fun onFailure(error: String?) = settle("movement_failed")
+                    override fun onFailure(error: String?) = settle("movement_failed", error)
                   })
                 }
               }
-              override fun onFailure(error: String?) = settle("start_failed")
+              override fun onFailure(error: String?) = settle("start_failed", error)
             })
           }
-          override fun onFailure(error: String?) = settle("ready_failed")
+          override fun onFailure(error: String?) = settle("ready_failed", error)
         })
       }
-    } catch (_: Exception) { settle("start_denied") }
+    } catch (error: Exception) { settle("start_denied", error.javaClass.simpleName) }
   }
 
   fun evidence(c: Context): JSONObject = JSONObject()

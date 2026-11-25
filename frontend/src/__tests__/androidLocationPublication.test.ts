@@ -22,6 +22,34 @@ describe('Android one-shot publication across real independent paths', () => {
     battery: { level: 0.8, is_charging: true },
   };
 
+  it('selects current native records first without changing acquisition or lifecycle policy', () => {
+    const config = engine.buildSdkConfig(sdk, {
+      backendBaseUrl: base, memberId: 'member', ownerUserId: 'owner', jwt: 'session',
+    });
+    expect(config.locationsOrderDirection).toBe('DESC');
+    expect(config).toMatchObject({
+      autoSync: true, batchSync: false, maxDaysToPersist: 7, maxRecordsToPersist: 10000,
+      distanceFilter: 10, stopTimeout: 5, heartbeatInterval: 60,
+      locationUpdateInterval: 10000, fastestLocationUpdateInterval: 10000,
+      stopOnTerminate: false, startOnBoot: true, enableHeadless: true,
+      foregroundService: true,
+    });
+    expect(config.extras).toHaveProperty('consent_generation');
+    expect(config.url).toBe(`${base}/api/members/member/location`);
+  });
+
+  it('does not change upload ordering on other platforms', () => {
+    const { Platform } = require('react-native');
+    Platform.OS = 'ios';
+    try {
+      expect(engine.buildSdkConfig(sdk, {
+        backendBaseUrl: base, memberId: 'member', jwt: 'session',
+      })).not.toHaveProperty('locationsOrderDirection');
+    } finally {
+      Platform.OS = 'android';
+    }
+  });
+
   beforeEach(async () => {
     jest.resetModules();
     jest.doMock('expo', () => ({ requireOptionalNativeModule: () => ({

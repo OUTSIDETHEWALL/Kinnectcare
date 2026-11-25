@@ -22,6 +22,7 @@ def run(coro):
 
 @pytest.mark.parametrize("kind", ["fresh", "replay", "older", "missing", "future"])
 def test_coordinate_timestamp_is_atomic_with_displayed_tuple(kind):
+    from test_location_consent_write_race import configure_evidence_session
     now = datetime.now(timezone.utc)
     old = now - timedelta(hours=2)
     document = {
@@ -38,10 +39,11 @@ def test_coordinate_timestamp_is_atomic_with_displayed_tuple(kind):
         "future": now + timedelta(hours=1),
     }[kind]
     db = MagicMock()
+    configure_evidence_session(db)
     db.users.find_one = AsyncMock(return_value={"location_sharing_enabled": True})
     db.members.find_one = AsyncMock(side_effect=lambda *a, **k: copy.deepcopy(document))
 
-    async def update(query, mutation):
+    async def update(query, mutation, **options):
         candidate = mutation.get("$set", {})
         matched = True
         if "$or" in query:
